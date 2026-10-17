@@ -76,11 +76,11 @@ def test_manifest_load_write(tmp_path):
     assert "sha256:" in m.manifest_hash()
 
 
-def test_upgrade_and_optimize(tmp_path, monkeypatch):
-    """hlock upgrade (plan/apply/rollback) and hlock optimize via the bindings."""
+def test_upgrade_and_tune(tmp_path, monkeypatch):
+    """hlock upgrade (plan/apply/rollback) and hlock tune via the bindings."""
     import json as _json
 
-    # a local task pack
+    # a local eval pack
     ws = tmp_path / "ws"
     (ws / "t1").mkdir(parents=True)
     (ws / "t1" / "prompt.md").write_text("write summary.md")
@@ -91,7 +91,7 @@ def test_upgrade_and_optimize(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     manifest = (
         "[project]\nname='ops'\n"
-        f"[tasks]\npacks=['{ws}']\nseeds=1\n"
+        f"[evals]\npacks=['{ws}']\nseeds=1\n"
         "[candidates.llm.planner]\nany_of=['reference:qwen-7b','reference:qwen-32b']\n"
         "[candidates]\nharness=['reference']\ndecision=['none']\n"
         "[objective]\nprimary='success-rate'\nselect='max-quality'\n"
@@ -112,10 +112,10 @@ def test_upgrade_and_optimize(tmp_path, monkeypatch):
     rolled = _json.loads(hlock.upgrade(manifest="harness.toml", rollback=True))
     assert rolled["rolled_back"] is True
 
-    opt = _json.loads(hlock.optimize(manifest="harness.toml", depth="hpo", out=str(tmp_path / "harness.opt.lock")))
-    assert (tmp_path / "harness.opt.lock").exists()
-    assert opt["report"]["depth"] == "hpo"
-    # reload the opt lock and confirm it is marked optimized
-    opt_lock = hlock.Lockfile.load(str(tmp_path / "harness.opt.lock"))
-    assert "optimized" in opt_lock.to_json() or opt_lock.harness
-    assert opt["summary"] != ""
+    tuned = _json.loads(hlock.tune(manifest="harness.toml", depth="hpo", out=str(tmp_path / "harness.tune.lock")))
+    assert (tmp_path / "harness.tune.lock").exists()
+    assert tuned["report"]["depth"] == "hpo"
+    # reload the tune lock and confirm it is marked tuned
+    tune_lock = hlock.Lockfile.load(str(tmp_path / "harness.tune.lock"))
+    assert "tuned" in tune_lock.to_json() or tune_lock.harness
+    assert tuned["summary"] != ""

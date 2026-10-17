@@ -32,11 +32,11 @@ flowchart TB
 dependency. It owns:
 
 - **manifest**: parsing and hashing `harness.toml`
-- **lockfile**: the schema-v1 `harness.lock` and `harness.opt.lock` models
+- **lockfile**: the schema-v1 `harness.lock` and `harness.tune.lock` models
 - **store**: a content-addressed store for trial artifacts under `.harnesslock/`
 - **eval packs**: loading packs, the deterministic search/holdout split, and grading
 - **search**: grid expansion, Pareto fronts, constraint filtering, winner selection
-- **resolver** (the `tuner` module): running trials, aggregating evidence, and building the lock
+- **resolver**: running trials, aggregating evidence, and building the lock
 
 The core orchestrates and aggregates. It never does heavy compute itself.
 
@@ -63,7 +63,7 @@ Requests and responses follow a versioned JSON contract (`CONTRACT_VERSION = 1`)
 core only ever sees the response, so it doesn't depend on where the work ran: in
 process, on this machine, or as a Flyte task on a GPU node.
 
-Each worker handler owns one stage of [`hlock optimize`](../guides/optimize.md):
+Each worker handler owns one stage of [`hlock tune`](../guides/tune.md):
 LLM trials, trace loading, synthetic data, grading, prompt search, and LoRA
 fine-tuning. On `cluster`, the worker lifts each body to a Flyte 2 task: CPU images
 for data, prompt, grading, and LLM trials; a GPU image with an accelerator request for

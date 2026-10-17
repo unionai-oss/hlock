@@ -5,7 +5,7 @@ crates expose the same API:
 
 | Crate | Use it when |
 |---|---|
-| [`hlock`](https://crates.io/crates/hlock) | The default: `hlock::Manifest`, `hlock::Tuner`, … |
+| [`hlock`](https://crates.io/crates/hlock) | The default: `hlock::Manifest`, `hlock::Resolver`, … |
 | [`harness-lock`](https://crates.io/crates/harness-lock) | An alias for `hlock`, under `harness_lock::…` |
 | [`harness-lock-core`](https://crates.io/crates/harness-lock-core) | You depend on the implementation crate directly |
 
@@ -25,13 +25,13 @@ evidence. This is the same flow as `hlock resolve`, `hlock check`, and `hlock sh
 ```rust title="src/main.rs"
 use std::path::Path;
 
-use hlock::{Lockfile, Manifest, Tuner};
+use hlock::{Lockfile, Manifest, Resolver};
 
 fn main() -> hlock::Result<()> {
-    // Resolve: load the manifest and tune. `tune()` also writes ./harness.lock.
+    // Resolve: load the manifest and search it. `resolve()` also writes ./harness.lock.
     let manifest = Manifest::load(Path::new("harness.toml"))?;
     let live_hash = manifest.manifest_hash();
-    let lock = Tuner::new(manifest, ".harnesslock").tune()?;
+    let lock = Resolver::new(manifest, ".harnesslock").resolve()?;
     println!("{}", lock.summary());
 
     // Check: an empty list means the lock matches the manifest.
@@ -61,7 +61,7 @@ success rate Some(1.0) over 2 trials
 | Item | What it is |
 |---|---|
 | [`Manifest`](https://docs.rs/harness-lock-core/latest/harness_lock_core/manifest/struct.Manifest.html) | A parsed `harness.toml`: `load`, `from_str`, `manifest_hash`, `eval_packs`, `backend_target` |
-| [`Tuner`](https://docs.rs/harness-lock-core/latest/harness_lock_core/tuner/struct.Tuner.html) | The resolver: `new`, `with_backend`, `enumerate_stacks`, `run_trial`, `tune` |
+| [`Resolver`](https://docs.rs/harness-lock-core/latest/harness_lock_core/resolver/struct.Resolver.html) | The resolver: `new`, `with_backend`, `enumerate_stacks`, `run_trial`, `resolve` |
 | [`Lockfile`](https://docs.rs/harness-lock-core/latest/harness_lock_core/lockfile/struct.Lockfile.html) | The `harness.lock` model: `load`, `from_str`, `save`, `check_manifest`, `summary`, and public fields for every section |
 | [`Backend`](https://docs.rs/harness-lock-core/latest/harness_lock_core/worker/enum.Backend.html) | `Local`, `Devbox`, or `Cluster`; `Backend::parse("devbox")` |
 | [`Store`](https://docs.rs/harness-lock-core/latest/harness_lock_core/store/struct.Store.html) | The content-addressed artifact store under `.harnesslock/` |
@@ -75,10 +75,10 @@ success rate Some(1.0) over 2 trials
 |---|---|
 | [`manifest`](https://docs.rs/harness-lock-core/latest/harness_lock_core/manifest/) | Manifest schema: candidates, objective, budget |
 | [`lockfile`](https://docs.rs/harness-lock-core/latest/harness_lock_core/lockfile/) | Lockfile schema: stack, policy, evidence, provenance |
-| [`tuner`](https://docs.rs/harness-lock-core/latest/harness_lock_core/tuner/) | The resolver: trial execution and lock construction |
+| [`resolver`](https://docs.rs/harness-lock-core/latest/harness_lock_core/resolver/) | The resolver: trial execution and lock construction |
 | [`search`](https://docs.rs/harness-lock-core/latest/harness_lock_core/search/) | Stacks, trial results, Pareto fronts, winner selection |
 | [`tasks`](https://docs.rs/harness-lock-core/latest/harness_lock_core/tasks/) | Eval packs, the search/holdout split, grading |
-| [`ops`](https://docs.rs/harness-lock-core/latest/harness_lock_core/ops/) | `upgrade` and `optimize`, the engines behind those commands |
+| [`ops`](https://docs.rs/harness-lock-core/latest/harness_lock_core/ops/) | `upgrade` and `tune`, the engines behind those commands |
 | [`worker`](https://docs.rs/harness-lock-core/latest/harness_lock_core/worker/) | Backends and the Python worker bridge (versioned JSON contract) |
 | [`providers`](https://docs.rs/harness-lock-core/latest/harness_lock_core/providers/) | The deterministic reference LLM provider |
 | [`store`](https://docs.rs/harness-lock-core/latest/harness_lock_core/store/), [`hash`](https://docs.rs/harness-lock-core/latest/harness_lock_core/hash/) | Content addressing and hashing |

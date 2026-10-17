@@ -13,7 +13,7 @@ mod tests {
     fn reexports_core_api() {
         let _ = std::any::type_name::<crate::Lockfile>();
         let _ = std::any::type_name::<crate::manifest::Manifest>();
-        let _ = std::any::type_name::<crate::Tuner>();
+        let _ = std::any::type_name::<crate::Resolver>();
         let _ = crate::sha256_text;
     }
 }

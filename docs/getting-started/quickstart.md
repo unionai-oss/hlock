@@ -153,5 +153,5 @@ diff in a PR shows exactly what changed in the agent and what evidence supports 
 - Write tasks for your own domain: [Eval packs](../guides/eval-packs.md)
 - Call real models: [Backends](../guides/backends.md)
 - Move to newer models safely: [Upgrading components](../guides/upgrade.md)
-- Tune prompts, hyperparameters, and small models: [Optimizing](../guides/optimize.md)
+- Tune prompts, hyperparameters, and small models: [Tuning](../guides/tune.md)
 - Do it all from Python: [Python API](../reference/python-api.md)

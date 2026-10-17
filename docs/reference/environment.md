@@ -34,7 +34,7 @@ Set these to call a real model through any OpenAI-compatible endpoint. Without
 
 ## Fine-tuning
 
-Used by `hlock optimize --depth ft` and `--depth full`.
+Used by `hlock tune --depth ft` and `--depth full`.
 
 | Variable | Default | Description |
 |---|---|---|

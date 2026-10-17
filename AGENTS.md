@@ -28,7 +28,7 @@ you report a change as done, and report failures as they are.
 
 | Path | Contents |
 |---|---|
-| `crates/harness-lock-core/` | Rust core: manifest, lockfile, store, eval packs, search, resolver (`tuner`) |
+| `crates/harness-lock-core/` | Rust core: manifest, lockfile, store, eval packs, search, resolver |
 | `crates/harness-lock-py/` | PyO3 bindings (ships only in the wheel) |
 | `crates/hlock/`, `crates/harness-lock/` | Re-export crates (`harness-lock` is the alias) |
 | `hlock/` | Shim re-exporting `harness_lock`, shipped in the `hlock` wheel |

@@ -1,6 +1,6 @@
 //! `hlock localize`: the best all-local equivalent of a lock (SPEC §7.8.7).
 //!
-//! Takes any lock (pinned, resolved, optimized) and replaces what isn't local:
+//! Takes any lock (pinned, resolved, tuned) and replaces what isn't local:
 //! a proprietary harness, or one that can't use a local model, becomes a
 //! local-capable one; LLM roles and the decision model on API providers move
 //! to a local runtime, picked from the runtime's model catalog and the weights
@@ -311,8 +311,8 @@ pub fn localize(source: &Lockfile, source_path: &Path, reg: &Registry, ctx: &Ctx
         let top: Vec<String> = ranked.iter().take(4).map(|c| format!("{}:{}", runtime.id, c.id)).collect();
         man.candidates.llm = BTreeMap::from([("planner".to_string(), LLMCandidate { any_of: top })]);
         man.candidates.harness = vec![HarnessCandidate { name: target.id.clone(), ..Default::default() }];
-        let mut tuner = crate::Tuner::new(man, &opts.workdir);
-        let lock = tuner.tune_lock()?;
+        let mut resolver = crate::Resolver::new(man, &opts.workdir);
+        let lock = resolver.resolve_lock()?;
         if let Some(win) = lock.llm.first() {
             if let Some(c) = ranked.iter().find(|c| c.id == win.model) {
                 default_pick = c.clone();

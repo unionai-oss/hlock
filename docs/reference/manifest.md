@@ -71,7 +71,7 @@ The search space. The resolver tries every combination.
 | `llm.<role>.any_of` | Candidate models for a role, as `"provider:model"`. v0.1 tunes the `planner` role. |
 | `decision` | Candidate decision models, e.g. `"none"`, `"rules:default"` |
 | `harness` | Candidate harnesses: names, or tables with `name`, `pattern`, and `config` |
-| `policy.<key>` | Policy values, e.g. `retries = [1]`, `temperature = [0.2]`. `resolve` uses the first value. [`optimize`](../guides/optimize.md) searches retries and temperature itself. |
+| `policy.<key>` | Policy values, e.g. `retries = [1]`, `temperature = [0.2]`. `resolve` uses the first value. [`tune`](../guides/tune.md) searches retries and temperature itself. |
 
 v0.1 ships the `reference` provider (models `qwen-1.5b`, `qwen-7b`, `qwen-32b`) and the
 `reference` harness. Real providers run through the worker on the

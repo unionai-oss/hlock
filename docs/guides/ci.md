@@ -61,9 +61,9 @@ Use `--json` when a later step needs the outcome:
 uvx hlock run --json "clean ./data/orders.csv" > outcome.json
 ```
 
-## Scheduled re-optimization
+## Scheduled re-tuning
 
-`hlock optimize --strict` exits non-zero unless it beats the current lock. A nightly
+`hlock tune --strict` exits non-zero unless it beats the current lock. A nightly
 job can try, and open a PR only when there's a real improvement:
 
 ```yaml
@@ -72,11 +72,11 @@ on:
     - cron: "0 6 * * *"
 
 jobs:
-  optimize:
+  tune:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v6
-      - run: uvx hlock optimize --depth hpo --strict --apply
+      - run: uvx hlock tune --depth hpo --strict --apply
       # then open a PR with the updated harness.lock, e.g. with peter-evans/create-pull-request
 ```

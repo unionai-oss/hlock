@@ -1,6 +1,6 @@
 # Going local with localize
 
-`hlock localize` turns any lock (pinned, resolved, or optimized) into its best equivalent
+`hlock localize` turns any lock (pinned, resolved, or tuned) into its best equivalent
 that runs entirely on your own machine: a local-capable harness, local models served by a
 runtime like Ollama or LM Studio, and the same MCP servers, skills and instructions.
 

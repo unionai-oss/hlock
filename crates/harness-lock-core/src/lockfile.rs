@@ -306,13 +306,13 @@ pub struct Lockfile {
     pub config: Vec<ConfigFile>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub secret: Vec<SecretRef>,
-    /// Optimization-only fields (see §5.9 / `harness.opt.lock`).
+    /// Tune-lock-only fields (see §5.9 / `harness.tune.lock`).
     #[serde(default, skip_serializing_if = "Option::is_none", rename = "base-lock")]
     pub base_lock: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kind: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub optimize: Option<serde_json::Value>,
+    pub tune: Option<serde_json::Value>,
     /// What `hlock localize` replaced and how it chose (localized locks only).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub localize: Option<serde_json::Value>,
@@ -343,7 +343,7 @@ impl Default for Lockfile {
             secret: Vec::new(),
             base_lock: None,
             kind: None,
-            optimize: None,
+            tune: None,
             localize: None,
         }
     }

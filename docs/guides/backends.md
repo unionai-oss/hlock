@@ -28,7 +28,7 @@ Override it for one command with `--backend`:
 
 ```bash
 hlock resolve --backend local
-hlock optimize --backend cluster --depth ft
+hlock tune --backend cluster --depth ft
 ```
 
 Check what's configured with `hlock backend status`:
@@ -81,7 +81,7 @@ runs on this machine, in the interpreter named by `HL_PYTHON`.
 4.  Run it:
 
     ```bash
-    hlock optimize --backend devbox --depth probe --max-trials 10
+    hlock tune --backend devbox --depth probe --max-trials 10
     ```
 
 ## `cluster`
@@ -103,7 +103,7 @@ Setup:
 3.  Run it:
 
     ```bash
-    hlock optimize --backend cluster --depth ft --data user:./runs
+    hlock tune --backend cluster --depth ft --data user:./runs
     ```
 
 If the Flyte SDK isn't importable, the worker runs each stage in process and reports

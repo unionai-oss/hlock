@@ -83,17 +83,17 @@ Plan, apply, or roll back upgrades, like [`hlock upgrade`](cli.md#upgrade). Retu
 }
 ```
 
-### `optimize`
+### `tune`
 
 ```python
-optimize(
+tune(
     manifest=None, depth="auto", data="user", harness=None, out=None,
     strict=False, apply=False, max_trials=None, backend=None, workdir=None, lock=None,
 ) -> str
 ```
 
-Run the optimizer, like [`hlock optimize`](cli.md#optimize). Returns JSON with `path`
-(the opt-lock written), `summary`, and a `report` with `depth`, `backend`, `data_mode`,
+Run tuning, like [`hlock tune`](cli.md#tune). Returns JSON with `path`
+(the tune lock written), `summary`, and a `report` with `depth`, `backend`, `data_mode`,
 `grid`, `best`, `baseline_success_rate`, and `gain_success_rate`.
 
 ### `check_eval_pack`
@@ -171,7 +171,7 @@ Budget(max_spend_usd=None, max_trials=None, strategy="grid", random_seed=0)
 
 | Member | Description |
 |---|---|
-| `Lockfile.load(path)` | Read a `harness.lock` or `harness.opt.lock` |
+| `Lockfile.load(path)` | Read a `harness.lock` or `harness.tune.lock` |
 | `.summary()` | One-line summary |
 | `.harness` | Locked harness name |
 | `.decision` | Locked decision model |

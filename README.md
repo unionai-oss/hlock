@@ -59,7 +59,7 @@ deterministic and offline, so the whole loop runs on a laptop.
 ```bash
 hlock evals init                          # write a hello-world eval pack to ./evals
 hlock init --name demo                    # write a starter harness.toml
-hlock resolve                             # tune the search space -> harness.lock
+hlock resolve                             # search the space -> harness.lock
 hlock check                               # fail if harness.toml drifted from the lock
 hlock run "count the words in words.txt"  # run the locked agent
 ```
@@ -73,8 +73,8 @@ with real tasks from your project. See [Eval packs](https://docs.hlock.ai/guides
 </p>
 
 From there: `hlock show` prints the locked stack and its evidence, `hlock tree` prints the
-component graph, `hlock upgrade` plans model upgrades, and `hlock optimize` tunes prompts,
-hyperparameters, and small models into a `harness.opt.lock`.
+component graph, `hlock upgrade` plans model upgrades, and `hlock tune` tunes prompts,
+hyperparameters, and small models into a `harness.tune.lock`.
 
 ### Already have a harness set up?
 
@@ -156,9 +156,9 @@ Flyte task on a cluster.
 | `cluster` | Python worker that lifts each stage to Flyte/Union | GPUs, fan-out, durable caching, shared results |
 
 ```bash
-hlock optimize --backend devbox --depth probe --max-trials 10
+hlock tune --backend devbox --depth probe --max-trials 10
 # real LLM calls: export HL_LLM_BASE_URL=http://… HL_LLM_MODEL=qwen-32b [HL_LLM_API_KEY=…]
-hlock optimize --backend cluster --depth ft --data user:./runs   # LoRA on a GPU worker
+hlock tune --backend cluster --depth ft --data user:./runs   # LoRA on a GPU worker
 ```
 
 See [Backends](https://docs.hlock.ai/guides/backends/) for setup and
@@ -185,7 +185,7 @@ Want to help? See the [contributing guide](https://docs.hlock.ai/project/contrib
 
 `hlock` is at **v0.1**. What works today: manifest and lockfile schema v1, a
 content-addressed store, eval packs with graders, the reference provider and harness,
-grid search with Pareto selection, `upgrade` (plan/apply/rollback), and `optimize` across
+grid search with Pareto selection, `upgrade` (plan/apply/rollback), and `tune` across
 the `local`, `devbox`, and `cluster` backends. [SPEC.md](https://github.com/unionai-oss/hlock/blob/main/SPEC.md) describes the full design,
 much of which is still on the roadmap.
 

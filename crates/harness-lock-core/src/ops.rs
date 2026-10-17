@@ -1,12 +1,12 @@
-//! Operational commands built on the tuner: `hlock upgrade` (§5.8) and
-//! `hlock optimize` (§5.9, §8.5).
+//! Operational commands built on the resolver: `hlock upgrade` (§5.8) and
+//! `hlock tune` (§5.9, §8.5).
 //!
 //! - **upgrade** moves locked components to newer/breaking versions, keeping a
 //!   `harness.lock.prev` for `--rollback`, and gates the apply on evidence not
 //!   regressing.
-//! - **optimize** is the compute-heavy step: it searches hyperparameter/decision
+//! - **tune** is the compute-heavy step: it searches hyperparameter/decision
 //!   axes (and, at deeper depths, records prompt edits and fine-tuning) to produce
-//!   a derived `harness.opt.lock` (§5.9) that re-measures gains vs the base lock.
+//!   a derived `harness.tune.lock` (§5.9) that re-measures gains vs the base lock.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -16,7 +16,7 @@ use crate::hash::sha256_text;
 use crate::lockfile::{Decision, Evidence, Harness, Lockfile};
 use crate::manifest::Manifest;
 use crate::search::Stack;
-use crate::tuner::Tuner;
+use crate::resolver::Resolver;
 use crate::LOCKFILE_PATH;
 
 // --------------------------------------------------------------------------- //
@@ -173,8 +173,8 @@ pub fn upgrade(manifest: Manifest, spec: &UpgradeSpec) -> Result<UpgradeOutcome>
     cand.policy = manifest.candidates.policy.clone();
     derived.candidates = cand;
 
-    let mut tuner = Tuner::new(derived, &spec.workdir);
-    let new_lock = tuner.tune_lock()?;
+    let mut resolver = Resolver::new(derived, &spec.workdir);
+    let new_lock = resolver.resolve_lock()?;
     new_lock.save(&lock_path)?;
 
     let after = baseline_sr(&new_lock);
@@ -207,16 +207,16 @@ fn baseline_sr(l: &Lockfile) -> f64 {
 }
 
 // --------------------------------------------------------------------------- //
-// Optimize
+// Tune
 // --------------------------------------------------------------------------- //
 #[derive(Debug, Clone)]
-pub struct OptimizeSpec {
+pub struct TuneSpec {
     /// probe | prompt | hpo | ft | full | auto
     pub depth: String,
     /// "user" | "user:<paths>" | "synthetic[:n]" | "hub:<pack>"
     pub data: String,
     pub harness: Option<String>,
-    /// Output path (default `harness.opt.lock`; user-renamable).
+    /// Output path (default `harness.tune.lock`; user-renamable).
     pub out: PathBuf,
     pub strict: bool,
     pub apply: bool,
@@ -228,13 +228,13 @@ pub struct OptimizeSpec {
     pub lock: Option<PathBuf>,
 }
 
-impl Default for OptimizeSpec {
+impl Default for TuneSpec {
     fn default() -> Self {
-        OptimizeSpec {
+        TuneSpec {
             depth: "auto".into(),
             data: "user".into(),
             harness: None,
-            out: PathBuf::from("harness.opt.lock"),
+            out: PathBuf::from("harness.tune.lock"),
             strict: false,
             apply: false,
             max_trials: None,
@@ -245,7 +245,7 @@ impl Default for OptimizeSpec {
     }
 }
 
-impl OptimizeSpec {
+impl TuneSpec {
     pub fn resolved_depth(&self) -> &str {
         match self.depth.as_str() {
             "auto" => "hpo",
@@ -254,7 +254,7 @@ impl OptimizeSpec {
     }
 }
 
-/// Grid axes searched by `optimize`. Deeper depths broaden the grid.
+/// Grid axes searched by `tune`. Deeper depths broaden the grid.
 /// Returns `(model, retries, temperature, tool_timeout_seconds)`.
 fn search_grid(manifest: &Manifest, depth: &str) -> Vec<(String, u32, f64, Option<u64>)> {
     let mut models: Vec<String> = manifest
@@ -299,14 +299,14 @@ fn search_grid(manifest: &Manifest, depth: &str) -> Vec<(String, u32, f64, Optio
     out
 }
 
-/// `hlock optimize` -> `harness.opt.lock` (§5.9).
+/// `hlock tune` -> `harness.tune.lock` (§5.9).
 ///
 /// Runs the depth-aware pipeline: **data** -> (depth>=prompt) **prompt search** ->
 /// **HPO trials** -> (depth>=ft) **LoRA fine-tune** -> (depth==full) **holdout
 /// re-validation**, on the configured backend. On `cluster`/Union the heavy stages
 /// are lifted to real Flyte tasks by the Python worker (GPUs for fine-tuning,
-/// images, caching), and their provenance/digests are recorded in the opt-lock.
-pub fn optimize(manifest: Manifest, spec: &OptimizeSpec) -> Result<OptimizeOutcome> {
+/// images, caching), and their provenance/digests are recorded in the tune lock.
+pub fn tune(manifest: Manifest, spec: &TuneSpec) -> Result<TuneOutcome> {
     let depth = spec.resolved_depth().to_string();
     let backend = crate::worker::Backend::parse(
         spec.backend.as_deref().unwrap_or(manifest.backend_target().as_str()),
@@ -316,10 +316,10 @@ pub fn optimize(manifest: Manifest, spec: &OptimizeSpec) -> Result<OptimizeOutco
     let base_lock = Lockfile::load(&lock_path).ok();
     let baseline_sr = base_lock.as_ref().map(baseline_sr).unwrap_or(0.0);
 
-    let mut tuner = crate::tuner::Tuner::with_backend(manifest.clone(), &spec.workdir, backend);
-    let search_tasks = tuner.load_packs();
+    let mut resolver = crate::resolver::Resolver::with_backend(manifest.clone(), &spec.workdir, backend);
+    let search_tasks = resolver.load_packs();
     if search_tasks.is_empty() {
-        return Err(Error::Tuning("no tasks loaded — cannot optimize".into()));
+        return Err(Error::Tuning("no tasks loaded — cannot tune".into()));
     }
     let seeds = manifest.seeds();
     let ws_root = spec.workdir.join("runs");
@@ -353,7 +353,7 @@ pub fn optimize(manifest: Manifest, spec: &OptimizeSpec) -> Result<OptimizeOutco
         let ws = ws_root.join("stage_data");
         match stage_run(w, backend.as_str(), kind, &ws, &plan_value) {
             Ok(v) => data_meta = v,
-            Err(Error::Worker(e)) => eprintln!("warn: optimize data stage: {e}"),
+            Err(Error::Worker(e)) => eprintln!("warn: tune data stage: {e}"),
             Err(e) => return Err(e),
         }
     } else {
@@ -362,18 +362,18 @@ pub fn optimize(manifest: Manifest, spec: &OptimizeSpec) -> Result<OptimizeOutco
 
     // ---- stage 2: prompt search (depth >= prompt) ----
     let mut prompt_meta = serde_json::json!({});
-    let mut optimized_prompt: Vec<String> = Vec::new();
+    let mut tuned_prompt: Vec<String> = Vec::new();
     if prompt_depth(&depth) {
         if let Some(w) = &worker {
             let ws = ws_root.join("stage_prompt");
             match stage_run(w, backend.as_str(), "prompt.search", &ws, &plan_value) {
                 Ok(v) => {
                     if let Some(p) = v.get("best_prompt").and_then(serde_json::Value::as_str) {
-                        optimized_prompt = vec![p.to_string()];
+                        tuned_prompt = vec![p.to_string()];
                     }
                     prompt_meta = v;
                 }
-                Err(Error::Worker(e)) => eprintln!("warn: optimize prompt stage: {e}"),
+                Err(Error::Worker(e)) => eprintln!("warn: tune prompt stage: {e}"),
                 Err(e) => return Err(e),
             }
         }
@@ -389,7 +389,7 @@ pub fn optimize(manifest: Manifest, spec: &OptimizeSpec) -> Result<OptimizeOutco
             decision: manifest.candidates.decision.first().cloned().unwrap_or_else(|| "none".into()),
             tools: manifest.tools.keys().cloned().collect(),
             skills: manifest.skills.keys().cloned().collect(),
-            instructions: optimized_prompt.clone(),
+            instructions: tuned_prompt.clone(),
             max_steps: 40,
             max_cost_usd_per_task: None,
             retries,
@@ -408,7 +408,7 @@ pub fn optimize(manifest: Manifest, spec: &OptimizeSpec) -> Result<OptimizeOutco
                         break;
                     }
                 }
-                let tr = tuner.run_trial(&stack, task, seed, &ws_root);
+                let tr = resolver.run_trial(&stack, task, seed, &ws_root);
                 if tr.success {
                     ok += 1;
                 }
@@ -429,12 +429,12 @@ pub fn optimize(manifest: Manifest, spec: &OptimizeSpec) -> Result<OptimizeOutco
         .iter()
         .max_by(|a, b| a.4.partial_cmp(&b.4).unwrap().then(b.5.partial_cmp(&a.5).unwrap()));
     let Some((bm, br, btemp, btto, bs, bc, bn_trials)) = best.cloned() else {
-        return Err(Error::Tuning("optimize produced no candidate".into()));
+        return Err(Error::Tuning("tune produced no candidate".into()));
     };
 
     if spec.strict && bs <= baseline_sr {
         return Err(Error::Tuning(format!(
-            "--strict: optimized success-rate {bs:.2} does not beat the base {baseline_sr:.2}"
+            "--strict: tuned success-rate {bs:.2} does not beat the base {baseline_sr:.2}"
         )));
     }
 
@@ -445,7 +445,7 @@ pub fn optimize(manifest: Manifest, spec: &OptimizeSpec) -> Result<OptimizeOutco
         decision: manifest.candidates.decision.first().cloned().unwrap_or_else(|| "none".into()),
         tools: manifest.tools.keys().cloned().collect(),
         skills: manifest.skills.keys().cloned().collect(),
-        instructions: optimized_prompt.clone(),
+        instructions: tuned_prompt.clone(),
         max_steps: 40,
         max_cost_usd_per_task: None,
         retries: br,
@@ -466,7 +466,7 @@ pub fn optimize(manifest: Manifest, spec: &OptimizeSpec) -> Result<OptimizeOutco
             });
             match stage_run(w, backend.as_str(), "ft.lora", &ws, &ft_plan) {
                 Ok(v) => ft_meta = v,
-                Err(Error::Worker(e)) => eprintln!("warn: optimize fine-tune stage: {e}"),
+                Err(Error::Worker(e)) => eprintln!("warn: tune fine-tune stage: {e}"),
                 Err(e) => return Err(e),
             }
         }
@@ -474,7 +474,7 @@ pub fn optimize(manifest: Manifest, spec: &OptimizeSpec) -> Result<OptimizeOutco
 
     // ---- stage 5: holdout re-validation (depth == full) ----
     let (es, ec, en, esplit) = if depth == "full" {
-        let hold = tuner.holdout();
+        let hold = resolver.holdout();
         if hold.is_empty() {
             (bs, bc, bn_trials as usize, "search".to_string())
         } else {
@@ -483,7 +483,7 @@ pub fn optimize(manifest: Manifest, spec: &OptimizeSpec) -> Result<OptimizeOutco
             let mut cost = 0.0;
             for task in hold {
                 for seed in 0..seeds {
-                    let tr = tuner.run_trial(&winner_stack, task, seed, &ws_root);
+                    let tr = resolver.run_trial(&winner_stack, task, seed, &ws_root);
                     if tr.success {
                         ok += 1;
                     }
@@ -497,7 +497,7 @@ pub fn optimize(manifest: Manifest, spec: &OptimizeSpec) -> Result<OptimizeOutco
         (bs, bc, bn_trials as usize, "search".to_string())
     };
 
-    let opt_lock = build_optimized_resolve(
+    let tune_lock = build_tuned_lock(
         &manifest,
         winner_stack,
         es,
@@ -519,10 +519,10 @@ pub fn optimize(manifest: Manifest, spec: &OptimizeSpec) -> Result<OptimizeOutco
     if let Some(parent) = out_path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    opt_lock.save(out_path)?;
+    tune_lock.save(out_path)?;
 
     if spec.apply {
-        opt_lock.save(&lock_path)?;
+        tune_lock.save(&lock_path)?;
     }
 
     let report = serde_json::json!({
@@ -538,20 +538,20 @@ pub fn optimize(manifest: Manifest, spec: &OptimizeSpec) -> Result<OptimizeOutco
         "path": out_path.to_string_lossy(),
         "applied": spec.apply,
     });
-    Ok(OptimizeOutcome {
+    Ok(TuneOutcome {
         path: out_path.clone(),
-        lock: opt_lock,
+        lock: tune_lock,
         report,
     })
 }
 
-pub struct OptimizeOutcome {
+pub struct TuneOutcome {
     pub path: PathBuf,
     pub lock: Lockfile,
     pub report: serde_json::Value,
 }
 
-fn build_optimized_resolve(
+fn build_tuned_lock(
     manifest: &Manifest,
     stack: Stack,
     success: f64,
@@ -586,7 +586,7 @@ fn build_optimized_resolve(
         proof_prompt.push(serde_json::json!({
             "component": "harness.system-prompt",
             "before": str_field(prompt_meta, "before_digest").unwrap_or_else(|| sha256_text("base system prompt")),
-            "after": str_field(prompt_meta, "after_digest").unwrap_or_else(|| sha256_text("optimized system prompt (depth >= prompt)")),
+            "after": str_field(prompt_meta, "after_digest").unwrap_or_else(|| sha256_text("tuned system prompt (depth >= prompt)")),
             "gain": {"success-rate": format!("{success:+.2}")},
             "_placeholder": placeholder,
         }));
@@ -615,10 +615,10 @@ fn build_optimized_resolve(
     let mut lf = Lockfile::default();
     lf.manifest_hash = Some(manifest.manifest_hash());
     lf.base_lock = if base_lock_hash.is_empty() { None } else { Some(base_lock_hash) };
-    lf.kind = Some("optimized".to_string());
+    lf.kind = Some("tuned".to_string());
     let mut stack_map = BTreeMap::new();
     stack_map.insert("name".to_string(), serde_json::json!(manifest.name()));
-    stack_map.insert("selection".to_string(), serde_json::json!("optimize"));
+    stack_map.insert("selection".to_string(), serde_json::json!("tune"));
     lf.stack = stack_map;
     lf.decision = Decision {
         kind: stack.decision.clone(),
@@ -691,7 +691,7 @@ fn build_optimized_resolve(
         .sum();
     let spend = cost * trials as f64 + stage_spend;
 
-    lf.optimize = Some(serde_json::json!({
+    lf.tune = Some(serde_json::json!({
         "hpo": {
             "axes": {
                 "retries": [0,1,3],

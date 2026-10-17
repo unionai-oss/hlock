@@ -106,12 +106,12 @@ entries that point the harness at the local endpoint, and a `[localize]` table r
 was replaced, the candidates considered, the memory budget, whether it was evaluated, and the
 source lock's evidence as a baseline.
 
-## `harness.opt.lock`
+## `harness.tune.lock`
 
-[`hlock optimize`](../guides/optimize.md) writes a separate opt-lock with the same shape,
-plus what the optimizer produced: the chosen hyperparameters, applied prompts, fine-tune
+[`hlock tune`](../guides/tune.md) writes a separate tune lock with the same shape,
+plus what tuning produced: the chosen hyperparameters, applied prompts, fine-tune
 adapters, the data split, and the budget, all content-addressed. Adopt it into
-`harness.lock` with `hlock optimize --apply`.
+`harness.lock` with `hlock tune --apply`.
 
 ## `harness.lock.prev`
 

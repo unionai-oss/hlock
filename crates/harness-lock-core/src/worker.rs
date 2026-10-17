@@ -2,13 +2,13 @@
 //!
 //! The Rust core stays the orchestrator and aggregator — manifests, search
 //! planning, trial bookkeeping, evidence, and lock construction. The
-//! ecosystem- and compute-heavy *work items* of `hlock optimize` that must run
+//! ecosystem- and compute-heavy *work items* of `hlock tune` that must run
 //! where the Python toolchain and GPUs live (real LLM invocation, user-trace
 //! loading with pandas/polars, synthetic-data generation, model grading, prompt
 //! search, LoRA fine-tuning) are handled by a small Python worker that the core
 //! shells out to over a versioned JSON contract.
 //!
-//! On `local` the tuner uses the deterministic in-process reference harness (no
+//! On `local` the resolver uses the deterministic in-process reference harness (no
 //! Python). On `devbox`/`cluster` the [`PythonAdapter`] takes over and calls
 //! `python -m harness_lock.tasks.worker <request.json> <response.json>`; that
 //! worker may in turn lift each body to a real Flyte task via the Python `flyte`
@@ -25,7 +25,7 @@ use crate::error::{Error, Result};
 use crate::search::Stack;
 use crate::tasks::Task;
 
-/// Where the tuner executes.
+/// Where the resolver executes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Backend {
     Local,
@@ -150,7 +150,7 @@ impl HarnessAdapter for PythonAdapter {
 
 /// Shells any work item out to the Python worker over the versioned JSON contract.
 ///
-/// Used by the tuner (as `PythonAdapter`) for trials and directly by `ops::optimize`
+/// Used by the resolver (as `PythonAdapter`) for trials and directly by `ops::tune`
 /// for the data / prompt / fine-tune stages of the pipeline.
 ///
 /// The interpreter is taken from `HL_PYTHON` (falling back to `python3`) so it can
