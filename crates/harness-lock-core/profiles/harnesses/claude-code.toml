@@ -67,3 +67,4 @@ source = "{root}/plugins/installed_plugins.json"
 [launch]
 model-flag = "--model"
 prompt = ["-p", "{prompt}"]  # `hlock run`: one prompt, non-interactively
+interactive = ["{prompt}"]  # `hlock meta run`: a session whose first message is the prompt

@@ -79,6 +79,7 @@ success rate Some(1.0) over 2 trials
 | [`search`](https://docs.rs/harness-lock-core/latest/harness_lock_core/search/) | Stacks, trial results, Pareto fronts, winner selection |
 | [`tasks`](https://docs.rs/harness-lock-core/latest/harness_lock_core/tasks/) | Eval packs, the search/holdout split, grading |
 | [`ops`](https://docs.rs/harness-lock-core/latest/harness_lock_core/ops/) | `upgrade` and `tune`, the engines behind those commands |
+| [`meta`](https://docs.rs/harness-lock-core/latest/harness_lock_core/meta/) | The meta harness: `choose`, `configure`, `pin`, `check`, job `render`/`prepare`/`verify` |
 | [`worker`](https://docs.rs/harness-lock-core/latest/harness_lock_core/worker/) | Backends and the Python worker bridge (versioned JSON contract) |
 | [`providers`](https://docs.rs/harness-lock-core/latest/harness_lock_core/providers/) | The deterministic reference LLM provider |
 | [`store`](https://docs.rs/harness-lock-core/latest/harness_lock_core/store/), [`hash`](https://docs.rs/harness-lock-core/latest/harness_lock_core/hash/) | Content addressing and hashing |

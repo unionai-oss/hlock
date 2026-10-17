@@ -137,7 +137,7 @@ entrypoint = "triage.agent:run"
 
 `[tools]`, `[skills]`, `[instructions]`, `[context]`, and `[enforce]` are parsed and
 included in the manifest hash. They're placeholders for the peripherals described in
-the [design spec](https://github.com/unionai-oss/hlock/blob/main/SPEC.md), and
+the [design spec](https://github.com/unionai-oss/hlock/blob/main/specs/v0.md), and
 the v0.1 resolver doesn't search over them yet.
 
 ## The manifest hash

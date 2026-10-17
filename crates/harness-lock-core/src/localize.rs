@@ -215,7 +215,7 @@ fn is_local_harness(p: &HarnessProfile) -> bool {
     p.kind == "custom" || (p.open_source == Some(true) && p.local_models == Some(true))
 }
 
-fn subst_value(v: &Value, vars: &[(&str, &str)]) -> Value {
+pub(crate) fn subst_value(v: &Value, vars: &[(&str, &str)]) -> Value {
     let s = |x: &str| vars.iter().fold(x.to_string(), |acc, (k, val)| acc.replace(&format!("{{{k}}}"), val));
     match v {
         Value::String(x) => Value::String(s(x)),
@@ -223,6 +223,62 @@ fn subst_value(v: &Value, vars: &[(&str, &str)]) -> Value {
         Value::Object(m) => Value::Object(m.iter().map(|(k, x)| (s(k), subst_value(x, vars))).collect()),
         other => other.clone(),
     }
+}
+
+/// A local runtime and the model to serve on it.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct LocalChoice {
+    pub runtime: String,
+    pub runtime_name: String,
+    pub installed: bool,
+    pub base_url: String,
+    pub host: String,
+    pub model: String,
+    /// The weights are already on disk.
+    pub present: bool,
+    /// The command that downloads the weights, when they aren't.
+    pub pull: Option<String>,
+    pub usable_gb: Option<f64>,
+}
+
+/// Pick a local runtime (`runtime`, else the most preferred installed one, else Ollama)
+/// and the best model for it that fits this machine (`model` to name one).
+pub fn choose_local(reg: &Registry, ctx: &Ctx, runtime: Option<&str>, model: Option<&str>, memory_gb: Option<f64>) -> Result<LocalChoice> {
+    let rt = match runtime {
+        Some(r) => reg.runtime(r).ok_or_else(|| Error::Profile(format!("unknown runtime {r:?} (see hlock runtime list)")))?,
+        None => DEFAULT_RUNTIMES
+            .iter()
+            .filter_map(|r| reg.runtime(r))
+            .find(|r| probe_runtime(r, ctx).installed)
+            .or_else(|| reg.runtime("ollama"))
+            .ok_or_else(|| Error::Profile("no runtime profiles".into()))?,
+    };
+    let usable = memory_gb.or_else(|| machine_memory(ctx).map(|m| m.1));
+    let opts = LocalizeOptions { models: model.map(|m| vec![m.to_string()]).unwrap_or_default(), ..Default::default() };
+    let ranked = rank_default(&candidates(rt, &opts, usable, ctx));
+    let top = ranked.first().ok_or_else(|| {
+        Error::Profile(format!("no {} model fits {} GB; pass --model", rt.name, usable.map(|u| u.to_string()).unwrap_or_else(|| "?".into())))
+    })?;
+    // a catalog model (known to call tools) already on disk, else the smallest of the best tier (the least to download)
+    let best = ranked.iter().find(|c| c.present && c.tier >= 2 && c.from == "catalog").unwrap_or_else(|| {
+        ranked
+            .iter()
+            .filter(|c| c.tier == top.tier)
+            .min_by(|a, b| a.min_memory_gb.or(a.params_b).unwrap_or(f64::MAX).partial_cmp(&b.min_memory_gb.or(b.params_b).unwrap_or(f64::MAX)).unwrap_or(std::cmp::Ordering::Equal))
+            .unwrap_or(top)
+    });
+    let port = rt.ports.first().copied().unwrap_or(8080);
+    Ok(LocalChoice {
+        runtime: rt.id.clone(),
+        runtime_name: rt.name.clone(),
+        installed: probe_runtime(rt, ctx).installed,
+        base_url: format!("http://localhost:{port}/v1"),
+        host: format!("http://localhost:{port}"),
+        model: best.id.clone(),
+        present: best.present,
+        pull: (!best.present).then(|| rt.pull.as_ref().map(|p| p.replace("{model}", &best.id))).flatten(),
+        usable_gb: usable,
+    })
 }
 
 /// Produce a localized lock. Nothing is written; `vendor` holds files to place next to `out`.

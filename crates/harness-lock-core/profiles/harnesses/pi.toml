@@ -13,6 +13,8 @@ active-env = ["PI_CODING_AGENT", "PI_SESSION_ID"]
 config-root = { env = "PI_CODING_AGENT_DIR", default = "~/.pi/agent" }
 instructions = ["AGENTS.md", "CLAUDE.md", "{root}/AGENTS.md"]
 
+api-keys = [{ provider = "anthropic", env = "ANTHROPIC_API_KEY" }, { provider = "openai", env = "OPENAI_API_KEY" }, { provider = "google", env = "GEMINI_API_KEY" }, { provider = "openrouter", env = "OPENROUTER_API_KEY" }]
+
 [[install]]
 method = "npm"
 package = "@earendil-works/pi-coding-agent"
@@ -60,11 +62,17 @@ lockfile = "{root}/npm/package-lock.json"
 [launch]
 model-flag = "--model"
 prompt = ["-p", "{prompt}"]  # `hlock run`: one prompt, non-interactively
+interactive = ["{prompt}"]  # `hlock meta run`: a session whose first message is the prompt
 
 # How `hlock localize` points this harness at a local OpenAI-compatible endpoint.
 [[local-provider]]
 file = "models"
 set = { "/providers/{provider}" = { baseUrl = "{base_url}", api = "openai-completions", apiKey = "local", models = [{ id = "{model}" }] } }
 [[local-provider]]
+file = "settings"
+set = { "/defaultProvider" = "{provider}", "/defaultModel" = "{model}" }
+
+# How `hlock meta` sets an API provider and model.
+[[api-provider]]
 file = "settings"
 set = { "/defaultProvider" = "{provider}", "/defaultModel" = "{model}" }

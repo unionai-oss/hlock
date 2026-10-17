@@ -72,7 +72,8 @@ pub struct Ctx {
 
 impl Ctx {
     pub fn from_process() -> Ctx {
-        let env: BTreeMap<String, String> = std::env::vars().collect();
+        let mut env: BTreeMap<String, String> = std::env::vars().collect();
+        crate::meta::restore_env(&mut env);
         let home = env.get("HOME").or_else(|| env.get("USERPROFILE")).map(PathBuf::from).unwrap_or_else(|| PathBuf::from("."));
         let path = env.get("PATH").map(|p| std::env::split_paths(p).collect()).unwrap_or_default();
         Ctx {
@@ -238,9 +239,13 @@ pub struct BundleSpec {
 pub struct LaunchSpec {
     pub args: Vec<String>,
     pub model_flag: Option<String>,
-    /// Arguments that run one prompt non-interactively and exit (`hlock run`), with
-    /// `{prompt}` replaced by the prompt, e.g. `["-p", "{prompt}"]`.
+    /// Arguments that run one prompt non-interactively and exit (`hlock run`, and
+    /// `hlock meta run --headless`), with `{prompt}` replaced by the prompt, e.g.
+    /// `["-p", "{prompt}"]`.
     pub prompt: Vec<String>,
+    /// Arguments that start an interactive session whose first message is `{prompt}`
+    /// (`hlock meta run`).
+    pub interactive: Vec<String>,
 }
 
 /// How `hlock localize` points a harness at a local OpenAI-compatible endpoint:
@@ -251,6 +256,14 @@ pub struct LaunchSpec {
 pub struct LocalProvider {
     pub file: String,
     pub set: BTreeMap<String, serde_json::Value>,
+}
+
+/// An API provider a harness supports, and the environment variable holding its key.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default, rename_all = "kebab-case")]
+pub struct ApiKey {
+    pub provider: String,
+    pub env: String,
 }
 
 /// A model `hlock localize` may pick for a runtime.
@@ -302,6 +315,11 @@ pub struct HarnessProfile {
     pub local_models: Option<bool>,
     /// How to configure a local model endpoint (`hlock localize`).
     pub local_provider: Vec<LocalProvider>,
+    /// API providers the harness talks to natively, and the variable each reads its key from.
+    pub api_keys: Vec<ApiKey>,
+    /// How to set an API provider and model (`hlock meta`): like `local-provider`, with
+    /// `{provider}` and `{model}` substituted.
+    pub api_provider: Vec<LocalProvider>,
     /// Framework profile a custom harness builds on (`pydantic-ai`, `deepagents`, …).
     pub framework: Option<String>,
     /// Packages whose installed versions are pinned (`pypi:pydantic-ai`, `npm:…`).

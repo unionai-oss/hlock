@@ -14,6 +14,8 @@ active-env = ["OPENCODE", "OPENCODE_SESSION_ID"]
 config-root = { env = "XDG_CONFIG_HOME", suffix = "opencode", default = "~/.config/opencode" }
 instructions = ["AGENTS.md", "CLAUDE.md", "{root}/AGENTS.md"]
 
+api-keys = [{ provider = "anthropic", env = "ANTHROPIC_API_KEY" }, { provider = "openai", env = "OPENAI_API_KEY" }, { provider = "google", env = "GOOGLE_GENERATIVE_AI_API_KEY" }]
+
 [[install]]
 method = "brew"
 package = "opencode"
@@ -61,8 +63,14 @@ source = "config#/plugin"
 [launch]
 model-flag = "--model"
 prompt = ["run", "{prompt}"]  # `hlock run`: one prompt, non-interactively
+interactive = ["--prompt", "{prompt}"]  # `hlock meta run`: a session whose first message is the prompt
 
 # How `hlock localize` points this harness at a local OpenAI-compatible endpoint.
 [[local-provider]]
 file = "config"
 set = { "/provider/{provider}" = { npm = "@ai-sdk/openai-compatible", name = "{provider} (local)", options = { baseURL = "{base_url}" }, models = { "{model}" = {} } }, "/model" = "{provider}/{model}" }
+
+# How `hlock meta` sets an API provider and model.
+[[api-provider]]
+file = "config"
+set = { "/model" = "{provider}/{model}" }

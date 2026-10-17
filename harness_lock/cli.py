@@ -20,6 +20,7 @@ from pathlib import Path
 
 import rich_click as click
 from rich.console import Console, Group
+from rich.markup import escape
 from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
@@ -35,6 +36,12 @@ from harness_lock import (
     harnesses,
     launch_prepare,
     load,
+    meta_check,
+    meta_config,
+    meta_init,
+    meta_pin,
+    meta_prepare,
+    meta_verify,
     run_code_harness,
     runtimes,
     sync_dockerfile,
@@ -146,7 +153,12 @@ click.rich_click.COMMAND_GROUPS = {
         {"name": "Go local", "commands": ["localize"]},
         {"name": "Harness", "commands": ["harness", "runtime"]},
         {"name": "Inspect", "commands": ["show", "tree", "backend"]},
-    ]
+        {"name": "Meta", "commands": ["meta"]},
+    ],
+    "hlock meta": [
+        {"name": "Set up", "commands": ["init", "pin", "check", "show", "sync", "launch"]},
+        {"name": "Jobs", "commands": ["jobs", "run", "verify"]},
+    ],
 }
 
 
@@ -327,7 +339,7 @@ def _hoist_global_options(args: list[str]) -> list[str]:
     """Let `-m/--manifest` and `--lock` appear after the subcommand too
     (`hlock resolve -m agent/harness.toml`) by moving them in front of it."""
     sub = next((i for i, a in enumerate(args) if not a.startswith("-") and (i == 0 or args[i - 1] not in _GLOBAL_OPTS)), None)
-    if sub is None or args[sub] in _PASSTHROUGH:
+    if sub is None or args[sub] in _PASSTHROUGH or args[sub:sub + 2] == ["meta", "launch"]:
         return args
     front, rest, i = args[:sub], [], sub
     while i < len(args):
@@ -367,7 +379,25 @@ def main(manifest: str | None, lock_path: str | None) -> None:
 
     Get started: [cmd]hlock pin[/] → [cmd]hlock check[/] → [cmd]hlock sync[/]
     """
+    _restore_meta_env()
     _set_project(manifest, lock_path)
+
+
+def _restore_meta_env() -> None:
+    """Inside a meta harness session, undo its config isolation for this process and
+    everything it starts, so hlock acts on the user's real setup (see `hlock meta`)."""
+    marker = os.environ.pop("HLOCK_META_RESTORE", None)
+    if not marker:
+        return
+    try:
+        changed = json.loads(marker)
+    except ValueError:
+        return
+    for key, value in changed.items():
+        if value is None:
+            os.environ.pop(key, None)
+        else:
+            os.environ[key] = value
 
 
 @main.command()
@@ -595,7 +625,7 @@ def pin(harness: str | None, out: str | None, no_vendor: bool, force: bool, as_j
         console.print(f"[warn]![/] {w}")
     console.print(_pin_panel(lock, _show(out)))
     if result["vendored"]:
-        console.print(f"[muted]vendored {len(result['vendored'])} files into[/] [path].hlock/vendor/{h['name']}/[/]  "
+        console.print(f"[muted]vendored {len(result['vendored'])} files into[/] [path]{_vendor_dir(result['vendored'], h['name'])}[/]  "
                       "[muted]· review before committing[/]")
     if result["previous"]:
         if result["diff"]:
@@ -606,6 +636,13 @@ def pin(harness: str | None, out: str | None, no_vendor: bool, force: bool, as_j
         else:
             console.print("[muted]no changes since the last pin[/]")
     _next("hlock check", "hlock sync")
+
+
+def _vendor_dir(vendored: list[str], harness: str) -> str:
+    """The directory a pin vendored into: `.hlock/vendor/[<lock name>/]<harness>/`."""
+    parts = Path(vendored[0]).parts
+    cut = parts.index(harness) + 1 if harness in parts else len(parts) - 1
+    return "/".join(parts[:cut]) + "/"
 
 
 _STATUS = {"satisfied": "[ok]✓[/]", "auto": "[brand]●[/]", "manual": "[warn]○[/]"}
@@ -1580,6 +1617,456 @@ def backend_status() -> None:
     flyte_cfg = Path.home() / ".flyte" / "config.yaml"
     t.add_row("flyte config", f"[path]{flyte_cfg}[/]" if flyte_cfg.exists() else "[muted]not found[/]")
     console.print(t)
+
+
+# --------------------------------------------------------------------------- #
+# hlock meta
+# --------------------------------------------------------------------------- #
+
+META_MANIFEST = "harness.meta.toml"
+META_LOCK = "harness.meta.lock"
+NEEDS_YOU_EXIT = 3
+
+
+def _mm() -> str:
+    """The meta manifest path: `HLOCK_META_MANIFEST`, else next to the project's lock."""
+    return os.environ.get("HLOCK_META_MANIFEST") or str(_Project.lock.parent / META_MANIFEST)
+
+
+def _ml() -> str:
+    """The meta lock path: `HLOCK_META_LOCK`, else next to the project's lock."""
+    return os.environ.get("HLOCK_META_LOCK") or str(_Project.lock.parent / META_LOCK)
+
+
+def _meta_prefix() -> str:
+    """Where the meta harness's own config root lives (`hlock launch`'s isolated root)."""
+    return str(_Project.lock.parent / ".hlock" / "env" / Path(_ml()).stem)
+
+
+def _meta_cfg() -> dict:
+    with _friendly_errors():
+        return json.loads(meta_config(_mm()))
+
+
+def _model_text(model: dict) -> str:
+    name = model.get("name") or "[muted]the harness's default[/]"
+    if model.get("runtime"):
+        return f"[bold]{model['runtime']}:{name}[/]  [muted](local)[/]"
+    if model.get("provider"):
+        return f"[bold]{model['provider']}:{name}[/]"
+    return name
+
+
+def _key_text(model: dict) -> str | None:
+    key = model.get("key-env")
+    if not key:
+        return None
+    return f"[ok]{key} is set[/]" if os.environ.get(key) else f"[warn]{key} isn't set[/]  [muted]export {key}=…[/]"
+
+
+def _need_meta_lock() -> None:
+    if not Path(_ml()).exists():
+        _fail(f"no meta harness pinned: {_show(_ml())} doesn't exist",
+              "set one up with [cmd]hlock meta init[/]" if not Path(_mm()).exists() else "pin it with [cmd]hlock meta pin[/]")
+
+
+def _run_shell(command: str, what: str) -> bool:
+    console.print(f"[brand]$ {command}[/]", soft_wrap=True)
+    ok = subprocess.run(command, shell=True, check=False).returncode == 0
+    if not ok:
+        err_console.print(f"[fail]✗[/] {what} failed; run it yourself: [cmd]{command}[/]", soft_wrap=True)
+    return ok
+
+
+def _confirm(question: str, yes: bool) -> bool:
+    if yes:
+        return True
+    if not sys.stdin.isatty():
+        return False
+    return click.confirm(question, default=True)
+
+
+@main.group()
+def meta() -> None:
+    """The agent hlock uses for its own work: installs, eval packs, updates.
+
+    hlock delegates work that needs judgment to a [bold]meta harness[/]: an open-source
+    agent (Pi by default) with a config of its own, pinned in [path]harness.meta.lock[/].
+    hlock writes each job's prompt, runs the agent, and checks the result itself.
+
+    Get started: [cmd]hlock meta init[/] → [cmd]hlock meta run install[/]
+    """
+
+
+@meta.command("init")
+@click.option("--harness", default=None, help="The meta harness (pi, codex, goose, opencode, hermes). [dim]\\[default: the first installed, else pi][/]")
+@click.option("--provider", default=None, help="An API provider (anthropic, openai, google, …). [dim]\\[default: the first whose API key is set][/]")
+@click.option("--model", default=None, help="The model. [dim]\\[default: one per provider, or the best local model that fits][/]")
+@click.option("--local", is_flag=True, help="Use open weights served by a local runtime instead of an API.")
+@click.option("--runtime", default=None, help="The local runtime (ollama, lmstudio, …). Implies --local.")
+@click.option("--memory-gb", type=float, default=None, help="Memory budget for local model weights. [dim]\\[default: measured][/]")
+@click.option("-y", "--yes", is_flag=True, help="Install the harness and download model weights without asking.")
+@click.option("--force", is_flag=True, help="Overwrite an existing harness.meta.toml.")
+def meta_init_cmd(harness: str | None, provider: str | None, model: str | None, local: bool, runtime: str | None,
+                  memory_gb: float | None, yes: bool, force: bool) -> None:
+    """Set up the meta harness: choose it, give it a model, and pin it.
+
+    Writes [path]harness.meta.toml[/], configures the harness in its own config root
+    under [path].hlock/env/[/] (never your own config), and pins it in
+    [path]harness.meta.lock[/]. API keys stay in your environment; only the variable's
+    name is written.
+    """
+    mm = Path(_mm())
+    if mm.exists() and not force:
+        _fail(f"{_show(mm)} already exists", "pass [cmd]--force[/] to start over, or [cmd]hlock meta pin[/] to re-pin it")
+    with _working("Looking for harnesses, API keys and local runtimes…"):
+        res = json.loads(meta_init(harness=harness, provider="local" if local and not provider else provider, model=model,
+                                   runtime=runtime, memory_gb=memory_gb, manifest=_m()))
+    c = res["choice"]
+    if force:
+        import shutil
+
+        shutil.rmtree(_meta_prefix(), ignore_errors=True)  # start over: the meta root is rebuilt from [model]
+    mm.write_text(res["manifest"])
+    _ok(f"wrote [path]{_show(mm)}[/]")
+    t = _kv_table()
+    t.add_row("harness", f"[bold]{c['harness_name']}[/]  [muted]{c['why']}[/]")
+    t.add_row("model", f"{_model_text(c['model'])}  [muted]{c['model_why']}[/]")
+    key = _key_text(c["model"])
+    if key:
+        t.add_row("api key", key)
+    console.print(t)
+
+    if not c["installed"]:
+        if c.get("install") and _confirm(f"Install {c['harness_name']} now?", yes):
+            c["installed"] = _run_shell(c["install"], f"installing {c['harness_name']}")
+        elif not c.get("install"):
+            console.print(f"[warn]![/] {c['harness_name']} isn't installed; see [cmd]hlock harness show {c['harness']}[/]")
+    local_choice = c.get("local") or {}
+    if local_choice and not local_choice.get("installed"):
+        console.print(f"[warn]![/] {local_choice['runtime_name']} isn't installed; install it to serve {c['model']['name']}")
+    elif local_choice.get("pull") and _confirm(f"Download {c['model']['name']} with {local_choice['runtime_name']} now?", yes):
+        _run_shell(local_choice["pull"], f"downloading {c['model']['name']}")
+
+    with _working("Pinning the meta harness…"):
+        out = json.loads(meta_pin(out=_ml(), meta_manifest=str(mm), manifest=_m(), force=force))
+    _ok(f"pinned [bold]{out['lock']['harness']['name']}[/] {out['lock']['harness'].get('version') or ''} → [path]{_show(_ml())}[/]")
+    for w in out["warnings"]:
+        console.print(f"[warn]![/] {w}")
+
+    todo = []
+    if not c["installed"]:
+        todo.append(c.get("install") or f"install {c['harness_name']}")
+    if c["model"].get("key-env") and not os.environ.get(c["model"]["key-env"]):
+        todo.append(f"export {c['model']['key-env']}=…")
+    if local_choice.get("pull") and not yes:
+        todo.append(local_choice["pull"])
+    if todo:
+        console.print("[bold]Before the first job[/]")
+        for step in todo:
+            console.print(f"  [cmd]{step}[/]")
+        if not c["installed"]:
+            console.print("  [muted]then re-pin with[/] [cmd]hlock meta pin[/] [muted]to record its version[/]")
+    _next("hlock meta run install", "hlock meta jobs")
+
+
+@meta.command("pin")
+@click.option("--no-vendor", is_flag=True, help="Don't copy unfetchable skills and config into .hlock/vendor/meta.")
+@click.option("--force", is_flag=True, help="Replace a meta lock that can't be read.")
+@click.option("--json", "as_json", is_flag=True, help="Print the result as JSON.")
+def meta_pin_cmd(no_vendor: bool, force: bool, as_json: bool) -> None:
+    """Pin the meta harness into [path]harness.meta.lock[/].
+
+    Applies [path]harness.meta.toml[/]'s [key]\\[model][/] to the meta harness's own
+    config, then captures that config: version, model, MCP servers, skills, plugins.
+    """
+    with _working("Pinning the meta harness…"):
+        out = json.loads(meta_pin(out=_ml(), meta_manifest=_mm(), vendor=not no_vendor, force=force, manifest=_m()))
+    if as_json:
+        console.print_json(data=out)
+        return
+    lock = out["lock"]
+    _ok(f"pinned [bold]{lock['harness']['name']}[/] {lock['harness'].get('version') or ''} → [path]{_show(_ml())}[/]")
+    for w in out["warnings"]:
+        console.print(f"[warn]![/] {w}")
+    console.print(_pin_panel(lock, f"{_show(_ml())} · meta"))
+    if out["vendored"]:
+        console.print(f"[muted]vendored {len(out['vendored'])} files into[/] "
+                      f"[path]{_vendor_dir(out['vendored'], lock['harness']['name'])}[/]")
+    if out["previous"]:
+        for line in out["diff"] or []:
+            style = {"+": "ok", "-": "fail", "~": "warn"}.get(line[:1], "muted")
+            console.print(f"  [{style}]{line}[/]")
+        if not out["diff"]:
+            console.print("[muted]no changes since the last pin[/]")
+    _next("hlock meta check", "hlock meta run install")
+
+
+@meta.command("check")
+def meta_check_cmd() -> None:
+    """Fail if the meta harness drifted from [path]harness.meta.lock[/] (CI-friendly).
+
+    Checks that the lock is for [path]harness.meta.toml[/]'s harness and model, and that
+    the meta harness's own config still matches it.
+    """
+    _need_meta_lock()
+    with _working("Checking the meta harness…"):
+        drift = json.loads(meta_check(_ml(), meta_manifest=_mm(), manifest=_m()))
+    if drift:
+        err_console.print(f"[fail]✗ drift:[/] the meta harness doesn't match {_show(_ml())}")
+        for line in drift:
+            err_console.print(f"  {escape(line)}")
+        err_console.print("  [muted]hint:[/] re-pin with [cmd]hlock meta pin[/], or restore it with [cmd]hlock meta sync[/]")
+        sys.exit(1)
+    model = _meta_cfg()["model"]
+    _ok(f"the meta harness matches [path]{_show(_ml())}[/]")
+    key = _key_text(model)
+    if key and not os.environ.get(model["key-env"]):
+        console.print(f"[warn]![/] {key}")
+
+
+@meta.command("show")
+@click.option("--json", "as_json", is_flag=True, help="Print the meta lock as JSON.")
+def meta_show_cmd(as_json: bool) -> None:
+    """Show the pinned meta harness."""
+    _need_meta_lock()
+    with _friendly_errors():
+        lf = Lockfile.load(_ml())
+    if as_json:
+        console.print_json(lf.to_json())
+        return
+    console.print(_pin_panel(json.loads(lf.to_json()), f"{_show(_ml())} · meta"))
+    key = _key_text(_meta_cfg()["model"])
+    if key:
+        console.print(f"[key]api key[/] {key}")
+
+
+@meta.command("sync", context_settings={"ignore_unknown_options": True})
+@click.option("--plan", "plan_only", is_flag=True, help="Print the plan and change nothing.")
+@click.option("--json", "as_json", is_flag=True, help="Print the plan as JSON and change nothing.")
+@click.option("-y", "--yes", is_flag=True, help="Don't ask before running automatic steps.")
+@click.option("--install", is_flag=True, help="Let hlock run package managers to install the meta harness.")
+@click.option("--pull", is_flag=True, help="Let hlock download model weights through installed runtimes.")
+@click.option("-v", "--verbose", is_flag=True, help="List every step, including optional ones.")
+@click.pass_context
+def meta_sync_cmd(ctx, plan_only: bool, as_json: bool, yes: bool, install: bool, pull: bool, verbose: bool) -> None:
+    """Rehydrate the meta harness from [path]harness.meta.lock[/] on this machine.
+
+    Like [cmd]hlock sync[/], into the meta harness's own config root.
+    """
+    _need_meta_lock()
+    ctx.invoke(sync, lock=_ml(), plan_only=plan_only, as_json=as_json, yes=yes, install=install, pull=pull,
+               prefix=_meta_prefix(), verbose=verbose)
+
+
+@meta.command("launch", context_settings={"ignore_unknown_options": True, "allow_interspersed_args": False})
+@click.argument("args", nargs=-1, type=click.UNPROCESSED)
+@click.pass_context
+def meta_launch_cmd(ctx, args: tuple[str, ...]) -> None:
+    """Start an interactive session in the locked meta harness.
+
+    Arguments go to the harness, as with [cmd]hlock launch[/]. Use it to sign in once,
+    or to configure the meta harness before [cmd]hlock meta pin[/].
+    """
+    _need_meta_lock()
+    if "--in-place" in args or (args and _known_harness(args[0])):
+        _fail("the meta harness always runs from its own lock and config root",
+              "drop --in-place and the harness name; change the harness with [cmd]hlock meta init --force[/]")
+    key = _key_text(_meta_cfg()["model"])
+    if key and "isn't set" in key:
+        console.print(f"[warn]![/] {key}")
+    ctx.invoke(launch, args=args, lock=_ml())
+
+
+@meta.command("jobs")
+@click.option("--json", "as_json", is_flag=True, help="Print the jobs as JSON.")
+def meta_jobs_cmd(as_json: bool) -> None:
+    """List the jobs the meta harness can run."""
+    jobs = _meta_cfg()["jobs"]
+    if as_json:
+        console.print_json(data=jobs)
+        return
+    t = Table(box=None, header_style="bold", pad_edge=False)
+    t.add_column("job", style="key", no_wrap=True)
+    t.add_column("")
+    t.add_column("description")
+    for j in jobs:
+        kind = "[muted]built in[/]" if j["builtin"] else ("custom" if j["verifies"] else "custom [muted](unverified)[/]")
+        t.add_row(j["name"], kind, j["description"])
+    console.print(t)
+    _next("hlock meta run <job>")
+
+
+def _verdict_exit(v: dict) -> int:
+    return {"verified": 0, "needs-you": NEEDS_YOU_EXIT}.get(v["status"], 1)
+
+
+def _print_verdict(v: dict) -> None:
+    mark = {"verified": "[ok]✓ verified[/]", "needs-you": "[warn]! needs you[/]", "failed": "[fail]✗ failed[/]",
+            "unverified": "[warn]? unverified[/]"}[v["status"]]
+    console.print(f"{mark}  {escape(v['summary'])}")
+    for line in v.get("details") or []:
+        console.print(f"  [muted]{escape(line)}[/]", soft_wrap=True)
+    for line in v.get("diff") or []:
+        style = {"+": "ok", "-": "fail", "~": "warn"}.get(line[:1], "muted")
+        console.print(f"  [{style}]{escape(line)}[/]")
+    for name in v.get("secrets") or []:
+        console.print(f"  [cmd]export {name}=…[/]")
+
+
+def _verify(job: str, out: str | None, count: int) -> dict:
+    with _working(f"Checking the {job} job…"):
+        return json.loads(meta_verify(job, lock=_l(), meta_lock=_ml(), meta_manifest=_mm(), manifest=_m(),
+                                      out=out, count=count))
+
+
+@meta.command("run", context_settings={"ignore_unknown_options": True})
+@click.argument("job")
+@click.argument("instructions", nargs=-1)
+@click.option("--headless/--interactive", "headless", default=None,
+              help="Run non-interactively, or as a session you watch. [dim]\\[default: \\[run] mode, else interactive][/]")
+@click.option("--out", default=None, help="bootstrap-evals: the pack directory. [dim]\\[default: the manifest's first eval pack, else ./evals][/]")
+@click.option("--count", default=10, show_default=True, help="bootstrap-evals: how many tasks to aim for.")
+@click.option("-t", "--template", default="coding", show_default=True,
+              type=click.Choice([t for t in _evals.TEMPLATES if t != "hello-world"]),
+              help="bootstrap-evals: the template to scaffold when there's no pack yet.")
+@click.option("--pin", "repin", is_flag=True, help="update: re-pin the project's lock when something changed.")
+@click.option("--allow-version-mismatch", is_flag=True, help="Run even if the installed meta harness differs from its lock.")
+@click.option("--dry-run", is_flag=True, help="Print the command and the prompt, and run nothing.")
+@click.option("--json", "as_json", is_flag=True, help="With --dry-run: print the run plan as JSON.")
+def meta_run_cmd(job: str, instructions: tuple[str, ...], headless: bool | None, out: str | None, count: int,
+                 template: str, repin: bool, allow_version_mismatch: bool, dry_run: bool, as_json: bool) -> None:
+    """Run JOB in the meta harness, then check the result.
+
+    hlock renders the job's prompt from the project's state, runs the locked meta
+    harness on it, and verifies the outcome itself. Extra words are added to the
+    prompt as instructions: [cmd]hlock meta run install "use brew"[/]. Exits 0 when
+    verified, 3 when only you can finish (for example, secrets to set), else 1.
+    """
+    _need_meta_lock()
+    started = datetime.now(timezone.utc)
+    run_dir = _Project.lock.parent / ".hlock" / "meta" / "runs" / f"{job}-{started.strftime('%Y%m%dT%H%M%SZ')}"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    ignore = run_dir.parent.parent / ".gitignore"
+    if not ignore.exists():
+        ignore.write_text("# hlock meta run records (prompts and agent output); not for version control\n*\n")
+    guide = None
+    if job == "bootstrap-evals":
+        guide = _scaffold_evals(Path(out) if out else _default_pack_dir(), template, count, run_dir, dry_run, as_json)
+    with _working(f"Preparing the {job} job…"):
+        prep = json.loads(meta_prepare(job, lock=_l(), meta_lock=_ml(), meta_manifest=_mm(), manifest=_m(), out=out,
+                                       count=count, instructions=" ".join(instructions),
+                                       guide=str(guide) if guide else None, headless=headless,
+                                       allow_version_mismatch=allow_version_mismatch, dry_run=dry_run))
+    prompt_file = run_dir / "prompt.md"
+    prompt_file.write_text(prep["prompt"])
+    if dry_run and as_json:
+        console.print_json(data={**prep, "prompt_file": str(prompt_file)})
+        return
+    for line in prep["notes"]:
+        console.print(f"[warn]![/] {escape(line)}")
+    shown = " ".join(a if a != prep["prompt"] else f"<{_show(prompt_file)}>" for a in prep["argv"])
+    env_txt = " ".join(f"{k}={_rel(v)}" for k, v in prep["env"].items() if not k.startswith(("HLOCK_", "PYTHON")))
+    console.print(f"[brand]▶[/] {prep['harness_name']} · {job} · {prep['mode']}  [muted]{env_txt}[/] [cmd]{shown}[/]",
+                  soft_wrap=True)
+    if dry_run:
+        console.print(Panel(Text(prep["prompt"]), title=f"[brand]{_show(prompt_file)}[/]", title_align="left",
+                            border_style="magenta"))
+        return
+    if prep["paste"]:
+        console.print(f"[warn]![/] {prep['harness_name']} can't take a first message; when it starts, tell it:")
+        console.print(f"  [cmd]Read {_show(prompt_file)} and do the job it describes.[/]", soft_wrap=True)
+
+    env = {**os.environ, **prep["env"]}
+    exe = Path(sys.argv[0])
+    if exe.name in ("hlock", "harness-lock") and exe.is_file():
+        # the agent runs `hlock meta verify`: make it the same hlock, however this one was installed
+        env["PATH"] = os.pathsep.join([str(exe.resolve().parent), env.get("PATH", "")])
+    code = None
+    sys.stdout.flush()
+    try:
+        if prep["mode"] == "headless":
+            with open(run_dir / "output.log", "w") as log:
+                proc = subprocess.Popen(prep["argv"], env=env, cwd=_Project.lock.parent, stdout=subprocess.PIPE,
+                                        stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL, text=True)
+                for line in proc.stdout:
+                    log.write(line)
+                    click.echo(line, nl=False)
+                code = proc.wait()
+        else:
+            code = subprocess.run(prep["argv"], env=env, cwd=_Project.lock.parent, check=False).returncode
+    except KeyboardInterrupt:
+        console.print("[muted]interrupted; checking what got done[/]")
+    except OSError as e:
+        _fail(f"cannot start {prep['argv'][0]}: {e}")
+
+    v = _verify(job, out, count)
+    if v["status"] == "unverified" and code not in (None, 0):
+        v["status"] = "failed"
+        v["summary"] = f"{prep['harness_name']} exited with {code}"
+    if job == "update" and repin and v.get("diff"):
+        with _working("Re-pinning the project's lock…"):
+            lf = Lockfile.load(_l())
+            _pin(harness=lf.harness, out=_l(), vendor=True, force=False, manifest=_m())
+        v["details"] = [*(v.get("details") or []), f"re-pinned {_ld()}"]
+    (run_dir / "result.json").write_text(json.dumps({
+        "job": job, "harness": prep["harness"], "harness_version": prep.get("harness_version"), "mode": prep["mode"],
+        "argv": [a if a != prep["prompt"] else str(prompt_file) for a in prep["argv"]], "exit_code": code,
+        "verdict": v, "started": started.isoformat(),
+        "finished": datetime.now(timezone.utc).isoformat(),
+    }, indent=2) + "\n")
+    _print_verdict(v)
+    console.print(f"[muted]run record:[/] [path]{_show(run_dir)}[/]")
+    if job == "update" and v.get("diff") and not repin:
+        _next("hlock pin", "hlock check")
+    sys.exit(_verdict_exit(v))
+
+
+def _default_pack_dir() -> Path:
+    """The manifest's first eval pack, else ./evals next to the project's lock."""
+    try:
+        packs = Manifest.load(_m()).eval_packs if Path(_m()).exists() else []
+    except ValueError:
+        packs = []
+    if packs:
+        p = Path(packs[0])
+        return p if p.is_absolute() else Path(_m()).parent / p
+    return _Project.lock.parent / "evals"
+
+
+def _scaffold_evals(pack_dir: Path, template: str, count: int, run_dir: Path, dry_run: bool, quiet: bool) -> Path:
+    """Write the template's slots when there's no pack yet (not on a dry run), and the
+    template's guide for the agent into the run record. Returns the guide's path."""
+    tpl = _evals.TEMPLATES[template]
+    if not (pack_dir / "pack.toml").exists():
+        if dry_run and not quiet:
+            console.print(f"[muted]dry run: a real run first writes the {template} template ({count} task slots) "
+                          f"to {_show(pack_dir)}, and the prompt asks the agent to fill it in[/]")
+        elif not dry_run:
+            with _friendly_errors():
+                written = _evals.init(pack_dir, template, n_tasks=count)
+            _ok(f"wrote [path]{_show(written[0])}[/]  [muted]({template} template, {count} task slots)[/]")
+    guide = run_dir / "guide.md"
+    guide.write_text(_evals.skill(tpl, _show(pack_dir)))
+    return guide
+
+
+@meta.command("verify")
+@click.argument("job")
+@click.option("--out", default=None, help="bootstrap-evals: the pack directory.")
+@click.option("--count", default=0, help="bootstrap-evals: the number of tasks expected.")
+@click.option("--json", "as_json", is_flag=True, help="Print the verdict as JSON.")
+def meta_verify_cmd(job: str, out: str | None, count: int, as_json: bool) -> None:
+    """Run only JOB's check: what [cmd]hlock meta run[/] does after the agent finishes.
+
+    The meta harness runs it to know when it's done; CI can run it too.
+    """
+    v = _verify(job, out, count)
+    if as_json:
+        console.print_json(data=v)
+    else:
+        _print_verdict(v)
+    sys.exit(_verdict_exit(v))
 
 
 def _default_manifest(name: str, pack: str, target: str | None = None) -> str:

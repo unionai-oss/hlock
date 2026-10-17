@@ -70,7 +70,8 @@ they are. The lock's `[[secret]]` entries list every placeholder and what uses i
 Some things another machine can't fetch: hand-written skills, user-level instruction files,
 and your config files. `pin` copies them, with secrets already redacted, into
 `.hlock/vendor/<harness>/` next to the lock, so the lock plus that directory is
-self-contained. Commit both. Review the vendored files first, because a skill you wrote
+self-contained. A lock named `harness.<name>.lock` or `<name>.lock` vendors into
+`.hlock/vendor/<name>/<harness>/` instead, so two locks never share vendored files. Commit both. Review the vendored files first, because a skill you wrote
 yourself is copied as it is. Pass `--no-vendor` to record digests only.
 
 ## Keep it honest with `check`

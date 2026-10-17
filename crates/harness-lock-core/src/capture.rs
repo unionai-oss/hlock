@@ -227,6 +227,15 @@ fn key_words(key: &str) -> Vec<String> {
 }
 
 /// Whether a config key names a secret.
+/// A value local runtimes accept in place of an API key (`"local"`, `"ollama"`, vLLM's
+/// `"EMPTY"`): not a secret, so it's kept as is.
+pub fn is_placeholder_key(value: &str) -> bool {
+    matches!(
+        value.to_ascii_lowercase().as_str(),
+        "local" | "none" | "empty" | "dummy" | "ollama" | "lm-studio" | "lmstudio" | "llama.cpp" | "not-needed" | "no-key" | "sk-no-key-required"
+    )
+}
+
 pub fn is_secret_key(key: &str) -> bool {
     let words = key_words(key);
     let joined = words.concat();
@@ -351,7 +360,7 @@ impl Secrets {
     /// credential-bearing query parameters and userinfo redacted.
     /// `used_by` describes where the value lives, for the lock's `[[secret]]` entry.
     fn scrub(&mut self, context: &[&str], key: &str, value: &str, force: bool, used_by: &str) -> String {
-        if value.is_empty() || is_env_ref(value) {
+        if value.is_empty() || is_env_ref(value) || is_placeholder_key(value) {
             return value.to_string();
         }
         if force || is_secret_key(key) || looks_secret(value) {
@@ -463,8 +472,10 @@ pub fn portable_path(p: &Path, root: Option<&Path>, ctx: &Ctx) -> String {
     p.to_string_lossy().into_owned()
 }
 
-fn is_project_path(p: &Path, ctx: &Ctx) -> bool {
-    p.starts_with(&ctx.cwd) && !ctx.home.starts_with(&ctx.cwd)
+/// A project file: under the working directory, but not under the harness's own config
+/// root (an isolated root, like the meta harness's, can live inside the project).
+fn is_project_path(p: &Path, root: &Path, ctx: &Ctx) -> bool {
+    p.starts_with(&ctx.cwd) && !ctx.home.starts_with(&ctx.cwd) && !p.starts_with(root)
 }
 
 /// Files under `dir` (sorted, relative), skipping VCS metadata and OS litter.
@@ -1077,7 +1088,7 @@ pub fn capture(profile: &HarnessProfile, reg: &Registry, ctx: &Ctx, project: Opt
     for s in &profile.mcp.sources {
         let file = s.split_once('#').map(|(f, _)| f).unwrap_or(s);
         let scope = match profile.file_path(file, ctx) {
-            Some(p) if is_project_path(&p, ctx) || s.contains("{cwd}") => "project",
+            Some(p) if is_project_path(&p, &root, ctx) || s.contains("{cwd}") => "project",
             _ => "user",
         };
         if let Some(Value::Object(servers)) = src.get(s) {
@@ -1112,7 +1123,7 @@ pub fn capture(profile: &HarnessProfile, reg: &Registry, ctx: &Ctx, project: Opt
             }
             let name = skill_name(&sk);
             let digest = tree_digest(&sk);
-            let project = is_project_path(&sk, ctx);
+            let project = is_project_path(&sk, &root, ctx);
             let mut s = Skill {
                 name: name.clone(),
                 digest: Some(digest),
@@ -1177,7 +1188,7 @@ pub fn capture(profile: &HarnessProfile, reg: &Registry, ctx: &Ctx, project: Opt
     for tpl in &profile.instructions {
         let p = ctx.expand(tpl, Some(&root));
         let Ok(bytes) = std::fs::read(&p) else { continue };
-        let project = is_project_path(&p, ctx);
+        let project = is_project_path(&p, &root, ctx);
         let name = portable_path(&p, Some(&root), ctx);
         let mut ins = Instructions { name: name.clone(), digest: Some(sha256_bytes(&bytes)), scope: if project { "project" } else { "user" }.into(), vendored: None };
         if !project {
@@ -1193,7 +1204,7 @@ pub fn capture(profile: &HarnessProfile, reg: &Registry, ctx: &Ctx, project: Opt
     for (id, spec) in &profile.files {
         let Some(path) = profile.file_path(id, ctx) else { continue };
         let Ok(raw) = std::fs::read(&path) else { continue };
-        let project = is_project_path(&path, ctx);
+        let project = is_project_path(&path, &root, ctx);
         let mut cf = ConfigFile {
             id: id.clone(),
             path: portable_path(&path, Some(&root), ctx),
@@ -1361,6 +1372,31 @@ pub fn diff_locks(old: &Lockfile, new: &Lockfile) -> Vec<String> {
 // pin / check
 // --------------------------------------------------------------------------- //
 
+/// The vendor namespace for a lock file, so two locks in one directory never share
+/// vendored files: `harness.lock` has none; `harness.<name>.lock` and `<name>.lock`
+/// vendor into `.hlock/vendor/<name>/<harness>/`.
+pub fn vendor_namespace(lock: &Path) -> Option<String> {
+    let name = lock.file_name()?.to_str()?;
+    let stem = name.strip_suffix(".lock").unwrap_or(name);
+    let ns = stem.strip_prefix("harness.").unwrap_or(stem);
+    (stem != "harness" && !ns.is_empty()).then(|| ns.to_string())
+}
+
+/// Move a capture's vendored paths from `.hlock/vendor/<id>/` to `.hlock/vendor/<ns>/<id>/`.
+fn relocate_vendored(cap: &mut Capture, id: &str, ns: &str) {
+    let from = format!("{VENDOR_DIR}/{id}/");
+    let to = format!("{VENDOR_DIR}/{ns}/{id}/");
+    let mv = |p: &mut String| {
+        if let Some(rest) = p.strip_prefix(&from) {
+            *p = format!("{to}{rest}");
+        }
+    };
+    cap.vendor.iter_mut().for_each(|f| mv(&mut f.rel));
+    cap.lock.skill.iter_mut().filter_map(|s| s.vendored.as_mut()).for_each(mv);
+    cap.lock.instructions.iter_mut().filter_map(|i| i.vendored.as_mut()).for_each(mv);
+    cap.lock.config.iter_mut().filter_map(|c| c.vendored.as_mut()).for_each(mv);
+}
+
 /// What [`pin`] did.
 #[derive(Debug, Clone)]
 pub struct PinOutcome {
@@ -1405,10 +1441,17 @@ pub fn pin(
         None
     };
     let mut cap = capture(profile, reg, ctx, project)?;
+    let ns = vendor_namespace(out);
+    if let Some(ns) = &ns {
+        relocate_vendored(&mut cap, &profile.id, ns);
+    }
     let base = out.parent().filter(|p| !p.as_os_str().is_empty()).map(Path::to_path_buf).unwrap_or_else(|| ctx.cwd.clone());
     let mut vendored = Vec::new();
     if vendor {
-        let vdir = base.join(VENDOR_DIR).join(&profile.id);
+        let vdir = match &ns {
+            Some(ns) => base.join(VENDOR_DIR).join(ns).join(&profile.id),
+            None => base.join(VENDOR_DIR).join(&profile.id),
+        };
         let _ = std::fs::remove_dir_all(&vdir);
         for f in &cap.vendor {
             let dest = base.join(&f.rel);
@@ -1458,6 +1501,21 @@ pub fn check_pin(lock: &Lockfile, reg: &Registry, ctx: &Ctx) -> Result<Vec<Strin
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn placeholder_keys_stay() {
+        assert!(is_placeholder_key("local") && is_placeholder_key("EMPTY") && !is_placeholder_key("sk-ant-abc123"));
+        let mut s = Secrets::default();
+        assert_eq!(s.scrub(&["pi", "models"], "apiKey", "local", false, "models#/apiKey"), "local");
+        assert_ne!(s.scrub(&["pi", "models"], "apiKey", "sk-ant-0123456789abcdef", false, "models#/apiKey"), "sk-ant-0123456789abcdef");
+    }
+
+    #[test]
+    fn vendor_namespaces() {
+        assert_eq!(vendor_namespace(Path::new("harness.lock")), None);
+        assert_eq!(vendor_namespace(Path::new("/p/harness.meta.lock")).as_deref(), Some("meta"));
+        assert_eq!(vendor_namespace(Path::new("pinned.lock")).as_deref(), Some("pinned"));
+    }
 
     #[test]
     fn jsonc() {

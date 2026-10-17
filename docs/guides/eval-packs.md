@@ -123,6 +123,11 @@ Then open your agent in the project and ask it to fill in `./evals` with the
 - give every task an output file that can be checked, and remove each `TODO(hlock)`;
 - run `hlock evals check` until it reports no errors.
 
+To have hlock run the agent and check the pack itself, use the
+[meta harness](meta.md#bootstrap-evals): `hlock meta run bootstrap-evals -t coding` writes
+the template if there's no pack yet, hands the slots to a pinned open-source agent, and
+runs the same check when it's done.
+
 The skill goes in `.agents/skills/`, which most harnesses read. Use `--skill-dir` to put
 it somewhere else, such as `.claude/skills/hlock-eval-pack`, or `--no-skill` to fill the
 pack in yourself. `--tasks N` sets how many slots the template writes (default 10), and
@@ -220,7 +225,7 @@ tags = ["writing"]
 Today, a task succeeds when every file in `expected.artifacts` exists in the task's
 workspace after the run. This is the `artifact:` grader, and it's the default when
 `graders` is empty. Richer graders (tests, rubric judges) are on the
-[roadmap](https://github.com/unionai-oss/hlock/blob/main/SPEC.md).
+[roadmap](https://github.com/unionai-oss/hlock/blob/main/specs/v0.md).
 
 ## Using a pack
 

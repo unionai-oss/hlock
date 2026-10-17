@@ -37,6 +37,8 @@ dependency. It owns:
 - **eval packs**: loading packs, the deterministic search/holdout split, and grading
 - **search**: grid expansion, Pareto fronts, constraint filtering, winner selection
 - **resolver**: running trials, aggregating evidence, and building the lock
+- **meta**: the [meta harness](../guides/meta.md): choosing and configuring it, rendering
+  job prompts, and verifying their results
 
 The core orchestrates and aggregates. It never does heavy compute itself.
 
@@ -86,4 +88,4 @@ runnable in CI and on a bare install.
 | `packaging/harness-lock` | The `harness-lock` PyPI alias, pinned to the matching `hlock` |
 | `evals/` | The demo eval pack |
 | `docs/` | This site |
-| `SPEC.md` | The full design, including what's still on the roadmap |
+| `specs/` | The design specs, including what's still on the roadmap |

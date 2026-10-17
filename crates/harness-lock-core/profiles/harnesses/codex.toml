@@ -14,6 +14,8 @@ active-env = ["CODEX_THREAD_ID", "CODEX_SANDBOX", "CODEX_MANAGED_BY_NPM", "CODEX
 config-root = { env = "CODEX_HOME", default = "~/.codex" }
 instructions = ["AGENTS.md", "AGENTS.override.md", "{root}/AGENTS.md"]
 
+api-keys = [{ provider = "openai", env = "OPENAI_API_KEY" }]
+
 [[install]]
 method = "npm"
 package = "@openai/codex"
@@ -48,8 +50,14 @@ builtin-dirs = ["{root}/skills/.system"]
 [launch]
 model-flag = "--model"
 prompt = ["exec", "{prompt}"]  # `hlock run`: one prompt, non-interactively
+interactive = ["{prompt}"]  # `hlock meta run`: a session whose first message is the prompt
 
 # How `hlock localize` points this harness at a local OpenAI-compatible endpoint.
 [[local-provider]]
 file = "config"
 set = { "/model_providers/{provider}" = { name = "{provider} (local)", base_url = "{base_url}", wire_api = "chat" }, "/model_provider" = "{provider}", "/model" = "{model}" }
+
+# How `hlock meta` sets an API provider and model.
+[[api-provider]]
+file = "config"
+set = { "/model_provider" = "{provider}", "/model" = "{model}" }

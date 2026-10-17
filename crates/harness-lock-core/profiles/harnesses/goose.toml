@@ -13,6 +13,8 @@ version = { args = ["--version"] }
 config-root = { env = "XDG_CONFIG_HOME", suffix = "goose", default = "~/.config/goose" }
 instructions = [".goosehints", "AGENTS.md", "{root}/.goosehints"]
 
+api-keys = [{ provider = "anthropic", env = "ANTHROPIC_API_KEY" }, { provider = "openai", env = "OPENAI_API_KEY" }, { provider = "google", env = "GOOGLE_API_KEY" }]
+
 [[install]]
 method = "brew"
 package = "block-goose-cli"
@@ -45,3 +47,8 @@ set = { "/GOOSE_PROVIDER" = "openai", "/GOOSE_MODEL" = "{model}", "/OPENAI_HOST"
 
 [launch]
 prompt = ["run", "-t", "{prompt}"]  # `hlock run`: one prompt, non-interactively
+
+# How `hlock meta` sets an API provider and model.
+[[api-provider]]
+file = "config"
+set = { "/GOOSE_PROVIDER" = "{provider}", "/GOOSE_MODEL" = "{model}" }

@@ -39,6 +39,9 @@ nav = [
       "guides/backends.md",
       "guides/ci.md",
     ] },
+    { "Delegate to an agent" = [
+      "guides/meta.md",
+    ] },
     { "Go local" = [
       "guides/localize.md",
     ] },
@@ -58,7 +61,7 @@ nav = [
     "project/development.md",
     "project/contributing.md",
     "project/releasing.md",
-    { "Design spec" = "https://github.com/unionai-oss/hlock/blob/main/SPEC.md" },
+    { "Design specs" = "https://github.com/unionai-oss/hlock/tree/main/specs" },
   ] },
 ]
 

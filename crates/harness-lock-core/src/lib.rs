@@ -18,6 +18,7 @@ pub mod error;
 pub mod hash;
 pub mod lockfile;
 pub mod manifest;
+pub mod meta;
 pub mod ops;
 pub mod profiles;
 pub mod providers;

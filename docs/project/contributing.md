@@ -61,7 +61,7 @@ ask for changes.
 - **Don't hand-edit generated files**, such as `harness.lock`, `uv.lock`, or
   `docs/assets/quickstart.svg`. Regenerate them with the tool that owns them.
 - **Docs describe what the code does today.** If a feature is planned but not built,
-  say so, or leave it to [SPEC.md](https://github.com/unionai-oss/hlock/blob/main/SPEC.md).
+  say so, or leave it to the [design specs](https://github.com/unionai-oss/hlock/tree/main/specs).
 
 ## For coding agents
 

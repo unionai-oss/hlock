@@ -143,6 +143,19 @@ Load the [eval pack](../guides/eval-packs.md) at `path` and check it, like
 (['hello_file', 'count_words', 'greet_people'], ['warn'])
 ```
 
+### Meta harness
+
+The functions behind [`hlock meta`](cli.md#meta). Each returns JSON.
+
+| Function | Returns |
+|---|---|
+| `meta_init(harness=None, provider=None, model=None, runtime=None, memory_gb=None, manifest=None)` | The chosen harness and model (`choice`) and the `harness.meta.toml` text to write (`manifest`) |
+| `meta_pin(out="harness.meta.lock", meta_manifest="harness.meta.toml", vendor=True, force=False, manifest=None)` | The pinned meta lock, its `diff` from the previous one, `vendored` files, and `warnings` |
+| `meta_check(path="harness.meta.lock", meta_manifest=None, manifest=None)` | A list of drift lines; empty when everything matches |
+| `meta_config(meta_manifest=None)` | `target`, `model`, the default `mode`, and every job |
+| `meta_prepare(job, lock="harness.lock", meta_lock="harness.meta.lock", meta_manifest=None, manifest=None, out=None, count=10, instructions="", guide=None, headless=None, allow_version_mismatch=False, dry_run=False)` | The run plan: `prompt`, `argv`, `env`, `mode`, `notes` |
+| `meta_verify(job, lock="harness.lock", meta_lock="harness.meta.lock", meta_manifest=None, manifest=None, out=None, count=0)` | The verdict: `status` (`verified`, `failed`, `needs-you`, `unverified`), `summary`, `details`, `secrets`, `diff` |
+
 ## Classes
 
 ### `SearchSpace`

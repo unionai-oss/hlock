@@ -86,6 +86,9 @@ system software or large downloads, never print secrets, finish with `hlock sync
 the harness with the `hlock-rehydrate` skill. Use `--skill-dir` to write it somewhere else,
 such as `.claude/skills/hlock-rehydrate`.
 
+To have hlock run the agent and check its work, use the
+[meta harness](meta.md#install) instead: `hlock meta run install`.
+
 ## Into an isolated directory
 
 `--prefix DIR` materializes the setup into its own config root instead of yours, like a

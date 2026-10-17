@@ -38,7 +38,7 @@ you report a change as done, and report failures as they are.
 | `tests/` | pytest suites |
 | `docs/`, `zensical.toml` | Documentation site |
 | `evals/` | Demo eval pack |
-| `SPEC.md` | Full design, including unbuilt features |
+| `specs/` | Design specs, including unbuilt features (`v0.md` is the core design) |
 
 ## Rules
 
@@ -47,7 +47,7 @@ you report a change as done, and report failures as they are.
   isn't rustfmt-formatted; don't run `cargo fmt` over files you aren't changing.
 - Add or update tests with every behavior change.
 - Update `docs/` when user-visible behavior changes. Docs describe what the code does
-  today; planned features belong in `SPEC.md`.
+  today; planned features belong in `specs/`.
 - Run any command or code example you add to the docs, and use its real output.
 - After changing CLI output, run `uv run python scripts/cli_screenshot.py`.
 - Don't hand-edit generated files: `harness.lock`, `uv.lock`,
