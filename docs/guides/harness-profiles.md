@@ -10,7 +10,8 @@ new harness, or fixing a path for an existing one, means editing a file.
     [`hlock pin`](pin.md) (`model`, `providers`, `mcp`, `skills`, `bundles`, `instructions`,
     `files`), [`hlock sync`](sync.md) (`install`, `files`, `skills.write`, `config-root`), and
     [`hlock launch`](launch.md) (`launch`, `mcp.write`, `mcp.shape`, `instructions`, and `run`
-    for code harnesses), and [`hlock localize`](localize.md) (`open-source`, `local-models`,
+    for code harnesses), [`hlock run`](../reference/cli.md#run) (`launch.prompt`), and
+    [`hlock localize`](localize.md) (`open-source`, `local-models`,
     `local-provider`, and runtime `catalog`s).
 
 ## Where profiles come from
@@ -67,6 +68,7 @@ write = "{root}/skills"
 
 [launch]
 model-flag = "--model"
+prompt = ["run", "{prompt}"]       # one prompt, non-interactively: `hlock run`
 ```
 
 ### Paths
@@ -117,7 +119,7 @@ or `record` (a digest only, for project files that are already in git).
 | `skills` | `dirs`, `write`, `builtin-dirs`, `builtin-manifest` |
 | `bundles` | Plugins/packages: `kind`, `extractor` (`claude-plugins`, `pi-packages`, `npm-list`), `source`, `lockfile` |
 | `instructions` | Instruction files the harness reads |
-| `launch` | `args`, `model-flag` |
+| `launch` | `args`, `model-flag`, and `prompt`: the arguments that run one prompt non-interactively, with `{prompt}` replaced (`hlock run`) |
 | `open-source`, `local-models` | Used by [`hlock localize`](localize.md) to choose local-capable harnesses |
 | `local-provider` | How `localize` points the harness at a local endpoint: a list of `{ file, set }`, where `set` maps JSON pointers to values; `{provider}`, `{model}`, `{base_url}` and `{host}` are substituted |
 | `packages` | Packages to pin for code harnesses, e.g. `pypi:pydantic-ai` |

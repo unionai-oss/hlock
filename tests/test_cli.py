@@ -84,6 +84,14 @@ def test_errors_are_friendly(project):
     assert r.exit_code == 1 and "--force" in r.output
 
 
+def test_missing_manifest_is_friendly(project):
+    for cmd in (["resolve"], ["upgrade", "--all"], ["tune"]):
+        r = invoke(*cmd)
+        assert r.exit_code == 1, r.output
+        assert "cannot read" in r.output and "hlock init" in r.output, r.output
+        assert "TOML parse error" not in r.output
+
+
 def test_upgrade_plan(project):
     invoke("init", "--pack", "./evals")
     invoke("resolve")

@@ -44,3 +44,4 @@ write = "{root}/skills"
 
 [launch]
 model-flag = "--model"
+prompt = ["-p", "{prompt}"]  # `hlock run`: one prompt, non-interactively

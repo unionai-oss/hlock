@@ -6,7 +6,7 @@
 
 ### Make your agent harness pinnable, portable, and tunable.
 
-**Tune your agent stack against your own tasks, then pin the winner in a `harness.lock`.**
+**Pin your harness, models, MCP servers, skills, and config in a `harness.lock`, version it, and rehydrate it anywhere.**
 
 [![PyPI](https://img.shields.io/pypi/v/hlock?label=pypi&color=3775A9&logo=pypi&logoColor=white)](https://pypi.org/project/hlock/)
 [![crates.io](https://img.shields.io/crates/v/hlock?color=E6532D&logo=rust&logoColor=white)](https://crates.io/crates/hlock)
@@ -24,18 +24,19 @@
 
 ---
 
-`hlock` treats an agent system the way a package manager treats dependencies. You
-bring your domain tasks, the models you're allowed to use, and the harness you like.
-`hlock` searches the stack, measures every candidate against your tasks, and writes a
-`harness.lock`: a pinned, version-controlled, enforceable description of the agent that
-actually works for your domain, along with the evidence for choosing it.
+Your agent is more than a model: it's a harness version, MCP servers, skills, plugins,
+instruction files, and config, set up by hand on one machine. `hlock` pins all of it in a
+`harness.lock` you commit to git, catches drift, and brings the same setup back on
+another laptop, in CI, or in a container. When you're ready, it measures your stack
+against your own tasks and finds a better one.
 
 | You know this from package managers | In `hlock` |
 |---|---|
-| 📄 `pyproject.toml` | **`harness.toml`**, the manifest: what the resolver may try, and what "best" means |
-| 🧮 dependency resolver | **the resolver**: search over LLMs × decision models × harnesses × policies |
-| 🔒 `uv.lock` / `Cargo.lock` | **`harness.lock`**, the lockfile: what was chosen, pinned and hashed, plus the evidence |
-| ✅ CI `--locked` check | **`hlock check`**: fail when the manifest drifts from the lock |
+| 🔒 `uv.lock` / `Cargo.lock` | **`harness.lock`**: every dependency of your harness, pinned and hashed |
+| 📌 `pip freeze` | **`hlock pin`**: record the setup you already have, and re-pin as it grows |
+| ✅ `--locked` check | **`hlock check`**: show what changed since the pin |
+| 📦 `uv sync` / `npm ci` | **`hlock sync`**: rehydrate the locked setup on any machine |
+| ▶️ `uv run` | **`hlock launch`** and **`hlock run`**: start sessions and run prompts on the locked setup |
 
 ## Install
 
@@ -53,15 +54,16 @@ for CPython 3.9+. For Rust, use `cargo add hlock`.
 
 ## Quickstart
 
-No accounts or API keys needed. The built-in `reference` provider and harness are
-deterministic and offline, so the whole loop runs on a laptop.
+Pin the harness you already use (Claude Code, Codex, Pi, OpenCode, Cursor, Gemini CLI,
+and [more](https://docs.hlock.ai/guides/harnesses/)), then bring it back anywhere:
 
 ```bash
-hlock evals init                          # write a hello-world eval pack to ./evals
-hlock init --name demo                    # write a starter harness.toml
-hlock resolve                             # search the space -> harness.lock
-hlock check                               # fail if harness.toml drifted from the lock
-hlock run "count the words in words.txt"  # run the locked agent
+hlock pin                       # lock your current setup into harness.lock
+git add harness.lock .hlock/    # version it (secrets are placeholders, never values)
+hlock check                     # see what changed since the pin; re-pin to lock it
+hlock sync                      # on another machine: rehydrate it (also --prefix DIR, --docker)
+hlock launch                    # start a session on the locked setup, isolated from your config
+hlock run "summarize README.md"  # or run one prompt through it (claude -p, codex exec, …)
 ```
 
 For your own work, `hlock evals init -t coding` (or `data`, `research`, `support`) writes
@@ -69,32 +71,39 @@ an eval pack template plus an Agent Skill, so the agent you already use can fill
 with real tasks from your project. See [Eval packs](https://docs.hlock.ai/guides/eval-packs/).
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/unionai-oss/hlock/main/docs/assets/quickstart.svg" alt="An hlock session: evals init, init, resolve, check, and run" width="640">
+  <img src="https://raw.githubusercontent.com/unionai-oss/hlock/main/docs/assets/quickstart.svg" alt="An hlock session: pin a Claude Code setup, check it, and sync it onto another machine" width="640">
 </p>
 
-From there: `hlock show` prints the locked stack and its evidence, `hlock tree` prints the
-component graph, `hlock upgrade` plans model upgrades, and `hlock tune` tunes prompts,
-hyperparameters, and small models into a `harness.tune.lock`.
-
-### Already have a harness set up?
-
-Pin it. `hlock pin` captures your Claude Code, Codex, Pi, OpenCode, Hermes or Cursor setup
-into `harness.lock`: the harness version, the models and local runtimes it uses, MCP
-servers, skills, plugins, and config, with secrets replaced by placeholders.
-
-```bash
-hlock harness list      # the harnesses on this machine, and the one you're running inside
-hlock pin               # lock your current setup into harness.lock
-hlock check             # fail if your setup drifted from the pin
-hlock sync              # on another machine: rehydrate it (also --prefix DIR, --docker)
-hlock launch            # start a session that matches the lock (or: hlock launch opencode)
-hlock localize          # an all-local equivalent: local harness + Ollama/LM Studio models
-```
-
-See [Harnesses](https://docs.hlock.ai/guides/harnesses/) and
+See the [Quickstart](https://docs.hlock.ai/getting-started/quickstart/),
 [Pinning your setup](https://docs.hlock.ai/guides/pin/),
 [Rehydrating with sync](https://docs.hlock.ai/guides/sync/), and
 [Launching a locked harness](https://docs.hlock.ai/guides/launch/).
+
+### Then make it better
+
+**Optimize your harness.** Draft an eval pack from the requests you've already made to your
+agent with `hlock evals init --from-traces` (it reads the sessions Claude Code, Codex, and
+Pi logged for the project), and review it with your agent using the Agent Skill it writes. List the models, decision models and harnesses to try in a
+`harness.toml`, and let `hlock resolve` lock the best combination with its success rate,
+cost, and latency. `hlock tune` goes further, into prompts, hyperparameters, and
+fine-tuned small models. The built-in `reference` provider is offline, so you can try the
+loop with no API keys:
+
+```bash
+hlock evals init                          # write a hello-world eval pack to ./evals
+hlock init --name demo                    # write a starter harness.toml
+hlock resolve                             # measure every combination -> harness.lock
+hlock run "count the words in words.txt"  # run the locked agent
+```
+
+**Go local.** `hlock localize` turns a lock into an equivalent on an open-source harness
+and models served by Ollama or LM Studio, keeping your MCP servers, skills, and
+instructions.
+
+See [Finding the best stack](https://docs.hlock.ai/guides/resolve/),
+[Eval packs](https://docs.hlock.ai/guides/eval-packs/),
+[Tuning](https://docs.hlock.ai/guides/tune/), and
+[Going local](https://docs.hlock.ai/guides/localize/).
 
 <details>
 <summary><b>Python API</b></summary>
@@ -124,7 +133,7 @@ print(agent.run("clean ./data/orders.csv"))   # {"success": true, "model": "qwen
 ## How it works
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/unionai-oss/hlock/main/docs/assets/how-it-works.svg" alt="How hlock works: harness.toml and eval packs feed hlock resolve (search, evaluate, select), which writes harness.lock for hlock check and hlock run" width="860">
+  <img src="https://raw.githubusercontent.com/unionai-oss/hlock/main/docs/assets/how-it-works.svg" alt="How hlock works: hlock pin captures your setup, or hlock resolve searches harness.toml and eval packs; either writes harness.lock for hlock check, sync, and launch" width="860">
 </p>
 
 ## Architecture
@@ -183,10 +192,11 @@ Want to help? See the [contributing guide](https://docs.hlock.ai/project/contrib
 
 ## Status
 
-`hlock` is at **v0.1**. What works today: manifest and lockfile schema v1, a
-content-addressed store, eval packs with graders, the reference provider and harness,
-grid search with Pareto selection, `upgrade` (plan/apply/rollback), and `tune` across
-the `local`, `devbox`, and `cluster` backends. [SPEC.md](https://github.com/unionai-oss/hlock/blob/main/SPEC.md) describes the full design,
+What works today: `pin`, `check`, `sync`, and `launch` for the
+[supported harnesses](https://docs.hlock.ai/guides/harnesses/), `localize`, manifest and
+lockfile schema v1, a content-addressed store, eval packs (`hlock evals`) with graders, the
+reference provider and harness, grid search with Pareto selection, `upgrade`
+(plan/apply/rollback), and `tune` across the `local`, `devbox`, and `cluster` backends. [SPEC.md](https://github.com/unionai-oss/hlock/blob/main/SPEC.md) describes the full design,
 much of which is still on the roadmap.
 
 ## License

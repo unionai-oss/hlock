@@ -47,6 +47,7 @@ builtin-dirs = ["{root}/skills/.system"]
 
 [launch]
 model-flag = "--model"
+prompt = ["exec", "{prompt}"]  # `hlock run`: one prompt, non-interactively
 
 # How `hlock localize` points this harness at a local OpenAI-compatible endpoint.
 [[local-provider]]

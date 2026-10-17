@@ -7,6 +7,8 @@ its history, the issue tracker). ``hlock evals check`` reports the slots still o
 
 from __future__ import annotations
 
+import json
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -364,3 +366,136 @@ def init(dest: str | Path, template: str = "hello-world", name: str | None = Non
         p.write_text(files[rel])
         written.append(p)
     return written
+
+
+# --------------------------------------------------------------------------- #
+# Drafting a pack from traces
+# --------------------------------------------------------------------------- #
+
+_STOP = {"a", "an", "the", "to", "in", "of", "for", "and", "or", "on", "with", "my", "our", "this", "that",
+         "please", "can", "you", "could", "would", "i", "we", "it", "is", "be", "me"}
+
+
+def _slug(text: str, taken: set[str]) -> str:
+    words = [w for w in re.findall(r"[a-z0-9]+", text.lower()) if w not in _STOP][:5] or ["task"]
+    base = "_".join(words)[:48].strip("_")
+    base = base if base[0].isalpha() else f"task_{base}"
+    tid, n = base, 2
+    while tid in taken:
+        tid, n = f"{base}_{n}", n + 1
+    taken.add(tid)
+    return tid
+
+
+def _artifacts(session, project: Path) -> list[str]:
+    """Files the session created inside the project, relative to where it ran."""
+    base = Path(session.cwd).resolve() if session.cwd else project
+    out = []
+    for f in session.created:
+        p = Path(f)
+        p = p.resolve() if p.is_absolute() else (base / p).resolve()
+        try:
+            rel = p.relative_to(base).as_posix()
+        except ValueError:
+            continue  # outside the project: not the task's output
+        if not rel.startswith((".git/", ".hlock/")) and rel not in out:
+            out.append(rel)
+    return out[:3]
+
+
+def _toml_str(s: str) -> str:
+    return json.dumps(s)  # a JSON string is a valid TOML basic string
+
+
+def draft_from_traces(dest: str | Path, sessions, name: str | None = None, n_tasks: int = 10,
+                      project: Path | None = None, force: bool = False) -> tuple[list[Path], int]:
+    """Write a draft eval pack to ``dest`` from trace sessions, newest first, one task per
+    distinct request. Prompts are redacted. A task whose session created files expects
+    them as artifacts; the rest get a ``TODO(hlock)`` to fill in. Returns the files
+    written (``pack.toml`` first) and the number of tasks."""
+    from harness_lock import redact_text
+
+    dest, project = Path(dest), (project or Path.cwd()).resolve()
+    if (dest / "pack.toml").exists() and not force:
+        raise ValueError(f"{dest / 'pack.toml'} already exists")
+    seen, picked = set(), []
+    for s in sorted(sessions, key=lambda s: s.started, reverse=True):
+        key = " ".join(s.prompt.lower().split())
+        if key not in seen:
+            seen.add(key)
+            picked.append(s)
+    picked = picked[:n_tasks]
+    if not picked:
+        raise ValueError("no requests found in the traces")
+    name = name or f"{project.name}/{dest.resolve().name}"
+    home = str(Path.home())
+    files: dict[str, str] = {}
+    blocks = [_header(name, "from-traces", "An eval pack drafted from agent traces by `hlock evals init --from-traces`.\n"
+                                           "# Review every task and its marked slots, then run `hlock evals check`.")]
+    taken: set[str] = set()
+    for s in picked:
+        prompt = redact_text(s.prompt).replace(home, "~")[:4000]
+        tid = _slug(prompt, taken)
+        arts = _artifacts(s, project)
+        when = s.started[:10] or "unknown date"
+        lines = ["", "[[task]]", f'id = "{tid}"', f'prompt = "{tid}/prompt.md"',
+                 f'fixtures = "{tid}/workspace/"', 'tools = ["shell", "filesystem"]']
+        if arts:
+            lines.append(f"expected = {{ artifacts = [{', '.join(_toml_str(a) for a in arts)}] }}  # files the session created")
+        else:
+            lines += [f"# {PLACEHOLDER}: the file a successful run leaves in the workspace (the session created none).",
+                      'expected = { artifacts = ["result.md"] }']
+        lines += [f'tags = ["from-traces", "{s.harness}"]', "timeout-seconds = 900"]
+        blocks.append("\n".join(lines) + "\n")
+        files[f"{tid}/prompt.md"] = (
+            f"<!-- drafted from a {s.harness} session ({when}); secrets redacted. Review before use. -->\n{prompt}\n")
+        files[f"{tid}/workspace/.gitkeep"] = ""
+    files["pack.toml"] = "".join(blocks)
+    written = []
+    for rel in ["pack.toml", *sorted(k for k in files if k != "pack.toml")]:
+        p = dest / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(files[rel])
+        written.append(p)
+    return written, len(picked)
+
+
+def trace_skill(pack_dir: str) -> str:
+    """An Agent Skill that guides an agent through reviewing a pack drafted from traces."""
+    return f"""---
+name: {SKILL_NAME}
+description: Review and finish the hlock eval pack in {pack_dir}, drafted from this project's agent sessions. Use when the user asks to review, finish, or fix their eval pack.
+---
+
+# Finish the eval pack in `{pack_dir}`
+
+`hlock evals init --from-traces` drafted an eval pack in `{pack_dir}` from the requests this
+user made to their agent in past sessions. hlock runs every candidate agent stack against
+these tasks, so each one must run on its own in an empty workspace and be checkable.
+
+## Rules
+
+- Show the user the drafted tasks, one line each, and ask which to keep. Delete the rest
+  (the `[[task]]` entry and its directory).
+- A drafted prompt may lean on context from its session ("fix it", "like before"). Rewrite it
+  so it stands alone, keeping the user's intent and wording where you can.
+- Each task starts from its `workspace/`. Copy in only the files it needs, from this
+  project. Never copy secrets, credentials, `.env` files, or personal data; replace names,
+  emails, and ids with placeholders. Prompts were redacted automatically: check that
+  nothing sensitive is left.
+- Every task must produce a file a program can check, named in `expected.artifacts` and at
+  the end of `prompt.md`. The file must not already be in `workspace/`. Resolve each
+  `{PLACEHOLDER}`.
+- Keep ids unique and in `snake_case`, and keep each directory named after its id.
+- Aim for at least 10 tasks, so hlock can hold some back to check the winner.
+
+## Steps
+
+1. Read `{pack_dir}/pack.toml` and the `prompt.md` files.
+2. Agree with the user on which tasks to keep.
+3. For each task: rewrite `prompt.md` to stand alone, fill `workspace/`, and check its
+   `[[task]]` entry.
+4. Run `hlock evals check {pack_dir}` and fix what it reports until it shows no errors.
+5. Tell the user the pack is ready, and that `hlock init --pack {pack_dir}` (or the `[evals]`
+   section of an existing `harness.toml`) points hlock at it.
+"""

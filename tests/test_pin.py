@@ -134,3 +134,9 @@ def test_pin_never_clobbers_a_resolved_lock(home, tmp_path):
     assert r.exit_code == 1 and "resolved lock" in r.output and "-o" in r.output
     assert invoke("pin", "--harness", "claude", "-o", "pinned.lock").exit_code == 0
     assert invoke("pin", "--harness", "claude", "--force").exit_code == 0
+
+
+def test_upgrade_explains_a_pinned_lock(home):
+    assert invoke("pin", "--harness", "claude").exit_code == 0
+    r = invoke("upgrade", "--all")
+    assert r.exit_code == 1 and "pinned lock" in r.output and "hlock pin" in r.output, r.output

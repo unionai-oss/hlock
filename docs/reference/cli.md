@@ -14,23 +14,23 @@ Failures print a one-line error with a hint and exit `1`.
 
 | Command | Purpose |
 |---|---|
-| [`init`](#init) | Write a starter `harness.toml` |
-| [`evals`](#evals) | Write a starter eval pack from a template, and check one |
-| [`resolve`](#resolve) | Search the space and pin the winner in `harness.lock` |
 | [`pin`](#pin) | Pin your current harness setup into `harness.lock` |
-| [`check`](#check) | Fail if `harness.toml` has drifted from `harness.lock`, or a pinned setup changed |
+| [`check`](#check) | Fail if a pinned setup changed, or `harness.toml` has drifted from `harness.lock` |
 | [`sync`](#sync) | Rehydrate the setup in a lock on this machine, in a prefix, or in a Docker image |
 | [`launch`](#launch) | Start a harness session that matches the lock |
-| [`show`](#show) | Show the locked stack and its evidence |
-| [`tree`](#tree) | Print the locked component graph |
+| [`run`](#run) | Run the locked agent on a prompt |
+| [`evals`](#evals) | Write a starter eval pack from a template, and check one |
+| [`init`](#init) | Write a starter `harness.toml` |
+| [`resolve`](#resolve) | Search the space and pin the winner in `harness.lock` |
+| [`tune`](#tune) | Tune prompts, hyperparameters, and small models into `harness.tune.lock` |
+| [`upgrade`](#upgrade) | Plan, apply, or roll back component upgrades on a resolved lock |
+| [`localize`](#localize) | Write an all-local equivalent of a lock |
 | [`harness list`](#harness-list) | List known harnesses and what's installed |
 | [`harness show`](#harness-show) | Show a harness profile and the paths it reads here |
 | [`runtime list`](#runtime-list) | List local inference runtimes and what's installed |
+| [`show`](#show) | Show the locked stack and its evidence |
+| [`tree`](#tree) | Print the locked component graph |
 | [`backend status`](#backend-status) | Show the configured backend and environment |
-| [`run`](#run) | Run the locked agent on a prompt |
-| [`upgrade`](#upgrade) | Plan, apply, or roll back component upgrades |
-| [`tune`](#tune) | Tune prompts, hyperparameters, and small models into `harness.tune.lock` |
-| [`localize`](#localize) | Write an all-local equivalent of a lock |
 
 ## Global options
 
@@ -80,10 +80,13 @@ Write and check [eval packs](../guides/eval-packs.md).
 
 Write a starter eval pack. The default `hello-world` pack is complete and runs as is.
 The other templates write task slots marked `TODO(hlock)`, plus an Agent Skill that guides
-your agent through filling them in from your project.
+your agent through filling them in from your project. `--from-traces` drafts the tasks
+from your agent's past sessions instead; see
+[Draft a pack from your traces](../guides/eval-packs.md#draft-a-pack-from-your-traces).
 
 ```bash
-hlock evals init [DIRECTORY] [-t TEMPLATE] [--name NAME] [--tasks N] [--no-skill] [--skill-dir DIR] [--force]
+hlock evals init [DIRECTORY] [-t TEMPLATE | --from-traces [PATH]] [--name NAME] [--tasks N]
+                 [--no-skill] [--skill-dir DIR] [--force]
 ```
 
 | Option | Default | Description |
@@ -91,7 +94,8 @@ hlock evals init [DIRECTORY] [-t TEMPLATE] [--name NAME] [--tasks N] [--no-skill
 | `DIRECTORY` | `./evals` | Where to write the pack |
 | `-t`, `--template` | `hello-world` | `hello-world`, `coding`, `data`, `research`, `support`, or `blank` |
 | `--name` | `<project>/<directory>` | Pack name |
-| `--tasks` | `10` | How many task slots a template writes. Ignored by `hello-world`. |
+| `--from-traces` | | Draft tasks from the sessions Claude Code, Codex and Pi logged for this project, or from `PATH`: a session log, or JSONL/CSV records with a prompt column |
+| `--tasks` | `10` | How many task slots a template writes, or the most tasks `--from-traces` drafts. Ignored by `hello-world`. |
 | `--no-skill` | | Don't write the Agent Skill |
 | `--skill-dir` | `.agents/skills/hlock-eval-pack` | Where the skill's `SKILL.md` goes |
 | `--force` | | Overwrite an existing `pack.toml` |
@@ -274,10 +278,14 @@ hlock backend status
 
 ## `run`
 
-Load `harness.lock` and run the locked stack on `PROMPT`. Exits `0` when the task
-succeeds and `1` when it fails. For a [code harness](../guides/harnesses.md#how-hlock-runs-a-code-harness),
-`run` calls its entrypoint or command; `--json` then prints `success`, `output`, `cost_usd`,
-`latency_s`, `exit_code` and the captured `log`.
+Load `harness.lock` and run the locked agent on `PROMPT`. Exits `0` when it succeeds and
+`1` when it fails. What runs depends on the lock's harness:
+
+| Harness | What `run` does |
+|---|---|
+| Agent CLI (Claude Code, Codex, Pi, …) | Prepares the same isolated environment as [`launch`](#launch), then runs the harness's non-interactive mode from its profile's `[launch] prompt` (`claude -p`, `codex exec`, `opencode run`, …). Success is the harness's exit code. `--json` prints `harness`, `success`, `exit_code`, `output`, `stderr`, `latency_s`, `notes` and `missing_secrets`. |
+| [Code harness](../guides/harnesses.md#how-hlock-runs-a-code-harness) | Calls its entrypoint or command. `--json` prints `success`, `output`, `cost_usd`, `latency_s`, `exit_code` and the captured `log`. |
+| `reference` | Runs the locked model on the offline reference provider. `--json` prints `success`, `model` and `cost_usd`. |
 
 ```bash
 hlock run PROMPT [--json]
@@ -285,17 +293,15 @@ hlock run PROMPT [--json]
 
 | Option | Description |
 |---|---|
-| `--json` | Print the raw outcome: `{"success": …, "model": …, "cost_usd": …}` |
-
-!!! note "v0.1"
-
-    For agent CLIs and the reference harness, `run` executes the locked model on the offline
-    reference provider. To work in a locked agent CLI, use [`launch`](#launch).
+| `--json` | Capture the outcome and print it as JSON |
 
 ## `upgrade`
 
 Find newer versions of locked components, re-measure the stack, and apply only on
 request. See [Upgrading components](../guides/upgrade.md).
+
+`upgrade` works on resolved locks. On a pinned lock it exits `1`: update your setup and
+re-pin with `hlock pin` instead.
 
 ```bash
 hlock upgrade [--all | --to TARGET] [--apply] [--force] [--rollback] [--workdir DIR]

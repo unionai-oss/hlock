@@ -1,27 +1,49 @@
 # How it works
 
-An agent is more than a model. It's a model (or several), a harness that drives it,
-maybe a decision model that routes between options, and policies like retries and step
-limits. Changing any one of these changes how well the agent does your work.
+An agent is more than a model. It's a harness at some version, one or more models, MCP
+servers, skills, plugins, instruction files, and config, plus, for tuned agents, a
+decision model that routes between options and policies like retries and step limits.
+Change any one of these and the agent behaves differently.
 
 `hlock` treats that combination, the **stack**, the way a package manager treats
-dependencies: you declare what's allowed, a resolver picks a concrete set, and a
-lockfile pins it.
+dependencies: a lockfile pins every part of it, and the same lock brings the same agent
+back anywhere. There are two ways to get a lock:
+
+- **Pin** the setup you already have. `hlock pin` reads your harness's config and records
+  what's there. No manifest, no tasks.
+- **Resolve** a better one. You declare what may be tried in `harness.toml`, and
+  `hlock resolve` measures every combination against your tasks and locks the winner.
 
 ```mermaid
 flowchart LR
+    H["🧰 your harness setup<br/><sub>what you have</sub>"] --> P["📌 hlock pin<br/><sub>capture</sub>"]
     M["📄 harness.toml<br/><sub>what may be tried</sub>"] --> R
     T["🧪 eval packs<br/><sub>what good looks like</sub>"] --> R
-    R["🧮 hlock resolve<br/><sub>search · evaluate · select</sub>"] --> L["🔒 harness.lock<br/><sub>what was chosen, and why</sub>"]
+    R["🧮 hlock resolve<br/><sub>search · evaluate · select</sub>"] --> L
+    P --> L["🔒 harness.lock<br/><sub>what's locked, and why</sub>"]
     L --> C["✅ hlock check"]
-    L --> X["▶️ hlock run"]
-    L --> U["⬆️ hlock upgrade"]
-    L --> O["⚙️ hlock tune"]
+    L --> S["📦 hlock sync · launch"]
+    L --> O["⚙️ hlock tune · upgrade"]
+    L --> Z["🏠 hlock localize"]
 ```
+
+## Pinning
+
+[`hlock pin`](../guides/pin.md) finds the harness you use, reads it through its
+[profile](../guides/harness-profiles.md), and writes everything into the lock with a
+digest: the harness version and install source, models and the local runtimes serving
+them, MCP servers, skills, plugins, instruction files, and config. Secrets become
+`HLOCK_SECRET_*` placeholders, and anything another machine can't download is vendored
+into `.hlock/vendor/`.
+
+On a pinned lock, `hlock check` re-captures the setup and reports what changed, and
+re-pinning records the change. [`hlock sync`](../guides/sync.md) turns the lock back into
+a working setup on another machine, and [`hlock launch`](../guides/launch.md) starts the
+harness in an isolated environment built from it.
 
 ## The manifest
 
-[`harness.toml`](../reference/manifest.md) is the part you write. It has four jobs:
+Resolving starts from [`harness.toml`](../reference/manifest.md), the part you write. It has four jobs:
 
 - **Candidates:** the models (per role), decision models, and harnesses the resolver may
   combine.
@@ -56,7 +78,7 @@ Picking the winner happens in three steps:
 
 ## The lockfile
 
-[`harness.lock`](../reference/lockfile.md) records the outcome:
+A resolved [`harness.lock`](../reference/lockfile.md) records the outcome:
 
 - the exact **stack**: each model by role and provider, with a fingerprint; the
   decision model; the harness; the policy (retries, step limits, sandbox, approvals);
@@ -71,10 +93,13 @@ a PR tells you what changed in the agent and what evidence supports the change.
 
 | Command | What it does |
 |---|---|
-| [`hlock check`](../guides/ci.md) | Fails if `harness.toml` changed after the lock was written. Put it in CI. |
-| [`hlock run`](../reference/cli.md#run) | Runs the pinned stack on a prompt. |
-| [`hlock upgrade`](../guides/upgrade.md) | Finds newer models for locked roles, re-measures, and applies only on request, keeping the old lock for rollback. |
+| [`hlock check`](../guides/pin.md#keep-it-honest-with-check) | On a pinned lock, fails if your setup changed. On a resolved lock, fails if `harness.toml` changed after the lock was written; put it in [CI](../guides/ci.md). |
+| [`hlock sync`](../guides/sync.md) | Rehydrates the locked setup on this machine, in a directory, or in a Docker image. |
+| [`hlock launch`](../guides/launch.md) | Starts the harness on the locked setup, isolated from your own config. |
+| [`hlock run`](../reference/cli.md#run) | Runs the locked stack on a prompt. |
+| [`hlock upgrade`](../guides/upgrade.md) | On a resolved lock, finds newer models for locked roles, re-measures, and applies only on request, keeping the old lock for rollback. |
 | [`hlock tune`](../guides/tune.md) | Goes beyond choosing: tunes prompts and hyperparameters, and can fine-tune small models, writing `harness.tune.lock`. |
+| [`hlock localize`](../guides/localize.md) | Writes an equivalent lock that runs entirely on your machine. |
 
 ## Search and holdout splits
 

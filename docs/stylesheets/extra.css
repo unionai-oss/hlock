@@ -155,8 +155,11 @@
   transform: translateY(-1px);
 }
 .md-typeset .hl-install {
-  max-width: 28rem;
-  margin: 0 auto 1.6em;
+  margin: 0 0 1.6em;
+}
+.md-typeset .hl-demo img {
+  display: block;
+  width: 100%;
 }
 @media (prefers-reduced-motion: reduce) {
   .md-typeset .md-button.hl-btn,

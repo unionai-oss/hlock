@@ -2,8 +2,9 @@
 
 **`harness-lock` is an alias for [`hlock`](https://crates.io/crates/hlock).**
 
-hlock makes your agent harness pinnable, portable, and tunable: tune your agent stack
-against your own tasks, then pin the winner in a `harness.lock`.
+hlock makes your agent harness pinnable, portable, and tunable: pin its models, MCP
+servers, skills, and config in a `harness.lock`, rehydrate it anywhere, then tune it
+against your own tasks.
 
 This crate has no code of its own. Like `hlock`, it re-exports
 [`harness-lock-core`](https://crates.io/crates/harness-lock-core) at the same version,

@@ -34,6 +34,8 @@ pub struct LaunchOptions {
     pub in_place: bool,
     /// Where a code harness works (default: the project directory).
     pub workspace: Option<PathBuf>,
+    /// Run this prompt non-interactively with the profile's `[launch] prompt` arguments.
+    pub prompt: Option<String>,
 }
 
 /// What to `exec`, and what happened while preparing it.
@@ -310,6 +312,16 @@ pub fn prepare(lock: &Lockfile, lock_path: &Path, reg: &Registry, ctx: &Ctx, opt
 
     let mut argv = vec![bin];
     argv.extend(target.launch.args.iter().cloned());
+    // the prompt arguments come first: `opencode run`, `codex exec` take flags after them
+    if let Some(prompt) = &opts.prompt {
+        if target.launch.prompt.is_empty() {
+            return Err(Error::Profile(format!(
+                "the {} profile doesn't say how to run a prompt non-interactively; add `prompt` to its [launch] table, or use hlock launch",
+                target.name
+            )));
+        }
+        argv.extend(target.launch.prompt.iter().map(|a| a.replace("{prompt}", prompt)));
+    }
     let has_config = lock.config.iter().any(|c| c.restore != "record");
 
     if same && opts.in_place {

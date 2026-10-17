@@ -6,8 +6,9 @@
 
 **`harness-lock` is an alias for [`hlock`](https://pypi.org/project/hlock/).**
 
-hlock makes your agent harness pinnable, portable, and tunable: tune your agent stack
-against your own tasks, then pin the winner in a `harness.lock`.
+hlock makes your agent harness pinnable, portable, and tunable: pin its models, MCP
+servers, skills, and config in a `harness.lock`, rehydrate it anywhere, then tune it
+against your own tasks.
 
 This package has no code of its own. Each `harness-lock` release pins the identical
 `hlock` release, so both names install the same thing. New projects should depend on

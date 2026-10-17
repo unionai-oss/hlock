@@ -815,9 +815,12 @@ three ways in:
   closed issues, notebooks, tickets), proposing tasks before writing them and keeping
   secrets out of fixtures. `hlock evals check` (also run by `resolve`) reports unfilled
   slots, missing prompts or fixtures, duplicate ids, and tasks that can't fail.
-- *Planned:* `hlock evals new --from-traces <dir>` turns existing production traces (in
-  the trace schema, or imported from OTel/LangSmith/etc.) into draft tasks with draft
-  graders for a human to review.
+- *Built:* `hlock evals init --from-traces [PATH]` drafts tasks from the sessions agent CLIs
+  logged for the project (Claude Code, Codex, Pi), or from JSONL/CSV records with a prompt
+  column: one task per distinct request, prompts redacted, and the files each session
+  created as expected artifacts. An Agent Skill guides the user's agent through review.
+- *Planned:* drafting from production traces in the trace schema, or imported from
+  OTel/LangSmith/etc., with draft graders beyond artifact checks.
 
 Initial official packs: `research-analyst`, `data-cleaning`, `ml-engineering`,
 `code-migration`, `support-triage`. Each has 30–100 tasks and a hidden holdout split on the Hub.
@@ -1933,7 +1936,7 @@ Install extras: `harness-lock[vllm]`, `harness-lock[train]`, `harness-lock[docke
 - `harness-lock/decider` + `harness-lock/judge` released · decision-model tuning stage
 - Layer 2 extension points stable, including the public `ComponentKind` entry point · profiles
 - Portable kinds `memory`, `retrieval`, `guardrail`, `browser`
-- `evals new --from-traces`
+- `evals init --from-traces` from OTel/LangSmith traces
 
 **v0.4: "scale"**
 - `cluster` backend (self-hosted Flyte and Union) · shared team cache

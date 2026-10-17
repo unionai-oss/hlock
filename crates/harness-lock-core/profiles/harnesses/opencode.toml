@@ -60,6 +60,7 @@ source = "config#/plugin"
 
 [launch]
 model-flag = "--model"
+prompt = ["run", "{prompt}"]  # `hlock run`: one prompt, non-interactively
 
 # How `hlock localize` points this harness at a local OpenAI-compatible endpoint.
 [[local-provider]]

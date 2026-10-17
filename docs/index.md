@@ -1,6 +1,6 @@
 ---
 title: hlock
-description: Make your agent harness pinnable, portable, and tunable. Tune your agent stack against your own tasks, then pin the winner in a harness.lock.
+description: Make your agent harness pinnable, portable, and tunable. Pin your harness, model, MCP servers, skills, and config in a harness.lock, version it, and rehydrate it anywhere.
 ---
 
 <p align="center">
@@ -11,10 +11,10 @@ description: Make your agent harness pinnable, portable, and tunable. Tune your 
 
 <p class="hl-tagline">Make your agent harness pinnable, portable, and tunable.</p>
 
-`hlock` tunes your agent stack against your own tasks, then pins the winner in a
-`harness.lock`: a pinned, hashed, version-controlled description of the agent that
-works for your domain, plus the evidence for choosing it. Commit the lock, and the
-same setup comes back on any machine, in CI, or on a cluster.
+Your agent is more than a model: it's a harness version, MCP servers, skills, plugins,
+instruction files, and config, set up by hand on one machine. `hlock` pins all of it in a
+`harness.lock` you commit to git, catches drift, and brings the same setup back on
+another laptop, in CI, or in a container.
 { .hl-lead }
 
 <div class="hl-actions" markdown>
@@ -53,50 +53,89 @@ same setup comes back on any machine, in CI, or on a cluster.
 
 </div>
 
-<figure markdown="span">
-  ![An hlock session: evals init, init, resolve, check, and run](assets/quickstart.svg){ width="620" }
-</figure>
+<div class="hl-demo" markdown>
+![An hlock session: pin a Claude Code setup, check it, and sync it onto another machine](assets/quickstart.svg)
+</div>
 
-## A package manager for agent stacks
+## Lock the harness you already have
 
 If you've used `uv`, `cargo`, or `npm`, you already know the shape of `hlock`:
 
 | You know this from package managers | In `hlock` |
 |---|---|
-| `pyproject.toml` | **`harness.toml`**, the [manifest](reference/manifest.md): what the resolver may try, and what "best" means |
-| dependency resolver | **the resolver**: search over LLMs × decision models × harnesses × policies |
-| `uv.lock` / `Cargo.lock` | **`harness.lock`**, the [lockfile](reference/lockfile.md): what was chosen, pinned and hashed, plus the evidence |
-| CI `--locked` check | **[`hlock check`](guides/ci.md)**: fail when the manifest drifts from the lock |
+| `uv.lock` / `Cargo.lock` | **`harness.lock`**, the [lockfile](reference/lockfile.md): every dependency of your harness, pinned and hashed |
+| `pip freeze` | **[`hlock pin`](guides/pin.md)**: record the setup you already have, and re-pin as it grows |
+| `--locked` check | **[`hlock check`](guides/pin.md#keep-it-honest-with-check)**: show what changed since the pin |
+| `uv sync` / `npm ci` | **[`hlock sync`](guides/sync.md)**: rehydrate the locked setup on any machine |
+| `uv run` | **[`hlock launch`](guides/launch.md)** and **[`hlock run`](reference/cli.md#run)**: start sessions and run prompts on the locked setup |
 
 <div class="grid cards" markdown>
 
--   :lucide-flask-conical:{ .lg .middle } **Measured on your tasks**
+-   :lucide-lock:{ .lg .middle } **Pin everything**
 
     ---
 
-    Every candidate stack runs against your [eval packs](guides/eval-packs.md), and the
-    lock records success rate, cost, and latency for the one that won.
+    The harness version, models, MCP servers, skills, plugins, instruction files, and
+    config, each with a digest. [Claude Code, Codex, Pi, OpenCode, and more](guides/harnesses.md).
 
--   :lucide-lock:{ .lg .middle } **Pinned and enforceable**
-
-    ---
-
-    Models, harness, decision model, and policies are pinned and hashed.
-    `hlock check` fails CI when the manifest drifts, and `hlock run` runs exactly what's pinned.
-
--   :lucide-laptop:{ .lg .middle } **Local first**
+-   :lucide-key-round:{ .lg .middle } **Secrets stay out**
 
     ---
 
-    The built-in reference provider and harness are deterministic and offline. The
-    whole loop runs on a laptop with no accounts and no API keys.
+    API keys and tokens become `HLOCK_SECRET_*` placeholders, so the lock is safe to
+    commit. You supply the values when you sync.
 
--   :lucide-cloud:{ .lg .middle } **Scales when it matters**
+-   :lucide-laptop:{ .lg .middle } **Rehydrate anywhere**
 
     ---
 
-    The same pipeline runs on a [`devbox`](guides/backends.md) with real LLMs, or on a
-    Flyte/Union cluster with GPUs, caching, and lineage.
+    `hlock sync` restores the setup on a new machine, in an isolated directory, or in a
+    Docker image, and tells you exactly what it can't do for you.
+
+-   :lucide-terminal:{ .lg .middle } **Launch from the lock**
+
+    ---
+
+    `hlock launch` starts your harness in an isolated environment that matches the lock,
+    with none of the unlocked config on your machine.
+
+</div>
+
+## Then make it better
+
+Once your harness is locked, you have a baseline to improve on, with tools you'll also
+recognize:
+
+| You know this from | In `hlock` |
+|---|---|
+| a test suite | **[`hlock evals init --from-traces`](guides/eval-packs.md#draft-a-pack-from-your-traces)**: draft an eval pack from the requests you've made to your agent |
+| `pyproject.toml` | **`harness.toml`**, the [manifest](reference/manifest.md): the models, decision models, and harnesses to try, and what "best" means |
+| `uv lock` | **[`hlock resolve`](guides/resolve.md)**: measure every combination on your evals, and lock the winner with its evidence |
+| `uv lock --upgrade` | **[`hlock upgrade`](guides/upgrade.md)**: try newer models, and keep them only if they hold up |
+| profile-guided optimization | **[`hlock tune`](guides/tune.md)**: tune prompts, hyperparameters, and small models on your evals |
+| cross-compiling | **[`hlock localize`](guides/localize.md)**: the same harness setup, on an open-source harness and local models |
+
+<div class="grid cards" markdown>
+
+-   :lucide-flask-conical:{ .lg .middle } **Optimize your harness**
+
+    ---
+
+    Draft an [eval pack](guides/eval-packs.md) from your agent's past sessions, and review
+    it with your agent.
+    [`hlock resolve`](guides/resolve.md) finds the best combination of models, decision
+    models, and harnesses for it, and [`hlock tune`](guides/tune.md) tunes
+    prompts, hyperparameters, and small models. Every lock records its success rate,
+    cost, and latency.
+
+-   :lucide-house:{ .lg .middle } **Go local**
+
+    ---
+
+    [`hlock localize`](guides/localize.md) moves your lock off proprietary harnesses and
+    API models onto an open-source harness and models that run on your machine, keeping
+    your MCP servers, skills, and instructions. Give it an eval pack, and it measures the
+    local candidates against your tasks.
 
 </div>
 

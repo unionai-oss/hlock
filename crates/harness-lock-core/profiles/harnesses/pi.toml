@@ -59,6 +59,7 @@ lockfile = "{root}/npm/package-lock.json"
 
 [launch]
 model-flag = "--model"
+prompt = ["-p", "{prompt}"]  # `hlock run`: one prompt, non-interactively
 
 # How `hlock localize` points this harness at a local OpenAI-compatible endpoint.
 [[local-provider]]

@@ -5,7 +5,7 @@
 
 [project]
 site_name = "hlock"
-site_description = "Make your agent harness pinnable, portable, and tunable. Tune your agent stack against your own tasks, then pin the winner in a harness.lock."
+site_description = "Make your agent harness pinnable, portable, and tunable. Pin your harness, models, MCP servers, skills, and config in a harness.lock, version it, and rehydrate it anywhere."
 site_url = "https://docs.hlock.ai/"
 site_author = "Union.ai"
 repo_url = "https://github.com/unionai-oss/hlock"
@@ -25,17 +25,26 @@ nav = [
     "concepts/architecture.md",
   ] },
   { "Guides" = [
-    "guides/harnesses.md",
-    "guides/pin.md",
-    "guides/sync.md",
-    "guides/launch.md",
-    "guides/localize.md",
-    "guides/harness-profiles.md",
-    "guides/eval-packs.md",
-    "guides/backends.md",
-    "guides/tune.md",
-    "guides/upgrade.md",
-    "guides/ci.md",
+    { "Lock your setup" = [
+      "guides/harnesses.md",
+      "guides/pin.md",
+      "guides/sync.md",
+      "guides/launch.md",
+    ] },
+    { "Optimize your harness" = [
+      "guides/eval-packs.md",
+      "guides/resolve.md",
+      "guides/tune.md",
+      "guides/upgrade.md",
+      "guides/backends.md",
+      "guides/ci.md",
+    ] },
+    { "Go local" = [
+      "guides/localize.md",
+    ] },
+    { "Extend" = [
+      "guides/harness-profiles.md",
+    ] },
   ] },
   { "Reference" = [
     "reference/cli.md",

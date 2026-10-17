@@ -441,9 +441,10 @@ fn resolve_manifest(py: Python<'_>, manifest: Option<PyObject>, backend: Option<
             } else if let Ok(sp) = obj.extract::<PyRef<PySearchSpace>>(py) {
                 to_core_manifest("agent", &sp)
             } else if let Ok(s) = obj.extract::<String>(py) {
-                // Accept either a path or raw TOML text.
+                // Accept either a path or raw TOML text. A single line with no `=` is a path,
+                // so a missing harness.toml reads as "cannot read", not a TOML parse error.
                 let p = Path::new(&s);
-                if p.exists() {
+                if p.exists() || (!s.contains('\n') && !s.contains('=')) {
                     core::Manifest::load(p).map_err(py_err)?
                 } else {
                     core::Manifest::from_str(&s).map_err(py_err)?
@@ -760,7 +761,7 @@ fn sync_dockerfile(plan: &str, path: String, manifest: Option<String>) -> PyResu
 /// Prepare `hlock launch`: verify, materialize the isolated root, and return
 /// JSON with the argv and environment to exec, plus what was done and notes.
 #[pyfunction]
-#[pyo3(signature = (path="harness.lock".to_string(), harness=None, prefix=None, allow_version_mismatch=false, in_place=false, args=Vec::new(), manifest=None))]
+#[pyo3(signature = (path="harness.lock".to_string(), harness=None, prefix=None, allow_version_mismatch=false, in_place=false, args=Vec::new(), manifest=None, prompt=None))]
 fn launch_prepare(
     path: String,
     harness: Option<String>,
@@ -769,10 +770,12 @@ fn launch_prepare(
     in_place: bool,
     args: Vec<String>,
     manifest: Option<String>,
+    prompt: Option<String>,
 ) -> PyResult<String> {
     let (reg, ctx, _) = registry(manifest.as_deref(), Some(&lock_dir(&path)))?;
     let lock = core::Lockfile::load(Path::new(&path)).map_err(py_err)?;
     let opts = core::launch::LaunchOptions {
+        prompt,
         target: harness,
         prefix: prefix.map(PathBuf::from),
         allow_version_mismatch,
@@ -847,6 +850,12 @@ fn localize(
     Ok(json_str(serde_json::json!({"lock": o.lock, "report": o.report, "path": out})))
 }
 
+/// Free text with credential-looking words replaced by `[redacted]`.
+#[pyfunction]
+fn redact_text(text: String) -> String {
+    core::capture::redact_text(&text)
+}
+
 /// Load the eval pack at `path` and check it (see `EvalPack::check`). Returns JSON
 /// with the pack's header, its task ids, and the issues found.
 #[pyfunction]
@@ -890,6 +899,7 @@ fn _harness_lock(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(run_code_harness, m)?)?;
     m.add_function(wrap_pyfunction!(localize, m)?)?;
     m.add_function(wrap_pyfunction!(check_eval_pack, m)?)?;
+    m.add_function(wrap_pyfunction!(redact_text, m)?)?;
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
     m.add("LOCK_VERSION", core::LOCK_VERSION)?;
     Ok(())

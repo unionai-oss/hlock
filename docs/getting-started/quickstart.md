@@ -1,157 +1,185 @@
 # Quickstart
 
-This walkthrough takes about five minutes. It uses the built-in `reference` provider
-and harness, which are deterministic and offline: no accounts, no API keys, and the
-same results on every machine.
+You've set up your agent by hand: a harness, a model, a few MCP servers, some skills, an
+instructions file. It works on your laptop. This walkthrough pins all of it into a
+`harness.lock`, versions it in git, keeps it current as you add to your setup, brings it
+back on another machine, and starts sessions from it. It takes about five minutes.
 
-## 1. Write an eval pack
+The examples use Claude Code. The same commands work with Codex, Pi, OpenCode, Cursor,
+Gemini CLI, and the [other supported harnesses](../guides/harnesses.md).
 
-An [eval pack](../guides/eval-packs.md) is the set of domain tasks every candidate stack
-is measured against. Write the hello-world pack:
+## 1. Pin your setup
 
-```console
-$ mkdir hlock-demo && cd hlock-demo
-$ hlock evals init
-✓ wrote evals/pack.toml  (hello-world, 3 tasks)
-  6 files under evals
-next → hlock evals check ./evals  ·  hlock init --pack ./evals
-```
-
-It holds three small tasks, `hello_file`, `count_words`, and `greet_people`, each with
-a prompt and an expected output file. Check that it's ready:
+Run `hlock pin` in the repository where you want to keep the lock:
 
 ```console
-$ hlock evals check
-hlock-demo/evals 0.1.0  3 tasks · evals
-  ! 3 tasks leaves 1 for the holdout split; add tasks until there are at least 10
-✓ ready  (1 warning)
-next → hlock init --pack ./evals
+$ hlock pin
+✓ pinned claude-code 2.1.0 → harness.lock  (the only installed harness)
+╭─ 📌 harness.lock · pinned ─────────────────────────────────────────────╮
+│                                                                        │
+│  harness        claude-code 2.1.0                                      │
+│  llm · default  anthropic:opus                                         │
+│  mcp            github (stdio)                                         │
+│  skills         1  (1 local)                                           │
+│  instructions   {root}/CLAUDE.md                                       │
+│  config         {root}/settings.json, ~/.claude.json /mcpServers       │
+│  secrets        1 redacted  (supplied as HLOCK_SECRET_* when syncing)  │
+│                                                                        │
+╰────────────────────────────────────────────────────────────────────────╯
+vendored 4 files into .hlock/vendor/claude-code/  · review before committing
+next → hlock check  ·  hlock sync
 ```
 
-The warning is expected for a demo. For your own work, start from a
-[template](../guides/eval-packs.md#fill-in-a-template-with-your-agent) and have your
-agent fill it in.
+`pin` found the installed harness and recorded its version and install source, the model,
+every MCP server and the package it launches, skills, plugins, instruction files, and the
+config files they came from, each with a digest.
 
-## 2. Write a manifest
+Secrets never reach the lock. The GitHub token in the MCP server's config became a
+placeholder:
 
-```console
-$ hlock init --name demo
-✓ wrote harness.toml  (project 'demo', eval pack ./evals)
-next → hlock resolve
+```toml title="harness.lock"
+[tool.env]
+GITHUB_TOKEN = "${HLOCK_SECRET_GITHUB_GITHUB_TOKEN}"
 ```
 
-`harness.toml` is the [manifest](../reference/manifest.md). It declares what the resolver
-may try and what "best" means:
+Things another machine can't download, like a skill you wrote yourself, your
+`CLAUDE.md`, and your config files, are copied (with secrets redacted) into
+`.hlock/vendor/`. See [Pinning your setup](../guides/pin.md) for everything `pin` records.
 
-```toml title="harness.toml"
-[project]
-name = "demo"
+## 2. Commit it
 
-[evals]
-packs = ["./evals"]
-seeds = 2                     # (1)!
-
-[candidates.llm.planner]
-any_of = ["reference:qwen-7b", "reference:qwen-32b"]   # (2)!
-
-[candidates]
-decision = ["none", "rules:default"]
-harness = ["reference"]
-
-[objective]
-primary = "success-rate"
-select = "min-cost"           # (3)!
-
-[objective.constraints]
-success-rate = ">=0.5"
-
-[budget]
-strategy = "grid"
-max_trials = 200
-
-[backend]
-target = "local"
+```bash
+git add harness.lock .hlock/
+git commit -m "Pin my agent setup"
 ```
 
-1.  Each candidate runs every task this many times.
-2.  Candidate models for the `planner` role, written `provider:model`.
-3.  Among the stacks that meet the constraints, pick the cheapest one.
+Like `uv.lock` or `Cargo.lock`, `harness.lock` belongs in version control.
 
-## 3. Resolve the lock
+## 3. Add to your setup, and lock what's new
 
-```console
-$ hlock resolve
-✓ wrote harness.lock
-╭─ 🔒 harness.lock ────────────────────────╮
-│                                          │
-│  Stack                                   │
-│  harness        reference                │
-│  llm · planner  reference:qwen-7b        │
-│  decision       none                     │
-│  backend        local                    │
-│                                          │
-│  Evidence                                │
-│  success rate  100%                      │
-│  cost / task   $0.0001                   │
-│  latency       p50 0.26s  ·  p95 0.40s   │
-│  trials        4                         │
-│                                          │
-│  lock-version 1 · manifest 2216eb06dca5  │
-│                                          │
-╰──────────────────────────────────────────╯
-next → hlock check  ·  hlock run "<prompt>"
-```
-
-The resolver ran every combination of models and decision models on the eval pack, kept
-the [Pareto front](../concepts/index.md#selection), applied your constraints, and chose
-the cheapest stack that passed. Both 7B and 32B solved the demo tasks, so the cheaper
-7B model won.
-
-## 4. Verify and inspect
+Setups grow by hand: you install a skill, connect another MCP server, edit a setting.
+`hlock check` re-captures your setup and shows what changed since the pin:
 
 ```console
 $ hlock check
-✓ harness.lock matches harness.toml  2216eb06dca5
-
-$ hlock tree
-🔒 harness.lock
-├── stack harness=reference
-│   ├── llm
-│   │   └── planner  reference:qwen-7b
-│   ├── decision  none
-│   └── harness  reference
-└── provenance  backend=local
+✗ drift: your claude-code setup changed since harness.lock was pinned
+  + mcp linear
+  + skill write-tests (user)
+  ~ config ~/.claude.json: ad825f266f → b33482f12e
+  hint: re-pin with hlock pin, or restore it with hlock sync
 ```
 
-`hlock check` exits non-zero if `harness.toml` changes after the lock was written. That
-makes it a [CI gate](../guides/ci.md). `hlock show` prints the same panel as `resolve`,
-and `hlock show --json` prints the full lockfile.
-
-## 5. Run the locked agent
+Run `hlock pin` again to lock the new pieces. It prints the same diff, and the change
+becomes a reviewable diff of `harness.lock` in git:
 
 ```console
-$ hlock run "count the words in words.txt"
-✓ success  model qwen-7b  cost $0.0001
+$ hlock pin
+✓ pinned claude-code 2.1.0 → harness.lock  (the only installed harness)
+╭─ 📌 harness.lock · pinned ─────────────────────────────────────────────╮
+│                                                                        │
+│  harness        claude-code 2.1.0                                      │
+│  llm · default  anthropic:opus                                         │
+│  mcp            github (stdio), linear (http)                          │
+│  skills         2  (2 local)                                           │
+│  instructions   {root}/CLAUDE.md                                       │
+│  config         {root}/settings.json, ~/.claude.json /mcpServers       │
+│  secrets        1 redacted  (supplied as HLOCK_SECRET_* when syncing)  │
+│                                                                        │
+╰────────────────────────────────────────────────────────────────────────╯
+vendored 5 files into .hlock/vendor/claude-code/  · review before committing
+changes since the last pin
+  + mcp linear
+  + skill write-tests (user)
+  ~ config ~/.claude.json: ad825f266f → b33482f12e
+next → hlock check  ·  hlock sync
 ```
 
-`hlock run` loads `harness.lock` and runs the pinned stack. It exits `0` on success
-and `1` on failure, and takes `--json` for scripting. In v0.1 it runs the locked model
-on the offline reference provider.
+If the change wasn't intended, `hlock sync` restores the locked setup instead.
 
-## 6. Commit both files
+## 4. Rehydrate it elsewhere
 
-```bash
-git add harness.toml harness.lock
-git commit -m "Lock the demo agent"
+On a new laptop, a VM, or a teammate's machine, clone the repository, set the secrets the
+lock asks for, and run `hlock sync`:
+
+```console
+$ export HLOCK_SECRET_GITHUB_GITHUB_TOKEN=ghp_…
+$ hlock sync --yes
+Sync plan for Claude Code 2.1.0 → your config
+✓  harness       Claude Code 2.1.0
+✓  mcp           `npx` for MCP servers: github
+✓  secret        HLOCK_SECRET_GITHUB_GITHUB_TOKEN (mcp github GITHUB_TOKEN)
+●  config        Write ~/.claude/settings.json
+●  config        Write ~/.claude.json /mcpServers
+●  skill         Copy skill review-pr → ~/.claude/skills/review-pr
+●  skill         Copy skill write-tests → ~/.claude/skills/write-tests
+●  instructions  Write ~/.claude/CLAUDE.md
+✓ Write ~/.claude/settings.json
+✓ Write ~/.claude.json /mcpServers
+✓ Copy skill review-pr → ~/.claude/skills/review-pr
+✓ Copy skill write-tests → ~/.claude/skills/write-tests
+✓ Write ~/.claude/CLAUDE.md
+✓ in sync with harness.lock
+
+$ hlock check
+✓ your claude-code setup matches harness.lock
 ```
 
-Like `uv.lock` or `Cargo.lock`, `harness.lock` belongs in version control. The lock
-diff in a PR shows exactly what changed in the agent and what evidence supports it.
+`sync` builds a plan: `✓` steps are already true, `●` steps hlock does for you, and `○`
+steps need you, with the exact command to run. It keeps a backup of any file it replaces.
+Pass `--install` to let it install missing harnesses and packages, and `--pull` to
+download local model weights. Without `--yes`, it shows the plan and asks first.
+`hlock sync --docker` writes a Docker image with the same setup instead.
 
-## Next steps
+## 5. Launch sessions and run prompts
 
-- Write tasks for your own domain: [Eval packs](../guides/eval-packs.md)
-- Call real models: [Backends](../guides/backends.md)
-- Move to newer models safely: [Upgrading components](../guides/upgrade.md)
-- Tune prompts, hyperparameters, and small models: [Tuning](../guides/tune.md)
-- Do it all from Python: [Python API](../reference/python-api.md)
+`hlock launch` starts the harness on the locked setup, in an isolated config directory
+under `.hlock/env/`, the way `uv run` uses a virtual environment. Your own `~/.claude`
+isn't touched, and nothing you haven't locked leaks in:
+
+```console
+$ hlock launch
+✓ Write .hlock/env/claude-code/config/settings.json
+✓ Write .hlock/env/claude-code/config/.claude.json /mcpServers
+✓ Copy skill review-pr → .hlock/env/claude-code/config/skills/review-pr
+✓ Copy skill write-tests → .hlock/env/claude-code/config/skills/write-tests
+✓ Write .hlock/env/claude-code/config/CLAUDE.md
+▶ Claude Code  CLAUDE_CONFIG_DIR=.hlock/env/claude-code/config …/bin/claude
+```
+
+`hlock run` sends one prompt through the same environment, using the harness's own
+non-interactive mode (`claude -p`, `codex exec`, `opencode run`, …), and exits `0` or `1`
+with the harness. The environment is only rebuilt when the lock changes:
+
+```console
+$ hlock run "summarize README.md"
+▶ Claude Code  CLAUDE_CONFIG_DIR=.hlock/env/claude-code/config …/bin/claude -p summarize README.md
+…
+✓ success  harness Claude Code  latency …
+```
+
+Between the `▶` line and the result is the harness's own output. `hlock run --json`
+captures it, with the exit code and latency, for scripts.
+
+You can also launch the lock in a different harness: `hlock launch opencode` carries the
+MCP servers, skills, and instructions over. See [Launching a locked harness](../guides/launch.md).
+
+## Where to next
+
+Your setup is pinned, versioned, and portable. From here, two paths:
+
+**Optimize your harness.** Measure your setup against your own tasks and let hlock find a
+better one:
+
+1. Draft an [eval pack](../guides/eval-packs.md) from the requests you've already made to
+   your agent: `hlock evals init --from-traces` reads the sessions Claude Code, Codex,
+   and Pi logged for this project. It writes an Agent Skill too, so your agent can help
+   you review the drafts.
+2. List the models, decision models, and harnesses to try in a `harness.toml`, and
+   [resolve](../guides/resolve.md) the best combination.
+3. Go below the stack with [`hlock tune`](../guides/tune.md): prompts,
+   hyperparameters, and fine-tuned small models.
+
+**Go local.** [`hlock localize`](../guides/localize.md) turns your lock into an equivalent
+that runs entirely on your machine, with an open-source harness and local models. Give it
+an eval pack, and it measures the local candidates against your tasks and records the
+evidence next to your original lock's.

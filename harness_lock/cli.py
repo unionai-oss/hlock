@@ -11,7 +11,9 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 import sys
+import time
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -46,6 +48,7 @@ from harness_lock import localize as _localize
 from harness_lock import pin as _pin
 from harness_lock import resolve as _resolve
 from harness_lock import select_harness as _select_harness
+from harness_lock import traces as _traces
 from harness_lock import tune as al_tune
 from harness_lock import upgrade as al_upgrade
 
@@ -135,11 +138,12 @@ click.rich_click.STYLE_USAGE = "bold magenta"
 click.rich_click.MAX_WIDTH = 100
 click.rich_click.COMMAND_GROUPS = {
     "hlock": [
-        {"name": "Lock", "commands": ["init", "evals", "resolve", "pin", "check"]},
-        {"name": "Rehydrate", "commands": ["sync", "launch"]},
+        {"name": "Lock", "commands": ["pin", "check"]},
+        {"name": "Rehydrate & run", "commands": ["sync", "launch", "run"]},
+        {"name": "Optimize", "commands": ["evals", "init", "resolve", "tune", "upgrade"]},
+        {"name": "Go local", "commands": ["localize"]},
         {"name": "Harness", "commands": ["harness", "runtime"]},
         {"name": "Inspect", "commands": ["show", "tree", "backend"]},
-        {"name": "Run & evolve", "commands": ["run", "upgrade", "tune", "localize"]},
     ]
 }
 
@@ -355,10 +359,11 @@ class _Group(click.RichGroup):
 def main(manifest: str | None, lock_path: str | None) -> None:
     """[brand]hlock[/] · make your agent harness pinnable, portable, and tunable.
 
-    Tune your agent stack against your own tasks, then pin the winner in a
-    [path]harness.lock[/].
+    Pin your harness, models, MCP servers, skills, and config in a
+    [path]harness.lock[/], version it, and rehydrate it anywhere. Then tune it
+    against your own evals.
 
-    Get started: [cmd]hlock evals init[/] → [cmd]hlock init[/] → [cmd]hlock resolve[/] → [cmd]hlock check[/]
+    Get started: [cmd]hlock pin[/] → [cmd]hlock check[/] → [cmd]hlock sync[/]
     """
     _set_project(manifest, lock_path)
 
@@ -412,14 +417,21 @@ def evals() -> None:
 @click.option("--skill-dir", default=f".agents/skills/{_evals.SKILL_NAME}", show_default=True,
               help="Where the Agent Skill's SKILL.md goes.")
 @click.option("--force", is_flag=True, help="Overwrite an existing pack.toml.")
+@click.option("--from-traces", "traces", is_flag=False, flag_value="", default=None, metavar="[PATH]",
+              help="Draft the tasks from agent traces: the sessions Claude Code, Codex and Pi logged for "
+                   "this project, or a file or directory of JSONL/CSV traces.")
 def evals_init(directory: str, template: str, name: str | None, n_tasks: int, no_skill: bool, skill_dir: str,
-               force: bool) -> None:
+               force: bool, traces: str | None) -> None:
     """Write a starter eval pack to [path]DIRECTORY[/].
 
     The default [bold]hello-world[/] pack is complete and runs as is. The other templates
     write task slots marked [key]TODO(hlock)[/], plus an Agent Skill your agent uses to
-    fill them with real tasks from this project.
+    fill them with real tasks from this project. [cmd]--from-traces[/] drafts the tasks from
+    the requests you've made to your agent instead.
     """
+    if traces is not None:
+        _evals_from_traces(directory, traces or None, name, n_tasks, no_skill, skill_dir, force)
+        return
     with _friendly_errors():
         written = _evals.init(directory, template, name=name, n_tasks=n_tasks, force=force)
     if template == "hello-world":
@@ -437,6 +449,40 @@ def evals_init(directory: str, template: str, name: str | None, n_tasks: int, no
         _ok(f"wrote [path]{_show(path)}[/]  [muted](Agent Skill {_evals.SKILL_NAME})[/]")
         console.print(f"[muted]open your agent here and ask it to fill in {directory} "
                       f"with the {_evals.SKILL_NAME} skill[/]")
+    _next(f"hlock evals check {directory}")
+
+
+def _evals_from_traces(directory: str, source: str | None, name: str | None, n_tasks: int, no_skill: bool,
+                       skill_dir: str, force: bool) -> None:
+    project = Path(_m()).parent
+    with _friendly_errors():
+        sessions = _traces.load(source, project)
+        if not sessions:
+            where = source or f"agent sessions for {_show(project)} (Claude Code, Codex, Pi)"
+            _fail(f"no requests found in {where}",
+                  "pass [cmd]--from-traces PATH[/] with session logs or JSONL/CSV records that have a prompt")
+        try:
+            written, n = _evals.draft_from_traces(directory, sessions, name=name, n_tasks=n_tasks, project=project,
+                                                  force=force)
+        except OSError as e:
+            _fail(f"cannot write {directory}: {e.strerror}")
+    counts: dict[str, int] = {}
+    for s in sessions:
+        counts[s.harness] = counts.get(s.harness, 0) + 1
+    origin = ", ".join(f"{v} {k} {'record' if k == 'traces' else 'session'}{'s' * (v != 1)}"
+                       for k, v in sorted(counts.items()))
+    _ok(f"wrote [path]{_show(written[0])}[/]  [muted]({n} draft task{'s' * (n != 1)} from {origin})[/]")
+    todo = sum(1 for p in written if p.name == "pack.toml" for line in p.read_text().splitlines()
+               if line.startswith(f"# {_evals.PLACEHOLDER}"))
+    if todo:
+        console.print(f"  [muted]{todo} {'tasks need' if todo != 1 else 'task needs'} an expected artifact; "
+                      "prompts are redacted drafts to review[/]")
+    if not no_skill:
+        path = Path(skill_dir) / "SKILL.md"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(_evals.trace_skill(directory))
+        _ok(f"wrote [path]{_show(path)}[/]  [muted](Agent Skill {_evals.SKILL_NAME})[/]")
+        console.print(f"[muted]open your agent here and ask it to review {directory} with the {_evals.SKILL_NAME} skill[/]")
     _next(f"hlock evals check {directory}")
 
 
@@ -762,7 +808,7 @@ def show(as_json: bool) -> None:
 
 @main.command()
 def check() -> None:
-    """Fail if [path]harness.toml[/] has drifted from [path]harness.lock[/] (CI-friendly).
+    """Fail if your setup, or [path]harness.toml[/], has drifted from [path]harness.lock[/].
 
     For a pinned lock, re-capture the harness and fail if the setup changed.
     """
@@ -862,12 +908,20 @@ def _pin_tree(lock: dict) -> Tree:
 @click.argument("prompt")
 @click.option("--json", "as_json", is_flag=True, help="Print the raw outcome as JSON.")
 def run(prompt: str, as_json: bool) -> None:
-    """Run the locked agent on PROMPT."""
+    """Run the locked agent on PROMPT.
+
+    An agent CLI runs for real, in the locked environment [cmd]hlock launch[/] uses, through
+    its own non-interactive mode ([cmd]claude -p[/], [cmd]codex exec[/], [cmd]opencode run[/], …).
+    """
     with _friendly_errors():
         lf = Lockfile.load(_l())
         agent = load(_l())
-    if _is_code_harness(lf.harness):
+    kind = _harness_kind(lf.harness)
+    if kind == "custom":
         _run_code_harness(prompt, as_json)
+        return
+    if kind == "cli":
+        _run_cli_harness(prompt, as_json)
         return
     with _working("Running the locked agent…"):
         raw = agent.run(prompt)
@@ -884,11 +938,38 @@ def run(prompt: str, as_json: bool) -> None:
     sys.exit(0 if ok else 1)
 
 
-def _is_code_harness(name: str) -> bool:
+def _harness_kind(name: str) -> str | None:
+    """`cli`, `custom` (a code harness), or None for the reference harness."""
     try:
-        return json.loads(harness_profile(name, manifest=_m()))["profile"]["kind"] == "custom"
+        return json.loads(harness_profile(name, manifest=_m()))["profile"]["kind"]
     except ValueError:
-        return False
+        return None
+
+
+def _run_cli_harness(prompt: str, as_json: bool) -> None:
+    with _working("Preparing the locked environment…"):
+        prep = json.loads(launch_prepare(_l(), prompt=prompt, manifest=_m()))
+    env = {**os.environ, **prep["env"]}
+    if not as_json:
+        _print_prep(prep)
+        sys.stdout.flush()
+    start = time.monotonic()
+    try:
+        r = subprocess.run(prep["argv"], env=env, capture_output=as_json, text=True, check=False)
+    except OSError as e:
+        _fail(f"cannot start {prep['argv'][0]}: {e}")
+    latency = time.monotonic() - start
+    ok = r.returncode == 0
+    if as_json:
+        console.print_json(data={
+            "harness": prep["harness"], "success": ok, "exit_code": r.returncode, "output": r.stdout,
+            "stderr": r.stderr, "latency_s": round(latency, 3), "notes": prep["notes"],
+            "missing_secrets": prep["missing_secrets"],
+        })
+    else:
+        mark = "[ok]✓ success[/]" if ok else f"[fail]✗ failed[/] [muted](exit {r.returncode})[/]"
+        console.print(f"{mark}  [muted]harness[/] {prep['harness_name']}  [muted]latency[/] {_secs(latency)}")
+    sys.exit(0 if ok else 1)
 
 
 def _run_code_harness(prompt: str, as_json: bool) -> None:
@@ -960,6 +1041,20 @@ def launch(args: tuple[str, ...], lock: str | None, prefix: str | None, in_place
     if as_json:
         console.print_json(data=prep)
         return
+    _print_prep(prep)
+    if dry_run:
+        return
+    env = {**os.environ, **prep["env"]}
+    sys.stdout.flush()
+    sys.stderr.flush()
+    try:
+        os.execvpe(prep["argv"][0], prep["argv"], env)
+    except OSError as e:
+        _fail(f"cannot start {prep['argv'][0]}: {e}")
+
+
+def _print_prep(prep: dict) -> None:
+    """What preparing a locked environment did, and the command it's about to run."""
     copies = [line for line in prep["done"] if line.startswith("Copy skill")]
     for line in prep["done"]:
         if len(copies) <= 6 or not line.startswith("Copy skill"):
@@ -974,15 +1069,6 @@ def launch(args: tuple[str, ...], lock: str | None, prefix: str | None, in_place
     env_txt = " ".join(f"{k}={_rel(v)}" for k, v in prep["env"].items() if not k.startswith(("HLOCK_", "PYTHON")))
     shown = " ".join(prep["argv"][:1] + [a if len(a) < 60 else a[:57] + "…" for a in prep["argv"][1:]])
     console.print(f"[brand]▶[/] {prep['harness_name']}  [muted]{env_txt}[/] [cmd]{shown}[/]", soft_wrap=True)
-    if dry_run:
-        return
-    env = {**os.environ, **prep["env"]}
-    sys.stdout.flush()
-    sys.stderr.flush()
-    try:
-        os.execvpe(prep["argv"][0], prep["argv"], env)
-    except OSError as e:
-        _fail(f"cannot start {prep['argv'][0]}: {e}")
 
 
 @main.command()
@@ -994,6 +1080,12 @@ def launch(args: tuple[str, ...], lock: str | None, prefix: str | None, in_place
 @click.option("--workdir", default=None, help="Where to put trial artifacts.")
 def upgrade(to: str | None, all_: bool, apply: bool, rollback: bool, force: bool, workdir: str | None) -> None:
     """Plan, apply, or roll back upgrades to locked components."""
+    if not rollback and Path(_l()).exists():
+        with _friendly_errors():
+            if Lockfile.load(_l()).kind == "pin":
+                _fail(f"{_ld()} is a pinned lock; upgrade re-measures a resolved one against your tasks",
+                      "update your setup (install a newer harness, change the model), then re-pin with "
+                      "[cmd]hlock pin[/]")
     label = "Rolling back…" if rollback else ("Applying upgrade…" if apply else "Planning upgrades…")
     with _working(label):
         result = json.loads(
