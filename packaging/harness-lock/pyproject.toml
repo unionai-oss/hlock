@@ -11,7 +11,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "harness-lock"
-version = "0.1.2"
+version = "0.2.0"
 description = "Alias for hlock: make your agent harness pinnable, portable, and tunable."
 readme = "README.md"
 requires-python = ">=3.9"
@@ -23,10 +23,10 @@ classifiers = [
     "Programming Language :: Python :: 3",
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
-dependencies = ["hlock==0.1.2"]
+dependencies = ["hlock==0.2.0"]
 
 [project.optional-dependencies]
-flyte = ["hlock[flyte]==0.1.2"]
+flyte = ["hlock[flyte]==0.2.0"]
 
 [project.urls]
 Homepage = "https://github.com/unionai-oss/hlock"

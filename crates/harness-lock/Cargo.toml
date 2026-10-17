@@ -17,7 +17,7 @@ name = "harness_lock"
 
 [dependencies]
 # Exact pin: harness-lock X.Y.Z is always harness-lock-core X.Y.Z.
-harness-lock-core = { path = "../harness-lock-core", version = "=0.1.2" }
+harness-lock-core = { path = "../harness-lock-core", version = "=0.2.0" }
 
 [features]
 default = []

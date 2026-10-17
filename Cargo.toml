@@ -9,7 +9,7 @@ members = [
 default-members = ["crates/harness-lock-core", "crates/harness-lock-py", "crates/harness-lock", "crates/hlock"]
 
 [workspace.package]
-version = "0.1.2"
+version = "0.2.0"
 edition = "2021"
 license = "Apache-2.0"
 authors = ["Niels Bantilan <niels.bantilan@gmail.com>"]
