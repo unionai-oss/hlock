@@ -31,7 +31,7 @@ nav = [
     "guides/launch.md",
     "guides/localize.md",
     "guides/harness-profiles.md",
-    "guides/task-packs.md",
+    "guides/eval-packs.md",
     "guides/backends.md",
     "guides/optimize.md",
     "guides/upgrade.md",

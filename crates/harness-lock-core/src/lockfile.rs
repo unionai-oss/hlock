@@ -238,8 +238,10 @@ pub struct Context {
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(default, rename_all = "kebab-case")]
 pub struct Evidence {
-    pub task_pack: Option<String>,
-    pub task_pack_version: Option<String>,
+    #[serde(alias = "task-pack")]
+    pub eval_pack: Option<String>,
+    #[serde(alias = "task-pack-version")]
+    pub eval_pack_version: Option<String>,
     pub split: String,
     pub trials: usize,
     pub success_rate: BTreeMap<String, f64>,

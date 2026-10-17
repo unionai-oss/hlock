@@ -42,7 +42,7 @@
     <text x="150" y="262" class="m" text-anchor="middle">manifest</text>
     <text x="282" y="262" class="m" text-anchor="middle">lockfile</text>
     <text x="414" y="262" class="m" text-anchor="middle">store</text>
-    <text x="546" y="262" class="m" text-anchor="middle">task packs</text>
+    <text x="546" y="262" class="m" text-anchor="middle">eval packs</text>
     <text x="678" y="262" class="m" text-anchor="middle">search</text>
     <text x="810" y="262" class="m" text-anchor="middle">resolver</text>
   </g>

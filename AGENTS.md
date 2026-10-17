@@ -28,7 +28,7 @@ you report a change as done, and report failures as they are.
 
 | Path | Contents |
 |---|---|
-| `crates/harness-lock-core/` | Rust core: manifest, lockfile, store, task packs, search, resolver (`tuner`) |
+| `crates/harness-lock-core/` | Rust core: manifest, lockfile, store, eval packs, search, resolver (`tuner`) |
 | `crates/harness-lock-py/` | PyO3 bindings (ships only in the wheel) |
 | `crates/hlock/`, `crates/harness-lock/` | Re-export crates (`harness-lock` is the alias) |
 | `hlock/` | Shim re-exporting `harness_lock`, shipped in the `hlock` wheel |
@@ -37,7 +37,7 @@ you report a change as done, and report failures as they are.
 | `harness_lock/tasks/worker.py` | Worker for the `devbox` and `cluster` backends (versioned JSON contract) |
 | `tests/` | pytest suites |
 | `docs/`, `zensical.toml` | Documentation site |
-| `tasks/` | Demo task pack |
+| `evals/` | Demo eval pack |
 | `SPEC.md` | Full design, including unbuilt features |
 
 ## Rules

@@ -116,7 +116,7 @@ The result is agents that degrade silently and can't be rolled back, diffed, or 
 
 1. **One sharable artifact.** `harness.lock` fully describes a tuned agent stack and the
    evidence behind it. It is human-readable, diffable in a PR, and machine-enforceable.
-2. **Domain-specific tuning.** Optimize against *your* tasks (a task pack), not a generic
+2. **Domain-specific tuning.** Optimize against *your* tasks (an eval pack), not a generic
    leaderboard.
 3. **Harness-agnostic.** Pluggable adapters for existing harnesses; no new agent framework
    to learn.
@@ -124,7 +124,7 @@ The result is agents that degrade silently and can't be rolled back, diffed, or 
    The same code path scales to a devbox or a cluster by changing one flag.
 5. **Layered devex.** Flyte powers the backend but stays invisible until a user needs to
    customize compute or durability.
-6. **Open artifacts.** Open-weights decision/judge models, open task packs, an open trace
+6. **Open artifacts.** Open-weights decision/judge models, open eval packs, an open trace
    dataset, all under permissive licenses.
 7. **Updateable.** Partial re-resolution (`update`), evidence diffs, and drift detection
    make it safe to move to new models and harness versions.
@@ -147,9 +147,9 @@ The result is agents that degrade silently and can't be rolled back, diffed, or 
 |---|---|
 | **Stack** | One concrete agent configuration: LLM assignment(s) + decision model + harness + tools + prompts + policies + runtime. |
 | **Component** | One axis of a stack (e.g. `llm.planner`, `decision.router`, `harness`, `policy.retries`). |
-| **Manifest** (`harness.toml`) | User-authored constraints: candidate components, task packs, objectives, budget, backend. |
+| **Manifest** (`harness.toml`) | User-authored constraints: candidate components, eval packs, objectives, budget, backend. |
 | **Search space** | The set of stacks implied by the manifest's candidates and constraints. |
-| **Task pack** | Versioned set of domain tasks + fixtures + graders. The unit of evaluation. |
+| **Eval pack** | Versioned set of domain tasks + fixtures + graders. The unit of evaluation. |
 | **Trial** | One `(stack, task, seed)` execution. Produces a trace and grades. |
 | **Trace** | Structured record of a trial: model calls, decisions, tool calls, observations, artifacts, costs, timings. |
 | **Grader** | Scores a trial: deterministic checks, artifact checks, or an LLM/judge model. |
@@ -168,7 +168,7 @@ The result is agents that degrade silently and can't be rolled back, diffed, or 
 
 ```
  harness.toml ─┐
- task packs ─────┤
+ eval packs ─────┤
                  ▼
           ┌─────────────┐   trials (fan-out)   ┌──────────────┐
           │   planner   │ ───────────────────► │ run + trace  │  ← adapters run each harness
@@ -365,9 +365,9 @@ tool-allowlist = ["python", "github", "filesystem"]
 
 # ---------- Evaluation evidence ----------
 [[evidence]]
-task-pack = "harness-lock/ml-engineering"
-task-pack-version = "0.2.0"
-task-pack-hash = "sha256:6aa2…"
+eval-pack = "harness-lock/ml-engineering"
+eval-pack-version = "0.2.0"
+eval-pack-hash = "sha256:6aa2…"
 split = "holdout"
 trials = 150                             # 50 tasks × 3 seeds
 success-rate = { mean = 0.87, ci95 = [0.81, 0.92] }
@@ -647,8 +647,8 @@ User-authored. Declares candidates and constraints; the tuner resolves them into
 [project]
 name = "ml-eng-debugger"
 
-[tasks]
-packs = ["harness-lock/ml-engineering@^0.2", "./tasks/internal"]   # hub packs + local packs
+[evals]
+packs = ["harness-lock/ml-engineering@^0.2", "./evals/internal"]   # hub packs + local packs
 splits = { search = 0.7, holdout = 0.3 }
 seeds = 3
 
@@ -767,9 +767,9 @@ hlock remove skill pdf
 
 ## 7. Components
 
-### 7.1 Task packs
+### 7.1 Eval packs
 
-A task pack is a directory (or a Hub reference) with a `pack.toml`:
+An eval pack is a directory (or a Hub reference) with a `pack.toml`:
 
 ```toml
 [pack]
@@ -803,10 +803,21 @@ correctness, tool errors, recoveries, human interventions, safety violations. Ag
 come with bootstrap CIs, plus **determinism** (outcome and trajectory variance across seeds)
 and **replayability** (whether the trial reproduces from its recorded trace, §10.3).
 
-**Bootstrapping a pack.** `hlock tasks new --from-traces <dir>` turns existing
-production traces (in the trace schema, or imported from OTel/LangSmith/etc.) into
-draft tasks with draft graders for a human to review. Domain coverage is the biggest
-adoption barrier, so this path matters.
+**Bootstrapping a pack.** Domain coverage is the biggest adoption barrier, so there are
+three ways in:
+
+- *Built:* `hlock evals init` writes a complete hello-world pack (three tasks with
+  fixtures) that runs as is, so a new user sees the whole loop before writing anything.
+- *Built:* `hlock evals init -t coding|data|research|support|blank` writes a template: task
+  slots marked `TODO(hlock)`, cycled over the template's task kinds (`--tasks N`, default
+  10), plus an Agent Skill (`.agents/skills/hlock-eval-pack/SKILL.md`). The user's own
+  agent follows the skill to fill the slots from local context (git history, merged PRs,
+  closed issues, notebooks, tickets), proposing tasks before writing them and keeping
+  secrets out of fixtures. `hlock evals check` (also run by `resolve`) reports unfilled
+  slots, missing prompts or fixtures, duplicate ids, and tasks that can't fail.
+- *Planned:* `hlock evals new --from-traces <dir>` turns existing production traces (in
+  the trace schema, or imported from OTel/LangSmith/etc.) into draft tasks with draft
+  graders for a human to review.
 
 Initial official packs: `research-analyst`, `data-cleaning`, `ml-engineering`,
 `code-migration`, `support-triage`. Each has 30–100 tasks and a hidden holdout split on the Hub.
@@ -1141,7 +1152,7 @@ up in `hlock diff`.
   and competes for selection. The lock records total metadata tokens, and `optional` skills
   let the tuner find the smallest set that keeps quality.
 - **Variants.** `variants` A/B-tests two versions of a skill (a new upstream commit vs. the
-  pinned one, or a terse vs. verbose rewrite) against the task pack.
+  pinned one, or a terse vs. verbose rewrite) against the eval pack.
 
 #### 7.7.8 Skill supply-chain security
 
@@ -1160,7 +1171,7 @@ harness-lock therefore:
 - enforces `[skills.trust]` (allowed sources, required license, pinned commits, scan pass,
   signatures);
 - runs skill scripts only inside the sandbox, under the stack's `[policy]`;
-- includes safety graders in official task packs that try to trigger skill-borne injection,
+- includes safety graders in official eval packs that try to trigger skill-borne injection,
   so a stack whose skills make it unsafe can't win.
 
 The scanner is pluggable (`hlock skills scan --scanner …`). The built-in one is a baseline, not
@@ -1371,8 +1382,8 @@ What carries over unchanged: the portable components (MCP servers, skills, instr
 translated as in `launch`. Remote MCP servers are kept but flagged, since they're also network
 dependencies (`--strict` drops them).
 
-How the choice is made: with task packs available (a `harness.toml` with `[tasks]`, or
-`--tasks`), `localize` builds an in-memory search space (local harnesses × local models ×
+How the choice is made: with eval packs available (a `harness.toml` with `[evals]`, or
+`--evals`), `localize` builds an in-memory search space (local harnesses × local models ×
 decision models) and runs it through the `optimize`/resolver pipeline with an all-local
 constraint. A localized code harness runs for real through the §7.8.3 contract; agent CLIs use
 the backend's adapter until native adapters exist. The evidence is compared with the source
@@ -1474,7 +1485,7 @@ Durability properties this gives us:
 - **Rate limiting** per provider via bounded concurrency in the fan-out, plus reusable
   containers (`flyte.ReusePolicy`) for trial workers on devbox/cluster to avoid cold starts.
 - **Human-in-the-loop** for `human-approval` policies during tuning: by default a
-  *simulated* approver (a scripted policy defined by the task pack) so tuning is unattended;
+  *simulated* approver (a scripted policy defined by the eval pack) so tuning is unattended;
   optionally real approvals through Flyte's human-in-the-loop mechanism on devbox/cluster.
 - **Lineage.** Every lock's `provenance.run` points at the Flyte run that produced it,
   and every evidence blob points at the trial outputs.
@@ -1530,7 +1541,7 @@ synthetic data where not:
   - Flyte-backed harnesses: runs under `flyte://org/project/domain`
   - explicit: `--data user:./runs,harnesslock-traces.jsonl` or `hlock traces export` output
   - a hub pack: `--data hub:harness-lock/traces`
-- **Synthetic** — `--data synthetic[:<n>]`: generates tasks from the task pack (failure
+- **Synthetic** — `--data synthetic[:<n>]`: generates tasks from the eval pack (failure
   seeding, tool-error recovery, prompt-injection attempts) plus optional LLM-authored
   variants to cover the space real traces under-sample.
 
@@ -1599,7 +1610,7 @@ hlock export --format docker|flyte|langgraph           # emit a deployable bundl
 hlock leaderboard [--pack <name>]                      # ranked stacks from the last search (Pareto front)
 hlock outdated                           # locked peripherals (skills, MCP, plugins, harness) with newer upstream versions
 hlock skills import|adopt|scan|unused    # import skills-lock.json or user skills, adopt undeclared, scan, find unused
-hlock tasks new|validate|pull|push
+hlock evals init|check|templates|new|pull|push
 hlock traces ls|show|export              # browse traces; export as HF dataset
 hlock traces replay <trial>              # re-run a trial from its recorded trace (§10.3)
 hlock traces explain <trial>             # failure triage via harness-lock/triage (§11)
@@ -1639,7 +1650,7 @@ space = hlock.SearchSpace(
 )
 lock = harness.lock(
     space,
-    tasks=hlock.TaskPack.pull("harness-lock/data-cleaning"),
+    evals=hlock.EvalPack.pull("harness-lock/data-cleaning"),
     objective=hlock.Objective(primary="success-rate", select="min-cost",
                            constraints={"success-rate": ">=0.8"}),
     budget=hlock.Budget(max_spend_usd=50),
@@ -1784,13 +1795,13 @@ and tuning later.
   stacks. Successes and failures, with grades. The training corpus for §11.
 - `harness-lock/failures`: failed trajectories labeled with failure class and the recovery
   step that worked in a sibling trial.
-- `harness-lock/tasks-*`: the official task packs (holdout splits withheld).
+- `harness-lock/evals-*`: the official eval packs (holdout splits withheld).
 
 Users opt in to contributing traces (`hlock traces push --public`) with a mandatory
 redaction pass. Nothing is uploaded by default.
 
 The trace corpus is likely the most defensible long-term asset: it trains §11's models and
-seeds new task packs.
+seeds new eval packs.
 
 ### 10.3 Replay
 
@@ -1828,7 +1839,7 @@ Design requirements:
   the lock records which judge produced the evidence.
 
 Marketing hooks: *"A 1.5B decision model that cuts agent cost by X% at equal success on
-Y task packs."* and *"We trained a small model to debug failed agents from their traces."*
+Y eval packs."* and *"We trained a small model to debug failed agents from their traces."*
 (triage). Only claim numbers we can publish with the reproduction pipeline.
 
 These models are deliberately narrow companion artifacts. "We fine-tuned a general
@@ -1871,7 +1882,7 @@ hlock/
   manifest/              # harness.toml parsing, validation, hashing
   lockfile/              # harness.lock schema, (de)serialization, diff, check
   store/                 # content-addressed blob store (local dir, s3/gcs/azure via fsspec)
-  tasks/                 # task packs, graders, splits, Hub client
+  tasks/                 # eval packs, graders, splits, Hub client
   providers/             # LLM providers, alias resolution, pricing, fingerprints, serving
   decision/              # rules, llm, model decision backends; training recipes
   components/            # component model: ComponentKind registry, pin strategies, graph, portable kinds
@@ -1922,7 +1933,7 @@ Install extras: `harness-lock[vllm]`, `harness-lock[train]`, `harness-lock[docke
 - `harness-lock/decider` + `harness-lock/judge` released · decision-model tuning stage
 - Layer 2 extension points stable, including the public `ComponentKind` entry point · profiles
 - Portable kinds `memory`, `retrieval`, `guardrail`, `browser`
-- `tasks new --from-traces`
+- `evals new --from-traces`
 
 **v0.4: "scale"**
 - `cluster` backend (self-hosted Flyte and Union) · shared team cache
@@ -1949,7 +1960,7 @@ Install extras: `harness-lock[vllm]`, `harness-lock[train]`, `harness-lock[docke
 
 **"We tuned an AI data analyst for your company in 20 minutes."**
 
-1. Start from 20–50 domain tasks (an official pack, or `tasks new --from-traces`).
+1. Start from 20–50 domain tasks (an official pack, or `evals new --from-traces`).
 2. harness-lock tries stacks such as frontier LLM + LangGraph, Claude + OpenCode, Qwen +
    custom workflow, small decider + big-model fallback, and local model on a cluster backend.
 3. `hlock leaderboard` shows the Pareto front.
@@ -1973,7 +1984,7 @@ Per-pack leaderboards produce charts and debate:
 
 ### 15.4 Launch artifacts
 
-GitHub repo · PyPI package · HF models (§11) · HF datasets (§10.2) · official task packs ·
+GitHub repo · PyPI package · HF models (§11) · HF datasets (§10.2) · official eval packs ·
 per-pack leaderboard · three example agents (research, data analysis, code execution) ·
 Flyte/Union cluster backend docs.
 
@@ -1981,7 +1992,7 @@ Flyte/Union cluster backend docs.
 
 - Time from `pip install` to first `harness.lock` on the local backend: **< 10 minutes**.
 - `harness.lock` files in public GitHub repos (search `filename:harness.lock lock-version`).
-- Community task packs and adapters published.
+- Community eval packs and adapters published.
 - Downloads of `harness-lock/decider` and `harness-lock/judge`.
 - Share of locks produced on devbox/cluster backends (the dial is working).
 - Published case studies where a locked stack matched frontier-only quality at materially
@@ -2012,7 +2023,7 @@ tools' lockfiles before v1.0.
    `verify` auto-propose an `update`, or only fail?
 6. **Judge trust.** How much of the evidence may come from judge graders before the lock
    is flagged "low-confidence"?
-7. **Hub.** Host task packs and locks on Hugging Face only, or run a small registry with
+7. **Hub.** Host eval packs and locks on Hugging Face only, or run a small registry with
    a leaderboard per pack?
 8. **Harness licensing.** Some harnesses have restrictive terms for automated or benchmark
    use. We need a per-adapter compliance note before publishing leaderboards.
@@ -2045,10 +2056,10 @@ could try, not just Union customers.
    harness, a public agent-trace dataset, and a benchmark measuring completion, tool-use
    correctness, recovery, cost, latency, determinism, replayability, and human-intervention
    rate, with a Flyte/Union backend for durable runs. *Kept as:* the trace layer (§10), the
-   task packs and graders (§7.1), and leaderboards (§15.3).
+   eval packs and graders (§7.1), and leaderboards (§15.3).
 2. **HarnessForge**: reframed from "evaluate and replay agents" to "produce the best
    domain-specialized agent system". It tunes LLM + decision model + harness + tools +
-   policy against domain task packs and exports the winner. TraceForge became its data
+   policy against domain eval packs and exports the winner. TraceForge became its data
    layer. *Kept as:* the tuner (§8), the manifest search space (§6), decision models (§7.3),
    and `export` (§9.1).
 3. **harness-lock**: adds the missing piece, a sharable, enforceable, version-controlled
@@ -2064,7 +2075,7 @@ could try, not just Union customers.
 | Private model-factory template | repo + workflows | Strong Union fit, but a template rather than a product; candidate future example |
 | Local LLM gateway proxy | installable system | Crowded market; folded in as an internal component (§7.4 proxy) |
 | Fine-tuned workflow-repair model | model + dataset | Best as a companion artifact; became `harness-lock/triage` (§11) |
-| Standalone research-agent app | app/harness | Good demo but less differentiated; became an example agent + the first task pack |
+| Standalone research-agent app | app/harness | Good demo but less differentiated; became an example agent + the first eval pack |
 
 ## Appendix B. References for the peripheral and skills survey (§5.4, §7.6, §7.7)
 

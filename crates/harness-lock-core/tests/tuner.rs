@@ -41,6 +41,7 @@ fn make_manifest(pack: &Path) -> Manifest {
 [project]
 name = "tunertest"
 
+# the old [tasks] name for [evals] still parses
 [tasks]
 seeds = 2
 
@@ -70,7 +71,7 @@ target = "local"
 "#
     );
     let mut m = Manifest::from_str(&toml).unwrap();
-    m.tasks.insert(
+    m.evals.insert(
         "packs".to_string(),
         serde_json::json!([pack.to_string_lossy().to_string()]),
     );

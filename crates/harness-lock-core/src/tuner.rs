@@ -12,7 +12,7 @@ use crate::manifest::{HarnessCandidate, Manifest};
 use crate::profiles::{probe_harness, Ctx, Registry};
 use crate::search::{select_winner, Stack, StackScore, TrialResult};
 use crate::store::Store;
-use crate::tasks::TaskPack;
+use crate::tasks::EvalPack;
 use crate::worker::{Backend, PythonAdapter};
 
 /// Aggregated metrics container produced by the tuner.
@@ -22,7 +22,7 @@ pub struct Tuner {
     pub workdir: PathBuf,
     pub store: Store,
     pub backend: Backend,
-    pack_by_task: BTreeMap<String, crate::tasks::TaskPack>,
+    pack_by_task: BTreeMap<String, crate::tasks::EvalPack>,
     adapter: Box<dyn HarnessAdapter>,
     holdout: Vec<crate::tasks::Task>,
     /// Target harness from the CLI (`--harness`), overriding `[target] harness`.
@@ -61,13 +61,17 @@ impl Tuner {
         }
     }
 
-    /// Load the manifest's task packs and return the search-split tasks.
+    /// Load the manifest's eval packs and return the search-split tasks.
     pub fn load_packs(&mut self) -> Vec<crate::tasks::Task> {
         let mut search: Vec<crate::tasks::Task> = Vec::new();
         let base = self.manifest.root();
-        for ref_ in self.manifest.task_packs() {
-            match TaskPack::load(&ref_, Some(&base)) {
+        for ref_ in self.manifest.eval_packs() {
+            match EvalPack::load(&ref_, Some(&base)) {
                 Ok(pack) => {
+                    let errors = pack.check().iter().filter(|i| i.level == "error").count();
+                    if errors > 0 {
+                        eprintln!("warn: eval pack {ref_} has {errors} problem(s); run `hlock evals check {ref_}`");
+                    }
                     let (s, h) = pack.split(self.manifest.search_frac(), self.manifest.budget.random_seed);
                     for t in pack.tasks.clone() {
                         self.pack_by_task.insert(t.id.clone(), pack.clone());
@@ -75,7 +79,7 @@ impl Tuner {
                     search.extend(s);
                     self.holdout.extend(h);
                 }
-                Err(e) => eprintln!("warn: skipping task pack {ref_}: {e}"),
+                Err(e) => eprintln!("warn: skipping eval pack {ref_}: {e}"),
             }
         }
         search
@@ -301,7 +305,7 @@ impl Tuner {
             },
             context: Context { isolation: self.manifest.context.get("isolation").and_then(serde_json::Value::as_str).unwrap_or("locked-only").into(), ..Default::default() },
             evidence: Evidence {
-                task_pack: Some(self.manifest.task_packs().join(",")),
+                eval_pack: Some(self.manifest.eval_packs().join(",")),
                 split: "search".into(),
                 trials: winner.n,
                 success_rate,

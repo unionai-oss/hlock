@@ -60,13 +60,13 @@ success rate Some(1.0) over 2 trials
 
 | Item | What it is |
 |---|---|
-| [`Manifest`](https://docs.rs/harness-lock-core/latest/harness_lock_core/manifest/struct.Manifest.html) | A parsed `harness.toml`: `load`, `from_str`, `manifest_hash`, `task_packs`, `backend_target` |
+| [`Manifest`](https://docs.rs/harness-lock-core/latest/harness_lock_core/manifest/struct.Manifest.html) | A parsed `harness.toml`: `load`, `from_str`, `manifest_hash`, `eval_packs`, `backend_target` |
 | [`Tuner`](https://docs.rs/harness-lock-core/latest/harness_lock_core/tuner/struct.Tuner.html) | The resolver: `new`, `with_backend`, `enumerate_stacks`, `run_trial`, `tune` |
 | [`Lockfile`](https://docs.rs/harness-lock-core/latest/harness_lock_core/lockfile/struct.Lockfile.html) | The `harness.lock` model: `load`, `from_str`, `save`, `check_manifest`, `summary`, and public fields for every section |
 | [`Backend`](https://docs.rs/harness-lock-core/latest/harness_lock_core/worker/enum.Backend.html) | `Local`, `Devbox`, or `Cluster`; `Backend::parse("devbox")` |
 | [`Store`](https://docs.rs/harness-lock-core/latest/harness_lock_core/store/struct.Store.html) | The content-addressed artifact store under `.harnesslock/` |
 | [`HarnessAdapter`](https://docs.rs/harness-lock-core/latest/harness_lock_core/adapters/trait.HarnessAdapter.html) | The trait a harness implements to run trials |
-| [`Error`](https://docs.rs/harness-lock-core/latest/harness_lock_core/error/enum.Error.html), [`Result`](https://docs.rs/harness-lock-core/latest/harness_lock_core/error/type.Result.html) | The error type, with one variant per kind (`Manifest`, `Lockfile`, `TaskPack`, `Tuning`, …) |
+| [`Error`](https://docs.rs/harness-lock-core/latest/harness_lock_core/error/enum.Error.html), [`Result`](https://docs.rs/harness-lock-core/latest/harness_lock_core/error/type.Result.html) | The error type, with one variant per kind (`Manifest`, `Lockfile`, `EvalPack`, `Tuning`, …) |
 | `LOCK_VERSION`, `LOCKFILE_PATH`, `MANIFEST_PATH` | Schema version `1`, `"harness.lock"`, `"harness.toml"` |
 
 ## Modules
@@ -77,7 +77,7 @@ success rate Some(1.0) over 2 trials
 | [`lockfile`](https://docs.rs/harness-lock-core/latest/harness_lock_core/lockfile/) | Lockfile schema: stack, policy, evidence, provenance |
 | [`tuner`](https://docs.rs/harness-lock-core/latest/harness_lock_core/tuner/) | The resolver: trial execution and lock construction |
 | [`search`](https://docs.rs/harness-lock-core/latest/harness_lock_core/search/) | Stacks, trial results, Pareto fronts, winner selection |
-| [`tasks`](https://docs.rs/harness-lock-core/latest/harness_lock_core/tasks/) | Task packs, the search/holdout split, grading |
+| [`tasks`](https://docs.rs/harness-lock-core/latest/harness_lock_core/tasks/) | Eval packs, the search/holdout split, grading |
 | [`ops`](https://docs.rs/harness-lock-core/latest/harness_lock_core/ops/) | `upgrade` and `optimize`, the engines behind those commands |
 | [`worker`](https://docs.rs/harness-lock-core/latest/harness_lock_core/worker/) | Backends and the Python worker bridge (versioned JSON contract) |
 | [`providers`](https://docs.rs/harness-lock-core/latest/harness_lock_core/providers/) | The deterministic reference LLM provider |

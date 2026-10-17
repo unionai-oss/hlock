@@ -8,7 +8,7 @@ import pytest
 import harness_lock as hlock
 
 REPO = Path(__file__).resolve().parent.parent
-TASKS = REPO / "tasks"
+TASKS = REPO / "evals"
 
 PACK_TOML = """\
 [pack]
@@ -50,7 +50,7 @@ def test_search_space_tune(workspace, monkeypatch):
         llm={"planner": ["reference:qwen-7b", "reference:qwen-32b"]},
         decision=["none", "rules:default"],
         harness=["reference"],
-        tasks=json.dumps({"packs": [str(ws)], "seeds": 2}),
+        evals=json.dumps({"packs": [str(ws)], "seeds": 2}),
     )
     lf = hlock.resolve(space, backend="local", workdir=str(base / ".harnesslock"))
     assert lf.harness == "reference"

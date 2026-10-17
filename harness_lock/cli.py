@@ -39,7 +39,9 @@ from harness_lock import (
     sync_run_step,
     sync_skill,
 )
+from harness_lock import check_eval_pack as _check_eval_pack
 from harness_lock import check_pin as _check_pin
+from harness_lock import evals as _evals
 from harness_lock import localize as _localize
 from harness_lock import optimize as al_optimize
 from harness_lock import pin as _pin
@@ -133,7 +135,7 @@ click.rich_click.STYLE_USAGE = "bold magenta"
 click.rich_click.MAX_WIDTH = 100
 click.rich_click.COMMAND_GROUPS = {
     "hlock": [
-        {"name": "Lock", "commands": ["init", "resolve", "pin", "check"]},
+        {"name": "Lock", "commands": ["init", "evals", "resolve", "pin", "check"]},
         {"name": "Rehydrate", "commands": ["sync", "launch"]},
         {"name": "Harness", "commands": ["harness", "runtime"]},
         {"name": "Inspect", "commands": ["show", "tree", "backend"]},
@@ -160,9 +162,9 @@ def _hint_for(message: str) -> str | None:
     if "cannot read" in message and Path(_l()).name in message:
         return "write one with [cmd]hlock resolve[/]"
     if "no tasks loaded" in message or "no viable stack" in message:
-        return f"check that [key]\\[tasks] packs[/] in [path]{_md()}[/] point at a directory with a pack.toml"
-    if "task pack" in message:
-        return f"check the [key]\\[tasks] packs[/] paths in [path]{_md()}[/]"
+        return f"check that [key]\\[evals] packs[/] in [path]{_md()}[/] point at a directory with a pack.toml"
+    if "eval pack" in message:
+        return f"check the [key]\\[evals] packs[/] paths in [path]{_md()}[/]"
     if "unknown harness" in message:
         return "list the known harnesses with [cmd]hlock harness list[/]"
     if "several harnesses are installed" in message or "no supported harness" in message:
@@ -356,14 +358,14 @@ def main(manifest: str | None, lock_path: str | None) -> None:
     Tune your agent stack against your own tasks, then pin the winner in a
     [path]harness.lock[/].
 
-    Get started: [cmd]hlock init[/] → [cmd]hlock resolve[/] → [cmd]hlock check[/]
+    Get started: [cmd]hlock evals init[/] → [cmd]hlock init[/] → [cmd]hlock resolve[/] → [cmd]hlock check[/]
     """
     _set_project(manifest, lock_path)
 
 
 @main.command()
 @click.option("--name", default="demo", show_default=True, help="Project name for the manifest.")
-@click.option("--pack", default="./tasks", show_default=True, help="Path to a task pack directory.")
+@click.option("--pack", default="./evals", show_default=True, help="Path to an eval pack directory.")
 @click.option("--harness", "harness", default=None,
               help="Target harness for \\[target]. [dim]\\[default: the one you're running in, if any][/]")
 @click.option("--force", is_flag=True, help="Overwrite an existing harness.toml.")
@@ -384,12 +386,106 @@ def init(name: str, pack: str, harness: str | None, force: bool) -> None:
         except ValueError:
             target = None
     p.write_text(_default_manifest(name, pack, target["id"] if target else None))
-    _ok(f"wrote [path]{_show(p)}[/]  [muted](project {name!r}, task pack {pack})[/]")
+    _ok(f"wrote [path]{_show(p)}[/]  [muted](project {name!r}, eval pack {pack})[/]")
     if target:
         console.print(f"[key]target[/] [bold]{target['id']}[/]  [muted]({target['reason']})[/]")
     if not (Path(pack) / "pack.toml").exists():
         console.print(f"[warn]![/] no [path]pack.toml[/] found in [path]{pack}[/]; add one before resolving")
+        _next(f"hlock evals init {pack}", "hlock resolve")
+        return
     _next("hlock resolve")
+
+
+@main.group()
+def evals() -> None:
+    """Write and check [bold]eval packs[/], the tasks every candidate stack is measured on."""
+
+
+@evals.command("init")
+@click.argument("directory", default="./evals")
+@click.option("-t", "--template", default="hello-world", show_default=True,
+              type=click.Choice(list(_evals.TEMPLATES)), help="What to write. See [cmd]hlock evals templates[/].")
+@click.option("--name", default=None, help="Pack name. [dim]\\[default: <project>/<directory>][/]")
+@click.option("--tasks", "n_tasks", default=10, show_default=True, type=click.IntRange(1, 200),
+              help="How many task slots a template writes. Ignored by hello-world.")
+@click.option("--no-skill", is_flag=True, help="Don't write the Agent Skill that guides your agent through a template.")
+@click.option("--skill-dir", default=f".agents/skills/{_evals.SKILL_NAME}", show_default=True,
+              help="Where the Agent Skill's SKILL.md goes.")
+@click.option("--force", is_flag=True, help="Overwrite an existing pack.toml.")
+def evals_init(directory: str, template: str, name: str | None, n_tasks: int, no_skill: bool, skill_dir: str,
+               force: bool) -> None:
+    """Write a starter eval pack to [path]DIRECTORY[/].
+
+    The default [bold]hello-world[/] pack is complete and runs as is. The other templates
+    write task slots marked [key]TODO(hlock)[/], plus an Agent Skill your agent uses to
+    fill them with real tasks from this project.
+    """
+    with _friendly_errors():
+        written = _evals.init(directory, template, name=name, n_tasks=n_tasks, force=force)
+    if template == "hello-world":
+        _ok(f"wrote [path]{_show(written[0])}[/]  [muted](hello-world, {len(_evals.HELLO_TASKS)} tasks)[/]")
+    else:
+        _ok(f"wrote [path]{_show(written[0])}[/]  [muted]({template} template, {n_tasks} task slots)[/]")
+    console.print(f"  [muted]{len(written)} files under {_show(directory)}[/]")
+    if template == "hello-world":
+        _next(f"hlock evals check {directory}", f"hlock init --pack {directory}" if not Path(_m()).exists() else "hlock resolve")
+        return
+    if not no_skill:
+        path = Path(skill_dir) / "SKILL.md"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(_evals.skill(_evals.TEMPLATES[template], directory))
+        _ok(f"wrote [path]{_show(path)}[/]  [muted](Agent Skill {_evals.SKILL_NAME})[/]")
+        console.print(f"[muted]open your agent here and ask it to fill in {directory} "
+                      f"with the {_evals.SKILL_NAME} skill[/]")
+    _next(f"hlock evals check {directory}")
+
+
+@evals.command("templates")
+@click.option("--json", "as_json", is_flag=True, help="Print the templates as JSON.")
+def evals_templates(as_json: bool) -> None:
+    """List the eval pack templates [cmd]hlock evals init[/] can write."""
+    rows = _evals.templates()
+    if as_json:
+        console.print_json(data=[{"name": t.name, "domain": t.domain, "summary": t.summary,
+                                  "kinds": [s.kind for s in t.slots]} for t in rows])
+        return
+    t = Table(box=None, header_style="bold", pad_edge=False)
+    t.add_column("template", style="key")
+    t.add_column("task kinds")
+    t.add_column("", style="muted")
+    for tpl in rows:
+        kinds = ", ".join(s.kind for s in tpl.slots) or "[muted]complete pack[/]"
+        t.add_row(tpl.name, kinds, tpl.summary)
+    console.print(t)
+    _next("hlock evals init -t <template>")
+
+
+@evals.command("check")
+@click.argument("directory", default="./evals")
+@click.option("--json", "as_json", is_flag=True, help="Print the result as JSON.")
+def evals_check(directory: str, as_json: bool) -> None:
+    """Check that an eval pack is ready: required fields, prompts, fixtures, and no
+    [key]TODO(hlock)[/] slots left. Exits 1 on errors; warnings don't fail."""
+    with _friendly_errors():
+        result = json.loads(_check_eval_pack(directory))
+    issues = result["issues"]
+    errors = [i for i in issues if i["level"] == "error"]
+    if as_json:
+        console.print_json(data=result)
+        sys.exit(1 if errors else 0)
+    head = f"[bold]{result['name'] or '(unnamed)'}[/] {result['version']}  [muted]{len(result['tasks'])} tasks · {_show(directory)}[/]"
+    console.print(head)
+    for i in issues:
+        mark = "[fail]✗[/]" if i["level"] == "error" else "[warn]![/]"
+        where = f"[key]{i['task']}[/]  " if i["task"] else ""
+        console.print(f"  {mark} {where}{i['message']}", soft_wrap=True)
+    warns = len(issues) - len(errors)
+    plural = lambda n, word: f"{n} {word}{'' if n == 1 else 's'}"
+    if errors:
+        err_console.print(f"[fail]✗[/] {plural(len(errors), 'error')}, {plural(warns, 'warning')}")
+        sys.exit(1)
+    _ok(f"ready  [muted]({plural(warns, 'warning')})[/]" if warns else "ready")
+    _next("hlock resolve" if Path(_m()).exists() else f"hlock init --pack {directory}")
 
 
 @main.command()
@@ -1124,24 +1220,25 @@ def _manifest_target() -> str | None:
 @click.option("--runtime", default=None, help="Inference runtime (ollama, lmstudio, llama-cpp, …). [dim]\\[default: the best installed][/]")
 @click.option("--models", default=None, help="Comma-separated model ids to consider instead of the runtime's catalog.")
 @click.option("--memory-gb", type=float, default=None, help="Memory budget for model weights. [dim]\\[default: measured][/]")
-@click.option("--tasks", default=None, help="Task pack to evaluate candidates on. [dim]\\[default: harness.toml's, if any][/]")
+@click.option("--evals", "--tasks", "evals", default=None,
+              help="Eval pack to evaluate candidates on. [dim]\\[default: harness.toml's, if any][/]")
 @click.option("--strict", is_flag=True, help="Drop remote MCP servers instead of flagging them.")
 @click.option("--allow-network", is_flag=True, help="Keep self-hosted runtimes on your network instead of replacing them.")
 @click.option("--json", "as_json", is_flag=True, help="Print the localize report as JSON.")
 def localize(lock: str | None, out: str, harness: str | None, runtime: str | None, models: str | None,
-             memory_gb: float | None, tasks: str | None, strict: bool, allow_network: bool, as_json: bool) -> None:
+             memory_gb: float | None, evals: str | None, strict: bool, allow_network: bool, as_json: bool) -> None:
     """Write an all-local equivalent of a lock to [path]harness.local.lock[/].
 
     A proprietary harness, or one that can't use a local model, becomes a local-capable
     one; models on API providers move to a local runtime, picked from its catalog and the
     weights on disk to fit this machine's memory. MCP servers, skills and instructions carry
-    over. With task packs, candidates are evaluated; otherwise they're ranked.
+    over. With eval packs, candidates are evaluated; otherwise they're ranked.
     """
     model_list = [m.strip() for m in models.split(",")] if models else []
     with _working("Localizing…"):
         lock = lock or _l()
         result = json.loads(_localize(lock, out, harness=harness, runtime=runtime, models=model_list,
-                                      memory_gb=memory_gb, tasks=tasks, strict=strict, allow_network=allow_network,
+                                      memory_gb=memory_gb, evals=evals, strict=strict, allow_network=allow_network,
                                       manifest=_m()))
     rep = result["report"]
     if as_json:
@@ -1173,7 +1270,7 @@ def localize(lock: str | None, out: str, harness: str | None, runtime: str | Non
             line += f"  [muted](source lock: {_pct(base['success-rate'])})[/]"
         t.add_row("evidence", line)
     else:
-        t.add_row("evidence", "[muted]not evaluated (no task packs); ranked by fit, tier, and what's on disk[/]")
+        t.add_row("evidence", "[muted]not evaluated (no eval packs); ranked by fit, tier, and what's on disk[/]")
     console.print(Panel(t, title=f"[brand]🏠 {out} · localized[/]", title_align="left", border_style="magenta",
                         expand=False, padding=(1, 2)))
     for line in rep["replaced"]:
@@ -1221,7 +1318,7 @@ def _default_manifest(name: str, pack: str, target: str | None = None) -> str:
 name = "{name}"
 
 {target_block}
-[tasks]
+[evals]
 packs = ["{pack}"]
 seeds = 2
 

@@ -21,7 +21,7 @@ space = SearchSpace(
     harness=["reference"],
     objective=Objective(select="min-cost", constraints={"success-rate": ">=0.5"}),
     budget=Budget(max_trials=50),
-    tasks=json.dumps({"packs": ["./tasks"], "seeds": 2}),
+    evals=json.dumps({"packs": ["./evals"], "seeds": 2}),
 )
 
 lock = hlock.resolve(space, backend="local")     # also writes ./harness.lock
@@ -96,6 +96,23 @@ Run the optimizer, like [`hlock optimize`](cli.md#optimize). Returns JSON with `
 (the opt-lock written), `summary`, and a `report` with `depth`, `backend`, `data_mode`,
 `grid`, `best`, `baseline_success_rate`, and `gain_success_rate`.
 
+### `check_eval_pack`
+
+```python
+check_eval_pack(path) -> str
+```
+
+Load the [eval pack](../guides/eval-packs.md) at `path` and check it, like
+[`hlock evals check`](cli.md#evals). Returns JSON with `name`, `version`, `domain`,
+`path`, `hash`, `tasks` (the task ids), and `issues`, each with `level` (`error` or
+`warn`), `task` (or `None`), and `message`.
+
+```python
+>>> r = json.loads(hl.check_eval_pack("evals"))
+>>> r["tasks"], [i["level"] for i in r["issues"]]
+(['hello_file', 'count_words', 'greet_people'], ['warn'])
+```
+
 ## Classes
 
 ### `SearchSpace`
@@ -104,7 +121,7 @@ A search space built in code instead of a `harness.toml`.
 
 ```python
 SearchSpace(llm=None, decision=None, harness=None, policy=None, tools=None,
-            skills=None, objective=None, budget=None, tasks=None)
+            skills=None, objective=None, budget=None, evals=None)
 ```
 
 | Parameter | Type | Description |
@@ -114,7 +131,7 @@ SearchSpace(llm=None, decision=None, harness=None, policy=None, tools=None,
 | `harness` | `list[str]` | Candidate harnesses |
 | `objective` | `Objective` | What "best" means |
 | `budget` | `Budget` | How much to search |
-| `tasks` | `str` (JSON) | `{"packs": [...], "seeds": n}`. Defaults to `{"seeds": 2}`. |
+| `evals` | `str` (JSON) | `{"packs": [...], "seeds": n}`. Defaults to `{"seeds": 2}`. `tasks` is the old name. |
 | `policy`, `tools`, `skills` | `str` (JSON) | Matching manifest sections |
 
 `SearchSpace.to_manifest(name)` returns the equivalent `Manifest`. A lock resolved from
@@ -147,7 +164,7 @@ Budget(max_spend_usd=None, max_trials=None, strategy="grid", random_seed=0)
 | `.name` | Project name |
 | `.backend` | Configured backend target |
 | `.manifest_hash()` | `"sha256:…"` hash, as recorded in the lock |
-| `.task_packs()` | List of task pack paths |
+| `.eval_packs()` | List of eval pack paths (`.task_packs()` is the old name) |
 | `.to_json()` | The manifest as JSON |
 
 ### `Lockfile`
@@ -181,5 +198,5 @@ Budget(max_spend_usd=None, max_trials=None, strategy="grid", random_seed=0)
 ## Errors
 
 Invalid input and failed operations raise `ValueError` with a message prefixed by the
-error kind: `manifest error:`, `lockfile error:`, `task pack error:`, `tuning error:`,
+error kind: `manifest error:`, `lockfile error:`, `eval pack error:`, `tuning error:`,
 `python worker error:`, and so on.

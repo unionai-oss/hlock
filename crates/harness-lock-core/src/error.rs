@@ -6,8 +6,8 @@ pub enum Error {
     Manifest(String),
     #[error("lockfile error: {0}")]
     Lockfile(String),
-    #[error("task pack error: {0}")]
-    TaskPack(String),
+    #[error("eval pack error: {0}")]
+    EvalPack(String),
     #[error("store error: {0}")]
     Store(String),
     #[error("io error: {0}")]

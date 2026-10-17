@@ -77,8 +77,8 @@ the lock means, and the manifest hash covers it. `hlock init` writes it for you 
 it inside a harness, or when you pass `--harness`:
 
 ```console
-$ hlock init --pack ./tasks --harness claude
-✓ wrote harness.toml  (project 'demo', task pack ./tasks)
+$ hlock init --pack ./evals --harness claude
+✓ wrote harness.toml  (project 'demo', eval pack ./evals)
 target claude-code  (--harness)
 next → hlock resolve
 ```

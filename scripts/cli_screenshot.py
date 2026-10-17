@@ -2,7 +2,7 @@
 
     python scripts/cli_screenshot.py          # writes docs/assets/quickstart.svg
 
-Runs init -> resolve -> check -> run against the repo's demo task pack in a temp dir,
+Runs evals init -> init -> resolve -> check -> run in a temp dir,
 recording the CLI's own rich console, so the picture always matches the real output.
 """
 
@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import io
 import os
-import shutil
 import tempfile
 from pathlib import Path
 
@@ -24,10 +23,11 @@ REPO = Path(__file__).resolve().parent.parent
 OUT = REPO / "docs" / "assets" / "quickstart.svg"
 
 SESSION = [
-    ["init", "--name", "demo", "--pack", "./tasks"],
+    ["evals", "init"],
+    ["init", "--name", "demo"],
     ["resolve"],
     ["check"],
-    ["run", "clean ./data/orders.csv"],
+    ["run", "count the words in words.txt"],
 ]
 
 
@@ -36,7 +36,6 @@ def main() -> None:
     cli.console = cli.err_console = rec
     cli._working = lambda _message: cli._friendly_errors()  # spinners don't belong in a still
     with tempfile.TemporaryDirectory() as tmp:
-        shutil.copytree(REPO / "tasks", Path(tmp) / "tasks")
         cwd = os.getcwd()
         os.chdir(tmp)
         try:

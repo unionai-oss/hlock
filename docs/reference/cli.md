@@ -15,6 +15,7 @@ Failures print a one-line error with a hint and exit `1`.
 | Command | Purpose |
 |---|---|
 | [`init`](#init) | Write a starter `harness.toml` |
+| [`evals`](#evals) | Write a starter eval pack from a template, and check one |
 | [`resolve`](#resolve) | Tune the search space and write `harness.lock` |
 | [`pin`](#pin) | Pin your current harness setup into `harness.lock` |
 | [`check`](#check) | Fail if `harness.toml` has drifted from `harness.lock`, or a pinned setup changed |
@@ -48,12 +49,12 @@ everything after the command goes to the harness, so put them first.
 current directory or any parent, the way Cargo finds `Cargo.toml`, so commands work from
 anywhere inside a project. The directory holding the manifest is the **project root**:
 
-- relative paths in the manifest (`[tasks] packs`, instruction files) resolve against it;
+- relative paths in the manifest (`[evals] packs`, instruction files) resolve against it;
 - the lock defaults to `harness.lock` next to the manifest;
 - `.harnesslock/` (trial artifacts), `.hlock/vendor/` and `.hlock/env/` live there.
 
 Without a manifest (a project that only has a pinned lock), hlock uses the nearest
-`harness.lock` instead. Paths you pass on the command line, like `-o` or `--tasks`, are
+`harness.lock` instead. Paths you pass on the command line, like `-o` or `--evals`, are
 relative to where you run the command.
 
 ## `init`
@@ -67,9 +68,47 @@ hlock init [--name NAME] [--pack PATH] [--harness NAME] [--force]
 | Option | Default | Description |
 |---|---|---|
 | `--name` | `demo` | Project name |
-| `--pack` | `./tasks` | Task pack directory. Warns if it has no `pack.toml`. |
+| `--pack` | `./evals` | Eval pack directory. Warns if it has no `pack.toml`, and suggests `hlock evals init`. |
 | `--harness` | the harness you're running inside | Write `[target] harness`. Without it, and outside a harness, `[target]` is left commented out. |
 | `--force` | | Overwrite an existing `harness.toml` |
+
+## `evals`
+
+Write and check [eval packs](../guides/eval-packs.md).
+
+### `evals init`
+
+Write a starter eval pack. The default `hello-world` pack is complete and runs as is.
+The other templates write task slots marked `TODO(hlock)`, plus an Agent Skill that guides
+your agent through filling them in from your project.
+
+```bash
+hlock evals init [DIRECTORY] [-t TEMPLATE] [--name NAME] [--tasks N] [--no-skill] [--skill-dir DIR] [--force]
+```
+
+| Option | Default | Description |
+|---|---|---|
+| `DIRECTORY` | `./evals` | Where to write the pack |
+| `-t`, `--template` | `hello-world` | `hello-world`, `coding`, `data`, `research`, `support`, or `blank` |
+| `--name` | `<project>/<directory>` | Pack name |
+| `--tasks` | `10` | How many task slots a template writes. Ignored by `hello-world`. |
+| `--no-skill` | | Don't write the Agent Skill |
+| `--skill-dir` | `.agents/skills/hlock-eval-pack` | Where the skill's `SKILL.md` goes |
+| `--force` | | Overwrite an existing `pack.toml` |
+
+### `evals templates`
+
+List the templates, with the kinds of task each one has slots for. Takes `--json`.
+
+### `evals check`
+
+Check that a pack is ready: required fields, prompts and fixtures present, no
+`TODO(hlock)` left, and tasks that can fail. Exits `1` on errors; warnings don't fail.
+Takes `--json`.
+
+```bash
+hlock evals check [DIRECTORY] [--json]
+```
 
 ## `resolve`
 
@@ -309,7 +348,7 @@ hlock localize [LOCK] [OPTIONS]
 | `--runtime` | the best installed | `ollama`, `lmstudio`, `llama-cpp`, `mlx-lm`, `vllm`, … |
 | `--models` | the runtime's catalog and weights on disk | Comma-separated model ids to consider |
 | `--memory-gb` | measured | Memory budget for model weights |
-| `--tasks` | `harness.toml`'s task packs | Task pack to evaluate candidates on |
+| `--evals` | `harness.toml`'s eval packs | Eval pack to evaluate candidates on. `--tasks` is the old name. |
 | `--strict` | | Drop remote MCP servers instead of flagging them |
 | `--allow-network` | | Keep self-hosted runtimes on your network |
 | `--json` | | Print the localize report as JSON |

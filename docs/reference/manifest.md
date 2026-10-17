@@ -2,7 +2,7 @@
 
 The manifest declares what the resolver may try and what "best" means. `hlock init` writes
 a starter one. Every section is optional, but a useful manifest has at least
-`[tasks]`, `[candidates]`, and `[objective]`.
+`[evals]`, `[candidates]`, and `[objective]`.
 
 ```toml title="harness.toml"
 [project]
@@ -11,11 +11,11 @@ name = "support-agent"
 [target]
 harness = "claude-code"
 
-[tasks]
-packs = ["./tasks"]
+[evals]
+packs = ["./evals"]
 seeds = 3
 
-[tasks.splits]
+[evals.splits]
 search = 0.7
 
 [candidates.llm.planner]
@@ -52,13 +52,15 @@ target = "local"
 |---|---|
 | `name` | Project name, recorded as the lock's stack name |
 
-## `[tasks]`
+## `[evals]`
 
 | Key | Default | Description |
 |---|---|---|
-| `packs` | `[]` | Paths to [task pack](../guides/task-packs.md) directories |
+| `packs` | `[]` | Paths to [eval pack](../guides/eval-packs.md) directories |
 | `seeds` | `3` | Runs per task per candidate |
 | `splits.search` | `0.7` | Fraction of tasks in the search split. The rest is holdout. |
+
+This section used to be called `[tasks]`, and that name still works.
 
 ## `[candidates]`
 
