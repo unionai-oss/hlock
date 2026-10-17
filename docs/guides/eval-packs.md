@@ -24,6 +24,54 @@ next → hlock evals check ./evals  ·  hlock init --pack ./evals
 [Finding the best stack](resolve.md) takes it from there. Three tasks are
 enough to watch the loop work, but too few to trust a result.
 
+### Draft a pack from your traces
+
+The requests you've already made to your agent are the best source of tasks.
+`hlock evals init --from-traces` reads the sessions your agent CLI logged for this project
+and drafts one task per distinct request, newest first:
+
+```console
+$ hlock evals init --from-traces
+✓ wrote evals/pack.toml  (4 draft tasks from 4 claude-code sessions)
+  2 tasks need an expected artifact; prompts are redacted drafts to review
+✓ wrote .agents/skills/hlock-eval-pack/SKILL.md  (Agent Skill hlock-eval-pack)
+open your agent here and ask it to review ./evals with the hlock-eval-pack skill
+next → hlock evals check ./evals
+```
+
+Each task's prompt is the request that opened a session, with credential-looking values
+replaced by `[redacted]` and your home directory by `~`. Files the session created inside
+the project (read from Claude Code and Pi sessions, and from an `artifacts` column) become
+the task's expected artifacts, so the task is checkable:
+
+```toml title="evals/pack.toml"
+[[task]]
+id = "fix_off_by_one_pagination"
+prompt = "fix_off_by_one_pagination/prompt.md"
+fixtures = "fix_off_by_one_pagination/workspace/"
+tools = ["shell", "filesystem"]
+expected = { artifacts = ["tests/test_pagination.py"] }  # files the session created
+tags = ["from-traces", "claude-code"]
+timeout-seconds = 900
+```
+
+A session that created no file gets a `TODO(hlock)` slot for one, which `hlock evals check`
+reports until you fill it in. The drafts are a start, not a finished pack: a request often
+leans on its session ("fix it like before"), and each task's `workspace/` starts empty. The
+`hlock-eval-pack` skill written next to the pack tells your agent how to review them with
+you: which tasks to keep, how to make each prompt stand on its own, and which files to copy
+into its workspace.
+
+| Source | Where hlock looks |
+|---|---|
+| Claude Code | `~/.claude/projects/<project>/*.jsonl` (or under `CLAUDE_CONFIG_DIR`) |
+| Codex | `~/.codex/sessions/**/*.jsonl` (or under `CODEX_HOME`), sessions started in this project |
+| Pi | `~/.pi/agent/sessions/*/*.jsonl` (or under `PI_CODING_AGENT_DIR`), sessions started in this project |
+| A file or directory | `--from-traces PATH`: any of the session logs above, or JSONL or CSV records with a `prompt` (or `input`, `question`, `query`, `instruction`, `request`, `task`) column and an optional `artifacts` list |
+
+`--tasks N` caps how many tasks are drafted (default 10). Sessions from other projects are
+left out, and nothing leaves your machine.
+
 ### Fill in a template with your agent
 
 For a real pack, start from a template. Each one writes task slots for one kind of work,

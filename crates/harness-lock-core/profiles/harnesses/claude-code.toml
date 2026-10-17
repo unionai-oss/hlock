@@ -66,3 +66,4 @@ source = "{root}/plugins/installed_plugins.json"
 
 [launch]
 model-flag = "--model"
+prompt = ["-p", "{prompt}"]  # `hlock run`: one prompt, non-interactively

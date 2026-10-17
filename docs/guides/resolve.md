@@ -140,10 +140,10 @@ $ hlock run "count the words in words.txt"
 ```
 
 `hlock run` loads `harness.lock` and runs the pinned stack. It exits `0` on success and
-`1` on failure, and takes `--json` for scripting. For a
-[code harness](harnesses.md#your-own-agent-frameworks-and-custom-scripts) it runs your
-agent; for agent CLIs and the reference harness it runs the locked model on the offline
-reference provider.
+`1` on failure, and takes `--json` for scripting. Here it runs the locked model on the
+offline reference provider. When the lock is for an agent CLI it runs that harness for
+real, and for a [code harness](harnesses.md#your-own-agent-frameworks-and-custom-scripts)
+it runs your agent.
 
 ## Resolve for your own harness
 

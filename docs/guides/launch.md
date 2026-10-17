@@ -60,6 +60,13 @@ $ hlock launch opencode --dry-run
 Plugins, built-in skills, and harness-specific settings (permissions, hooks, providers,
 themes) don't carry over, and `launch` lists them.
 
+## Run one prompt
+
+`hlock run "<prompt>"` prepares the same environment and runs the harness's
+non-interactive mode on the prompt (`claude -p`, `codex exec`, `opencode run`, `pi -p`,
+`hermes -z`, …, from the profile's `[launch] prompt`). It exits with the harness's result,
+and `--json` captures the output for scripts. See the [CLI reference](../reference/cli.md#run).
+
 ## Code harnesses
 
 For a [project harness](harnesses.md#your-own-agent-frameworks-and-custom-scripts),

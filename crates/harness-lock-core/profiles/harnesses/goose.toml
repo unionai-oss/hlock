@@ -42,3 +42,6 @@ write = "~/.agents/skills"
 [[local-provider]]
 file = "config"
 set = { "/GOOSE_PROVIDER" = "openai", "/GOOSE_MODEL" = "{model}", "/OPENAI_HOST" = "{host}", "/OPENAI_BASE_PATH" = "v1/chat/completions" }
+
+[launch]
+prompt = ["run", "-t", "{prompt}"]  # `hlock run`: one prompt, non-interactively

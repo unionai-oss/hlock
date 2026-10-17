@@ -32,3 +32,6 @@ write = "settings#/amp.mcpServers"
 [skills]
 dirs = ["~/.config/agents/skills", ".agents/skills"]
 write = "~/.config/agents/skills"
+
+[launch]
+prompt = ["-x", "{prompt}"]  # `hlock run`: one prompt, non-interactively

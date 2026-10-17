@@ -40,6 +40,7 @@ builtin-manifest = "{root}/skills/.bundled_manifest"
 
 [launch]
 model-flag = "--model"
+prompt = ["-z", "{prompt}"]  # `hlock run`: one prompt, non-interactively
 
 # How `hlock localize` points this harness at a local OpenAI-compatible endpoint.
 [[local-provider]]

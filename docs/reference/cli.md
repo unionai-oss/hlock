@@ -80,10 +80,13 @@ Write and check [eval packs](../guides/eval-packs.md).
 
 Write a starter eval pack. The default `hello-world` pack is complete and runs as is.
 The other templates write task slots marked `TODO(hlock)`, plus an Agent Skill that guides
-your agent through filling them in from your project.
+your agent through filling them in from your project. `--from-traces` drafts the tasks
+from your agent's past sessions instead; see
+[Draft a pack from your traces](../guides/eval-packs.md#draft-a-pack-from-your-traces).
 
 ```bash
-hlock evals init [DIRECTORY] [-t TEMPLATE] [--name NAME] [--tasks N] [--no-skill] [--skill-dir DIR] [--force]
+hlock evals init [DIRECTORY] [-t TEMPLATE | --from-traces [PATH]] [--name NAME] [--tasks N]
+                 [--no-skill] [--skill-dir DIR] [--force]
 ```
 
 | Option | Default | Description |
@@ -91,7 +94,8 @@ hlock evals init [DIRECTORY] [-t TEMPLATE] [--name NAME] [--tasks N] [--no-skill
 | `DIRECTORY` | `./evals` | Where to write the pack |
 | `-t`, `--template` | `hello-world` | `hello-world`, `coding`, `data`, `research`, `support`, or `blank` |
 | `--name` | `<project>/<directory>` | Pack name |
-| `--tasks` | `10` | How many task slots a template writes. Ignored by `hello-world`. |
+| `--from-traces` | | Draft tasks from the sessions Claude Code, Codex and Pi logged for this project, or from `PATH`: a session log, or JSONL/CSV records with a prompt column |
+| `--tasks` | `10` | How many task slots a template writes, or the most tasks `--from-traces` drafts. Ignored by `hello-world`. |
 | `--no-skill` | | Don't write the Agent Skill |
 | `--skill-dir` | `.agents/skills/hlock-eval-pack` | Where the skill's `SKILL.md` goes |
 | `--force` | | Overwrite an existing `pack.toml` |
@@ -274,10 +278,14 @@ hlock backend status
 
 ## `run`
 
-Load `harness.lock` and run the locked stack on `PROMPT`. Exits `0` when the task
-succeeds and `1` when it fails. For a [code harness](../guides/harnesses.md#how-hlock-runs-a-code-harness),
-`run` calls its entrypoint or command; `--json` then prints `success`, `output`, `cost_usd`,
-`latency_s`, `exit_code` and the captured `log`.
+Load `harness.lock` and run the locked agent on `PROMPT`. Exits `0` when it succeeds and
+`1` when it fails. What runs depends on the lock's harness:
+
+| Harness | What `run` does |
+|---|---|
+| Agent CLI (Claude Code, Codex, Pi, …) | Prepares the same isolated environment as [`launch`](#launch), then runs the harness's non-interactive mode from its profile's `[launch] prompt` (`claude -p`, `codex exec`, `opencode run`, …). Success is the harness's exit code. `--json` prints `harness`, `success`, `exit_code`, `output`, `stderr`, `latency_s`, `notes` and `missing_secrets`. |
+| [Code harness](../guides/harnesses.md#how-hlock-runs-a-code-harness) | Calls its entrypoint or command. `--json` prints `success`, `output`, `cost_usd`, `latency_s`, `exit_code` and the captured `log`. |
+| `reference` | Runs the locked model on the offline reference provider. `--json` prints `success`, `model` and `cost_usd`. |
 
 ```bash
 hlock run PROMPT [--json]
@@ -285,12 +293,7 @@ hlock run PROMPT [--json]
 
 | Option | Description |
 |---|---|
-| `--json` | Print the raw outcome: `{"success": …, "model": …, "cost_usd": …}` |
-
-!!! note "v0.1"
-
-    For agent CLIs and the reference harness, `run` executes the locked model on the offline
-    reference provider. To work in a locked agent CLI, use [`launch`](#launch).
+| `--json` | Capture the outcome and print it as JSON |
 
 ## `upgrade`
 

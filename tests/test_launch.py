@@ -81,6 +81,26 @@ def test_launch_execs_the_harness(pinned):
     assert "CONFIG=" in out.stdout and ".hlock/env/claude-code/config" in out.stdout and "ARGS=-p hi" in out.stdout
 
 
+def test_run_drives_the_locked_cli(pinned):
+    r = invoke("run", "--json", "summarize README.md")
+    assert r.exit_code == 0, r.output
+    out = json.loads(r.output)
+    assert out["success"] and out["harness"] == "claude-code"
+    assert ".hlock/env/claude-code/config" in out["output"] and "ARGS=-p summarize README.md" in out["output"]
+
+    env = {**os.environ, "HL_PYTHON": sys.executable}  # streamed, not captured, without --json
+    out = subprocess.run([sys.executable, "-m", "harness_lock.cli", "run", "hi"],
+                         capture_output=True, text=True, env=env, check=False)
+    assert out.returncode == 0 and "ARGS=-p hi" in out.stdout and "✓ success" in out.stdout, out.stdout
+
+
+def test_run_reports_a_failing_cli(pinned):
+    executable(pinned["bin"] / "claude", "#!/bin/sh\n"
+               'if [ "$1" = "--version" ]; then echo "2.1.0 (Claude Code)"; exit 0; fi\nexit 3\n')
+    r = invoke("run", "--json", "hi")
+    assert r.exit_code == 1 and json.loads(r.output)["exit_code"] == 3
+
+
 def test_launch_refuses_a_version_mismatch(pinned, monkeypatch):
     monkeypatch.setenv("FAKE_CLAUDE_VERSION", "2.2.0")
     r = invoke("launch", "--dry-run")

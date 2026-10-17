@@ -36,7 +36,7 @@ against your own tasks and finds a better one.
 | 📌 `pip freeze` | **`hlock pin`**: record the setup you already have, and re-pin as it grows |
 | ✅ `--locked` check | **`hlock check`**: show what changed since the pin |
 | 📦 `uv sync` / `npm ci` | **`hlock sync`**: rehydrate the locked setup on any machine |
-| ▶️ `uv run` | **`hlock launch`**: start sessions and run prompts on the locked setup |
+| ▶️ `uv run` | **`hlock launch`** and **`hlock run`**: start sessions and run prompts on the locked setup |
 
 ## Install
 
@@ -63,6 +63,7 @@ git add harness.lock .hlock/    # version it (secrets are placeholders, never va
 hlock check                     # see what changed since the pin; re-pin to lock it
 hlock sync                      # on another machine: rehydrate it (also --prefix DIR, --docker)
 hlock launch                    # start a session on the locked setup, isolated from your config
+hlock run "summarize README.md"  # or run one prompt through it (claude -p, codex exec, …)
 ```
 
 For your own work, `hlock evals init -t coding` (or `data`, `research`, `support`) writes
@@ -80,9 +81,9 @@ See the [Quickstart](https://docs.hlock.ai/getting-started/quickstart/),
 
 ### Then make it better
 
-**Optimize your harness.** Start an eval pack with `hlock evals init -t <template>`, and
-have the agent you already use fill it in with real work from your project, using the
-Agent Skill it writes. List the models, decision models and harnesses to try in a
+**Optimize your harness.** Draft an eval pack from the requests you've already made to your
+agent with `hlock evals init --from-traces` (it reads the sessions Claude Code, Codex, and
+Pi logged for the project), and review it with your agent using the Agent Skill it writes. List the models, decision models and harnesses to try in a
 `harness.toml`, and let `hlock resolve` lock the best combination with its success rate,
 cost, and latency. `hlock tune` goes further, into prompts, hyperparameters, and
 fine-tuned small models. The built-in `reference` provider is offline, so you can try the

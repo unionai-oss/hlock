@@ -67,7 +67,7 @@ If you've used `uv`, `cargo`, or `npm`, you already know the shape of `hlock`:
 | `pip freeze` | **[`hlock pin`](guides/pin.md)**: record the setup you already have, and re-pin as it grows |
 | `--locked` check | **[`hlock check`](guides/pin.md#keep-it-honest-with-check)**: show what changed since the pin |
 | `uv sync` / `npm ci` | **[`hlock sync`](guides/sync.md)**: rehydrate the locked setup on any machine |
-| `uv run` | **[`hlock launch`](guides/launch.md)**: start sessions and run prompts on the locked setup |
+| `uv run` | **[`hlock launch`](guides/launch.md)** and **[`hlock run`](reference/cli.md#run)**: start sessions and run prompts on the locked setup |
 
 <div class="grid cards" markdown>
 
@@ -103,7 +103,17 @@ If you've used `uv`, `cargo`, or `npm`, you already know the shape of `hlock`:
 
 ## Then make it better
 
-Once your harness is locked, you have a baseline to improve on.
+Once your harness is locked, you have a baseline to improve on, with tools you'll also
+recognize:
+
+| You know this from | In `hlock` |
+|---|---|
+| a test suite | **[`hlock evals init --from-traces`](guides/eval-packs.md#draft-a-pack-from-your-traces)**: draft an eval pack from the requests you've made to your agent |
+| `pyproject.toml` | **`harness.toml`**, the [manifest](reference/manifest.md): the models, decision models, and harnesses to try, and what "best" means |
+| `uv lock` | **[`hlock resolve`](guides/resolve.md)**: measure every combination on your evals, and lock the winner with its evidence |
+| `uv lock --upgrade` | **[`hlock upgrade`](guides/upgrade.md)**: try newer models, and keep them only if they hold up |
+| profile-guided optimization | **[`hlock tune`](guides/tune.md)**: tune prompts, hyperparameters, and small models on your evals |
+| cross-compiling | **[`hlock localize`](guides/localize.md)**: the same harness setup, on an open-source harness and local models |
 
 <div class="grid cards" markdown>
 
@@ -111,8 +121,8 @@ Once your harness is locked, you have a baseline to improve on.
 
     ---
 
-    Start an [eval pack](guides/eval-packs.md) with `hlock evals init`, and have your agent
-    fill it in with real work from your project.
+    Draft an [eval pack](guides/eval-packs.md) from your agent's past sessions, and review
+    it with your agent.
     [`hlock resolve`](guides/resolve.md) finds the best combination of models, decision
     models, and harnesses for it, and [`hlock tune`](guides/tune.md) tunes
     prompts, hyperparameters, and small models. Every lock records its success rate,

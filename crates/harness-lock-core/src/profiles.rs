@@ -238,6 +238,9 @@ pub struct BundleSpec {
 pub struct LaunchSpec {
     pub args: Vec<String>,
     pub model_flag: Option<String>,
+    /// Arguments that run one prompt non-interactively and exit (`hlock run`), with
+    /// `{prompt}` replaced by the prompt, e.g. `["-p", "{prompt}"]`.
+    pub prompt: Vec<String>,
 }
 
 /// How `hlock localize` points a harness at a local OpenAI-compatible endpoint:
@@ -959,6 +962,10 @@ mod tests {
             assert!(h.packages.iter().all(|p| p.starts_with("pypi:")), "{fw}");
         }
         assert!(r.harnesses.iter().filter(|h| h.kind == "cli").count() >= 10);
+        // `hlock run` needs every agent CLI's non-interactive mode
+        for h in r.harnesses.iter().filter(|h| h.kind == "cli") {
+            assert!(h.launch.prompt.iter().any(|a| a.contains("{prompt}")), "{}", h.id);
+        }
         assert!(r.runtime("ollama").is_some());
         assert_eq!(r.harness("claude").unwrap().id, "claude-code");
         assert_eq!(r.runtime("lms").unwrap().id, "lmstudio");

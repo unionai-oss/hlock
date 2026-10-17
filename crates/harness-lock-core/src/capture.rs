@@ -271,6 +271,34 @@ pub fn looks_secret(v: &str) -> bool {
     charset && digits && upper && lower
 }
 
+/// Free text with every credential-looking word replaced by `[redacted]`, for prompts
+/// drafted from traces. A word is split at `=` and `:` so `TOKEN=sk-…` is caught too.
+pub fn redact_text(s: &str) -> String {
+    let trim = |c: char| "\"'`()[]{}<>,;.!?".contains(c);
+    let mut out = String::with_capacity(s.len());
+    let mut rest = s;
+    while !rest.is_empty() {
+        let end = rest.find(char::is_whitespace).unwrap_or(rest.len());
+        let (word, tail) = rest.split_at(end);
+        let core = word.trim_matches(trim);
+        let mut kept = word.to_string();
+        if !core.contains(['=', ':']) {
+            if looks_secret(core) {
+                kept = word.replacen(core, "[redacted]", 1);
+            }
+        } else {
+            for part in core.split(['=', ':']).map(|p| p.trim_matches(trim)).filter(|p| looks_secret(p)) {
+                kept = kept.replacen(part, "[redacted]", 1);
+            }
+        }
+        out.push_str(&kept);
+        let ws = tail.find(|c: char| !c.is_whitespace()).unwrap_or(tail.len());
+        out.push_str(&tail[..ws]);
+        rest = &tail[ws..];
+    }
+    out
+}
+
 /// Collects placeholders for the secrets a capture redacts.
 #[derive(Default)]
 struct Secrets {
@@ -1465,6 +1493,15 @@ mod tests {
         assert!(!looks_secret("6f1d2c1a-2b3c-4d5e-8f90-1a2b3c4d5e6f")); // a uuid
         assert!(!looks_secret("http://localhost:1234/v1"));
         assert!(!looks_secret("${GITHUB_TOKEN}"));
+    }
+
+    #[test]
+    fn redact_free_text() {
+        let t = "use ghp_0123456789abcdefABCDEF0123456789, or export OPENAI_API_KEY=sk-live-123456789012\nthen run `make`";
+        let r = redact_text(t);
+        assert_eq!(r, "use [redacted], or export OPENAI_API_KEY=[redacted]\nthen run `make`");
+        let plain = "fix the bug in src/auth/login.py (see https://example.com/issues/42)";
+        assert_eq!(redact_text(plain), plain);
     }
 
     #[test]

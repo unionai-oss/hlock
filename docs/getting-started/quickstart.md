@@ -146,13 +146,19 @@ $ hlock launch
 ▶ Claude Code  CLAUDE_CONFIG_DIR=.hlock/env/claude-code/config …/bin/claude
 ```
 
-Arguments after the harness name go to the harness, so a one-off prompt is the harness's
-own non-interactive mode. The environment is only rebuilt when the lock changes:
+`hlock run` sends one prompt through the same environment, using the harness's own
+non-interactive mode (`claude -p`, `codex exec`, `opencode run`, …), and exits `0` or `1`
+with the harness. The environment is only rebuilt when the lock changes:
 
 ```console
-$ hlock launch claude -p "summarize README.md"
+$ hlock run "summarize README.md"
 ▶ Claude Code  CLAUDE_CONFIG_DIR=.hlock/env/claude-code/config …/bin/claude -p summarize README.md
+…
+✓ success  harness Claude Code  latency …
 ```
+
+Between the `▶` line and the result is the harness's own output. `hlock run --json`
+captures it, with the exit code and latency, for scripts.
 
 You can also launch the lock in a different harness: `hlock launch opencode` carries the
 MCP servers, skills, and instructions over. See [Launching a locked harness](../guides/launch.md).
@@ -164,9 +170,10 @@ Your setup is pinned, versioned, and portable. From here, two paths:
 **Optimize your harness.** Measure your setup against your own tasks and let hlock find a
 better one:
 
-1. Start an [eval pack](../guides/eval-packs.md) with `hlock evals init -t <template>`.
-   It writes an Agent Skill, so the agent you already use can fill the pack in with real
-   work from your project: git history, merged pull requests, closed issues, tickets.
+1. Draft an [eval pack](../guides/eval-packs.md) from the requests you've already made to
+   your agent: `hlock evals init --from-traces` reads the sessions Claude Code, Codex,
+   and Pi logged for this project. It writes an Agent Skill too, so your agent can help
+   you review the drafts.
 2. List the models, decision models, and harnesses to try in a `harness.toml`, and
    [resolve](../guides/resolve.md) the best combination.
 3. Go below the stack with [`hlock tune`](../guides/tune.md): prompts,
