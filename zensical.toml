@@ -33,7 +33,7 @@ nav = [
     "guides/harness-profiles.md",
     "guides/task-packs.md",
     "guides/backends.md",
-    "guides/optimize.md",
+    "guides/tune.md",
     "guides/upgrade.md",
     "guides/ci.md",
   ] },

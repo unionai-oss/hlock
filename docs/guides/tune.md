@@ -1,17 +1,17 @@
-# Optimizing
+# Tuning
 
-`hlock resolve` *chooses* among the components you list. `hlock optimize` goes further
+`hlock resolve` *chooses* among the components you list. `hlock tune` goes further
 and *produces* improvements: tuned prompts, tuned hyperparameters, and, at the deepest
-levels, fine-tuned small models. The result goes into a separate `harness.opt.lock`, so
+levels, fine-tuned small models. The result goes into a separate `harness.tune.lock`, so
 your base lock stays untouched until you adopt it.
 
 ```bash
-hlock optimize --depth hpo
+hlock tune --depth hpo
 ```
 
 ```console
-✓ wrote harness.opt.lock
-╭─ ⚙ optimize ────────────────────────╮
+✓ wrote harness.tune.lock
+╭─ ⚙ tune ────────────────────────────╮
 │                                     │
 │  depth    hpo                       │
 │  backend  local                     │
@@ -27,7 +27,7 @@ hlock optimize --depth hpo
 │  success rate  100%  →  100%   +0%  │
 │                                     │
 ╰─────────────────────────────────────╯
-next → hlock optimize --apply
+next → hlock tune --apply
 ```
 
 The baseline is the success rate recorded in your current `harness.lock`.
@@ -50,7 +50,7 @@ training, and a GPU for anything beyond a tiny model.
 
 ## Data
 
-`--data` sets what the optimizer learns from:
+`--data` sets what tuning learns from:
 
 | Value | Source |
 |---|---|
@@ -60,17 +60,17 @@ training, and a GPU for anything beyond a tiny model.
 | `hub:<pack>` | A published trace pack *(roadmap)* |
 
 Traces are normalized, redacted, split into train, validation, and test shards, and
-content-hashed, so the opt-lock records exactly what data produced it.
+content-hashed, so the tune lock records exactly what data produced it.
 
 ## Adopting the result
 
 ```bash
-hlock optimize --depth hpo --apply     # also write the result into harness.lock
-hlock optimize --depth hpo --strict    # fail unless it beats the base lock
+hlock tune --depth hpo --apply     # also write the result into harness.lock
+hlock tune --depth hpo --strict    # fail unless it beats the base lock
 ```
 
-`--strict` makes `optimize` safe to run on a schedule: it exits non-zero, and writes no
-opt-lock, unless the optimized stack beats your current success rate.
+`--strict` makes `tune` safe to run on a schedule: it exits non-zero, and writes no
+tune lock, unless the tuned stack beats your current success rate.
 
 ## Other options
 
@@ -78,7 +78,7 @@ opt-lock, unless the optimized stack beats your current success rate.
 |---|---|
 | `--harness NAME` | Restrict the search to one harness |
 | `--max-trials N` | Cap the number of trials |
-| `--out FILE` | Write somewhere other than `harness.opt.lock` |
+| `--out FILE` | Write somewhere other than `harness.tune.lock` |
 | `--backend` | Override the manifest's backend |
 | `--workdir DIR` | Where trial artifacts go (default `.harnesslock`) |
 

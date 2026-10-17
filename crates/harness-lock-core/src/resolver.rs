@@ -1,4 +1,4 @@
-//! The tuner: turns a manifest into an `harness.lock`.
+//! The resolver: turns a manifest into an `harness.lock`.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -15,9 +15,9 @@ use crate::store::Store;
 use crate::tasks::TaskPack;
 use crate::worker::{Backend, PythonAdapter};
 
-/// Aggregated metrics container produced by the tuner.
+/// Aggregated metrics container produced by the resolver.
 
-pub struct Tuner {
+pub struct Resolver {
     pub manifest: Manifest,
     pub workdir: PathBuf,
     pub store: Store,
@@ -31,13 +31,13 @@ pub struct Tuner {
     code_harnesses: BTreeMap<String, crate::profiles::HarnessProfile>,
 }
 
-impl Tuner {
-    /// Create a tuner that runs on the local, in-process reference harness.
+impl Resolver {
+    /// Create a resolver that runs on the local, in-process reference harness.
     pub fn new(manifest: Manifest, workdir: impl Into<PathBuf>) -> Self {
         Self::with_backend(manifest, workdir, Backend::Local)
     }
 
-    /// Create a tuner for a specific backend. `devbox`/`cluster` delegate trials
+    /// Create a resolver for a specific backend. `devbox`/`cluster` delegate trials
     /// to the Python worker (which may lift them to real Flyte tasks); `local`
     /// keeps the deterministic offline reference harness.
     pub fn with_backend(manifest: Manifest, workdir: impl Into<PathBuf>, backend: Backend) -> Self {
@@ -48,7 +48,7 @@ impl Tuner {
         } else {
             Box::new(ReferenceAdapter::default())
         };
-        Tuner {
+        Resolver {
             manifest,
             workdir,
             store,
@@ -173,15 +173,15 @@ impl Tuner {
         }
     }
 
-    /// Tune: enumerate, run, aggregate, select, and write `harness.lock`.
-    pub fn tune(&mut self) -> Result<Lockfile> {
-        let lock = self.tune_lock()?;
+    /// Resolve: enumerate, run, aggregate, select, and write `harness.lock`.
+    pub fn resolve(&mut self) -> Result<Lockfile> {
+        let lock = self.resolve_lock()?;
         lock.save(std::path::Path::new(crate::LOCKFILE_PATH))?;
         Ok(lock)
     }
 
-    /// Tune and return the winning lock without writing it.
-    pub fn tune_lock(&mut self) -> Result<Lockfile> {
+    /// Resolve and return the winning lock without writing it.
+    pub fn resolve_lock(&mut self) -> Result<Lockfile> {
         let registry = Registry::load_for(&Ctx::from_process(), Some(&self.manifest))?;
         apply_target(&mut self.manifest, self.harness_override.as_deref(), &registry)?;
         self.code_harnesses = registry

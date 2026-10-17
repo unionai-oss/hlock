@@ -9,7 +9,7 @@
 //! (reading `~/.flyte/config.yaml`) and builds the worker image.
 //!
 //! This module is intentionally minimal and **not validated against a live
-//! backend yet** — it records the pointer so the tuner's `run_trial` can be
+//! backend yet** — it records the pointer so the resolver's `run_trial` can be
 //! wrapped as a traced step (replay-on-retry, human-in-the-loop via
 //! `flyte::condition`). Full fan-out and image bundling is a follow-up against
 //! flyte-sdk-rs (the SDK is experimental: `flyte = "0.1"`).

@@ -16,7 +16,7 @@ flowchart LR
     L --> C["✅ hlock check"]
     L --> X["▶️ hlock run"]
     L --> U["⬆️ hlock upgrade"]
-    L --> O["⚙️ hlock optimize"]
+    L --> O["⚙️ hlock tune"]
 ```
 
 ## The manifest
@@ -74,12 +74,12 @@ a PR tells you what changed in the agent and what evidence supports the change.
 | [`hlock check`](../guides/ci.md) | Fails if `harness.toml` changed after the lock was written. Put it in CI. |
 | [`hlock run`](../reference/cli.md#run) | Runs the pinned stack on a prompt. |
 | [`hlock upgrade`](../guides/upgrade.md) | Finds newer models for locked roles, re-measures, and applies only on request, keeping the old lock for rollback. |
-| [`hlock optimize`](../guides/optimize.md) | Goes beyond choosing: tunes prompts and hyperparameters, and can fine-tune small models, writing `harness.opt.lock`. |
+| [`hlock tune`](../guides/tune.md) | Goes beyond choosing: tunes prompts and hyperparameters, and can fine-tune small models, writing `harness.tune.lock`. |
 
 ## Search and holdout splits
 
 A task pack is split deterministically into a **search** split, used to pick the
 winner, and a **holdout** split, used to confirm the gain is real. The split defaults
 to 70/30 by task id, seeded by `[budget] random_seed`, so the same manifest always
-produces the same split. Deep `hlock optimize` runs (`--depth full`) re-validate on
+produces the same split. Deep `hlock tune` runs (`--depth full`) re-validate on
 the holdout split.

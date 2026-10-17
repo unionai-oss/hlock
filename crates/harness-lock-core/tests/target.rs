@@ -1,6 +1,6 @@
 //! `[target] harness` / `--harness`: narrowing harness candidates to the target.
 
-use harness_lock_core::tuner::apply_target;
+use harness_lock_core::resolver::apply_target;
 use harness_lock_core::{Manifest, Registry};
 
 fn manifest(extra: &str) -> Manifest {

@@ -2,11 +2,11 @@
 //!
 //! Implements the manifest, the lockfile, the content-addressed store, task
 //! packs, the deterministic reference provider/harness, the search layer, and
-//! the tuner — the same v0.1 surface as the (now reference) Python
+//! the resolver — the same v0.1 surface as the (now reference) Python
 //! implementation, in Rust. The [`flyte`] backend and the PyO3 Python bindings
 //! live in sibling crates.
 //!
-//! The Python-facing API mirrors [`lock`](tuner::Tuner::tune) and the lockfile
+//! The Python-facing API mirrors [`resolve`](resolver::Resolver::resolve) and the lockfile
 //! model so the user surface stays stable across the language boundary.
 
 pub mod adapters;
@@ -21,11 +21,11 @@ pub mod manifest;
 pub mod ops;
 pub mod profiles;
 pub mod providers;
+pub mod resolver;
 pub mod search;
 pub mod store;
 pub mod sync;
 pub mod tasks;
-pub mod tuner;
 pub mod worker;
 
 #[cfg(feature = "flyte")]
@@ -37,8 +37,8 @@ pub use hash::{content_hash, sha256_hex, sha256_text};
 pub use lockfile::Lockfile;
 pub use manifest::{find_manifest, Manifest};
 pub use profiles::Registry;
+pub use resolver::Resolver;
 pub use store::Store;
-pub use tuner::Tuner;
 pub use worker::Backend;
 
 /// Schema version of the `harness.lock` lockfile.

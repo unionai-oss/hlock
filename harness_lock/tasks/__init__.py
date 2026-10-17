@@ -1,4 +1,4 @@
-"""Heavy compute workers for ``hlock optimize``.
+"""Heavy compute workers for ``hlock tune``.
 
 These run *out-of-process* from the Rust core over a versioned JSON contract
 (see ``harness_lock/tasks/worker.py``). They own the ecosystem-heavy work items

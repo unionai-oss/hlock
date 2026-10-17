@@ -7,7 +7,7 @@
 //! optional JSON result from `HLOCK_OUTPUT`; without one, exit code 0 means
 //! success. A Python `entrypoint` runs through a small shim (`entry_shim.py`,
 //! passed with `python -c`), so both kinds share one path and the agent's
-//! interpreter needs nothing from hlock installed. [`CommandAdapter`] plugs this into the tuner,
+//! interpreter needs nothing from hlock installed. [`CommandAdapter`] plugs this into the resolver,
 //! so `resolve` evaluates code harnesses for real.
 
 use std::collections::BTreeMap;
@@ -246,7 +246,7 @@ fn copy_dir(src: &Path, dst: &Path) {
     }
 }
 
-/// Runs trials through a code harness's entrypoint, for `resolve` and `optimize`.
+/// Runs trials through a code harness's entrypoint, for `resolve` and `tune`.
 pub struct CommandAdapter {
     profile: HarnessProfile,
     ctx: Ctx,
