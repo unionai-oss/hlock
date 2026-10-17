@@ -1,4 +1,4 @@
-//! End-to-end tests for `hlock upgrade` (§5.8) and `hlock optimize` (§5.9).
+//! End-to-end tests for `hlock upgrade` (§5.8) and `hlock tune` (§5.9).
 //!
 //! These chdir, so they are consolidated into a single test that runs
 //! sequentially within the process (integration-test threads share the cwd).
@@ -6,8 +6,8 @@
 use std::fs;
 use std::path::Path;
 
-use harness_lock_core::ops::{optimize, plan_upgrade, upgrade, OptimizeSpec, UpgradeSpec};
-use harness_lock_core::{Lockfile, Manifest, Tuner, LOCKFILE_PATH};
+use harness_lock_core::ops::{plan_upgrade, tune, upgrade, TuneSpec, UpgradeSpec};
+use harness_lock_core::{Lockfile, Manifest, Resolver, LOCKFILE_PATH};
 
 fn make_pack(root: &Path) {
     let taskdir = root.join("t1");
@@ -58,7 +58,7 @@ target = "local"
 }
 
 #[test]
-fn ops_end_to_end_upgrade_and_optimize() {
+fn ops_end_to_end_upgrade_and_tune() {
     let dir = std::env::temp_dir().join(format!("hlock-ops-{}", std::process::id()));
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).unwrap();
@@ -67,7 +67,7 @@ fn ops_end_to_end_upgrade_and_optimize() {
 
     make_pack(&dir);
     let manifest = make_manifest(&dir);
-    let _ = Tuner::new(manifest.clone(), dir.join(".harnesslock")).tune().unwrap();
+    let _ = Resolver::new(manifest.clone(), dir.join(".harnesslock")).resolve().unwrap();
     let base = Lockfile::load(Path::new(LOCKFILE_PATH)).unwrap();
     let base_model = base.llm[0].model.clone();
 
@@ -85,20 +85,20 @@ fn ops_end_to_end_upgrade_and_optimize() {
     assert!(upgrade(manifest.clone(), &rb).unwrap().rolled_back);
     assert_eq!(Lockfile::load(Path::new(LOCKFILE_PATH)).unwrap().llm[0].model, base_model);
 
-    // ---- optimize ----
-    let opt_spec = OptimizeSpec {
+    // ---- tune ----
+    let tune_spec = TuneSpec {
         depth: "hpo".into(),
         data: "user".into(),
-        out: dir.join("harness.opt.lock"),
+        out: dir.join("harness.tune.lock"),
         workdir: dir.join(".harnesslock"),
         ..Default::default()
     };
-    let outcome = optimize(manifest.clone(), &opt_spec).unwrap();
+    let outcome = tune(manifest.clone(), &tune_spec).unwrap();
     assert!(outcome.path.exists());
-    let opt = Lockfile::load(&outcome.path).unwrap();
-    assert_eq!(opt.kind.as_deref(), Some("optimized"));
-    assert!(opt.base_lock.is_some());
-    assert!(opt.optimize.is_some());
+    let tuned = Lockfile::load(&outcome.path).unwrap();
+    assert_eq!(tuned.kind.as_deref(), Some("tuned"));
+    assert!(tuned.base_lock.is_some());
+    assert!(tuned.tune.is_some());
     // the opt grid is models x retries and must have run >= 1 config
     assert!(outcome.report["grid"].as_u64().unwrap() >= 1);
 
@@ -120,6 +120,6 @@ harness = ["reference"]
     )
     .unwrap();
     assert_eq!(m.candidates.llm.get("planner").unwrap().any_of.len(), 2);
-    let spec = OptimizeSpec { depth: "auto".into(), ..Default::default() };
+    let spec = TuneSpec { depth: "auto".into(), ..Default::default() };
     assert_eq!(spec.resolved_depth(), "hpo");
 }

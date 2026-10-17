@@ -18,7 +18,6 @@ from ._harness_lock import (
     launch_prepare,
     load,
     localize,
-    optimize,
     pin,
     resolve,
     run_code_harness,
@@ -28,6 +27,7 @@ from ._harness_lock import (
     sync_plan,
     sync_run_step,
     sync_skill,
+    tune,
     upgrade,
 )
 
@@ -46,7 +46,6 @@ __all__ = [
     "launch_prepare",
     "load",
     "localize",
-    "optimize",
     "pin",
     "resolve",
     "run_code_harness",
@@ -56,5 +55,6 @@ __all__ = [
     "sync_plan",
     "sync_run_step",
     "sync_skill",
+    "tune",
     "upgrade",
 ]

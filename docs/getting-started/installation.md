@@ -72,7 +72,7 @@ hlock, version 0.1.2
 |---|---|---|
 | `flyte` | `pip install "hlock[flyte]"` | `flyteplugins-rs`, so the [`cluster` backend](../guides/backends.md) can lift work to Flyte/Union tasks |
 
-The worker that runs heavy optimization stages (`devbox` and `cluster` backends) imports
+The worker that runs heavy tuning stages (`devbox` and `cluster` backends) imports
 `pandas`/`polars`, `torch`/`peft`/`trl`, and `flyte` lazily, and only when a stage needs
 them. Install those in the worker's environment when you use the stages that need them;
 see [Backends](../guides/backends.md).

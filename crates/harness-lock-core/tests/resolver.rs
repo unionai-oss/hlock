@@ -1,10 +1,10 @@
-//! End-to-end tuner test: build a temp task pack, run `Tuner::tune`, and check
+//! End-to-end resolver test: build a temp task pack, run `Resolver::resolve`, and check
 //! the produced `harness.lock`.
 
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use harness_lock_core::{Manifest, Tuner};
+use harness_lock_core::{Manifest, Resolver};
 
 fn make_pack(root: &Path) -> PathBuf {
     let taskdir = root.join("t1");
@@ -39,7 +39,7 @@ fn make_manifest(pack: &Path) -> Manifest {
     let toml = format!(
         r#"
 [project]
-name = "tunertest"
+name = "resolvertest"
 
 [tasks]
 seeds = 2
@@ -79,7 +79,7 @@ target = "local"
 
 #[test]
 fn tune_writes_a_resolve() {
-    let base = std::env::temp_dir().join(format!("hlock-tuner-{}", std::process::id()));
+    let base = std::env::temp_dir().join(format!("hlock-resolver-{}", std::process::id()));
     let _ = fs::remove_dir_all(&base);
     fs::create_dir_all(&base).unwrap();
     let cwd = std::env::current_dir().unwrap();
@@ -88,8 +88,8 @@ fn tune_writes_a_resolve() {
     let pack = make_pack(&base);
     let manifest = make_manifest(&pack);
     let mh = manifest.manifest_hash();
-    let mut tuner = Tuner::new(manifest, base.join(".harnesslock"));
-    let lock = tuner.tune().unwrap();
+    let mut resolver = Resolver::new(manifest, base.join(".harnesslock"));
+    let lock = resolver.resolve().unwrap();
 
     // lock is written at cwd
     let lock_path = base.join("harness.lock");

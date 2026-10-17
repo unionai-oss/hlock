@@ -308,7 +308,7 @@ impl PyLockfile {
         self.inner.harness.name.clone()
     }
 
-    /// `"pin"` for locks written by `hlock pin`, `"optimize"` for opt-locks, else `None`.
+    /// `"pin"` for locks written by `hlock pin`, `"tuned"` for tune locks, else `None`.
     #[getter]
     fn kind(&self) -> Option<String> {
         self.inner.kind.clone()
@@ -412,9 +412,9 @@ fn resolve(
     let wd = workdir.map(PathBuf::from).unwrap_or_else(|| root.join(".harnesslock"));
     let lock = lock.map(PathBuf::from).unwrap_or_else(|| root.join(core::LOCKFILE_PATH));
     let backend = core::Backend::parse(core_manifest.backend_target().as_str());
-    let mut tuner = core::Tuner::with_backend(core_manifest, &wd, backend);
-    tuner.harness_override = harness;
-    let lf = tuner.tune_lock().map_err(py_err)?;
+    let mut resolver = core::Resolver::with_backend(core_manifest, &wd, backend);
+    resolver.harness_override = harness;
+    let lf = resolver.resolve_lock().map_err(py_err)?;
     lf.save(&lock).map_err(py_err)?;
     Ok(PyLockfile { inner: lf })
 }
@@ -499,7 +499,7 @@ fn upgrade(
 
 #[pyfunction]
 #[pyo3(signature = (manifest=None, depth="auto".to_string(), data="user".to_string(), harness=None, out=None, strict=false, apply=false, max_trials=None, backend=None, workdir=None, lock=None))]
-fn optimize(
+fn tune(
     py: Python<'_>,
     manifest: Option<PyObject>,
     depth: String,
@@ -515,11 +515,11 @@ fn optimize(
 ) -> PyResult<String> {
     let m = resolve_manifest(py, manifest, backend.as_deref())?;
     let root = m.root();
-    let spec = core::ops::OptimizeSpec {
+    let spec = core::ops::TuneSpec {
         depth,
         data,
         harness,
-        out: out.map(PathBuf::from).unwrap_or_else(|| root.join("harness.opt.lock")),
+        out: out.map(PathBuf::from).unwrap_or_else(|| root.join("harness.tune.lock")),
         strict,
         apply,
         max_trials,
@@ -527,7 +527,7 @@ fn optimize(
         workdir: workdir.map(PathBuf::from).unwrap_or_else(|| root.join(".harnesslock")),
         lock: Some(lock.map(PathBuf::from).unwrap_or_else(|| root.join(core::LOCKFILE_PATH))),
     };
-    let o = core::ops::optimize(m, &spec).map_err(py_err)?;
+    let o = core::ops::tune(m, &spec).map_err(py_err)?;
     Ok(serde_json::json!({
         "path": o.path.to_string_lossy(),
         "report": o.report,
@@ -849,7 +849,7 @@ fn _harness_lock(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(resolve, m)?)?;
     m.add_function(wrap_pyfunction!(load, m)?)?;
     m.add_function(wrap_pyfunction!(upgrade, m)?)?;
-    m.add_function(wrap_pyfunction!(optimize, m)?)?;
+    m.add_function(wrap_pyfunction!(tune, m)?)?;
     m.add_function(wrap_pyfunction!(harnesses, m)?)?;
     m.add_function(wrap_pyfunction!(runtimes, m)?)?;
     m.add_function(wrap_pyfunction!(harness_profile, m)?)?;

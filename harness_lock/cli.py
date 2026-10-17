@@ -41,10 +41,10 @@ from harness_lock import (
 )
 from harness_lock import check_pin as _check_pin
 from harness_lock import localize as _localize
-from harness_lock import optimize as al_optimize
 from harness_lock import pin as _pin
 from harness_lock import resolve as _resolve
 from harness_lock import select_harness as _select_harness
+from harness_lock import tune as al_tune
 from harness_lock import upgrade as al_upgrade
 
 MANIFEST = "harness.toml"
@@ -137,7 +137,7 @@ click.rich_click.COMMAND_GROUPS = {
         {"name": "Rehydrate", "commands": ["sync", "launch"]},
         {"name": "Harness", "commands": ["harness", "runtime"]},
         {"name": "Inspect", "commands": ["show", "tree", "backend"]},
-        {"name": "Run & evolve", "commands": ["run", "upgrade", "optimize", "localize"]},
+        {"name": "Run & evolve", "commands": ["run", "upgrade", "tune", "localize"]},
     ]
 }
 
@@ -399,7 +399,7 @@ def init(name: str, pack: str, harness: str | None, force: bool) -> None:
               help="Target harness, overriding \\[target] harness (e.g. claude, codex, pi, opencode).")
 @click.option("--workdir", default=None, help="Where to put trial artifacts.  [dim]\\[default: .harnesslock][/]")
 def resolve(backend: str | None, harness: str | None, workdir: str | None) -> None:
-    """Tune the search space and write [path]harness.lock[/]."""
+    """Search the space and pin the winner in [path]harness.lock[/]."""
     with _working(f"Resolving {_md()} on the {backend or 'configured'} backend…"):
         lf = _resolve(_m(), backend=backend, workdir=workdir, harness=harness, lock=_l())
     _ok(f"wrote [path]{_ld()}[/]")
@@ -929,23 +929,23 @@ def upgrade(to: str | None, all_: bool, apply: bool, rollback: bool, force: bool
 
 @main.command()
 @click.option("--depth", default="auto", show_default=True,
-              type=click.Choice(["probe", "prompt", "hpo", "ft", "full", "auto"]), help="How deep to optimize.")
+              type=click.Choice(["probe", "prompt", "hpo", "ft", "full", "auto"]), help="How deep to tune.")
 @click.option("--data", default="user", show_default=True, help="user | user:<paths> | synthetic\\[:n] | hub:<pack>")
 @click.option("--harness", default=None, help="Restrict to one harness.")
-@click.option("--out", default="harness.opt.lock", show_default=True, help="Output opt-lock filename.")
-@click.option("--strict", is_flag=True, help="Fail unless the opt lock beats the base.")
+@click.option("--out", default="harness.tune.lock", show_default=True, help="Output tune lock filename.")
+@click.option("--strict", is_flag=True, help="Fail unless the tune lock beats the base.")
 @click.option("--apply", is_flag=True, help="Also adopt the result into harness.lock.")
 @click.option("--max-trials", default=None, type=int, help="Cap the number of trials.")
 @click.option("--backend", default=None, type=click.Choice(["local", "devbox", "cluster"]),
               help="Override the manifest's \\[backend] target.")
 @click.option("--workdir", default=None, help="Where to put trial artifacts.")
-def optimize(depth: str, data: str, harness: str | None, out: str, strict: bool, apply: bool,
-             max_trials: int | None, backend: str | None, workdir: str | None) -> None:
-    """Tune prompts, hyperparameters and small models into [path]harness.opt.lock[/]."""
-    with _working(f"Optimizing (depth={depth}, data={data})…"):
+def tune(depth: str, data: str, harness: str | None, out: str, strict: bool, apply: bool,
+         max_trials: int | None, backend: str | None, workdir: str | None) -> None:
+    """Tune prompts, hyperparameters and small models into [path]harness.tune.lock[/]."""
+    with _working(f"Tuning (depth={depth}, data={data})…"):
         result = json.loads(
-            al_optimize(_m(), depth=depth, data=data, harness=harness, out=out, strict=strict, apply=apply,
-                        max_trials=max_trials, backend=backend, workdir=workdir, lock=_l())
+            al_tune(_m(), depth=depth, data=data, harness=harness, out=out, strict=strict, apply=apply,
+                    max_trials=max_trials, backend=backend, workdir=workdir, lock=_l())
         )
     r = result.get("report", {})
     best = r.get("best") or {}
@@ -969,12 +969,12 @@ def optimize(depth: str, data: str, harness: str | None, out: str, strict: bool,
     )
     console.print(Panel(
         Group(run_info, Text(""), Text("Best configuration", style="bold"), chosen, Text(""), result_row),
-        title="[brand]⚙ optimize[/]", title_align="left", border_style="magenta", expand=False, padding=(1, 2),
+        title="[brand]⚙ tune[/]", title_align="left", border_style="magenta", expand=False, padding=(1, 2),
     ))
     if apply:
         _ok(f"adopted into [path]{_ld()}[/]")
     else:
-        _next("hlock optimize --apply")
+        _next("hlock tune --apply")
 
 
 def _known_harness(name: str) -> bool:

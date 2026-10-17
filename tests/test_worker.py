@@ -1,6 +1,6 @@
 """Tests for the Rust <-> Python worker bridge (harness_lock.tasks.worker).
 
-These prove the seam ``hlock optimize --backend devbox|cluster`` uses: the Rust core
+These prove the seam ``hlock tune --backend devbox|cluster`` uses: the Rust core
 shells a trial out to the Python worker over a versioned JSON contract and
 consumes the response. They run entirely offline — the worker's LLM call falls
 back to the deterministic reference RNG when no ``HL_LLM_BASE_URL`` is set, and
@@ -101,8 +101,8 @@ def test_worker_contract_handlers(kind, key, tmp_path):
     assert key in resp["result"]["model_digests"]
 
 
-def test_optimize_backend_devbox(tmp_path, monkeypatch):
-    """End-to-end: Rust core -> Python worker -> harness.opt.lock, offline."""
+def test_tune_backend_devbox(tmp_path, monkeypatch):
+    """End-to-end: Rust core -> Python worker -> harness.tune.lock, offline."""
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("HL_PYTHON", sys.executable)  # pin the interpreter the worker runs under
 
@@ -132,14 +132,14 @@ max_trials = 1
 
     import harness_lock as hlock
 
-    out = json.loads(hlock.optimize(backend="devbox", depth="probe", data="synthetic:1", max_trials=1))
+    out = json.loads(hlock.tune(backend="devbox", depth="probe", data="synthetic:1", max_trials=1))
     report = out["report"]
     assert report["backend"] == "devbox"
-    assert (tmp_path / "harness.opt.lock").exists()
+    assert (tmp_path / "harness.tune.lock").exists()
     assert report["best"]["trials"] == 1  # evidence.trials follows the winner's real trial count
 
-    lf = hlock.Lockfile.load(str(tmp_path / "harness.opt.lock"))
-    assert json.loads(lf.to_json())["kind"] == "optimized"
+    lf = hlock.Lockfile.load(str(tmp_path / "harness.tune.lock"))
+    assert json.loads(lf.to_json())["kind"] == "tuned"
 
 
 def test_worker_contract_prompt_search_digests():
@@ -184,7 +184,7 @@ def test_worker_contract_data_load_split():
     assert set(md["split"]) == {"train", "val", "test"}
 
 
-def test_optimize_depth_prompt_devbox(tmp_path, monkeypatch):
+def test_tune_depth_prompt_devbox(tmp_path, monkeypatch):
     """depth=prompt drives the data + prompt.search stages, writing real digests."""
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("HL_PYTHON", sys.executable)
@@ -216,10 +216,10 @@ max_trials = 2
 
     import harness_lock as hlock
 
-    json.loads(hlock.optimize(backend="devbox", depth="prompt", data="synthetic:2", max_trials=2))
-    d = json.loads(hlock.Lockfile.load(str(tmp_path / "harness.opt.lock")).to_json())
-    applied = d["optimize"]["prompt"]["applied"]
+    json.loads(hlock.tune(backend="devbox", depth="prompt", data="synthetic:2", max_trials=2))
+    d = json.loads(hlock.Lockfile.load(str(tmp_path / "harness.tune.lock")).to_json())
+    applied = d["tune"]["prompt"]["applied"]
     assert applied and applied[0]["_placeholder"] is False  # real prompt search ran
     after = applied[0]["after"]
     assert after.startswith("sha256:") and after != applied[0]["before"]
-    assert d["optimize"]["data"]["mode"] == "synthetic"
+    assert d["tune"]["data"]["mode"] == "synthetic"

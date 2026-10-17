@@ -15,7 +15,7 @@ Failures print a one-line error with a hint and exit `1`.
 | Command | Purpose |
 |---|---|
 | [`init`](#init) | Write a starter `harness.toml` |
-| [`resolve`](#resolve) | Tune the search space and write `harness.lock` |
+| [`resolve`](#resolve) | Search the space and pin the winner in `harness.lock` |
 | [`pin`](#pin) | Pin your current harness setup into `harness.lock` |
 | [`check`](#check) | Fail if `harness.toml` has drifted from `harness.lock`, or a pinned setup changed |
 | [`sync`](#sync) | Rehydrate the setup in a lock on this machine, in a prefix, or in a Docker image |
@@ -28,7 +28,7 @@ Failures print a one-line error with a hint and exit `1`.
 | [`backend status`](#backend-status) | Show the configured backend and environment |
 | [`run`](#run) | Run the locked agent on a prompt |
 | [`upgrade`](#upgrade) | Plan, apply, or roll back component upgrades |
-| [`optimize`](#optimize) | Tune prompts, hyperparameters, and small models into `harness.opt.lock` |
+| [`tune`](#tune) | Tune prompts, hyperparameters, and small models into `harness.tune.lock` |
 | [`localize`](#localize) | Write an all-local equivalent of a lock |
 
 ## Global options
@@ -271,13 +271,13 @@ hlock upgrade [--all | --to TARGET] [--apply] [--force] [--rollback] [--workdir 
 | `--rollback` | Restore `harness.lock` from `harness.lock.prev` |
 | `--workdir DIR` | Where trial artifacts go |
 
-## `optimize`
+## `tune`
 
 Tune prompts, hyperparameters, and small models, and write the result to
-`harness.opt.lock`. See [Optimizing](../guides/optimize.md).
+`harness.tune.lock`. See [Tuning](../guides/tune.md).
 
 ```bash
-hlock optimize [--depth LEVEL] [--data SOURCE] [OPTIONS]
+hlock tune [--depth LEVEL] [--data SOURCE] [OPTIONS]
 ```
 
 | Option | Default | Description |
@@ -285,7 +285,7 @@ hlock optimize [--depth LEVEL] [--data SOURCE] [OPTIONS]
 | `--depth` | `auto` | `probe`, `prompt`, `hpo`, `ft`, `full`, or `auto` |
 | `--data` | `user` | `user`, `user:<paths>`, `synthetic[:n]`, or `hub:<pack>` |
 | `--harness NAME` | | Restrict to one harness |
-| `--out FILE` | `harness.opt.lock` | Output file |
+| `--out FILE` | `harness.tune.lock` | Output file |
 | `--strict` | | Fail unless the result beats the base lock |
 | `--apply` | | Also adopt the result into `harness.lock` |
 | `--max-trials N` | | Cap the number of trials |

@@ -4,7 +4,7 @@ Invoked out-of-process by the Rust core (``hlock``) over a versioned JSON contra
 
     python -m harness_lock.tasks.worker <request.json> <response.json>
 
-Each handler owns one ecosystem-heavy stage of ``hlock optimize``. On
+Each handler owns one ecosystem-heavy stage of ``hlock tune``. On
 ``backend=cluster`` (a fully-fledged Union cluster) the worker lifts each body to
 a real Flyte 2 task — CPU images for data/prompt/grading/LLM trials, a GPU image
 + accelerator request for LoRA fine-tuning, `cache="auto"` for durable trial

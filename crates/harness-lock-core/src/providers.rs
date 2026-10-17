@@ -1,6 +1,6 @@
 //! LLM providers — a thin abstraction with a deterministic reference provider.
 
-/// A provider manifests itself to the tuner through `complete`, which returns a
+/// A provider manifests itself to the resolver through `complete`, which returns a
 /// `ProviderResponse`. The reference provider is deterministic and offline so the
 /// whole local loop runs with no accounts or network.
 #[derive(Debug, Clone)]
@@ -17,7 +17,7 @@ pub struct ProviderResponse {
     pub latency_ms: f64,
 }
 
-/// Deterministic provider: "succeeds" with per-model probability so the tuner can
+/// Deterministic provider: "succeeds" with per-model probability so the resolver can
 /// discriminate candidate stacks and produce a real-looking leaderboard + lock.
 #[derive(Debug, Clone)]
 pub struct ReferenceProvider {
