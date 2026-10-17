@@ -15,6 +15,7 @@ import subprocess
 import sys
 import time
 from contextlib import contextmanager
+from datetime import datetime, timezone
 from pathlib import Path
 
 import rich_click as click
@@ -44,6 +45,7 @@ from harness_lock import (
 from harness_lock import check_eval_pack as _check_eval_pack
 from harness_lock import check_pin as _check_pin
 from harness_lock import evals as _evals
+from harness_lock import jobs as _jobs
 from harness_lock import localize as _localize
 from harness_lock import pin as _pin
 from harness_lock import resolve as _resolve
@@ -1115,7 +1117,7 @@ def upgrade(to: str | None, all_: bool, apply: bool, rollback: bool, force: bool
             _next("hlock upgrade --all --apply")
 
 
-@main.command()
+@main.group(invoke_without_command=True)
 @click.option("--depth", default="auto", show_default=True,
               type=click.Choice(["probe", "prompt", "hpo", "ft", "full", "auto"]), help="How deep to tune.")
 @click.option("--data", default="user", show_default=True, help="user | user:<paths> | synthetic\\[:n] | hub:<pack>")
@@ -1127,18 +1129,37 @@ def upgrade(to: str | None, all_: bool, apply: bool, rollback: bool, force: bool
 @click.option("--backend", default=None, type=click.Choice(["local", "devbox", "cluster"]),
               help="Override the manifest's \\[backend] target.")
 @click.option("--workdir", default=None, help="Where to put trial artifacts.")
-def tune(depth: str, data: str, harness: str | None, out: str, strict: bool, apply: bool,
-         max_trials: int | None, backend: str | None, workdir: str | None) -> None:
-    """Tune prompts, hyperparameters and small models into [path]harness.tune.lock[/]."""
+@click.option("-d", "--detach", is_flag=True,
+              help="Run in the background as a tune job. See [cmd]hlock tune list[/].")
+@click.pass_context
+def tune(ctx: click.Context, depth: str, data: str, harness: str | None, out: str, strict: bool, apply: bool,
+         max_trials: int | None, backend: str | None, workdir: str | None, detach: bool) -> None:
+    """Tune prompts, hyperparameters and small models into [path]harness.tune.lock[/].
+
+    Long tunes can run in the background: [cmd]hlock tune --detach[/] starts a tune job,
+    and [cmd]hlock tune fetch[/] collects its result when it finishes.
+    """
+    if ctx.invoked_subcommand is not None:
+        return
+    if detach:
+        _tune_detach(depth=depth, data=data, harness=harness, strict=strict, apply=apply,
+                     max_trials=max_trials, backend=backend, workdir=workdir)
+        return
     with _working(f"Tuning (depth={depth}, data={data})…"):
         result = json.loads(
             al_tune(_m(), depth=depth, data=data, harness=harness, out=out, strict=strict, apply=apply,
                     max_trials=max_trials, backend=backend, workdir=workdir, lock=_l())
         )
-    r = result.get("report", {})
-    best = r.get("best") or {}
     _ok(f"wrote [path]{result.get('path')}[/]")
+    console.print(_tune_panel(result.get("report", {})))
+    if apply:
+        _ok(f"adopted into [path]{_ld()}[/]")
+    else:
+        _next("hlock tune --apply")
 
+
+def _tune_panel(r: dict, title: str = "[brand]⚙ tune[/]") -> Panel:
+    best = r.get("best") or {}
     run_info = _kv_table()
     run_info.add_row("depth", str(r.get("depth")))
     run_info.add_row("backend", str(r.get("backend")))
@@ -1155,14 +1176,176 @@ def tune(depth: str, data: str, harness: str | None, out: str, strict: bool, app
         ("success rate  ", "key"), _pct(r.get("baseline_success_rate")), "  →  ",
         (_pct(best.get("success_rate")), "bold"), "   ", _signed_pct(r.get("gain_success_rate")),
     )
-    console.print(Panel(
+    return Panel(
         Group(run_info, Text(""), Text("Best configuration", style="bold"), chosen, Text(""), result_row),
-        title="[brand]⚙ tune[/]", title_align="left", border_style="magenta", expand=False, padding=(1, 2),
-    ))
+        title=title, title_align="left", border_style="magenta", expand=False, padding=(1, 2),
+    )
+
+
+def _root() -> Path:
+    return _Project.manifest.parent
+
+
+def _tune_detach(*, apply: bool, **options) -> None:
+    if apply:
+        _fail("--apply doesn't work with --detach",
+              "adopt a finished job with [cmd]hlock tune fetch <job> --apply[/]")
+    with _friendly_errors():
+        job = _jobs.submit(_m(), lock=_l(), options=options)
+    _ok(f"started tune job [bold]{job['id']}[/]  [muted](depth={options['depth']}, pid {job['pid']})[/]")
+    console.print(f"[key]log[/] [path]{_show(Path(job['dir']) / _jobs.LOG)}[/]")
+    _next(f"hlock tune show {job['id']}", f"hlock tune fetch {job['id']} --wait")
+
+
+_STATUS_STYLE = {"queued": "muted", "running": "warn", "succeeded": "ok", "failed": "fail", "cancelled": "muted"}
+
+
+def _status(s: str) -> str:
+    return f"[{_STATUS_STYLE.get(s, 'muted')}]{s}[/]"
+
+
+def _ago(ts: str | None) -> str:
+    if not ts:
+        return "—"
+    secs = (datetime.now(timezone.utc) - datetime.fromisoformat(ts)).total_seconds()
+    return f"{_duration(secs)} ago"
+
+
+def _duration(secs: float | None) -> str:
+    if secs is None:
+        return "—"
+    d, rest = divmod(max(0, int(secs)), 86400)
+    h, rest = divmod(rest, 3600)
+    m, s = divmod(rest, 60)
+    parts = [f"{v}{u}" for v, u in ((d, "d"), (h, "h"), (m, "m"), (s, "s")) if v]
+    return " ".join(parts[:2]) or "0s"
+
+
+def _elapsed(job: dict) -> float | None:
+    if not job.get("started_at"):
+        return None
+    end = datetime.fromisoformat(job["finished_at"]) if job.get("finished_at") else datetime.now(timezone.utc)
+    return (end - datetime.fromisoformat(job["started_at"])).total_seconds()
+
+
+@contextmanager
+def _job_errors():
+    try:
+        yield
+    except _jobs.JobError as e:
+        msg = str(e)
+        hint = None
+        if "no tune jobs" in msg:
+            hint = "start one with [cmd]hlock tune --detach[/]"
+        elif "no tune job" in msg or "ambiguous" in msg:
+            hint = "list jobs with [cmd]hlock tune list[/]"
+        elif " is queued" in msg or " is running" in msg:
+            hint = "wait for it with [cmd]--wait[/], or check on it with [cmd]hlock tune show[/]"
+        _fail(msg, hint)
+
+
+@tune.command("list")
+@click.option("--json", "as_json", is_flag=True, help="Print the jobs as JSON.")
+def tune_list(as_json: bool) -> None:
+    """List this project's tune jobs, newest first."""
+    jobs = _jobs.list_jobs(_root())
+    if as_json:
+        console.print_json(data=jobs)
+        return
+    if not jobs:
+        console.print("[muted]no tune jobs yet[/]")
+        _next("hlock tune --detach")
+        return
+    t = Table(box=None, header_style="bold", pad_edge=False)
+    for col in ("job", "status", "depth", "backend", "started", "elapsed", "success rate"):
+        t.add_column(col)
+    for j in jobs:
+        o, r = j.get("options") or {}, j.get("report") or {}
+        sr = (r.get("best") or {}).get("success_rate")
+        t.add_row(f"[key]{j['id']}[/]", _status(j["status"]), str(o.get("depth")),
+                  str(o.get("backend")), _ago(j.get("started_at") or j.get("created_at")),
+                  _duration(_elapsed(j)), _pct(sr) if sr is not None else "—")
+    console.print(t)
+
+
+@tune.command("show")
+@click.argument("job", required=False)
+@click.option("--log", "log_lines", default=10, show_default=True, type=int, help="How many log lines to show.")
+@click.option("--json", "as_json", is_flag=True, help="Print the job as JSON.")
+def tune_show(job: str | None, log_lines: int, as_json: bool) -> None:
+    """Show a tune job's status, settings and result. [dim]\\[default: the newest job][/]"""
+    with _job_errors():
+        j = _jobs.get(_root(), job)
+    if as_json:
+        console.print_json(data=j)
+        return
+    o = j.get("options") or {}
+    info = _kv_table()
+    info.add_row("status", _status(j["status"]))
+    info.add_row("depth", str(o.get("depth")))
+    info.add_row("data", str(o.get("data")))
+    info.add_row("backend", str(o.get("backend")))
+    if o.get("max_trials"):
+        info.add_row("max trials", str(o["max_trials"]))
+    info.add_row("started", _ago(j.get("started_at") or j.get("created_at")))
+    info.add_row("elapsed", _duration(_elapsed(j)))
+    if j["status"] == "running":
+        info.add_row("trials", f"{j.get('trials', 0)} so far")
+    for run in j.get("runs") or []:
+        info.add_row("flyte run", run)
+    if j.get("error"):
+        info.add_row("error", f"[fail]{j['error']}[/]")
+    info.add_row("log", f"[path]{_show(Path(j['dir']) / _jobs.LOG)}[/]")
+    console.print(Panel(info, title=f"[brand]⚙ tune job {j['id']}[/]", title_align="left",
+                        border_style="magenta", expand=False, padding=(1, 2)))
+    if j.get("report"):
+        console.print(_tune_panel(j["report"], title="[brand]⚙ result[/]"))
+    if log_lines > 0 and j["status"] != "succeeded":
+        try:
+            lines = (Path(j["dir"]) / _jobs.LOG).read_text(errors="replace").splitlines()[-log_lines:]
+        except OSError:
+            lines = []
+        if lines:
+            console.print(Text("\n".join(lines), style="muted"))
+    if j["status"] == "succeeded":
+        _next(f"hlock tune fetch {j['id']}", f"hlock tune fetch {j['id']} --apply")
+    elif j["status"] in _jobs.ACTIVE:
+        _next(f"hlock tune fetch {j['id']} --wait", f"hlock tune cancel {j['id']}")
+
+
+@tune.command("fetch")
+@click.argument("job", required=False)
+@click.option("--out", default="harness.tune.lock", show_default=True, help="Where to write the tune lock.")
+@click.option("--apply", is_flag=True, help="Also adopt the result into harness.lock.")
+@click.option("--wait", is_flag=True, help="Wait for the job to finish first.")
+def tune_fetch(job: str | None, out: str, apply: bool, wait: bool) -> None:
+    """Write a finished job's result to [path]harness.tune.lock[/]. [dim]\\[default: the newest job][/]"""
+    root = _root()
+    with _job_errors():
+        if wait:
+            ref = _jobs.get(root, job)["id"]
+            with console.status(f"[brand]Waiting for tune job {ref}…[/]", spinner="dots"):
+                _jobs.wait(root, ref)
+            job = ref
+        j = _jobs.fetch(root, job, out=out, apply=apply)
+    _ok(f"wrote [path]{_show(j['fetched'])}[/]  [muted](from tune job {j['id']})[/]")
+    console.print(_tune_panel(j.get("report") or {}))
+    if j.get("base_changed"):
+        console.print(f"[warn]![/] [path]{_ld()}[/] changed since this job started, so it was tuned "
+                      "against an older base lock")
     if apply:
         _ok(f"adopted into [path]{_ld()}[/]")
     else:
-        _next("hlock tune --apply")
+        _next(f"hlock tune fetch {j['id']} --apply")
+
+
+@tune.command("cancel")
+@click.argument("job")
+def tune_cancel(job: str) -> None:
+    """Stop a running tune job."""
+    with _job_errors():
+        j = _jobs.cancel(_root(), job)
+    _ok(f"tune job [bold]{j['id']}[/] {_status(j['status'])}")
 
 
 def _known_harness(name: str) -> bool:

@@ -1563,7 +1563,19 @@ hlock tune --apply                     # also adopt the result into harness.lock
 hlock tune diff                        # tuned changes vs: base (evidence + content)
 hlock tune reuse-traces --dir …        # point at an exact trace directory
 hlock tune dry-run                     # print plan + cost estimate, run nothing
+hlock tune --detach                    # run as a background tune job
+hlock tune list | show [job] | fetch [job] [--wait] [--apply] | cancel <job>
 ```
+
+**Background jobs.** Tunes run for minutes to days, so `--detach` starts a *tune job*:
+a detached orchestrator process with its own directory under `.harnesslock/tune/jobs/<id>/`
+(settings, status, log, trial artifacts, and the resulting tune lock). A job never writes
+the project's locks; `fetch` copies its result to `harness.tune.lock` (and `--apply` adopts
+it), warning when `harness.lock` changed since the job started. Today the orchestrator runs
+on the submitting machine on every backend, with only the heavy stages on Flyte for
+`cluster`. Planned: on `cluster`, submit the orchestrator itself as a Flyte run so a job
+survives the laptop sleeping, with the job record holding the run URL (`hlock.attach(url)`,
+§9.2) and `list`/`show`/`fetch` reading status and outputs from the cluster.
 
 **Evaluation discipline.** `tune` re-runs the tuned stack against the **holdout** split
 (at `--depth full`, or on request) and only records a gain when it is distinguishable with
