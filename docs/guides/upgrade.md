@@ -4,6 +4,10 @@ New models come out all the time. `hlock upgrade` tells you which locked compone
 have newer versions available, re-measures the stack with them, and only changes your
 lock when you ask. It always keeps the previous lock, so you can roll back.
 
+`upgrade` works on a [resolved lock](resolve.md), because it re-measures against your
+tasks. To update a [pinned lock](pin.md), change your setup (install a newer harness,
+switch the model), then run `hlock pin` again.
+
 ## Plan
 
 By default `upgrade` only plans:

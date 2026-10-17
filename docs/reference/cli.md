@@ -14,23 +14,23 @@ Failures print a one-line error with a hint and exit `1`.
 
 | Command | Purpose |
 |---|---|
-| [`init`](#init) | Write a starter `harness.toml` |
-| [`evals`](#evals) | Write a starter eval pack from a template, and check one |
-| [`resolve`](#resolve) | Search the space and pin the winner in `harness.lock` |
 | [`pin`](#pin) | Pin your current harness setup into `harness.lock` |
-| [`check`](#check) | Fail if `harness.toml` has drifted from `harness.lock`, or a pinned setup changed |
+| [`check`](#check) | Fail if a pinned setup changed, or `harness.toml` has drifted from `harness.lock` |
 | [`sync`](#sync) | Rehydrate the setup in a lock on this machine, in a prefix, or in a Docker image |
 | [`launch`](#launch) | Start a harness session that matches the lock |
-| [`show`](#show) | Show the locked stack and its evidence |
-| [`tree`](#tree) | Print the locked component graph |
+| [`run`](#run) | Run the locked agent on a prompt |
+| [`evals`](#evals) | Write a starter eval pack from a template, and check one |
+| [`init`](#init) | Write a starter `harness.toml` |
+| [`resolve`](#resolve) | Search the space and pin the winner in `harness.lock` |
+| [`tune`](#tune) | Tune prompts, hyperparameters, and small models into `harness.tune.lock` |
+| [`upgrade`](#upgrade) | Plan, apply, or roll back component upgrades on a resolved lock |
+| [`localize`](#localize) | Write an all-local equivalent of a lock |
 | [`harness list`](#harness-list) | List known harnesses and what's installed |
 | [`harness show`](#harness-show) | Show a harness profile and the paths it reads here |
 | [`runtime list`](#runtime-list) | List local inference runtimes and what's installed |
+| [`show`](#show) | Show the locked stack and its evidence |
+| [`tree`](#tree) | Print the locked component graph |
 | [`backend status`](#backend-status) | Show the configured backend and environment |
-| [`run`](#run) | Run the locked agent on a prompt |
-| [`upgrade`](#upgrade) | Plan, apply, or roll back component upgrades |
-| [`tune`](#tune) | Tune prompts, hyperparameters, and small models into `harness.tune.lock` |
-| [`localize`](#localize) | Write an all-local equivalent of a lock |
 
 ## Global options
 
@@ -296,6 +296,9 @@ hlock run PROMPT [--json]
 
 Find newer versions of locked components, re-measure the stack, and apply only on
 request. See [Upgrading components](../guides/upgrade.md).
+
+`upgrade` works on resolved locks. On a pinned lock it exits `1`: update your setup and
+re-pin with `hlock pin` instead.
 
 ```bash
 hlock upgrade [--all | --to TARGET] [--apply] [--force] [--rollback] [--workdir DIR]

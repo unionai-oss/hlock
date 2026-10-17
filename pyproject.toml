@@ -7,7 +7,7 @@ name = "hlock"
 # Read by maturin from the Cargo workspace ([workspace.package].version), the single
 # source of truth. Bump it with `python scripts/set_version.py X.Y.Z`.
 dynamic = ["version"]
-description = "Make your agent harness pinnable, portable, and tunable: tune your agent stack against your own tasks, then pin the winner in a harness.lock."
+description = "Make your agent harness pinnable, portable, and tunable: pin its models, MCP servers, skills, and config in a harness.lock, rehydrate it anywhere, then tune it against your own tasks."
 readme = "README.md"
 requires-python = ">=3.9"
 license = "Apache-2.0"

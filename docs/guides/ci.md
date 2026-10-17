@@ -4,6 +4,13 @@ Commit `harness.toml` and `harness.lock` together, then have CI check that they 
 match. If someone edits the manifest without re-locking, the build fails, just like
 `uv sync --locked` or `cargo build --locked`.
 
+!!! note "Pinned locks"
+
+    This page is about [resolved locks](resolve.md). A [pinned lock](pin.md) describes the
+    harness setup on a machine, and `hlock check` compares it with the setup on the machine
+    it runs on. A CI runner doesn't have your setup, so run that check where the setup
+    lives, before you commit.
+
 ## `hlock check`
 
 ```console

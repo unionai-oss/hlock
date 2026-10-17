@@ -135,11 +135,12 @@ click.rich_click.STYLE_USAGE = "bold magenta"
 click.rich_click.MAX_WIDTH = 100
 click.rich_click.COMMAND_GROUPS = {
     "hlock": [
-        {"name": "Lock", "commands": ["init", "evals", "resolve", "pin", "check"]},
-        {"name": "Rehydrate", "commands": ["sync", "launch"]},
+        {"name": "Lock", "commands": ["pin", "check"]},
+        {"name": "Rehydrate & run", "commands": ["sync", "launch", "run"]},
+        {"name": "Optimize", "commands": ["evals", "init", "resolve", "tune", "upgrade"]},
+        {"name": "Go local", "commands": ["localize"]},
         {"name": "Harness", "commands": ["harness", "runtime"]},
         {"name": "Inspect", "commands": ["show", "tree", "backend"]},
-        {"name": "Run & evolve", "commands": ["run", "upgrade", "tune", "localize"]},
     ]
 }
 
@@ -355,10 +356,11 @@ class _Group(click.RichGroup):
 def main(manifest: str | None, lock_path: str | None) -> None:
     """[brand]hlock[/] · make your agent harness pinnable, portable, and tunable.
 
-    Tune your agent stack against your own tasks, then pin the winner in a
-    [path]harness.lock[/].
+    Pin your harness, models, MCP servers, skills, and config in a
+    [path]harness.lock[/], version it, and rehydrate it anywhere. Then tune it
+    against your own evals.
 
-    Get started: [cmd]hlock evals init[/] → [cmd]hlock init[/] → [cmd]hlock resolve[/] → [cmd]hlock check[/]
+    Get started: [cmd]hlock pin[/] → [cmd]hlock check[/] → [cmd]hlock sync[/]
     """
     _set_project(manifest, lock_path)
 
@@ -762,7 +764,7 @@ def show(as_json: bool) -> None:
 
 @main.command()
 def check() -> None:
-    """Fail if [path]harness.toml[/] has drifted from [path]harness.lock[/] (CI-friendly).
+    """Fail if your setup, or [path]harness.toml[/], has drifted from [path]harness.lock[/].
 
     For a pinned lock, re-capture the harness and fail if the setup changed.
     """
@@ -994,6 +996,12 @@ def launch(args: tuple[str, ...], lock: str | None, prefix: str | None, in_place
 @click.option("--workdir", default=None, help="Where to put trial artifacts.")
 def upgrade(to: str | None, all_: bool, apply: bool, rollback: bool, force: bool, workdir: str | None) -> None:
     """Plan, apply, or roll back upgrades to locked components."""
+    if not rollback and Path(_l()).exists():
+        with _friendly_errors():
+            if Lockfile.load(_l()).kind == "pin":
+                _fail(f"{_ld()} is a pinned lock; upgrade re-measures a resolved one against your tasks",
+                      "update your setup (install a newer harness, change the model), then re-pin with "
+                      "[cmd]hlock pin[/]")
     label = "Rolling back…" if rollback else ("Applying upgrade…" if apply else "Planning upgrades…")
     with _working(label):
         result = json.loads(

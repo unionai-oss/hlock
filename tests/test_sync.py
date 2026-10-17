@@ -89,6 +89,14 @@ def test_rehydrate_on_a_new_machine(machines, monkeypatch):
     assert pending == {"claude-code.plugin:lsp@market", "claude-code.marketplace:market"}, pending
 
 
+def test_synced_config_is_not_drift(machines, monkeypatch):
+    # sync reformats the JSON and fills in this machine's secret; neither is a change to the setup
+    monkeypatch.setenv("HLOCK_SECRET_GITHUB_GITHUB_TOKEN", "ghp_another_machines_token_0123456789")
+    invoke("sync", "--yes")
+    r = invoke("check")
+    assert "config" not in r.output and "mcp" not in r.output, r.output
+
+
 def test_sync_keeps_secrets_already_configured(machines, monkeypatch):
     monkeypatch.setenv("HOME", str(machines["a"]))
     plan = json.loads(invoke("sync", "--json").output)

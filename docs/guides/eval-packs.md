@@ -21,7 +21,7 @@ $ hlock evals init
 next → hlock evals check ./evals  ·  hlock init --pack ./evals
 ```
 
-The [Quickstart](../getting-started/quickstart.md) takes it from there. Three tasks are
+[Finding the best stack](resolve.md) takes it from there. Three tasks are
 enough to watch the loop work, but too few to trust a result.
 
 ### Fill in a template with your agent

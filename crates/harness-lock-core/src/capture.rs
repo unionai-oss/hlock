@@ -1185,13 +1185,14 @@ pub fn capture(profile: &HarnessProfile, reg: &Registry, ctx: &Ctx, project: Opt
                                 m.insert(p.clone(), sub.clone());
                             }
                         }
-                        // pointers digests cover only what's restored
-                        cf.digest = Some(content_hash(&Value::Object(m.clone())));
                         (Value::Object(m), "json")
                     } else {
                         (std::mem::take(&mut v), if spec.format == "jsonc" { "json" } else { spec.format.as_str() })
                     };
                     secrets.scrub_value(&mut vec![profile.id.clone(), id.clone()], &mut body, false);
+                    // digest what's restored, redacted and parsed, so a sync that reformats the
+                    // file or fills in a different secret value isn't drift
+                    cf.digest = Some(content_hash(&body));
                     match render_config(&body, fmt) {
                         Ok(text) => {
                             let ext = if cf.restore == "pointers" { "pointers.json".to_string() } else { fmt.to_string() };

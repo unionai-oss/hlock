@@ -81,9 +81,12 @@ On a pinned lock, `hlock check` re-captures the harness and fails if anything ch
 $ hlock check
 ✗ drift: your claude-code setup changed since harness.lock was pinned
   ~ llm default: anthropic:opus → anthropic:sonnet
-  ~ config {root}/settings.json: 1c4e6085b0 → 1c3e450af7
+  ~ config {root}/settings.json: 016233bf39 → d5aaa91f9e
   hint: re-pin with hlock pin, or restore it with hlock sync
 ```
+
+A config file's digest covers what `sync` restores from it, parsed and with secrets
+redacted, so reformatting the file or using a different value for a secret isn't drift.
 
 Running `hlock pin` again overwrites the pin and prints the same kind of diff under
 "changes since the last pin".

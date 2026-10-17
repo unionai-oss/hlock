@@ -24,8 +24,9 @@ import argparse
 import re
 import subprocess
 import sys
-import tomllib
 from pathlib import Path
+
+import tomllib
 
 ROOT = Path(__file__).resolve().parent.parent
 WORKSPACE = ROOT / "Cargo.toml"
@@ -40,11 +41,11 @@ SEMVER = re.compile(r"^(\d+\.\d+\.\d+)(?:-(alpha|a|beta|b|rc)\.?(\d+))?$")
 PEP440_PRE = {"alpha": "a", "a": "a", "beta": "b", "b": "b", "rc": "rc"}
 
 # `version = "…"` inside the [workspace.package] table only.
-WORKSPACE_VERSION = re.compile(r'(\[workspace\.package\][^\[]*?^version\s*=\s*")([^"]+)(")', re.M | re.S)
+WORKSPACE_VERSION = re.compile(r'(\[workspace\.package\][^\[]*?^version\s*=\s*")([^"]+)(")', re.MULTILINE | re.DOTALL)
 # `harness-lock-core = { …, version = "=…" }` in a dependent crate.
-CORE_DEP_VERSION = re.compile(rf'(^{CORE}\s*=\s*\{{[^}}]*?version\s*=\s*"=?)([^"]+)(")', re.M)
+CORE_DEP_VERSION = re.compile(rf'(^{CORE}\s*=\s*\{{[^}}]*?version\s*=\s*"=?)([^"]+)(")', re.MULTILINE)
 # `version = "…"` in the [project] table of the harness-lock alias pyproject.
-PROJECT_VERSION = re.compile(r'(\[project\][^\[]*?^version\s*=\s*")([^"]+)(")', re.M | re.S)
+PROJECT_VERSION = re.compile(r'(\[project\][^\[]*?^version\s*=\s*")([^"]+)(")', re.MULTILINE | re.DOTALL)
 # Every `hlock==…` / `hlock[extra]==…` pin in the harness-lock alias pyproject.
 HLOCK_PIN = re.compile(r'("hlock(?:\[[^\]]*\])?==)([^"]+)(")')
 

@@ -441,9 +441,10 @@ fn resolve_manifest(py: Python<'_>, manifest: Option<PyObject>, backend: Option<
             } else if let Ok(sp) = obj.extract::<PyRef<PySearchSpace>>(py) {
                 to_core_manifest("agent", &sp)
             } else if let Ok(s) = obj.extract::<String>(py) {
-                // Accept either a path or raw TOML text.
+                // Accept either a path or raw TOML text. A single line with no `=` is a path,
+                // so a missing harness.toml reads as "cannot read", not a TOML parse error.
                 let p = Path::new(&s);
-                if p.exists() {
+                if p.exists() || (!s.contains('\n') && !s.contains('=')) {
                     core::Manifest::load(p).map_err(py_err)?
                 } else {
                     core::Manifest::from_str(&s).map_err(py_err)?
