@@ -25,7 +25,7 @@ def no_harness_env(monkeypatch):
 
 @pytest.fixture
 def project(tmp_path, monkeypatch):
-    shutil.copytree(REPO / "tasks", tmp_path / "tasks")
+    shutil.copytree(REPO / "evals", tmp_path / "evals")
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("NO_COLOR", "1")
     return tmp_path
@@ -36,7 +36,7 @@ def invoke(*args):
 
 
 def test_lock_loop(project):
-    r = invoke("init", "--name", "demo", "--pack", "./tasks")
+    r = invoke("init", "--name", "demo", "--pack", "./evals")
     assert r.exit_code == 0, r.output
     assert "wrote harness.toml" in r.output
     assert "next" in r.output and "hlock resolve" in r.output
@@ -63,7 +63,7 @@ def test_lock_loop(project):
 
 
 def test_check_detects_drift(project):
-    invoke("init", "--pack", "./tasks")
+    invoke("init", "--pack", "./evals")
     invoke("resolve")
     manifest = project / "harness.toml"
     manifest.write_text(manifest.read_text().replace("max_trials = 200", "max_trials = 10"))
@@ -85,7 +85,7 @@ def test_errors_are_friendly(project):
 
 
 def test_upgrade_plan(project):
-    invoke("init", "--pack", "./tasks")
+    invoke("init", "--pack", "./evals")
     invoke("resolve")
     r = invoke("upgrade", "--all")
     assert r.exit_code == 0, r.output
@@ -113,19 +113,19 @@ def test_harness_list_and_show(project, monkeypatch):
 
 def test_init_detects_the_running_harness(project, monkeypatch):
     monkeypatch.setenv("PI_CODING_AGENT", "true")
-    r = invoke("init", "--pack", "./tasks")
+    r = invoke("init", "--pack", "./evals")
     assert r.exit_code == 0, r.output
     assert 'harness = "pi"' in (project / "harness.toml").read_text()
     assert "running inside it" in r.output
 
 
 def test_init_without_a_harness_leaves_target_commented(project):
-    invoke("init", "--pack", "./tasks")
+    invoke("init", "--pack", "./evals")
     assert '# harness = "claude-code"' in (project / "harness.toml").read_text()
 
 
 def test_resolve_for_a_target_harness(project):
-    invoke("init", "--pack", "./tasks", "--harness", "opencode")
+    invoke("init", "--pack", "./evals", "--harness", "opencode")
     r = invoke("resolve")
     assert r.exit_code == 0, r.output
     lock = json.loads(invoke("show", "--json").output)
@@ -144,7 +144,7 @@ def test_resolve_for_a_target_harness(project):
 
 
 def test_project_harness_in_manifest(project):
-    invoke("init", "--pack", "./tasks")
+    invoke("init", "--pack", "./evals")
     manifest = project / "harness.toml"
     manifest.write_text(manifest.read_text() + """
 [harnesses.triage]

@@ -35,7 +35,7 @@ fn make_manifest(pack: &Path) -> Manifest {
     let toml = r#"
 [project]
 name = "opstest"
-[tasks]
+[evals]
 seeds = 2
 [candidates.llm.planner]
 any_of = ["reference:qwen-7b", "reference:qwen-32b"]
@@ -53,7 +53,7 @@ strategy = "grid"
 target = "local"
 "#;
     let mut m = Manifest::from_str(toml).unwrap();
-    m.tasks.insert("packs".to_string(), serde_json::json!([pack.to_string_lossy().to_string()]));
+    m.evals.insert("packs".to_string(), serde_json::json!([pack.to_string_lossy().to_string()]));
     m
 }
 

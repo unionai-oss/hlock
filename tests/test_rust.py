@@ -8,7 +8,7 @@ import pytest
 import harness_lock as hlock
 
 REPO = Path(__file__).resolve().parent.parent
-TASKS = REPO / "tasks"
+TASKS = REPO / "evals"
 
 PACK_TOML = """\
 [pack]
@@ -50,7 +50,7 @@ def test_search_space_tune(workspace, monkeypatch):
         llm={"planner": ["reference:qwen-7b", "reference:qwen-32b"]},
         decision=["none", "rules:default"],
         harness=["reference"],
-        tasks=json.dumps({"packs": [str(ws)], "seeds": 2}),
+        evals=json.dumps({"packs": [str(ws)], "seeds": 2}),
     )
     lf = hlock.resolve(space, backend="local", workdir=str(base / ".harnesslock"))
     assert lf.harness == "reference"
@@ -80,7 +80,7 @@ def test_upgrade_and_tune(tmp_path, monkeypatch):
     """hlock upgrade (plan/apply/rollback) and hlock tune via the bindings."""
     import json as _json
 
-    # a local task pack
+    # a local eval pack
     ws = tmp_path / "ws"
     (ws / "t1").mkdir(parents=True)
     (ws / "t1" / "prompt.md").write_text("write summary.md")
@@ -91,7 +91,7 @@ def test_upgrade_and_tune(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     manifest = (
         "[project]\nname='ops'\n"
-        f"[tasks]\npacks=['{ws}']\nseeds=1\n"
+        f"[evals]\npacks=['{ws}']\nseeds=1\n"
         "[candidates.llm.planner]\nany_of=['reference:qwen-7b','reference:qwen-32b']\n"
         "[candidates]\nharness=['reference']\ndecision=['none']\n"
         "[objective]\nprimary='success-rate'\nselect='max-quality'\n"

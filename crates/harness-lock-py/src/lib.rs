@@ -55,8 +55,13 @@ impl PyManifest {
         self.inner.manifest_hash()
     }
 
+    fn eval_packs(&self) -> Vec<String> {
+        self.inner.eval_packs()
+    }
+
+    /// The old name for `eval_packs`.
     fn task_packs(&self) -> Vec<String> {
-        self.inner.task_packs()
+        self.inner.eval_packs()
     }
 
     /// `[target] harness`, if set.
@@ -66,7 +71,7 @@ impl PyManifest {
     }
 
     fn to_json(&self) -> String {
-        serde_json::to_string(&self.inner.tasks).unwrap_or_default()
+        serde_json::to_string(&self.inner.evals).unwrap_or_default()
     }
 }
 
@@ -157,19 +162,19 @@ pub struct PySearchSpace {
     policy: serde_json::Value,
     tools: serde_json::Value,
     skills: serde_json::Value,
-    tasks: serde_json::Value,
+    evals: serde_json::Value,
     objective: Option<PyObjective>,
     budget: Option<PyBudget>,
 }
 
-fn default_tasks() -> serde_json::Value {
+fn default_evals() -> serde_json::Value {
     serde_json::json!({"seeds": 2})
 }
 
 #[pymethods]
 impl PySearchSpace {
     #[new]
-    #[pyo3(signature = (llm=None, decision=None, harness=None, policy=None, tools=None, skills=None, objective=None, budget=None, tasks=None))]
+    #[pyo3(signature = (llm=None, decision=None, harness=None, policy=None, tools=None, skills=None, objective=None, budget=None, evals=None, tasks=None))]
     fn new(
         llm: Option<std::collections::BTreeMap<String, Vec<String>>>,
         decision: Option<Vec<String>>,
@@ -179,6 +184,7 @@ impl PySearchSpace {
         skills: Option<String>,
         objective: Option<PyObjective>,
         budget: Option<PyBudget>,
+        evals: Option<String>,
         tasks: Option<String>,
     ) -> Self {
         let parse = |s: Option<String>, fallback: serde_json::Value| -> serde_json::Value {
@@ -194,7 +200,8 @@ impl PySearchSpace {
             policy: parse(policy, serde_json::json!({})),
             tools: parse(tools, serde_json::json!({})),
             skills: parse(skills, serde_json::json!({})),
-            tasks: parse(tasks, default_tasks()),
+            // `tasks` is the old name for `evals`
+            evals: parse(evals.or(tasks), default_evals()),
             objective,
             budget,
         }
@@ -255,7 +262,7 @@ fn to_core_manifest(name: &str, sp: &PySearchSpace) -> core::Manifest {
     project.insert("name".into(), serde_json::json!(name));
     core::Manifest {
         project,
-        tasks: object_of(&sp.tasks),
+        evals: object_of(&sp.evals),
         candidates,
         tools: object_of(&sp.tools),
         skills: object_of(&sp.skills),
@@ -795,10 +802,11 @@ fn run_code_harness(prompt: String, path: String, workspace: Option<String>, tim
 }
 
 /// Write a localized (all-local) copy of a lock to `out`. Evaluates candidates on
-/// `tasks` (a task pack path) or `./harness.toml`'s task packs when available.
+/// `evals` (an eval pack path; `tasks` is its old name) or `./harness.toml`'s eval
+/// packs when available.
 /// Returns JSON with the lock and the localize report.
 #[pyfunction]
-#[pyo3(signature = (path="harness.lock".to_string(), out="harness.local.lock".to_string(), harness=None, runtime=None, models=Vec::new(), memory_gb=None, tasks=None, strict=false, allow_network=false, workdir=None, manifest=None))]
+#[pyo3(signature = (path="harness.lock".to_string(), out="harness.local.lock".to_string(), harness=None, runtime=None, models=Vec::new(), memory_gb=None, evals=None, tasks=None, strict=false, allow_network=false, workdir=None, manifest=None))]
 fn localize(
     path: String,
     out: String,
@@ -806,6 +814,7 @@ fn localize(
     runtime: Option<String>,
     models: Vec<String>,
     memory_gb: Option<f64>,
+    evals: Option<String>,
     tasks: Option<String>,
     strict: bool,
     allow_network: bool,
@@ -813,10 +822,10 @@ fn localize(
     manifest: Option<String>,
 ) -> PyResult<String> {
     let (reg, ctx, found) = registry(manifest.as_deref(), Some(&lock_dir(&path)))?;
-    let manifest = match tasks {
+    let manifest = match evals.or(tasks) {
         Some(t) => Some(
             core::Manifest::from_str(&format!(
-                "[tasks]\npacks = [{t:?}]\nseeds = 2\n[objective]\nprimary = \"success-rate\"\nselect = \"max-quality\"\n"
+                "[evals]\npacks = [{t:?}]\nseeds = 2\n[objective]\nprimary = \"success-rate\"\nselect = \"max-quality\"\n"
             ))
             .map_err(py_err)?,
         ),
@@ -836,6 +845,23 @@ fn localize(
     let abs = |p: &str| if Path::new(p).is_absolute() { PathBuf::from(p) } else { cwd.join(p) };
     let o = core::localize::localize_to(&abs(&path), &abs(&out), &reg, &ctx, &opts).map_err(py_err)?;
     Ok(json_str(serde_json::json!({"lock": o.lock, "report": o.report, "path": out})))
+}
+
+/// Load the eval pack at `path` and check it (see `EvalPack::check`). Returns JSON
+/// with the pack's header, its task ids, and the issues found.
+#[pyfunction]
+fn check_eval_pack(path: String) -> PyResult<String> {
+    let pack = core::tasks::EvalPack::load(&path, None).map_err(py_err)?;
+    let issues = pack.check();
+    Ok(json_str(serde_json::json!({
+        "name": pack.name,
+        "version": pack.version,
+        "domain": pack.domain,
+        "path": pack.path,
+        "hash": pack.hash,
+        "tasks": pack.tasks.iter().map(|t| &t.id).collect::<Vec<_>>(),
+        "issues": issues,
+    })))
 }
 
 #[pymodule]
@@ -863,6 +889,7 @@ fn _harness_lock(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(launch_prepare, m)?)?;
     m.add_function(wrap_pyfunction!(run_code_harness, m)?)?;
     m.add_function(wrap_pyfunction!(localize, m)?)?;
+    m.add_function(wrap_pyfunction!(check_eval_pack, m)?)?;
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
     m.add("LOCK_VERSION", core::LOCK_VERSION)?;
     Ok(())

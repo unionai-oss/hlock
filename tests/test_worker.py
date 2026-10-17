@@ -109,8 +109,8 @@ def test_tune_backend_devbox(tmp_path, monkeypatch):
     manifest = f"""[project]
 name = "worker-e2e"
 
-[tasks]
-packs = ["{REPO / 'tasks'}"]
+[evals]
+packs = ["{REPO / 'evals'}"]
 seeds = 1
 
 [candidates.llm.planner]
@@ -193,8 +193,8 @@ def test_tune_depth_prompt_devbox(tmp_path, monkeypatch):
     manifest = f"""[project]
 name = "prompt-e2e"
 
-[tasks]
-packs = ["{REPO / 'tasks'}"]
+[evals]
+packs = ["{REPO / 'evals'}"]
 seeds = 1
 
 [candidates.llm.planner]

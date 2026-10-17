@@ -31,7 +31,7 @@ planner    qwen-7b  →  qwen-32b
 ✓ upgraded  success rate 100% → 100%  (previous lock kept at harness.lock.prev)
 ```
 
-Applying re-runs the task pack on the upgraded stack and compares success rates. If
+Applying re-runs the eval pack on the upgraded stack and compares success rates. If
 the success rate drops, the upgrade is rolled back automatically. Pass `--force` to
 keep it anyway.
 

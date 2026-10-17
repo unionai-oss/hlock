@@ -105,8 +105,9 @@ where
 pub struct Manifest {
     #[serde(default)]
     pub project: BTreeMap<String, serde_json::Value>,
-    #[serde(default)]
-    pub tasks: BTreeMap<String, serde_json::Value>,
+    /// `[evals]`: the eval packs to measure against. `[tasks]` is the old name.
+    #[serde(default, alias = "tasks")]
+    pub evals: BTreeMap<String, serde_json::Value>,
     #[serde(default)]
     pub candidates: Candidates,
     #[serde(default)]
@@ -159,7 +160,7 @@ impl Manifest {
     }
 
     /// The project directory: where the manifest lives (else the working directory).
-    /// Relative paths in the manifest (task packs, instructions) resolve against it.
+    /// Relative paths in the manifest (eval packs, instructions) resolve against it.
     pub fn root(&self) -> PathBuf {
         let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
         match self.source_path.as_ref().and_then(|p| p.parent()) {
@@ -183,8 +184,8 @@ impl Manifest {
             .unwrap_or_else(|| "agent".to_string())
     }
 
-    pub fn task_packs(&self) -> Vec<String> {
-        self.tasks
+    pub fn eval_packs(&self) -> Vec<String> {
+        self.evals
             .get("packs")
             .and_then(|v| v.as_array())
             .map(|a| {
@@ -195,8 +196,13 @@ impl Manifest {
             .unwrap_or_default()
     }
 
+    #[deprecated(note = "renamed to `eval_packs`")]
+    pub fn task_packs(&self) -> Vec<String> {
+        self.eval_packs()
+    }
+
     pub fn seeds(&self) -> u64 {
-        self.tasks
+        self.evals
             .get("seeds")
             .and_then(|v| v.as_u64())
             .unwrap_or(3)
@@ -220,7 +226,7 @@ impl Manifest {
     }
 
     pub fn search_frac(&self) -> f64 {
-        self.tasks
+        self.evals
             .get("splits")
             .and_then(|v| v.get("search"))
             .and_then(|v| v.as_f64())

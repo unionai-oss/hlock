@@ -5,7 +5,7 @@
 //! local-capable one; LLM roles and the decision model on API providers move
 //! to a local runtime, picked from the runtime's model catalog and the weights
 //! already on disk, filtered to what fits this machine's memory. Portable
-//! components carry over. With task packs it evaluates the candidates through
+//! components carry over. With eval packs it evaluates the candidates through
 //! the resolver; otherwise it ranks them and marks the result unevaluated.
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -35,7 +35,7 @@ pub struct LocalizeOptions {
     pub models: Vec<String>,
     /// Memory budget for model weights, overriding the machine probe.
     pub memory_gb: Option<f64>,
-    /// A manifest whose task packs evaluate the candidates.
+    /// A manifest whose eval packs evaluate the candidates.
     pub manifest: Option<Manifest>,
     /// Drop remote MCP servers instead of flagging them.
     pub strict: bool,
@@ -304,7 +304,7 @@ pub fn localize(source: &Lockfile, source_path: &Path, reg: &Registry, ctx: &Ctx
     let mut evaluated = false;
     let mut evidence = Evidence::default();
     let mut eval_harness = target.id.clone();
-    let tasks = opts.manifest.as_ref().filter(|m| !m.task_packs().is_empty());
+    let tasks = opts.manifest.as_ref().filter(|m| !m.eval_packs().is_empty());
     if let Some(m) = tasks {
         let mut man = m.clone();
         man.target.clear();
@@ -325,7 +325,7 @@ pub fn localize(source: &Lockfile, source_path: &Path, reg: &Registry, ctx: &Ctx
             notes.push(format!("trials ran on the {eval_harness} adapter, so the evidence is a stand-in"));
         }
     } else {
-        notes.push("no task packs to evaluate with; candidates were ranked by fit, tier, and what's on disk".into());
+        notes.push("no eval packs to evaluate with; candidates were ranked by fit, tier, and what's on disk".into());
     }
 
     // ---- build the lock ----

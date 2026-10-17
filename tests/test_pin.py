@@ -127,8 +127,8 @@ def test_pin_opencode_with_local_runtime(home):
 
 def test_pin_never_clobbers_a_resolved_lock(home, tmp_path):
     repo = Path(__file__).resolve().parent.parent
-    shutil.copytree(repo / "tasks", "tasks")
-    invoke("init", "--pack", "./tasks")
+    shutil.copytree(repo / "evals", "evals")
+    invoke("init", "--pack", "./evals")
     assert invoke("resolve").exit_code == 0
     r = invoke("pin", "--harness", "claude")
     assert r.exit_code == 1 and "resolved lock" in r.output and "-o" in r.output

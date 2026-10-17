@@ -125,11 +125,11 @@ def run(prompt, ctx):
 
 @pytest.fixture
 def code_project(tmp_path, monkeypatch, clean_env):
-    shutil.copytree(REPO / "tasks", tmp_path / "tasks")
+    shutil.copytree(REPO / "evals", tmp_path / "evals")
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("HL_PYTHON", sys.executable)
     (tmp_path / "triage.py").write_text(AGENT)
-    invoke("init", "--pack", "./tasks")
+    invoke("init", "--pack", "./evals")
     manifest = tmp_path / "harness.toml"
     text = manifest.read_text().replace('# [target]\n# harness = "claude-code"', '[target]\nharness = "triage"')
     manifest.write_text(text + '\n[harnesses.triage]\nentrypoint = "triage:run"\n')

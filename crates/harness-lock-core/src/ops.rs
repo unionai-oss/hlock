@@ -646,7 +646,7 @@ fn build_tuned_lock(
         ..Default::default()
     };
     lf.evidence = Evidence {
-        task_pack: Some(manifest.task_packs().join(",")),
+        eval_pack: Some(manifest.eval_packs().join(",")),
         split: eval_split.into(),
         trials,
         success_rate: success_map,

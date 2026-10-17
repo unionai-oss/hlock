@@ -1,4 +1,4 @@
-//! End-to-end resolver test: build a temp task pack, run `Resolver::resolve`, and check
+//! End-to-end resolver test: build a temp eval pack, run `Resolver::resolve`, and check
 //! the produced `harness.lock`.
 
 use std::fs;
@@ -41,6 +41,7 @@ fn make_manifest(pack: &Path) -> Manifest {
 [project]
 name = "resolvertest"
 
+# the old [tasks] name for [evals] still parses
 [tasks]
 seeds = 2
 
@@ -70,7 +71,7 @@ target = "local"
 "#
     );
     let mut m = Manifest::from_str(&toml).unwrap();
-    m.tasks.insert(
+    m.evals.insert(
         "packs".to_string(),
         serde_json::json!([pack.to_string_lossy().to_string()]),
     );

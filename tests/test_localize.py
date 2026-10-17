@@ -108,9 +108,9 @@ def test_localize_options(machine):
     assert r.exit_code == 1 and "--models" in r.output
 
 
-def test_localize_evaluates_with_tasks(machine):
-    shutil.copytree(REPO / "tasks", "tasks")
-    r = invoke("localize", "--memory-gb", "30", "--tasks", "./tasks", "-o", "eval.lock")
+def test_localize_evaluates_with_evals(machine):
+    shutil.copytree(REPO / "evals", "evals")
+    r = invoke("localize", "--memory-gb", "30", "--evals", "./evals", "-o", "eval.lock")
     assert r.exit_code == 0, r.output
     lock = load("eval.lock")
     assert lock["localize"]["evaluated"] is True

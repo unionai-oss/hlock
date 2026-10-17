@@ -54,7 +54,7 @@ same setup comes back on any machine, in CI, or on a cluster.
 </div>
 
 <figure markdown="span">
-  ![An hlock session: init, resolve, check, and run](assets/quickstart.svg){ width="620" }
+  ![An hlock session: evals init, init, resolve, check, and run](assets/quickstart.svg){ width="620" }
 </figure>
 
 ## A package manager for agent stacks
@@ -74,7 +74,7 @@ If you've used `uv`, `cargo`, or `npm`, you already know the shape of `hlock`:
 
     ---
 
-    Every candidate stack runs against your [task packs](guides/task-packs.md), and the
+    Every candidate stack runs against your [eval packs](guides/eval-packs.md), and the
     lock records success rate, cost, and latency for the one that won.
 
 -   :lucide-lock:{ .lg .middle } **Pinned and enforceable**

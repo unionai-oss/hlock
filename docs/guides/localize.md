@@ -13,7 +13,7 @@ $ hlock localize
 │  llm · default  ollama:gemma3:12b                                                   │
 │  memory         20.0 GB for weights  (128.0 GB, unified memory (75%))               │
 │  candidates     gemma3:12b ✓, devstral:24b, gpt-oss:20b, gemma3:4b ✓, …  (✓ on disk) │
-│  evidence       not evaluated (no task packs); ranked by fit, tier, and what's on disk │
+│  evidence       not evaluated (no eval packs); ranked by fit, tier, and what's on disk │
 ╰─────────────────────────────────────────────────────────────────────────────────────╯
   ~ harness claude-code → opencode
   ~ llm default: anthropic:opus → ollama:gemma3:12b
@@ -53,11 +53,11 @@ merged into the harness's config when you sync or launch.
 
 ## Evaluate instead of guess
 
-With task packs, `localize` measures the top candidates instead of ranking them. Pass
-`--tasks ./tasks`, or run it next to a `harness.toml` that has `[tasks]`:
+With eval packs, `localize` measures the top candidates instead of ranking them. Pass
+`--evals ./evals`, or run it next to a `harness.toml` that has `[evals]`:
 
 ```bash
-hlock localize --tasks ./tasks
+hlock localize --evals ./evals
 ```
 
 It runs the candidates through the resolver with an all-local search space and records the

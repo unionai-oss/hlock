@@ -14,7 +14,7 @@ flowchart TB
 
     subgraph core["🦀 harness-lock-core  ·  Rust"]
         direction LR
-        MF["manifest"] ~~~ LK["lockfile"] ~~~ ST["store"] ~~~ TP["task packs"] ~~~ SR["search"] ~~~ TU["resolver"]
+        MF["manifest"] ~~~ LK["lockfile"] ~~~ ST["store"] ~~~ TP["eval packs"] ~~~ SR["search"] ~~~ TU["resolver"]
     end
 
     py -- "PyO3 bindings" --> core
@@ -34,7 +34,7 @@ dependency. It owns:
 - **manifest**: parsing and hashing `harness.toml`
 - **lockfile**: the schema-v1 `harness.lock` and `harness.tune.lock` models
 - **store**: a content-addressed store for trial artifacts under `.harnesslock/`
-- **task packs**: loading packs, the deterministic search/holdout split, and grading
+- **eval packs**: loading packs, the deterministic search/holdout split, and grading
 - **search**: grid expansion, Pareto fronts, constraint filtering, winner selection
 - **resolver**: running trials, aggregating evidence, and building the lock
 
@@ -84,6 +84,6 @@ runnable in CI and on a bare install.
 | `harness_lock/` | The Python package: bindings re-export, CLI, worker |
 | `hlock/` | Shim that re-exports `harness_lock`, so `import hlock` works |
 | `packaging/harness-lock` | The `harness-lock` PyPI alias, pinned to the matching `hlock` |
-| `tasks/` | The demo task pack |
+| `evals/` | The demo eval pack |
 | `docs/` | This site |
 | `SPEC.md` | The full design, including what's still on the roadmap |

@@ -11,7 +11,7 @@ lockfile pins it.
 ```mermaid
 flowchart LR
     M["📄 harness.toml<br/><sub>what may be tried</sub>"] --> R
-    T["🧪 task packs<br/><sub>what good looks like</sub>"] --> R
+    T["🧪 eval packs<br/><sub>what good looks like</sub>"] --> R
     R["🧮 hlock resolve<br/><sub>search · evaluate · select</sub>"] --> L["🔒 harness.lock<br/><sub>what was chosen, and why</sub>"]
     L --> C["✅ hlock check"]
     L --> X["▶️ hlock run"]
@@ -25,7 +25,7 @@ flowchart LR
 
 - **Candidates:** the models (per role), decision models, and harnesses the resolver may
   combine.
-- **Tasks:** which [task packs](../guides/task-packs.md) to measure against, and how
+- **Evals:** which [eval packs](../guides/eval-packs.md) to measure against, and how
   many times to run each one.
 - **Objective:** the metric that matters, hard constraints, and a rule for choosing
   among the stacks that pass.
@@ -60,7 +60,7 @@ Picking the winner happens in three steps:
 
 - the exact **stack**: each model by role and provider, with a fingerprint; the
   decision model; the harness; the policy (retries, step limits, sandbox, approvals);
-- the **evidence**: trials, success rate, cost, and latency on the task pack;
+- the **evidence**: trials, success rate, cost, and latency on the eval pack;
 - **provenance**: the backend that produced it and the search settings;
 - the **manifest hash**, which ties the lock to the exact `harness.toml` it came from.
 
@@ -78,7 +78,7 @@ a PR tells you what changed in the agent and what evidence supports the change.
 
 ## Search and holdout splits
 
-A task pack is split deterministically into a **search** split, used to pick the
+An eval pack is split deterministically into a **search** split, used to pick the
 winner, and a **holdout** split, used to confirm the gain is real. The split defaults
 to 70/30 by task id, seeded by `[budget] random_seed`, so the same manifest always
 produces the same split. Deep `hlock tune` runs (`--depth full`) re-validate on

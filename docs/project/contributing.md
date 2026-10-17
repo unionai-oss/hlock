@@ -8,15 +8,15 @@ looks like. For setting up a working copy, see [Development](development.md).
 
 - **Report a bug or ask for a feature:** [open an issue](https://github.com/unionai-oss/hlock/issues/new).
   For bugs, include the command you ran, the output, `hlock --version`, and your OS
-  and Python version. A minimal `harness.toml` and task pack that reproduce the
+  and Python version. A minimal `harness.toml` and eval pack that reproduce the
   problem help most.
 - **Improve the docs:** every page has an edit button that opens the source file
   on GitHub. Small fixes can go straight to a pull request.
 - **Write code:** fix a bug, add a test, or pick up an open issue. For anything
   larger than a small fix, such as a new command, a manifest field, or a lockfile
   schema change, open an issue first so the design can be agreed before you build it.
-- **Share task packs:** packs for real domains make the resolver's evidence
-  meaningful. See [Task packs](../guides/task-packs.md).
+- **Share eval packs:** packs for real domains make the resolver's evidence
+  meaningful. See [Eval packs](../guides/eval-packs.md).
 
 ## Making a change
 

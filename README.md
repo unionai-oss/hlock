@@ -57,14 +57,19 @@ No accounts or API keys needed. The built-in `reference` provider and harness ar
 deterministic and offline, so the whole loop runs on a laptop.
 
 ```bash
-hlock init --name demo --pack ./tasks   # write a starter harness.toml
-hlock resolve                           # search the space -> harness.lock
-hlock check                             # fail if harness.toml drifted from the lock
-hlock run "clean ./data/orders.csv"     # run the locked agent
+hlock evals init                          # write a hello-world eval pack to ./evals
+hlock init --name demo                    # write a starter harness.toml
+hlock resolve                             # search the space -> harness.lock
+hlock check                               # fail if harness.toml drifted from the lock
+hlock run "count the words in words.txt"  # run the locked agent
 ```
 
+For your own work, `hlock evals init -t coding` (or `data`, `research`, `support`) writes
+an eval pack template plus an Agent Skill, so the agent you already use can fill it in
+with real tasks from your project. See [Eval packs](https://docs.hlock.ai/guides/eval-packs/).
+
 <p align="center">
-  <img src="https://raw.githubusercontent.com/unionai-oss/hlock/main/docs/assets/quickstart.svg" alt="An hlock session: init, resolve, check, and run" width="640">
+  <img src="https://raw.githubusercontent.com/unionai-oss/hlock/main/docs/assets/quickstart.svg" alt="An hlock session: evals init, init, resolve, check, and run" width="640">
 </p>
 
 From there: `hlock show` prints the locked stack and its evidence, `hlock tree` prints the
@@ -105,7 +110,7 @@ space = SearchSpace(
     harness=["reference"],
     objective=Objective(select="min-cost", constraints={"success-rate": ">=0.5"}),
     budget=Budget(max_trials=50),
-    tasks=json.dumps({"packs": ["./tasks"], "seeds": 2}),
+    evals=json.dumps({"packs": ["./evals"], "seeds": 2}),
 )
 lock = hlock.resolve(space, backend="local")   # writes ./harness.lock
 print(lock.summary())
@@ -119,7 +124,7 @@ print(agent.run("clean ./data/orders.csv"))   # {"success": true, "model": "qwen
 ## How it works
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/unionai-oss/hlock/main/docs/assets/how-it-works.svg" alt="How hlock works: harness.toml and task packs feed hlock resolve (search, evaluate, select), which writes harness.lock for hlock check and hlock run" width="860">
+  <img src="https://raw.githubusercontent.com/unionai-oss/hlock/main/docs/assets/how-it-works.svg" alt="How hlock works: harness.toml and eval packs feed hlock resolve (search, evaluate, select), which writes harness.lock for hlock check and hlock run" width="860">
 </p>
 
 ## Architecture
@@ -179,7 +184,7 @@ Want to help? See the [contributing guide](https://docs.hlock.ai/project/contrib
 ## Status
 
 `hlock` is at **v0.1**. What works today: manifest and lockfile schema v1, a
-content-addressed store, task packs with graders, the reference provider and harness,
+content-addressed store, eval packs with graders, the reference provider and harness,
 grid search with Pareto selection, `upgrade` (plan/apply/rollback), and `tune` across
 the `local`, `devbox`, and `cluster` backends. [SPEC.md](https://github.com/unionai-oss/hlock/blob/main/SPEC.md) describes the full design,
 much of which is still on the roadmap.
