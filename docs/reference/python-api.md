@@ -96,6 +96,36 @@ Run tuning, like [`hlock tune`](cli.md#tune). Returns JSON with `path`
 (the tune lock written), `summary`, and a `report` with `depth`, `backend`, `data_mode`,
 `grid`, `best`, `baseline_success_rate`, and `gain_success_rate`.
 
+### Tune jobs
+
+`harness_lock.jobs` runs a tune in the background, like
+[`hlock tune --detach`](../guides/tune.md#running-in-the-background). Job records are
+plain dicts with `id`, `status` (`queued`, `running`, `succeeded`, `failed`, or
+`cancelled`), timestamps, `options`, and, once the job succeeds, `report` and `result`
+(the path of its tune lock).
+
+```python
+from harness_lock import jobs
+
+job = jobs.submit("harness.toml", lock="harness.lock", options={"depth": "probe"})
+jobs.wait(".", job["id"])                   # block until it finishes
+jobs.fetch(".", job["id"], out="harness.tune.lock")
+print([(j["id"], j["status"]) for j in jobs.list_jobs(".")])
+# [('df4c53a6', 'succeeded')]
+```
+
+| Function | Description |
+|---|---|
+| `submit(manifest, *, lock, options, cwd=None)` | Start a tune job. `options` are `tune` keyword arguments (`depth`, `data`, `harness`, `strict`, `max_trials`, `backend`, `workdir`). |
+| `list_jobs(root)` | The project's jobs, newest first. `root` is the manifest's directory. |
+| `get(root, ref=None)` | A job by id or unique id prefix, or the newest job |
+| `wait(root, ref, poll=2.0, timeout=None)` | Block until a job finishes |
+| `fetch(root, ref, out, apply=False)` | Copy a succeeded job's tune lock to `out`, and to the base lock with `apply` |
+| `cancel(root, ref)` | Stop a queued or running job |
+
+They raise `jobs.JobError`, a `ValueError`, for a job that doesn't exist, is ambiguous,
+or is in the wrong state.
+
 ### `check_eval_pack`
 
 ```python

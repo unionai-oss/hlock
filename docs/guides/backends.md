@@ -109,6 +109,9 @@ Setup:
 If the Flyte SDK isn't importable, the worker runs each stage in process and reports
 that it did, rather than failing.
 
+Fine-tuning on a cluster can take a long time. Run it in the background with
+`hlock tune --detach`; see [Running in the background](tune.md#running-in-the-background).
+
 ## Environment variables
 
 See the [environment variable reference](../reference/environment.md) for every `HL_*`

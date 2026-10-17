@@ -23,6 +23,10 @@ Failures print a one-line error with a hint and exit `1`.
 | [`init`](#init) | Write a starter `harness.toml` |
 | [`resolve`](#resolve) | Search the space and pin the winner in `harness.lock` |
 | [`tune`](#tune) | Tune prompts, hyperparameters, and small models into `harness.tune.lock` |
+| [`tune list`](#tune-list) | List the project's background tune jobs |
+| [`tune show`](#tune-show) | Show a tune job's status, settings, and result |
+| [`tune fetch`](#tune-fetch) | Write a finished tune job's result to `harness.tune.lock` |
+| [`tune cancel`](#tune-cancel) | Stop a running tune job |
 | [`upgrade`](#upgrade) | Plan, apply, or roll back component upgrades on a resolved lock |
 | [`localize`](#localize) | Write an all-local equivalent of a lock |
 | [`harness list`](#harness-list) | List known harnesses and what's installed |
@@ -336,6 +340,56 @@ hlock tune [--depth LEVEL] [--data SOURCE] [OPTIONS]
 | `--max-trials N` | | Cap the number of trials |
 | `--backend` | manifest `[backend] target` | `local`, `devbox`, or `cluster` |
 | `--workdir DIR` | `.harnesslock` | Where trial artifacts go |
+| `-d`, `--detach` | | Run in the background as a tune job; can't be combined with `--apply` |
+
+The job commands below take a `JOB`: a job id or a unique prefix of one. Without it,
+they use the newest job. See [Running in the background](../guides/tune.md#running-in-the-background).
+
+### `tune list`
+
+List the project's tune jobs, newest first, with their status, depth, backend, start
+time, elapsed time, and success rate.
+
+```bash
+hlock tune list [--json]
+```
+
+### `tune show`
+
+Show a tune job's status, settings, trials run so far, Flyte run ids, error, result, and
+the end of its log.
+
+```bash
+hlock tune show [JOB] [--log N] [--json]
+```
+
+| Option | Default | Description |
+|---|---|---|
+| `--log N` | `10` | How many log lines to show for a job that hasn't succeeded |
+| `--json` | | Print the job record as JSON |
+
+### `tune fetch`
+
+Write a succeeded job's tune lock to `harness.tune.lock`. Fails if the job hasn't
+succeeded.
+
+```bash
+hlock tune fetch [JOB] [--out FILE] [--apply] [--wait]
+```
+
+| Option | Default | Description |
+|---|---|---|
+| `--out FILE` | `harness.tune.lock` | Where to write the tune lock |
+| `--apply` | | Also adopt the result into `harness.lock` |
+| `--wait` | | Wait for the job to finish first |
+
+### `tune cancel`
+
+Stop a queued or running tune job and the worker processes it started.
+
+```bash
+hlock tune cancel JOB
+```
 
 ## `localize`
 

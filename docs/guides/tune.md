@@ -72,6 +72,52 @@ hlock tune --depth hpo --strict    # fail unless it beats the base lock
 `--strict` makes `tune` safe to run on a schedule: it exits non-zero, and writes no
 tune lock, unless the tuned stack beats your current success rate.
 
+## Running in the background
+
+A tune can take minutes for a prompt or hyperparameter search, and hours or days with
+fine-tuning. `--detach` runs it as a background *tune job*, so you get your terminal
+back and can close it:
+
+```console
+$ hlock tune --detach --depth hpo
+✓ started tune job cdda29ff  (depth=hpo, pid 91638)
+log .harnesslock/tune/jobs/cdda29ff/tune.log
+next → hlock tune show cdda29ff  ·  hlock tune fetch cdda29ff --wait
+```
+
+Check on your jobs with `hlock tune list`:
+
+```console
+$ hlock tune list
+job       status     depth  backend  started  elapsed  success rate
+cdda29ff  succeeded  hpo    local    2s ago   0s       100%
+```
+
+`hlock tune show <job>` adds the settings, the trials run so far, any Flyte run ids,
+the error if it failed, and the end of its log. When the job succeeds, `fetch` writes
+its result to `harness.tune.lock`:
+
+```console
+$ hlock tune fetch
+✓ wrote harness.tune.lock  (from tune job cdda29ff)
+```
+
+A job writes its result into its own directory and never touches your locks, so you can
+run several at once. `fetch` takes the same `--out` and `--apply` as `tune`, and
+`--wait` blocks until the job finishes, which suits scripts and CI. If `harness.lock`
+changed after the job started, `fetch` warns that the job tuned against the older one.
+
+Every job command takes a job id, or any unique prefix of one, and defaults to the
+newest job. `hlock tune cancel <job>` stops a running job and the worker processes it
+started.
+
+Jobs live in `.harnesslock/tune/jobs/<id>/`: `job.json` with the settings, status, and
+report; `tune.log`; the resulting `harness.tune.lock`; and the trial artifacts in
+`work/`, unless you passed `--workdir`.
+
+The job runs on this machine on every backend. On `cluster`, only its stages run on
+Flyte, so the machine has to stay on until the job finishes.
+
 ## Other options
 
 | Option | Description |
@@ -81,6 +127,7 @@ tune lock, unless the tuned stack beats your current success rate.
 | `--out FILE` | Write somewhere other than `harness.tune.lock` |
 | `--backend` | Override the manifest's backend |
 | `--workdir DIR` | Where trial artifacts go (default `.harnesslock`) |
+| `-d`, `--detach` | Run as a [background job](#running-in-the-background) |
 
 ## Fine-tuning settings
 
