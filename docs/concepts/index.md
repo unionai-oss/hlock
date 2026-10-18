@@ -100,7 +100,7 @@ a PR tells you what changed in the agent and what evidence supports the change.
 | [`hlock upgrade`](../guides/upgrade.md) | On a resolved lock, finds newer models for locked roles, re-measures, and applies only on request, keeping the old lock for rollback. |
 | [`hlock tune`](../guides/tune.md) | Goes beyond choosing: tunes prompts and hyperparameters, and can fine-tune small models, writing `harness.tune.lock`. |
 | [`hlock localize`](../guides/localize.md) | Writes an equivalent lock that runs entirely on your machine. |
-| [`hlock meta`](../guides/meta.md) | Hands work that needs judgment (installs, filling in eval packs, updates) to a pinned open-source agent, and checks the result. |
+| [`hlock meta`](../guides/meta.md) | Hands work that needs judgment (installs, filling in eval packs, updates) to a pinned agent (built into hlock, or an open-source harness), and checks the result. |
 
 ## Search and holdout splits
 

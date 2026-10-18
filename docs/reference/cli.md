@@ -416,8 +416,9 @@ hlock localize [LOCK] [OPTIONS]
 
 ## `meta`
 
-Set up the [meta harness](../guides/meta.md), an open-source agent with a config of its
-own, pinned in `harness.meta.lock`, and run jobs in it. The meta files live next to the
+Set up the [meta harness](../guides/meta.md), the agent hlock uses for its own work
+(hlock's built-in agent by default, or an open-source harness you install), pinned in
+`harness.meta.lock`, and run jobs in it. The meta files live next to the
 project's lock.
 
 | Command | Description |
@@ -426,8 +427,8 @@ project's lock.
 | `hlock meta pin` | Apply `[model]` to the meta harness's config and pin it into `harness.meta.lock` |
 | `hlock meta check` | Fail if the meta harness drifted from `harness.meta.lock` or `harness.meta.toml` |
 | `hlock meta show` | Show the meta lock and whether the API key variable is set |
-| `hlock meta sync` | Rehydrate the meta harness's config (`--plan`, `--json`, `-y`, `--install`, `--pull`, `-v`) |
-| `hlock meta launch [ARGS...]` | Start an interactive session in the meta harness |
+| `hlock meta sync` | Rehydrate an installed meta harness's config (`--plan`, `--json`, `-y`, `--install`, `--pull`, `-v`) |
+| `hlock meta launch [ARGS...]` | Start an interactive session in an installed meta harness |
 | `hlock meta jobs` | List built-in and custom jobs (`--json`) |
 | `hlock meta run JOB [INSTRUCTIONS...]` | Run a job in the meta harness, then verify it |
 | `hlock meta verify JOB` | Run only a job's verification (`--out`, `--count`, `--json`) |
@@ -440,12 +441,13 @@ hlock meta init [OPTIONS]
 
 | Option | Default | Description |
 |---|---|---|
-| `--harness` | the first installed of pi, codex, goose, opencode, hermes; else pi | The meta harness (open source only) |
-| `--provider` | the first provider whose API key is set | An API provider: `anthropic`, `openai`, `google`, `openrouter` (depends on the harness) |
+| `--harness` | `builtin` | `builtin` (ships with hlock), or an installed open-source harness: `pi`, `codex`, `goose`, `opencode`, `hermes` |
+| `--provider` | the first provider whose API key is set | An API provider: `anthropic`, `openai`, `google`, `openrouter` (an installed harness may support fewer) |
 | `--model` | one per provider, or the best local model that fits | The model |
 | `--local` | | Use a local runtime instead of an API |
 | `--runtime` | the best installed | The local runtime; implies `--local` |
 | `--memory-gb` | measured | Memory budget for local weights |
+| `--base-url` | the provider's or runtime's | The model API's URL, such as an OpenAI-compatible gateway |
 | `-y`, `--yes` | | Install the harness and download weights without asking |
 | `--force` | | Start over: replace `harness.meta.toml` and rebuild the meta harness's config |
 

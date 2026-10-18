@@ -36,8 +36,11 @@ pub const RESTORE_ENV: &str = "HLOCK_META_RESTORE";
 /// Stands in for the prompt while the command is built, before the prompt is rendered.
 const PROMPT_TOKEN: &str = "\u{1}hlock-meta-prompt\u{1}";
 
-/// Open-source harnesses the meta harness can be, most preferred first.
-pub const META_HARNESSES: &[&str] = &["pi", "codex", "goose", "opencode", "hermes"];
+/// The agent that ships inside hlock (see [`crate::agent`]): the default meta harness.
+pub const BUILTIN: &str = "builtin";
+/// Harnesses the meta harness can be, most preferred first: the built-in agent, then
+/// open-source harnesses the user installs.
+pub const META_HARNESSES: &[&str] = &[BUILTIN, "pi", "codex", "goose", "opencode", "hermes"];
 /// The model `hlock meta init` picks for each API provider.
 pub const DEFAULT_MODELS: &[(&str, &str)] = &[("anthropic", "claude-sonnet-5-5"), ("openai", "gpt-5.5"), ("google", "gemini-3.5-flash")];
 
@@ -89,11 +92,22 @@ impl MetaModel {
     }
 }
 
+/// `[agent]`: what the built-in agent may do.
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+#[serde(default, rename_all = "kebab-case")]
+pub struct AgentSpec {
+    /// Command prefixes that run without asking (default: `hlock` and read-only git).
+    pub allow: Option<Vec<String>>,
+    pub max_steps: Option<u32>,
+    pub timeout_seconds: Option<u64>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(default)]
 pub struct MetaManifest {
     pub target: BTreeMap<String, Value>,
     pub model: MetaModel,
+    pub agent: AgentSpec,
     pub run: RunDefaults,
     pub jobs: BTreeMap<String, JobSpec>,
 }
@@ -142,9 +156,28 @@ impl MetaManifest {
 // Choosing and configuring the meta harness
 // --------------------------------------------------------------------------- //
 
+/// Whether `name` names the built-in agent.
+pub fn is_builtin(name: &str) -> bool {
+    matches!(name, BUILTIN | "hlock" | "hlock-agent")
+}
+
+/// A profile standing in for the built-in agent, so choosing a model works the same way.
+pub fn builtin_profile() -> HarnessProfile {
+    HarnessProfile {
+        id: BUILTIN.into(),
+        name: "built-in agent".into(),
+        kind: "builtin".into(),
+        open_source: Some(true),
+        local_models: Some(true),
+        api_keys: crate::agent::PROVIDERS.iter().map(|(p, _, k)| crate::profiles::ApiKey { provider: p.to_string(), env: k.to_string() }).collect(),
+        origin: "builtin".into(),
+        ..Default::default()
+    }
+}
+
 /// Why a harness can't be the meta harness (`None` when it can).
 pub fn ineligible(p: &HarnessProfile) -> Option<String> {
-    if p.kind == "custom" {
+    if p.kind == "custom" || p.kind == "builtin" {
         return None;
     }
     if p.kind != "cli" {
@@ -160,6 +193,15 @@ pub fn ineligible(p: &HarnessProfile) -> Option<String> {
         return Some(format!("the {} profile doesn't say how to give it a prompt ([launch] prompt or interactive)", p.name));
     }
     None
+}
+
+/// The meta harness's profile: the built-in agent's, or an eligible registry profile.
+fn meta_profile<'a>(reg: &'a Registry, name: &str, builtin: &'a HarnessProfile) -> Result<&'a HarnessProfile> {
+    if is_builtin(name) {
+        Ok(builtin)
+    } else {
+        eligible_harness(reg, name)
+    }
 }
 
 fn eligible_harness<'a>(reg: &'a Registry, name: &str) -> Result<&'a HarnessProfile> {
@@ -180,6 +222,8 @@ pub struct InitOptions {
     /// A local runtime (implies `local`).
     pub runtime: Option<String>,
     pub memory_gb: Option<f64>,
+    /// Where the model's API lives, overriding the provider's or runtime's default.
+    pub base_url: Option<String>,
 }
 
 /// The meta harness and model `hlock meta init` settled on, and what's still missing.
@@ -201,15 +245,10 @@ pub struct Choice {
 /// Choose the meta harness and its model from the options, the API keys in the
 /// environment, and the local runtimes installed.
 pub fn choose(reg: &Registry, ctx: &Ctx, opts: &InitOptions) -> Result<Choice> {
+    let builtin = builtin_profile();
     let (profile, why) = match &opts.harness {
-        Some(h) => (eligible_harness(reg, h)?, "chosen with --harness".to_string()),
-        None => {
-            let options: Vec<&HarnessProfile> = META_HARNESSES.iter().filter_map(|h| reg.harness(h)).filter(|p| ineligible(p).is_none()).collect();
-            match options.iter().find(|p| probe_harness(p, ctx).installed) {
-                Some(p) => (*p, "the most preferred open-source harness installed".to_string()),
-                None => (*options.first().ok_or_else(|| Error::Profile("no open-source harness profile".into()))?, "the default meta harness".to_string()),
-            }
-        }
+        Some(h) => (meta_profile(reg, h, &builtin)?, "chosen with --harness".to_string()),
+        None => (&builtin, "ships with hlock; nothing to install".to_string()),
     };
     let installed = profile.kind != "cli" || probe_harness(profile, ctx).installed;
     let install = (!installed)
@@ -229,7 +268,7 @@ pub fn choose(reg: &Registry, ctx: &Ctx, opts: &InitOptions) -> Result<Choice> {
         })
         .flatten();
     let key_for = |provider: &str| profile.api_keys.iter().find(|k| k.provider == provider).map(|k| k.env.clone());
-    let can_local = profile.kind == "custom" || (profile.local_models == Some(true) && !profile.local_provider.is_empty());
+    let can_local = matches!(profile.kind.as_str(), "custom" | "builtin") || (profile.local_models == Some(true) && !profile.local_provider.is_empty());
     let want_local = opts.runtime.is_some() || opts.provider.as_deref() == Some("local");
     let local_installed = || crate::localize::DEFAULT_RUNTIMES.iter().filter_map(|r| reg.runtime(r)).any(|r| probe_runtime(r, ctx).installed);
     let api = |provider: &str, why: String| -> Result<(MetaModel, String, bool)> {
@@ -267,6 +306,10 @@ pub fn choose(reg: &Registry, ctx: &Ctx, opts: &InitOptions) -> Result<Choice> {
     } else {
         (MetaModel::default(), format!("{} uses its own model settings", profile.name), true, None)
     };
+    let mut model = model;
+    if opts.base_url.is_some() {
+        model.base_url = opts.base_url.clone();
+    }
     Ok(Choice { harness: profile.id.clone(), harness_name: profile.name.clone(), why, installed, install, model, model_why, key_set, local })
 }
 
@@ -276,7 +319,7 @@ pub fn manifest_text(c: &Choice) -> String {
     let line = |kv: String, comment: &str| if comment.is_empty() { format!("{kv}\n") } else { format!("{kv:<30}# {comment}\n") };
     let mut s = String::from("# hlock meta manifest: the agent hlock uses for its own work (hlock meta --help).\n");
     s.push_str("[target]\n");
-    s.push_str(&line(format!("harness = \"{}\"", c.harness), &format!("an open-source harness: {}", META_HARNESSES.join(", "))));
+    s.push_str(&line(format!("harness = \"{}\"", c.harness), &format!("builtin (ships with hlock), or one you install: {}", META_HARNESSES[1..].join(", "))));
     let m = &c.model;
     if m.name.is_some() || m.runtime.is_some() {
         s.push_str("\n[model]\n");
@@ -292,6 +335,13 @@ pub fn manifest_text(c: &Choice) -> String {
         if let Some(k) = &m.key_env {
             s.push_str(&line(format!("key-env = \"{k}\""), "the variable holding the API key; the key is never written"));
         }
+        if let Some(u) = &m.base_url {
+            s.push_str(&line(format!("base-url = \"{u}\""), ""));
+        }
+    }
+    if is_builtin(&c.harness) {
+        s.push_str("\n[agent]\n# commands that run without asking; others need your OK, and unattended runs refuse them\n");
+        s.push_str(&line(format!("allow = [{}]", crate::agent::DEFAULT_ALLOW.iter().map(|a| format!("\"{a}\"")).collect::<Vec<_>>().join(", ")), ""));
     }
     s.push_str("\n[run]\n");
     s.push_str(&line("mode = \"interactive\"".into(), "or \"headless\""));
@@ -364,6 +414,9 @@ fn local_base_url(reg: &Registry, model: &MetaModel) -> Option<String> {
 /// config into `out`.
 pub fn pin(reg: &Registry, ctx: &Ctx, meta: &MetaManifest, out: &Path, project: Option<&str>, vendor: bool, force: bool) -> Result<PinOutcome> {
     let harness = meta.target_harness().ok_or_else(|| Error::Manifest(format!("{META_MANIFEST_PATH} has no [target] harness; run `hlock meta init`")))?;
+    if is_builtin(&harness) {
+        return pin_builtin(reg, meta, out, project);
+    }
     let profile = eligible_harness(reg, &harness)?;
     let (tctx, _, root) = meta_env(profile, ctx, out);
     std::fs::create_dir_all(&root)?;
@@ -375,10 +428,95 @@ pub fn pin(reg: &Registry, ctx: &Ctx, meta: &MetaManifest, out: &Path, project: 
     crate::capture::pin(reg, &tctx, Some(&profile.id), None, project, out, vendor, force)
 }
 
+/// The lock for the built-in agent: hlock's version, the model, and what it may do.
+fn builtin_lock(reg: &Registry, meta: &MetaManifest, project: Option<&str>) -> Result<Lockfile> {
+    let m = &meta.model;
+    let model = m.name.clone().ok_or_else(|| Error::Manifest(format!("{META_MANIFEST_PATH}: the built-in agent needs a [model] name")))?;
+    let mut llm = crate::lockfile::LLM { role: "default".into(), model, resolved_from: Some(format!("{META_MANIFEST_PATH}#/model")), ..Default::default() };
+    if let Some(rt) = &m.runtime {
+        llm.provider = rt.clone();
+        llm.runtime = Some(rt.clone());
+        llm.endpoint = Some(local_base_url(reg, m).ok_or_else(|| Error::Profile(format!("unknown runtime {rt:?} (see hlock runtime list)")))?);
+    } else {
+        let provider = m.provider.clone().ok_or_else(|| Error::Manifest(format!("{META_MANIFEST_PATH}: [model] needs a provider or a runtime")))?;
+        if m.base_url.is_none() && crate::agent::provider_base_url(&provider).is_none() {
+            return Err(Error::Manifest(format!(
+                "the built-in agent doesn't know where {provider:?} is; set [model] base-url to its OpenAI-compatible endpoint"
+            )));
+        }
+        llm.endpoint = m.base_url.clone();
+        if let Some(k) = m.key_env.clone().or_else(|| crate::agent::provider_key_env(&provider).map(str::to_string)) {
+            llm.params.insert("key-env".into(), Value::String(k));
+        }
+        llm.provider = provider;
+    }
+    let version = env!("CARGO_PKG_VERSION").to_string();
+    let mut lf = Lockfile { kind: Some("pin".into()), llm: vec![llm], ..Default::default() };
+    lf.stack.insert("name".into(), Value::String(project.unwrap_or(BUILTIN).to_string()));
+    lf.stack.insert("harness".into(), Value::String(BUILTIN.into()));
+    lf.stack.insert("selection".into(), Value::String("pin".into()));
+    lf.harness = crate::lockfile::Harness { name: BUILTIN.into(), version: Some(version.clone()), source: Some(format!("hlock@{version}")), ..Default::default() };
+    lf.policy.tool_allowlist = meta.agent.allow.clone().unwrap_or_else(|| crate::agent::DEFAULT_ALLOW.iter().map(|s| s.to_string()).collect());
+    lf.policy.max_steps = meta.agent.max_steps.unwrap_or(crate::agent::DEFAULT_MAX_STEPS);
+    lf.policy.tool_timeout_seconds = Some(meta.agent.timeout_seconds.unwrap_or(crate::agent::DEFAULT_TIMEOUT_SECONDS));
+    lf.provenance.backend = "pin".into();
+    Ok(lf)
+}
+
+fn pin_builtin(reg: &Registry, meta: &MetaManifest, out: &Path, project: Option<&str>) -> Result<PinOutcome> {
+    let lock = builtin_lock(reg, meta, project)?;
+    let previous = Lockfile::load(out).ok().filter(Lockfile::is_pin);
+    let mut diff = previous.as_ref().map(|p| crate::capture::diff_locks(p, &lock)).unwrap_or_default();
+    if let Some(p) = &previous {
+        diff.extend(policy_diff(&p.policy, &lock.policy));
+    }
+    lock.save(out)?;
+    Ok(PinOutcome {
+        lock,
+        path: out.to_path_buf(),
+        selection: crate::profiles::Selection { id: BUILTIN.into(), reason: "ships with hlock".into() },
+        diff,
+        previous: previous.is_some(),
+        vendored: Vec::new(),
+        warnings: Vec::new(),
+    })
+}
+
+/// What the built-in agent may do, as drift lines.
+fn policy_diff(old: &crate::lockfile::Policy, new: &crate::lockfile::Policy) -> Vec<String> {
+    let mut out = Vec::new();
+    if old.tool_allowlist != new.tool_allowlist {
+        out.push(format!("~ agent allow: {} → {}", old.tool_allowlist.join(", "), new.tool_allowlist.join(", ")));
+    }
+    if old.max_steps != new.max_steps {
+        out.push(format!("~ agent max-steps: {} → {}", old.max_steps, new.max_steps));
+    }
+    if old.tool_timeout_seconds != new.tool_timeout_seconds {
+        out.push(format!("~ agent timeout-seconds: {:?} → {:?}", old.tool_timeout_seconds, new.tool_timeout_seconds));
+    }
+    out
+}
+
 /// `hlock meta check`: what drifted between `harness.meta.toml`, the meta lock, and the
 /// meta harness's own config. Empty when everything matches.
 pub fn check(reg: &Registry, ctx: &Ctx, meta: Option<&MetaManifest>, lock: &Lockfile, lock_path: &Path) -> Result<Vec<String>> {
     let mut out = Vec::new();
+    if is_builtin(&lock.harness.name) {
+        let want = env!("CARGO_PKG_VERSION");
+        if lock.harness.version.as_deref() != Some(want) {
+            out.push(format!("~ harness builtin: the lock pins hlock {}, this is hlock {want}", lock.harness.version.as_deref().unwrap_or("?")));
+        }
+        if let Some(m) = meta {
+            if m.target_harness().is_some_and(|t| !is_builtin(&t)) {
+                out.push(format!("~ harness: {META_MANIFEST_PATH} targets {}, the lock pins the built-in agent", m.target_harness().unwrap_or_default()));
+            } else {
+                let fresh = builtin_lock(reg, m, lock.stack.get("name").and_then(Value::as_str))?;
+                out.extend(crate::capture::diff_locks(lock, &fresh));
+                out.extend(policy_diff(&lock.policy, &fresh.policy));
+            }
+        }
+        return Ok(out);
+    }
     let profile = reg.require_harness(&lock.harness.name)?;
     if let Some(why) = ineligible(profile) {
         out.push(format!("! {why}"));
@@ -895,7 +1033,11 @@ pub struct Prepared {
 /// Build the command that runs `job` in the meta harness pinned in `meta_lock`.
 pub fn prepare(job: &str, input: &JobInput, meta: Option<&MetaManifest>, meta_lock: &Lockfile, reg: &Registry, ctx: &Ctx, opts: &RunOptions) -> Result<Prepared> {
     job_spec(job, meta)?;
-    let profile = eligible_harness(reg, &meta_lock.harness.name)?;
+    let builtin = builtin_profile();
+    let profile = meta_profile(reg, &meta_lock.harness.name, &builtin)?;
+    if profile.kind == "builtin" {
+        return prepare_builtin(job, input, meta, meta_lock, reg, ctx, opts);
+    }
     let code = profile.kind != "cli";
     let mut headless = opts.headless.unwrap_or_else(|| meta.is_some_and(MetaManifest::headless));
     let mut notes = Vec::new();
@@ -973,6 +1115,56 @@ pub fn prepare(job: &str, input: &JobInput, meta: Option<&MetaManifest>, meta_lo
         done: prep.done,
         notes,
         missing_secrets: prep.missing_secrets,
+    })
+}
+
+/// The built-in agent runs as `hlock meta agent` (hlock's own interpreter), so a job runs,
+/// streams and records the same way an external harness's does.
+fn prepare_builtin(job: &str, input: &JobInput, meta: Option<&MetaManifest>, meta_lock: &Lockfile, reg: &Registry, ctx: &Ctx, opts: &RunOptions) -> Result<Prepared> {
+    let headless = opts.headless.unwrap_or_else(|| meta.is_some_and(MetaManifest::headless));
+    let mut notes = Vec::new();
+    let builtin = builtin_profile();
+    if let Err(e) = preflight(reg, ctx, meta, &builtin, &mut notes) {
+        if !opts.dry_run {
+            return Err(e);
+        }
+        notes.push(e.to_string());
+    }
+    let want = env!("CARGO_PKG_VERSION");
+    if meta_lock.harness.version.as_deref() != Some(want) {
+        let msg = format!("the meta lock pins hlock {}, this is hlock {want}", meta_lock.harness.version.as_deref().unwrap_or("?"));
+        if !opts.allow_version_mismatch {
+            return Err(Error::Profile(format!("{msg}; re-pin with `hlock meta pin`, or pass --allow-version-mismatch")));
+        }
+        notes.push(msg);
+    }
+    let prompt = render(job, input, meta, reg, ctx, "")?;
+    let python = crate::profiles::python_for(None, ctx).map(|p| p.to_string_lossy().into_owned()).unwrap_or_else(|| "python3".into());
+    let argv = vec![
+        python,
+        "-m".into(),
+        "harness_lock.cli".into(),
+        "meta".into(),
+        "agent".into(),
+        "--meta-lock".into(),
+        input.meta_lock_path.to_string_lossy().into_owned(),
+        if headless { "--headless" } else { "--interactive" }.into(),
+        prompt.clone(),
+    ];
+    Ok(Prepared {
+        job: job.into(),
+        harness: BUILTIN.into(),
+        harness_name: builtin.name,
+        harness_version: meta_lock.harness.version.clone(),
+        mode: if headless { "headless" } else { "interactive" }.into(),
+        argv,
+        env: BTreeMap::new(),
+        root: None,
+        prompt,
+        paste: false,
+        done: Vec::new(),
+        notes,
+        missing_secrets: Vec::new(),
     })
 }
 

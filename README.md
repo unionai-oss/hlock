@@ -102,11 +102,11 @@ instructions.
 
 **Let an agent do the busywork.** `hlock meta` hands work that needs judgment (installing
 what a lock needs on a new machine, filling in an eval pack, updating skills and MCP
-servers) to a pinned open-source agent, Pi by default, with an API key or a local model,
-and checks the result itself:
+servers) to a pinned agent and checks the result itself. The default is an agent built
+into hlock, so there's nothing to install: give it an API key or a local model.
 
 ```bash
-hlock meta init                 # pick an open-source harness and a model, and pin it
+hlock meta init                 # pick a model for the built-in agent, and pin it
 hlock meta run install          # install what harness.lock still needs, then verify
 ```
 

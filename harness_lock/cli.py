@@ -32,6 +32,7 @@ from harness_lock import (
     Lockfile,
     Manifest,
     __version__,
+    agent_run,
     harness_profile,
     harnesses,
     launch_prepare,
@@ -1664,6 +1665,13 @@ def _key_text(model: dict) -> str | None:
     return f"[ok]{key} is set[/]" if os.environ.get(key) else f"[warn]{key} isn't set[/]  [muted]export {key}=…[/]"
 
 
+def _meta_is_builtin() -> bool:
+    try:
+        return Lockfile.load(_ml()).harness in ("builtin", "hlock", "hlock-agent")
+    except ValueError:
+        return False
+
+
 def _need_meta_lock() -> None:
     if not Path(_ml()).exists():
         _fail(f"no meta harness pinned: {_show(_ml())} doesn't exist",
@@ -1690,8 +1698,9 @@ def _confirm(question: str, yes: bool) -> bool:
 def meta() -> None:
     """The agent hlock uses for its own work: installs, eval packs, updates.
 
-    hlock delegates work that needs judgment to a [bold]meta harness[/]: an open-source
-    agent (Pi by default) with a config of its own, pinned in [path]harness.meta.lock[/].
+    hlock delegates work that needs judgment to a [bold]meta harness[/], pinned in
+    [path]harness.meta.lock[/]: hlock's built-in agent by default (nothing to install), or
+    an open-source harness like Pi, Codex or Goose with a config of its own.
     hlock writes each job's prompt, runs the agent, and checks the result itself.
 
     Get started: [cmd]hlock meta init[/] → [cmd]hlock meta run install[/]
@@ -1699,16 +1708,17 @@ def meta() -> None:
 
 
 @meta.command("init")
-@click.option("--harness", default=None, help="The meta harness (pi, codex, goose, opencode, hermes). [dim]\\[default: the first installed, else pi][/]")
+@click.option("--harness", default=None, help="The meta harness: builtin, pi, codex, goose, opencode, hermes. [dim]\\[default: builtin, which ships with hlock][/]")
 @click.option("--provider", default=None, help="An API provider (anthropic, openai, google, …). [dim]\\[default: the first whose API key is set][/]")
 @click.option("--model", default=None, help="The model. [dim]\\[default: one per provider, or the best local model that fits][/]")
 @click.option("--local", is_flag=True, help="Use open weights served by a local runtime instead of an API.")
 @click.option("--runtime", default=None, help="The local runtime (ollama, lmstudio, …). Implies --local.")
 @click.option("--memory-gb", type=float, default=None, help="Memory budget for local model weights. [dim]\\[default: measured][/]")
+@click.option("--base-url", default=None, help="The model API's URL, e.g. an OpenAI-compatible gateway. [dim]\\[default: the provider's or runtime's][/]")
 @click.option("-y", "--yes", is_flag=True, help="Install the harness and download model weights without asking.")
 @click.option("--force", is_flag=True, help="Overwrite an existing harness.meta.toml.")
 def meta_init_cmd(harness: str | None, provider: str | None, model: str | None, local: bool, runtime: str | None,
-                  memory_gb: float | None, yes: bool, force: bool) -> None:
+                  memory_gb: float | None, base_url: str | None, yes: bool, force: bool) -> None:
     """Set up the meta harness: choose it, give it a model, and pin it.
 
     Writes [path]harness.meta.toml[/], configures the harness in its own config root
@@ -1721,7 +1731,7 @@ def meta_init_cmd(harness: str | None, provider: str | None, model: str | None, 
         _fail(f"{_show(mm)} already exists", "pass [cmd]--force[/] to start over, or [cmd]hlock meta pin[/] to re-pin it")
     with _working("Looking for harnesses, API keys and local runtimes…"):
         res = json.loads(meta_init(harness=harness, provider="local" if local and not provider else provider, model=model,
-                                   runtime=runtime, memory_gb=memory_gb, manifest=_m()))
+                                   runtime=runtime, memory_gb=memory_gb, base_url=base_url, manifest=_m()))
     c = res["choice"]
     if force:
         import shutil
@@ -1835,7 +1845,12 @@ def meta_show_cmd(as_json: bool) -> None:
     if as_json:
         console.print_json(lf.to_json())
         return
-    console.print(_pin_panel(json.loads(lf.to_json()), f"{_show(_ml())} · meta"))
+    lock = json.loads(lf.to_json())
+    console.print(_pin_panel(lock, f"{_show(_ml())} · meta"))
+    if _meta_is_builtin():
+        pol = lock.get("policy") or {}
+        console.print(f"[key]allowed[/] {', '.join(pol.get('tool-allowlist') or [])}  "
+                      f"[muted](without asking; at most {pol.get('max-steps')} steps a job)[/]")
     key = _key_text(_meta_cfg()["model"])
     if key:
         console.print(f"[key]api key[/] {key}")
@@ -1855,6 +1870,9 @@ def meta_sync_cmd(ctx, plan_only: bool, as_json: bool, yes: bool, install: bool,
     Like [cmd]hlock sync[/], into the meta harness's own config root.
     """
     _need_meta_lock()
+    if _meta_is_builtin():
+        _ok("the built-in agent ships with hlock; there's nothing to install or restore")
+        return
     ctx.invoke(sync, lock=_ml(), plan_only=plan_only, as_json=as_json, yes=yes, install=install, pull=pull,
                prefix=_meta_prefix(), verbose=verbose)
 
@@ -1869,6 +1887,9 @@ def meta_launch_cmd(ctx, args: tuple[str, ...]) -> None:
     or to configure the meta harness before [cmd]hlock meta pin[/].
     """
     _need_meta_lock()
+    if _meta_is_builtin():
+        _fail("the built-in agent runs jobs rather than open sessions",
+              "run one with [cmd]hlock meta run <job>[/] (interactive by default)")
     if "--in-place" in args or (args and _known_harness(args[0])):
         _fail("the meta harness always runs from its own lock and config root",
               "drop --in-place and the harness name; change the harness with [cmd]hlock meta init --force[/]")
@@ -1978,10 +1999,13 @@ def meta_run_cmd(job: str, instructions: tuple[str, ...], headless: bool | None,
         console.print(f"  [cmd]Read {_show(prompt_file)} and do the job it describes.[/]", soft_wrap=True)
 
     env = {**os.environ, **prep["env"]}
+    # the agent runs `hlock meta verify`: make it the same hlock, however this one was installed
     exe = Path(sys.argv[0])
-    if exe.name in ("hlock", "harness-lock") and exe.is_file():
-        # the agent runs `hlock meta verify`: make it the same hlock, however this one was installed
-        env["PATH"] = os.pathsep.join([str(exe.resolve().parent), env.get("PATH", "")])
+    dirs = [str(exe.resolve().parent)] if exe.name in ("hlock", "harness-lock") and exe.is_file() else []
+    if (Path(sys.executable).parent / "hlock").exists():
+        dirs.append(str(Path(sys.executable).parent))
+    if dirs:
+        env["PATH"] = os.pathsep.join([*dict.fromkeys(dirs), env.get("PATH", "")])
     code = None
     sys.stdout.flush()
     try:
@@ -2020,6 +2044,48 @@ def meta_run_cmd(job: str, instructions: tuple[str, ...], headless: bool | None,
     if job == "update" and v.get("diff") and not repin:
         _next("hlock pin", "hlock check")
     sys.exit(_verdict_exit(v))
+
+
+@meta.command("agent", hidden=True)
+@click.argument("prompt")
+@click.option("--meta-lock", "meta_lock", default=None, help="The meta lock pinning the built-in agent.")
+@click.option("--headless/--interactive", "headless", default=False, help="Refuse commands that aren't allowed, or ask.")
+def meta_agent_cmd(prompt: str, meta_lock: str | None, headless: bool) -> None:
+    """Run hlock's built-in agent on PROMPT (what [cmd]hlock meta run[/] starts)."""
+    interactive = not headless and sys.stdin.isatty()
+
+    def say(kind: str, text: str) -> bool:
+        if kind == "text":
+            console.print(Text(text))
+        elif kind == "tool":
+            console.print(Text.assemble(("→ ", "brand"), (text, "cmd")), soft_wrap=True)
+        elif kind == "result":
+            console.print(Text("  " + text, style="muted"), soft_wrap=True)
+        elif kind == "denied":
+            console.print(Text.assemble(("  ✗ refused ", "warn"), text), soft_wrap=True)
+        else:
+            err_console.print(Text.assemble(("✗ ", "fail"), text), soft_wrap=True)
+        return True
+
+    def ask(command: str) -> str:
+        console.print(Text.assemble(("? ", "warn"), "the agent wants to run ", (command, "cmd")), soft_wrap=True)
+        try:
+            return click.prompt("  run it? (y)es, (n)o, (a)lways for this program", default="y",
+                                type=click.Choice(["y", "n", "a"]), show_choices=False)
+        except (click.Abort, EOFError):
+            return "n"
+
+    with _friendly_errors():
+        out = json.loads(agent_run(prompt, meta_lock=meta_lock or _ml(), interactive=interactive, say=say, ask=ask,
+                                   project=str(Path.cwd())))
+    tokens = out["input_tokens"] + out["output_tokens"]
+    usage = f"{out['steps']} steps" + (f", {tokens:,} tokens" if tokens else "")
+    if out["status"] == "done":
+        console.print(f"[muted]built-in agent finished ({usage})[/]")
+        return
+    reason = {"max-steps": "it hit its step limit", "stopped": "it was stopped"}.get(out["status"], out.get("error") or "it failed")
+    err_console.print(f"[fail]✗[/] the built-in agent didn't finish: {reason} [muted]({usage})[/]")
+    sys.exit(1)
 
 
 def _default_pack_dir() -> Path:

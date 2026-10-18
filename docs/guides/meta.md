@@ -5,58 +5,57 @@ what a lock needs on a machine you've never seen, filling in an eval pack from a
 updating skills and MCP servers to their latest releases. `hlock meta` hands that work to
 an agent of its own, the **meta harness**, and checks the result itself.
 
-The meta harness is an open-source agent harness (Pi by default) with a config of its
-own, pinned in `harness.meta.lock`. It doesn't use your daily driver or its config, so
-it behaves the same on every machine.
+By default the meta harness is hlock's **built-in agent**: a small tool-calling agent
+that ships inside hlock, so there's nothing to install. It talks to an API provider with
+your key, or to a model served on your machine. You can use an open-source harness
+instead (Pi, Codex, Goose, OpenCode or Hermes) with a config of its own. Either way it's
+pinned in `harness.meta.lock` and never touches your daily driver's config.
 
 ## Set it up
 
 ```console
 $ hlock meta init
 ✓ wrote harness.meta.toml
-harness  Pi  the most preferred open-source harness installed
+harness  built-in agent  ships with hlock; nothing to install
 model    anthropic:claude-sonnet-5-5  ANTHROPIC_API_KEY is set
 api key  ANTHROPIC_API_KEY is set
-✓ pinned pi 1.0.0 → harness.meta.lock
+✓ pinned builtin 0.2.0 → harness.meta.lock
 next → hlock meta run install  ·  hlock meta jobs
 ```
 
-`init` looks at what's on the machine and picks:
-
-| | Default |
-|---|---|
-| **Harness** | The first of Pi, Codex, Goose, OpenCode and Hermes that's installed, else Pi |
-| **Model** | The first provider whose API key is set: Anthropic `claude-sonnet-5-5`, OpenAI `gpt-5.5`, Google `gemini-3.5-flash`. With no key but a local runtime installed: a model for that runtime. Otherwise Anthropic, with a reminder to set the key. |
-
-Then it writes `harness.meta.toml`, configures the harness in its own config root under
-`.hlock/env/harness.meta/`, offers to install the harness if it's missing, and pins the
-result. Pass `-y` to install without asking.
+`init` picks the model from what's on the machine: the first provider whose API key is
+set (Anthropic `claude-sonnet-5-5`, OpenAI `gpt-5.5`, Google `gemini-3.5-flash`, or
+OpenRouter with `--model`). With no key but a local runtime installed, it uses a model
+for that runtime. Otherwise it picks Anthropic and reminds you to set the key.
 
 ```bash
 hlock meta init --provider openai                 # an API provider, with its default model
 hlock meta init --provider anthropic --model claude-opus-5-5
-hlock meta init --harness goose                   # Goose or Codex if you'd rather run Rust
+hlock meta init --base-url https://gateway.example.com/v1 --provider openai   # any OpenAI-compatible endpoint
+hlock meta init --harness pi                      # an installed harness instead (pi, codex, goose, opencode, hermes)
 hlock meta init --force                           # start over
 ```
 
-Only open-source harnesses can be the meta harness. Claude Code, Cursor Agent, Copilot
-CLI and Amp are refused, and so is Gemini CLI, because its config root can't be moved.
+A harness other than the built-in agent must be open source and able to run from its own
+config root. Claude Code, Cursor Agent, Copilot CLI and Amp are refused, and so is Gemini
+CLI, because its config root can't be moved. `init` configures it under
+`.hlock/env/harness.meta/` and offers to install it if it's missing (`-y` installs
+without asking).
 
 ### API keys
 
 The key stays in your environment. `harness.meta.toml` records only the variable's name
-(`key-env = "ANTHROPIC_API_KEY"`), and the harness reads it the way it always does.
-Nothing hlock writes contains the key. `hlock meta run` checks that the variable is set
-before it starts.
+(`key-env = "ANTHROPIC_API_KEY"`), and the agent reads it at run time. Nothing hlock
+writes contains the key. `hlock meta run` checks that the variable is set before it starts.
 
 ### Local models
 
 ```console
 $ hlock meta init --local
 ✓ wrote harness.meta.toml
-harness  Pi  the most preferred open-source harness installed
+harness  built-in agent  ships with hlock; nothing to install
 model    ollama:qwen3-coder:30b  (local)  chosen with --local
-✓ pinned pi 1.0.0 → harness.meta.lock
+✓ pinned builtin 0.2.0 → harness.meta.lock
 Before the first job
   ollama pull qwen3-coder:30b
 next → hlock meta run install  ·  hlock meta jobs
@@ -66,19 +65,59 @@ next → hlock meta run install  ·  hlock meta jobs
 (Ollama, LM Studio, llama.cpp, MLX, vLLM, …; `--runtime` picks one). The model is a
 catalog model already on disk if there is one, else the smallest of the best models that
 fit the machine's memory (`--memory-gb` overrides the measurement, `--model` names one).
-`init` offers to download it; `-y` downloads without asking.
+`init` offers to download it; `-y` downloads without asking. Small models can call tools,
+but they do worse at multi-step jobs. hlock's check after each job tells you when one
+didn't get there.
+
+## The built-in agent
+
+The built-in agent is part of hlock's Rust core. It speaks Anthropic's Messages API and
+the OpenAI chat-completions API (which covers OpenAI, OpenRouter, Gemini and every local
+runtime), and works through six tools:
+
+| Tool | What it does |
+|---|---|
+| `list_dir`, `read_file`, `search` | Look around the project (or anywhere you point it) |
+| `write_file`, `edit_file` | Create and change files, only inside the project |
+| `run` | Run a shell command in the project |
+
+What it may run is up to you:
+
+- **Interactive runs** (the default) show you each command that isn't on the allowlist:
+  `y` runs it, `n` refuses it, `a` allows that program for the rest of the run.
+- **Headless runs** (`--headless`) run only allowlisted commands and refuse the rest. The
+  agent is told why, and says in its summary what it couldn't do.
+
+The allowlist matches on whole words at the start of a plain command, so `git log`
+allows `git log -5` but not `git push`, and nothing with pipes, redirects, `;`, `&&` or
+`$(…)` matches. The default allows `hlock` and read-only `git`. Change it in `[agent]`:
+
+```toml title="harness.meta.toml"
+[agent]
+allow = ["hlock", "git log", "git show", "brew install", "npm install"]
+max-steps = 60                # model turns per job
+timeout-seconds = 300         # per command
+```
+
+`hlock meta pin` records the agent's version (hlock's), its model, and these settings in
+the lock, so a changed allowlist shows up in review and `hlock meta check` catches drift.
+A lock pinned by another hlock version needs a re-pin (or `--allow-version-mismatch`).
 
 ## `harness.meta.toml`
 
 ```toml title="harness.meta.toml"
 # hlock meta manifest: the agent hlock uses for its own work (hlock meta --help).
 [target]
-harness = "pi"                # an open-source harness: pi, codex, goose, opencode, hermes
+harness = "builtin"           # builtin (ships with hlock), or one you install: pi, codex, goose, opencode, hermes
 
 [model]
 provider = "anthropic"
 name = "claude-sonnet-5-5"
 key-env = "ANTHROPIC_API_KEY" # the variable holding the API key; the key is never written
+
+[agent]
+# commands that run without asking; others need your OK, and unattended runs refuse them
+allow = ["hlock", "git log", "git show", "git diff", "git status"]
 
 [run]
 mode = "interactive"          # or "headless"
@@ -90,18 +129,20 @@ mode = "interactive"          # or "headless"
 
 | Key | Description |
 |---|---|
-| `target.harness` | The meta harness: `pi`, `codex`, `goose`, `opencode`, `hermes`, or a [project harness](harnesses.md#your-own-agent-frameworks-and-custom-scripts) |
+| `target.harness` | The meta harness: `builtin`, `pi`, `codex`, `goose`, `opencode`, `hermes`, or a [project harness](harnesses.md#your-own-agent-frameworks-and-custom-scripts) |
 | `model.provider`, `model.name`, `model.key-env` | An API provider, its model, and the variable holding its key |
-| `model.runtime`, `model.name`, `model.base-url` | A local runtime, its model, and where it listens (default: the runtime's local port) |
+| `model.runtime`, `model.name` | A local runtime and its model |
+| `model.base-url` | Where the model's API is, overriding the provider's or runtime's default |
+| `agent.allow`, `agent.max-steps`, `agent.timeout-seconds` | What the [built-in agent](#the-built-in-agent) may run, and its limits |
 | `run.mode` | How `hlock meta run` runs jobs by default: `interactive` or `headless` |
 | `jobs.<name>` | Extra `instructions` for a built-in job, or a [custom job](#custom-jobs) |
 
-After you edit it, run `hlock meta pin`. That writes `[model]` into the meta harness's
-config and pins it again. `hlock meta check` fails until you do.
+After you edit it, run `hlock meta pin` to pin it again. `hlock meta check` fails until
+you do.
 
-Commit `harness.meta.toml`, `harness.meta.lock` and `.hlock/vendor/meta/`. The meta
-harness's config root (`.hlock/env/harness.meta/`) is rebuilt from the lock, so leave it
-out of version control.
+Commit `harness.meta.toml` and `harness.meta.lock`, and for an installed harness also
+`.hlock/vendor/meta/`. An installed harness's config root (`.hlock/env/harness.meta/`) is
+rebuilt from the lock, so leave it out of version control.
 
 ## Run a job
 
@@ -117,11 +158,12 @@ next → hlock meta run <job>
 `hlock meta run JOB` renders the job's prompt from the project's state, runs the meta
 harness on it, and then checks the result itself:
 
-- **Interactive** (the default): a normal session with the prompt as its first message.
-  You watch, approve what it asks to do, and exit when it's done.
-- **Headless** (`--headless`, or `[run] mode = "headless"`): the harness runs the prompt
-  non-interactively, with the same arguments as [`hlock run`](../reference/cli.md#run)
-  (`pi -p`, `codex exec`, `goose run -t`, …), and its output streams to the terminal.
+- **Interactive** (the default): you watch the agent work and approve what it asks to do.
+  An installed harness opens a normal session with the prompt as its first message; exit
+  it when it's done.
+- **Headless** (`--headless`, or `[run] mode = "headless"`): the agent runs the prompt
+  unattended and its output streams to the terminal. An installed harness gets the same
+  arguments as [`hlock run`](../reference/cli.md#run) (`pi -p`, `codex exec`, …).
 
 Words after the job name are added to the prompt: `hlock meta run install "use brew,
 never sudo"`. `--dry-run` prints the command and the prompt without running anything.
@@ -201,7 +243,11 @@ $ hlock meta verify bootstrap-evals
 
 ## What the agent can touch
 
-The meta harness runs with its own config root, set through its config variable
+The [built-in agent](#the-built-in-agent) writes only inside the project and runs only
+what the allowlist or you allow. It uses your environment as is, so the commands you
+approve act on your real setup.
+
+An installed harness runs with its own config root, set through its config variable
 (`PI_CODING_AGENT_DIR` for Pi), and the commands it runs inherit that variable. So that
 it can still work on *your* setup:
 
@@ -211,7 +257,7 @@ it can still work on *your* setup:
   other commands that should see your real config.
 
 hlock never passes flags that bypass a harness's permission prompts. A headless run can
-do only what the meta harness's own config allows. To allow more, change its config in
+do only what that harness's own config allows. To allow more, change its config in
 `hlock meta launch`, then `hlock meta pin`, so the change shows up in a reviewed lock.
 
 Each run is recorded in `.hlock/meta/runs/<job>-<time>/`: the prompt, the output of a
@@ -225,20 +271,23 @@ $ hlock meta check
 ✓ the meta harness matches harness.meta.lock
 ```
 
-`check` fails when the lock isn't for `[target]`'s harness or `[model]`'s model, or when
-the meta harness's config or version changed since it was pinned. `hlock meta sync`
-rebuilds its config from the lock (`--install` installs the harness, `--pull` downloads
-local weights), and `hlock meta show` prints the lock:
+`check` fails when the lock isn't for `[target]`'s harness, `[model]`'s model or
+`[agent]`'s settings, when the built-in agent's version changed (a new hlock), or when an
+installed harness's config or version changed since it was pinned. For an installed
+harness, `hlock meta sync` rebuilds its config from the lock (`--install` installs the
+harness, `--pull` downloads local weights) and `hlock meta launch` opens a session in it;
+the built-in agent needs neither. `hlock meta show` prints the lock:
 
 ```console
 $ hlock meta show
-╭─ 📌 harness.meta.lock · meta · pinned ───────────────────────────────╮
-│                                                                      │
-│  harness        pi 1.0.0  npm:@earendil-works/pi-coding-agent@1.0.0  │
-│  llm · default  anthropic:claude-sonnet-5-5                          │
-│  config         {root}/settings.json                                 │
-│                                                                      │
-╰──────────────────────────────────────────────────────────────────────╯
+╭─ 📌 harness.meta.lock · meta · pinned ───────╮
+│                                              │
+│  harness        builtin 0.2.0  hlock@0.2.0   │
+│  llm · default  anthropic:claude-sonnet-5-5  │
+│                                              │
+╰──────────────────────────────────────────────╯
+allowed hlock, git log, git show, git diff, git status  (without asking; at most 60
+steps a job)
 api key ANTHROPIC_API_KEY is set
 ```
 

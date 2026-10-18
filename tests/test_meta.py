@@ -71,7 +71,7 @@ META_ROOT = ".hlock/env/harness.meta/pi/config"
 
 def test_init_with_an_api_key(project, monkeypatch):
     monkeypatch.setenv("OPENAI_API_KEY", "sk-openai-0123456789abcdefABCDEF")
-    r = invoke("meta", "init")
+    r = invoke("meta", "init", "--harness", "pi")
     assert r.exit_code == 0, r.output
     assert "OPENAI_API_KEY is set" in r.output and "pinned pi 1.0.0" in r.output
     toml = (project["project"] / "harness.meta.toml").read_text()
@@ -92,7 +92,7 @@ def test_init_with_an_api_key(project, monkeypatch):
 
 
 def test_init_without_keys_or_runtimes_guides_you(project):
-    r = invoke("meta", "init")
+    r = invoke("meta", "init", "--harness", "pi")
     assert r.exit_code == 0, r.output
     assert "anthropic:claude-sonnet-5-5" in r.output and "ANTHROPIC_API_KEY isn't set" in r.output
     assert "export ANTHROPIC_API_KEY=" in r.output
@@ -110,7 +110,7 @@ def test_init_refuses_a_proprietary_harness(project):
 
 def test_init_with_a_local_model(project):
     executable(project["bin"] / "ollama", "#!/bin/sh\necho 'ollama version is 0.12.0'\n")
-    r = invoke("meta", "init", "--local", "--memory-gb", "16")
+    r = invoke("meta", "init", "--harness", "pi", "--local", "--memory-gb", "16")
     assert r.exit_code == 0, r.output
     assert "(local)" in r.output and "ollama pull" in r.output
     toml = (project["project"] / "harness.meta.toml").read_text()
@@ -120,7 +120,7 @@ def test_init_with_a_local_model(project):
     lock = json.loads(Lockfile.load("harness.meta.lock").to_json())
     assert not lock.get("secret")  # a placeholder API key isn't a secret
     # starting over with an API model leaves nothing of the local setup behind
-    r = invoke("meta", "init", "--provider", "openai", "--force")
+    r = invoke("meta", "init", "--harness", "pi", "--provider", "openai", "--force")
     assert r.exit_code == 0, r.output
     assert not (project["project"] / META_ROOT / "models.json").exists()
     lock = json.loads(Lockfile.load("harness.meta.lock").to_json())
@@ -129,7 +129,7 @@ def test_init_with_a_local_model(project):
 
 def test_check_catches_drift(project, monkeypatch):
     monkeypatch.setenv("ANTHROPIC_API_KEY", "k")
-    assert invoke("meta", "init").exit_code == 0
+    assert invoke("meta", "init", "--harness", "pi").exit_code == 0
     mm = project["project"] / "harness.meta.toml"
     mm.write_text(mm.read_text().replace("claude-sonnet-5-5", "claude-opus-5-5"))
     r = invoke("meta", "check")
@@ -140,7 +140,7 @@ def test_check_catches_drift(project, monkeypatch):
 
 def test_bootstrap_pack_headless_verified(project, monkeypatch):
     monkeypatch.setenv("ANTHROPIC_API_KEY", "k")
-    assert invoke("meta", "init").exit_code == 0
+    assert invoke("meta", "init", "--harness", "pi").exit_code == 0
     # hlock scaffolds the template; the agent fills it in, and asks hlock (which must see
     # the real config root) where pi's config is
     monkeypatch.setenv("FAKE_AGENT", (
@@ -171,7 +171,7 @@ def test_bootstrap_pack_headless_verified(project, monkeypatch):
 
 def test_bootstrap_pack_failure_is_reported(project, monkeypatch):
     monkeypatch.setenv("ANTHROPIC_API_KEY", "k")
-    assert invoke("meta", "init").exit_code == 0
+    assert invoke("meta", "init", "--harness", "pi").exit_code == 0
     monkeypatch.setenv("FAKE_AGENT", "printf '[pack]\\nname = \"x\"\\n' > evals/pack.toml")
     r = invoke("meta", "run", "bootstrap-evals", "--headless")
     assert r.exit_code == 1, r.output
@@ -182,7 +182,7 @@ def test_bootstrap_pack_failure_is_reported(project, monkeypatch):
 
 def test_bootstrap_evals_adds_to_a_complete_pack(project, monkeypatch):
     monkeypatch.setenv("ANTHROPIC_API_KEY", "k")
-    assert invoke("meta", "init").exit_code == 0
+    assert invoke("meta", "init", "--harness", "pi").exit_code == 0
     (project["project"] / "evals/one").mkdir(parents=True)
     (project["project"] / "evals/one/prompt.md").write_text("do it\n")
     (project["project"] / "evals/pack.toml").write_text(PACK)
@@ -198,7 +198,7 @@ def test_install_job(project, monkeypatch):
     (home / ".claude/settings.json").write_text(json.dumps({"model": "opus"}))
     assert invoke("pin", "--harness", "claude").exit_code == 0
     monkeypatch.setenv("ANTHROPIC_API_KEY", "k")
-    assert invoke("meta", "init").exit_code == 0
+    assert invoke("meta", "init", "--harness", "pi").exit_code == 0
     assert invoke("meta", "verify", "install").exit_code == 0
     # lose the skill: the sync plan has a step again
     import shutil
@@ -220,7 +220,7 @@ def test_update_job_reports_and_repins(project, monkeypatch):
     (home / ".claude/settings.json").write_text(json.dumps({"model": "opus"}))
     assert invoke("pin", "--harness", "claude").exit_code == 0
     monkeypatch.setenv("ANTHROPIC_API_KEY", "k")
-    assert invoke("meta", "init").exit_code == 0
+    assert invoke("meta", "init", "--harness", "pi").exit_code == 0
     r = invoke("meta", "run", "update", "--dry-run", "--headless", "--json")
     assert "may be nothing to update" in json.loads(r.output)["prompt"]
     monkeypatch.setenv("FAKE_AGENT", (
@@ -241,14 +241,14 @@ def test_update_needs_a_pinned_lock(project, monkeypatch):
     (project["project"] / "harness.lock").write_text(
         "lock-version = 1\ngenerated-by = \"x\"\ngenerated-at = \"\"\n[harness]\nname = \"reference\"\n[evidence]\ntrials = 2\n")
     monkeypatch.setenv("ANTHROPIC_API_KEY", "k")
-    assert invoke("meta", "init").exit_code == 0
+    assert invoke("meta", "init", "--harness", "pi").exit_code == 0
     r = invoke("meta", "run", "update", "--headless")
     assert r.exit_code == 1 and "resolved lock" in r.output
 
 
 def test_custom_job_and_jobs_list(project, monkeypatch):
     monkeypatch.setenv("ANTHROPIC_API_KEY", "k")
-    assert invoke("meta", "init").exit_code == 0
+    assert invoke("meta", "init", "--harness", "pi").exit_code == 0
     mm = project["project"] / "harness.meta.toml"
     mm.write_text(mm.read_text() + '\n[jobs.notes]\ndescription = "Write notes"\nprompt = "Write NOTES.md about {lock}"\n'
                   'verify = "test -s NOTES.md"\n')
@@ -265,7 +265,7 @@ def test_custom_job_and_jobs_list(project, monkeypatch):
 
 def test_interactive_and_launch_use_the_meta_root(project, monkeypatch):
     monkeypatch.setenv("ANTHROPIC_API_KEY", "k")
-    assert invoke("meta", "init").exit_code == 0
+    assert invoke("meta", "init", "--harness", "pi").exit_code == 0
     r = invoke("meta", "run", "bootstrap-evals", "--dry-run", "--json")
     prep = json.loads(r.output)
     assert prep["mode"] == "interactive" and prep["argv"][1:] == [prep["prompt"]]  # first message, no -p
@@ -284,7 +284,7 @@ def test_meta_and_project_locks_vendor_apart(project, monkeypatch):
     (pi_home / "settings.json").write_text(json.dumps({"defaultProvider": "openai", "defaultModel": "gpt-5"}))
     assert invoke("pin", "--harness", "pi").exit_code == 0
     monkeypatch.setenv("ANTHROPIC_API_KEY", "k")
-    assert invoke("meta", "init").exit_code == 0
+    assert invoke("meta", "init", "--harness", "pi").exit_code == 0
     r = invoke("meta", "pin")
     assert "vendored 1 files into .hlock/vendor/meta/pi/" in r.output, r.output
     vendor = project["project"] / ".hlock/vendor"

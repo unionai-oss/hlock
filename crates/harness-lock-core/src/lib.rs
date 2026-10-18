@@ -10,6 +10,7 @@
 //! model so the user surface stays stable across the language boundary.
 
 pub mod adapters;
+pub mod agent;
 pub mod capture;
 pub mod contract;
 pub mod launch;

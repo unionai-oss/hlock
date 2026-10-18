@@ -932,10 +932,11 @@ fn meta_config(meta_manifest: Option<String>) -> PyResult<String> {
 /// the API keys in the environment, and installed local runtimes. Returns JSON with
 /// the choice and the `harness.meta.toml` text to write.
 #[pyfunction]
-#[pyo3(signature = (harness=None, provider=None, model=None, runtime=None, memory_gb=None, manifest=None))]
-fn meta_init(harness: Option<String>, provider: Option<String>, model: Option<String>, runtime: Option<String>, memory_gb: Option<f64>, manifest: Option<String>) -> PyResult<String> {
+#[pyo3(signature = (harness=None, provider=None, model=None, runtime=None, memory_gb=None, base_url=None, manifest=None))]
+#[allow(clippy::too_many_arguments)]
+fn meta_init(harness: Option<String>, provider: Option<String>, model: Option<String>, runtime: Option<String>, memory_gb: Option<f64>, base_url: Option<String>, manifest: Option<String>) -> PyResult<String> {
     let (reg, ctx, _) = registry(manifest.as_deref(), None)?;
-    let opts = core::meta::InitOptions { harness, provider, model, runtime, memory_gb };
+    let opts = core::meta::InitOptions { harness, provider, model, runtime, memory_gb, base_url };
     let c = core::meta::choose(&reg, &ctx, &opts).map_err(py_err)?;
     Ok(json_str(serde_json::json!({"choice": c, "manifest": core::meta::manifest_text(&c)})))
 }
@@ -1014,6 +1015,53 @@ fn meta_verify(job: String, lock: String, meta_lock: String, meta_manifest: Opti
     Ok(json_str(serde_json::json!(v)))
 }
 
+/// Run the built-in agent pinned in `meta_lock` on `prompt`, in `project` (default: the
+/// lock's directory). `say(kind, text)` gets its progress and returns whether to keep
+/// going; `ask(command)` returns `y`, `n` or `a` for a command that isn't allowed
+/// (interactive runs only). Returns JSON (see `agent::Outcome`).
+#[pyfunction]
+#[pyo3(signature = (prompt, meta_lock="harness.meta.lock".to_string(), interactive=false, say=None, ask=None, project=None))]
+fn agent_run(
+    py: Python<'_>,
+    prompt: String,
+    meta_lock: String,
+    interactive: bool,
+    say: Option<PyObject>,
+    ask: Option<PyObject>,
+    project: Option<String>,
+) -> PyResult<String> {
+    let lock = core::Lockfile::load(Path::new(&meta_lock)).map_err(py_err)?;
+    let project = project.map(PathBuf::from).unwrap_or_else(|| lock_dir(&meta_lock));
+    let ctx = core::profiles::Ctx::from_process();
+    let cfg = core::agent::config_from_lock(&lock, &project, interactive, &ctx.env).map_err(py_err)?;
+    // release the GIL while the agent waits on the model and on commands; take it back
+    // only to call the callbacks, which also gives Ctrl-C a chance to stop the run
+    let out = py.allow_threads(|| {
+        let mut say_fn = |kind: &str, text: &str| -> bool {
+            Python::with_gil(|py| {
+                if let Some(f) = &say {
+                    match f.call1(py, (kind, text)) {
+                        Ok(r) if !r.bind(py).is_truthy().unwrap_or(true) => return false,
+                        Ok(_) => {}
+                        Err(_) => return false,
+                    }
+                }
+                py.check_signals().is_ok()
+            })
+        };
+        let mut ask_fn = |command: &str| -> String {
+            Python::with_gil(|py| {
+                ask.as_ref()
+                    .and_then(|f| f.call1(py, (command,)).ok())
+                    .and_then(|r| r.extract::<String>(py).ok())
+                    .unwrap_or_else(|| "n".into())
+            })
+        };
+        core::agent::run(&cfg, &prompt, &mut say_fn, &mut ask_fn)
+    });
+    Ok(json_str(serde_json::json!(out)))
+}
+
 #[pymodule]
 fn _harness_lock(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyManifest>()?;
@@ -1041,6 +1089,7 @@ fn _harness_lock(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(localize, m)?)?;
     m.add_function(wrap_pyfunction!(check_eval_pack, m)?)?;
     m.add_function(wrap_pyfunction!(redact_text, m)?)?;
+    m.add_function(wrap_pyfunction!(agent_run, m)?)?;
     m.add_function(wrap_pyfunction!(meta_config, m)?)?;
     m.add_function(wrap_pyfunction!(meta_init, m)?)?;
     m.add_function(wrap_pyfunction!(meta_pin, m)?)?;
