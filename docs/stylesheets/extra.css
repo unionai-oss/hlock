@@ -165,3 +165,26 @@
   .md-typeset .md-button.hl-btn,
   .md-typeset .md-button.hl-btn .twemoji { transition: none; }
 }
+
+/* Header: link to the project website, beside the repository link. */
+.md-header__website {
+  display: flex;
+  align-items: center;
+  flex-shrink: 0;
+  gap: .15rem;
+  margin: 0 .4rem 0 .8rem;
+  font-size: .65rem;
+  line-height: 1;
+  color: currentcolor;
+  opacity: .85;
+  transition: opacity 125ms;
+}
+.md-header__website:hover {
+  opacity: 1;
+}
+.md-header__website svg {
+  width: .8rem;
+  height: .8rem;
+  fill: none;
+  stroke: currentcolor;
+}
