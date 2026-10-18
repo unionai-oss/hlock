@@ -17,7 +17,7 @@ $ hlock launch
 1. checks that the installed harness is the version the lock pins, and stops if it isn't
    (`hlock sync --install` fixes that; `--allow-version-mismatch` overrides);
 2. restores the locked setup into an isolated config root under `.hlock/env/<harness>/`,
-   the same way [`hlock sync --prefix`](sync.md#into-an-isolated-directory) does, including
+   the same way [`hlock sync`](sync.md#the-isolated-directory) does, including
    plugin installs; this only does work the first time, or after the lock changes;
 3. starts the harness with its config-root variable pointing there (`CLAUDE_CONFIG_DIR`,
    `CODEX_HOME`, `PI_CODING_AGENT_DIR`, `HERMES_HOME`, `CURSOR_CONFIG_DIR`,

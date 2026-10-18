@@ -71,6 +71,7 @@ def test_launch_same_harness_isolated(pinned):
     assert state["mcpServers"]["github"]["env"]["GITHUB_TOKEN"] == GH_TOKEN
     assert (root / "skills/my-skill/SKILL.md").is_file() and (root / "CLAUDE.md").is_file()
     assert not prep["missing_secrets"]
+    assert (root.parent / ".gitignore").read_text().splitlines()[-1] == "*"  # not for version control
 
 
 def test_launch_execs_the_harness(pinned):

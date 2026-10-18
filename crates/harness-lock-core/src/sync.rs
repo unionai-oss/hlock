@@ -23,9 +23,12 @@ use crate::profiles::{probe_harness, probe_runtime, python_package_versions, run
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct SyncOptions {
-    /// Materialize into an isolated config root under this directory instead of
-    /// the user's real one (the "virtual environment" `launch` uses).
+    /// Materialize into an isolated config root under this directory (the
+    /// "virtual environment" `launch` uses). Default: `.hlock/env` next to the lock.
     pub prefix: Option<PathBuf>,
+    /// Write into the user's real config root (`~/.claude`, …) instead of an
+    /// isolated one. Only an explicit opt-in touches global config.
+    pub in_place: bool,
     /// Materialize into a Docker build context: files land under `<dir>/home`.
     pub docker: Option<PathBuf>,
     /// Let hlock run package managers (npm, brew, uv, pip, install scripts).
@@ -117,12 +120,30 @@ pub struct Plan {
     pub root: PathBuf,
     /// Environment that points the harness at `root` (empty in `home` mode).
     pub isolation: BTreeMap<String, String>,
+    /// In `prefix` mode, the directory isolated roots live under, for display
+    /// (relative to the project when it's inside it).
+    pub prefix: Option<String>,
+    /// In `prefix` mode, this harness's own directory under the prefix, which
+    /// [`ignore_env`] marks as not for version control.
+    pub env: Option<PathBuf>,
     pub steps: Vec<Step>,
 }
 
 impl Plan {
     pub fn count(&self, status: &str) -> usize {
         self.steps.iter().filter(|s| s.status == status && !s.optional).count()
+    }
+
+    /// The `hlock sync` and `hlock check` commands that target the same place as this plan.
+    pub fn commands(&self) -> (String, String) {
+        match (self.mode.as_str(), &self.prefix) {
+            ("prefix", Some(p)) => {
+                let p = shell_join(std::slice::from_ref(p));
+                (format!("hlock sync --prefix {p}"), format!("hlock check --prefix {p}"))
+            }
+            ("docker", _) => ("hlock sync --docker".into(), "hlock check".into()),
+            _ => ("hlock sync --in-place".into(), "hlock check".into()),
+        }
     }
 }
 
@@ -259,7 +280,8 @@ fn desired_config(vendored: &Path, format: &str, pointers: &[String], target: &P
 // Targets
 // --------------------------------------------------------------------------- //
 
-/// The context a plan writes into, and the environment that selects it.
+/// The context a plan writes into, and the environment that selects it. With
+/// neither `docker` nor `prefix` set, that's the user's real config (`home` mode).
 pub(crate) fn target_ctx(profile: &HarnessProfile, ctx: &Ctx, opts: &SyncOptions) -> (Ctx, String, BTreeMap<String, String>) {
     let mut t = ctx.clone();
     let mut iso = BTreeMap::new();
@@ -271,8 +293,7 @@ pub(crate) fn target_ctx(profile: &HarnessProfile, ctx: &Ctx, opts: &SyncOptions
         return (t, "docker".into(), iso);
     }
     if let Some(prefix) = &opts.prefix {
-        let base = if prefix.is_absolute() { prefix.clone() } else { ctx.cwd.join(prefix) };
-        let base = base.join(&profile.id);
+        let base = env_dir(profile, prefix, ctx);
         let root = match &profile.config_root.suffix {
             Some(sfx) => base.join("xdg").join(sfx),
             None => base.join("config"),
@@ -290,6 +311,24 @@ pub(crate) fn target_ctx(profile: &HarnessProfile, ctx: &Ctx, opts: &SyncOptions
         return (t, "prefix".into(), iso);
     }
     (t, "home".into(), iso)
+}
+
+/// A harness's own directory under an isolated-environment prefix.
+pub(crate) fn env_dir(profile: &HarnessProfile, prefix: &Path, ctx: &Ctx) -> PathBuf {
+    let base = if prefix.is_absolute() { prefix.to_path_buf() } else { ctx.cwd.join(prefix) };
+    base.join(&profile.id)
+}
+
+/// Create an isolated environment directory with a `.gitignore` that keeps all of it
+/// out of version control: it's restored from the lock, and holds filled-in secrets
+/// and the harness's own state. An existing `.gitignore` is left alone.
+pub fn ignore_env(dir: &Path) -> Result<()> {
+    std::fs::create_dir_all(dir)?;
+    let ignore = dir.join(".gitignore");
+    if !ignore.exists() {
+        std::fs::write(ignore, "# hlock's isolated harness environment, restored from the lock; not for version control\n*\n")?;
+    }
+    Ok(())
 }
 
 /// Expand a lock's portable path (`{root}/…`, `~/…`, relative) for a target.
@@ -399,8 +438,19 @@ fn install_step(id: String, kind: &str, what: &str, version: Option<&str>, sourc
 /// Build the sync plan for a lock. Nothing is changed.
 pub fn plan(lock: &Lockfile, lock_path: &Path, reg: &Registry, ctx: &Ctx, opts: &SyncOptions) -> Result<Plan> {
     let profile = reg.require_harness(&lock.harness.name)?;
+    // isolated by default: only `in_place` writes into the user's real config
+    let isolated;
+    let opts = if opts.prefix.is_none() && opts.docker.is_none() && !opts.in_place {
+        isolated = SyncOptions { prefix: Some(crate::launch::env_prefix(lock_path, ctx)), ..opts.clone() };
+        &isolated
+    } else {
+        opts
+    };
     let (t, mode, isolation) = target_ctx(profile, ctx, opts);
     let root = profile.config_root(&t);
+    let prefix = opts.prefix.as_ref().filter(|_| mode == "prefix").map(|p| pretty(&if p.is_absolute() { p.clone() } else { ctx.cwd.join(p) }, ctx));
+    let env = opts.prefix.as_ref().filter(|_| mode == "prefix").map(|p| env_dir(profile, p, ctx));
+    let (sync_cmd, _) = Plan { mode: mode.clone(), prefix: prefix.clone(), ..Default::default() }.commands();
     let lock_dir = lock_dir_of(lock_path, ctx);
     let docker = mode == "docker";
     let mut steps: Vec<Step> = Vec::new();
@@ -618,7 +668,7 @@ pub fn plan(lock: &Lockfile, lock_path: &Path, reg: &Registry, ctx: &Ctx, opts: 
             } else {
                 "not set".into()
             },
-            command: (missing && !docker).then(|| format!("export {}=…   # then re-run hlock sync", r.name)),
+            command: (missing && !docker).then(|| format!("export {}=…   # then re-run {sync_cmd}", r.name)),
             ..Default::default()
         });
     }
@@ -631,6 +681,8 @@ pub fn plan(lock: &Lockfile, lock_path: &Path, reg: &Registry, ctx: &Ctx, opts: 
         mode,
         root,
         isolation,
+        prefix,
+        env,
         steps,
     })
 }
@@ -930,17 +982,21 @@ pub fn rehydrate_skill(plan: &Plan, lock_name: &str) -> String {
         plan.harness_name,
         plan.version.as_deref().unwrap_or("")
     ));
-    s.push_str("## Rules\n\n- Ask the user before installing system software or downloading large model weights, and say how big the download is.\n- Never print, log, or commit secret values. Ask the user to set secrets in their shell; don't type them yourself.\n- Run each step's check before moving on. If a step fails, stop and report the error.\n- Finish by running `hlock sync`, which performs the remaining automatic steps, then `hlock check`.\n\n");
+    let (sync_cmd, check_cmd) = plan.commands();
+    s.push_str(&format!("## Rules\n\n- Ask the user before installing system software or downloading large model weights, and say how big the download is.\n- Never print, log, or commit secret values. Ask the user to set secrets in their shell; don't type them yourself.\n- Run each step's check before moving on. If a step fails, stop and report the error.\n- Finish by running `{sync_cmd}`, which performs the remaining automatic steps, then `{check_cmd}`.\n\n"));
+    if let (true, Some(p)) = (plan.mode == "prefix", &plan.prefix) {
+        s.push_str(&format!("The setup is restored into an isolated config root under `{p}`, not the user's own config. Don't change the user's own config unless they ask.\n\n"));
+    }
     let pending: Vec<&Step> = plan.steps.iter().filter(|st| st.status != "satisfied" && !st.optional).collect();
     if pending.is_empty() {
-        s.push_str("## Steps\n\nNothing is missing. Run `hlock check` to confirm.\n");
+        s.push_str(&format!("## Steps\n\nNothing is missing. Run `{check_cmd}` to confirm.\n"));
         return s;
     }
     s.push_str("## Steps\n\n");
     for (i, st) in pending.iter().enumerate() {
         s.push_str(&format!("{}. **{}**", i + 1, st.title));
         if st.status == "auto" {
-            s.push_str(" (`hlock sync` does this)");
+            s.push_str(&format!(" (`{sync_cmd}` does this)"));
         }
         s.push('\n');
         if !st.reason.is_empty() {
@@ -960,7 +1016,7 @@ pub fn rehydrate_skill(plan: &Plan, lock_name: &str) -> String {
             s.push_str(&format!("- {}{}\n", st.title, st.command.as_ref().map(|c| format!(": `{c}`")).unwrap_or_default()));
         }
     }
-    s.push_str("\n## Finish\n\n1. Run `hlock sync` and confirm it reports no remaining steps.\n2. Run `hlock check`.\n");
+    s.push_str(&format!("\n## Finish\n\n1. Run `{sync_cmd}` and confirm it reports no remaining steps.\n2. Run `{check_cmd}`.\n"));
     s
 }
 
@@ -1036,6 +1092,13 @@ exec "$@"
 mod tests {
     use super::*;
     use crate::capture::parse_config;
+
+    #[test]
+    fn plan_commands_target_the_same_place() {
+        let plan = |mode: &str, prefix: Option<&str>| Plan { mode: mode.into(), prefix: prefix.map(String::from), ..Default::default() }.commands();
+        assert_eq!(plan("prefix", Some(".hlock/env")), ("hlock sync --prefix .hlock/env".into(), "hlock check --prefix .hlock/env".into()));
+        assert_eq!(plan("home", None), ("hlock sync --in-place".into(), "hlock check".into()));
+    }
 
     #[test]
     fn placeholder_fill_keeps_existing_secrets() {

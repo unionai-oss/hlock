@@ -66,7 +66,7 @@ $ hlock check
   + mcp linear
   + skill write-tests (user)
   ~ config ~/.claude.json: ad825f266f → b33482f12e
-  hint: re-pin with hlock pin, or restore it with hlock sync
+  hint: re-pin with hlock pin, or restore it with hlock sync --in-place
 ```
 
 Run `hlock pin` again to lock the new pieces. It prints the same diff, and the change
@@ -94,7 +94,8 @@ changes since the last pin
 next → hlock check  ·  hlock sync
 ```
 
-If the change wasn't intended, `hlock sync` restores the locked setup instead.
+If the change wasn't intended, `hlock sync --in-place` restores the locked setup into your
+config instead.
 
 ## 4. Rehydrate it elsewhere
 
@@ -104,28 +105,32 @@ lock asks for, and run `hlock sync`:
 ```console
 $ export HLOCK_SECRET_GITHUB_GITHUB_TOKEN=ghp_…
 $ hlock sync --yes
-Sync plan for Claude Code 2.1.0 → your config
+Sync plan for Claude Code 2.1.0 → .hlock/env/claude-code/config
 ✓  harness       Claude Code 2.1.0
 ✓  mcp           `npx` for MCP servers: github
 ✓  secret        HLOCK_SECRET_GITHUB_GITHUB_TOKEN (mcp github GITHUB_TOKEN)
-●  config        Write ~/.claude/settings.json
-●  config        Write ~/.claude.json /mcpServers
-●  skill         Copy skill review-pr → ~/.claude/skills/review-pr
-●  skill         Copy skill write-tests → ~/.claude/skills/write-tests
-●  instructions  Write ~/.claude/CLAUDE.md
-✓ Write ~/.claude/settings.json
-✓ Write ~/.claude.json /mcpServers
-✓ Copy skill review-pr → ~/.claude/skills/review-pr
-✓ Copy skill write-tests → ~/.claude/skills/write-tests
-✓ Write ~/.claude/CLAUDE.md
-✓ in sync with harness.lock
+●  config        Write .hlock/env/claude-code/config/settings.json
+●  config        Write .hlock/env/claude-code/config/.claude.json /mcpServers
+●  skill         Copy skill review-pr → .hlock/env/claude-code/config/skills/review-pr
+●  skill         Copy skill write-tests → .hlock/env/claude-code/config/skills/write-tests
+●  instructions  Write .hlock/env/claude-code/config/CLAUDE.md
+✓ Write .hlock/env/claude-code/config/settings.json
+✓ Write .hlock/env/claude-code/config/.claude.json /mcpServers
+✓ Copy skill review-pr → .hlock/env/claude-code/config/skills/review-pr
+✓ Copy skill write-tests → .hlock/env/claude-code/config/skills/write-tests
+✓ Write .hlock/env/claude-code/config/CLAUDE.md
+✓ in sync at .hlock/env/claude-code/config  your own config wasn't touched
+use it: CLAUDE_CONFIG_DIR=.hlock/env/claude-code/config claude
+to restore into your own config instead: hlock sync --in-place
 
-$ hlock check
-✓ your claude-code setup matches harness.lock
+$ hlock check --prefix .hlock/env
+✓ the claude-code setup in .hlock/env matches harness.lock
 ```
 
 `sync` builds a plan: `✓` steps are already true, `●` steps hlock does for you, and `○`
-steps need you, with the exact command to run. It keeps a backup of any file it replaces.
+steps need you, with the exact command to run. It writes into an isolated config root in
+`.hlock/env/`, so the setup on that machine stays as it was. Pass `--in-place` to restore
+into `~/.claude` itself; `sync` keeps a backup of any file it replaces.
 Pass `--install` to let it install missing harnesses and packages, and `--pull` to
 download local model weights. Without `--yes`, it shows the plan and asks first.
 `hlock sync --docker` writes a Docker image with the same setup instead.

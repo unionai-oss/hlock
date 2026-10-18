@@ -46,6 +46,7 @@ from harness_lock import (
     run_code_harness,
     runtimes,
     sync_dockerfile,
+    sync_ignore_env,
     sync_plan,
     sync_run_step,
     sync_skill,
@@ -682,6 +683,14 @@ def _rel(path: str) -> str:
         return path
 
 
+def _tilde(path: str) -> str:
+    """A path with the home directory shown as `~`."""
+    try:
+        return "~/" + str(Path(path).relative_to(Path.home()))
+    except ValueError:
+        return path
+
+
 def _manual_steps(plan: dict) -> list[dict]:
     return [st for st in plan["steps"] if st["status"] == "manual" and not st.get("optional")]
 
@@ -694,7 +703,8 @@ def _manual_steps(plan: dict) -> list[dict]:
 @click.option("--install", is_flag=True, help="Let hlock run package managers (npm, brew, uv, install scripts).")
 @click.option("--pull", is_flag=True, help="Let hlock download model weights through installed runtimes.")
 @click.option("--all-models", is_flag=True, help="Include models a provider lists but no locked role uses.")
-@click.option("--prefix", default=None, help="Materialize into an isolated config root under DIR, not your real one.")
+@click.option("--prefix", default=None, help="Where isolated config roots live.  [dim]\\[default: .hlock/env][/]")
+@click.option("--in-place", is_flag=True, help="Write into your own config (~/.claude, …) instead of an isolated root.")
 @click.option("--docker", "docker", is_flag=True, help="Write a Docker build context and Dockerfile to .hlock/docker/<harness>.")
 @click.option("--build", is_flag=True, help="With --docker: also run docker build.")
 @click.option("--skill", "skill", is_flag=True, help="Write an Agent Skill that guides an agent through the remaining steps.")
@@ -702,7 +712,8 @@ def _manual_steps(plan: dict) -> list[dict]:
 @click.option("--exact", is_flag=True, help="Also remove skills that aren't in the lock (moved aside, not deleted).")
 @click.option("-v", "--verbose", is_flag=True, help="List every step, including optional ones.")
 def sync(lock: str, plan_only: bool, as_json: bool, yes: bool, install: bool, pull: bool, all_models: bool,
-         prefix: str | None, docker: bool, build: bool, skill: bool, skill_dir: str, exact: bool, verbose: bool) -> None:
+         prefix: str | None, in_place: bool, docker: bool, build: bool, skill: bool, skill_dir: str, exact: bool,
+         verbose: bool) -> None:
     """Rehydrate the setup in [path]harness.lock[/] on this machine.
 
     Builds a plan in which each step is [ok]✓ satisfied[/], [brand]● automatic[/] (hlock does it), or
@@ -710,20 +721,25 @@ def sync(lock: str, plan_only: bool, as_json: bool, yes: bool, install: bool, pu
     and instruction files and install plugins through the harness's own CLI. Package
     installs need [cmd]--install[/] and model downloads need [cmd]--pull[/]. Exits 3 while manual
     steps remain, so it's safe to re-run until it's clean.
+
+    The setup goes into an isolated config root in [path].hlock/env/[/] (the one [cmd]hlock launch[/]
+    uses), so your own config isn't touched. Pass [cmd]--in-place[/] to write into it instead.
     """
     lock = lock or _l()
+    if in_place and (prefix or docker):
+        _fail("--in-place doesn't work with --prefix or --docker", "pick one place to write the setup")
     docker_dir = None
     if docker:
         with _friendly_errors():
             harness_id = Lockfile.load(lock).harness
         docker_dir = str(Path(".hlock/docker") / harness_id)
     with _working("Planning…"):
-        plan = json.loads(sync_plan(lock, prefix=prefix, docker=docker_dir, install=install, pull=pull,
+        plan = json.loads(sync_plan(lock, prefix=prefix, in_place=in_place, docker=docker_dir, install=install, pull=pull,
                                     all_models=all_models, exact=exact, manifest=_m()))
     if as_json:
         console.print_json(data=plan)
         return
-    where = {"home": "your config", "prefix": f"[path]{_rel(plan['root'])}[/]",
+    where = {"home": f"your config [path]{_tilde(plan['root'])}[/]", "prefix": f"[path]{_rel(plan['root'])}[/]",
              "docker": f"[path]{docker_dir}[/]"}[plan["mode"]]
     console.print(f"[bold]Sync plan[/] for {plan['harness_name']} {plan.get('version') or ''} → {where}")
     console.print(_plan_table(plan, verbose))
@@ -746,6 +762,7 @@ def sync(lock: str, plan_only: bool, as_json: bool, yes: bool, install: bool, pu
             _fail(f"{len(auto)} automatic steps to run", "pass [cmd]--yes[/] to run them, or [cmd]--plan[/] to just look")
         if not click.confirm(f"Run {len(auto)} automatic step{'s' if len(auto) != 1 else ''}?", default=True):
             sys.exit(1)
+    sync_ignore_env(json.dumps(plan))  # an isolated root is restored from the lock: keep it out of git
     failed = 0
     groups: dict[str, list[dict]] = {}
     for st in auto:
@@ -800,6 +817,7 @@ def sync(lock: str, plan_only: bool, as_json: bool, yes: bool, install: bool, pu
         sys.exit(1 if failed else 0)
 
     remaining = _manual_steps(plan)
+    again = "hlock sync --in-place" if in_place else "hlock sync"
     if remaining:
         secrets = [st for st in remaining if st["kind"] == "secret"]
         others = [st for st in remaining if st["kind"] != "secret"]
@@ -811,16 +829,16 @@ def sync(lock: str, plan_only: bool, as_json: bool, yes: bool, install: bool, pu
         if secrets:
             n = len(others) + 1
             console.print(f"  {n}. Set {len(secrets)} secret{'s' if len(secrets) != 1 else ''}, then re-run "
-                          "[cmd]hlock sync[/] [muted](values stay out of the lock)[/]")
+                          f"[cmd]{again}[/] [muted](values stay out of the lock)[/]")
             for st in secrets:
                 name, _, used = st["title"].partition(" (")
                 console.print(f"     [cmd]export {name}=…[/]  [muted]# {used.rstrip(')')}[/]")
         hints = []
         if any("--install" in (st.get("reason") or "") for st in remaining):
-            hints.append("hlock sync --install")
+            hints.append(f"{again} --install")
         if any("--pull" in (st.get("reason") or "") for st in remaining):
-            hints.append("hlock sync --pull")
-        hints.append("hlock sync --skill [muted](let your agent do it)[/]")
+            hints.append(f"{again} --pull")
+        hints.append(f"{again} --skill [muted](let your agent do it)[/]")
         _next(*hints)
     if failed:
         sys.exit(1)
@@ -828,8 +846,10 @@ def sync(lock: str, plan_only: bool, as_json: bool, yes: bool, install: bool, pu
         sys.exit(MANUAL_EXIT)
     if plan["mode"] == "prefix":
         env = " ".join(f"{k}={_rel(v)}" for k, v in plan["isolation"].items())
-        _ok(f"in sync at [path]{_rel(plan['root'])}[/]")
+        _ok(f"in sync at [path]{_rel(plan['root'])}[/]  [muted]your own config wasn't touched[/]")
         console.print(f"[muted]use it:[/] [cmd]{env} {plan.get('binary') or plan['harness']}[/]", soft_wrap=True)
+        if not prefix:
+            console.print("[muted]to restore into your own config instead:[/] [cmd]hlock sync --in-place[/]")
     else:
         _ok(f"in sync with [path]{_show(lock)}[/]")
 
@@ -847,7 +867,9 @@ def show(as_json: bool) -> None:
 
 
 @main.command()
-def check() -> None:
+@click.option("--prefix", default=None,
+              help="For a pinned lock: check the isolated root [cmd]hlock sync --prefix DIR[/] writes, not your own config.")
+def check(prefix: str | None) -> None:
     """Fail if your setup, or [path]harness.toml[/], has drifted from [path]harness.lock[/].
 
     For a pinned lock, re-capture the harness and fail if the setup changed.
@@ -859,14 +881,16 @@ def check() -> None:
         lf = Lockfile.load(_l())
     if lf.kind == "pin":
         with _working(f"Re-capturing {lf.harness}…"):
-            drift = json.loads(_check_pin(_l(), manifest=_m()))
+            drift = json.loads(_check_pin(_l(), prefix=prefix, manifest=_m()))
+        which = f"the {lf.harness} setup in [path]{prefix}[/]" if prefix else f"your {lf.harness} setup"
         if drift:
-            err_console.print(f"[fail]✗ drift:[/] your {lf.harness} setup changed since {_ld()} was pinned")
+            err_console.print(f"[fail]✗ drift:[/] {which} changed since {_ld()} was pinned")
             for line in drift:
                 err_console.print(f"  {line}")
-            err_console.print("  [muted]hint:[/] re-pin with [cmd]hlock pin[/], or restore it with [cmd]hlock sync[/]")
+            restore = f"hlock sync --prefix {prefix}" if prefix else "hlock sync --in-place"
+            err_console.print(f"  [muted]hint:[/] re-pin with [cmd]hlock pin[/], or restore it with [cmd]{restore}[/]")
             sys.exit(1)
-        _ok(f"your {lf.harness} setup matches [path]{_ld()}[/]")
+        _ok(f"{which} matches [path]{_ld()}[/]")
         return
     with _friendly_errors():
         m = Manifest.load(_m())

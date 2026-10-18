@@ -419,6 +419,7 @@ pub fn pin(reg: &Registry, ctx: &Ctx, meta: &MetaManifest, out: &Path, project: 
     }
     let profile = eligible_harness(reg, &harness)?;
     let (tctx, _, root) = meta_env(profile, ctx, out);
+    sync::ignore_env(&sync::env_dir(profile, &launch::env_prefix(out, ctx), ctx))?;
     std::fs::create_dir_all(&root)?;
     let mut model = meta.model.clone();
     if model.is_local() {
@@ -725,6 +726,9 @@ fn install_goal(input: &JobInput, reg: &Registry, ctx: &Ctx) -> Result<(String, 
         plan.harness_name,
         plan.version.as_deref().unwrap_or("")
     );
+    if let Some(p) = &plan.prefix {
+        s.push_str(&format!("`hlock sync` restores the config into an isolated root under `{p}`, not the user's own config. Don't change the user's own config unless they ask.\n\n"));
+    }
     let pending: Vec<&sync::Step> = plan.steps.iter().filter(|st| st.status != "satisfied" && !st.optional).collect();
     let (secrets, steps): (Vec<&sync::Step>, Vec<&sync::Step>) = pending.into_iter().partition(|st| st.kind == "secret");
     if steps.is_empty() {

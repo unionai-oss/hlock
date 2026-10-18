@@ -342,6 +342,7 @@ pub fn prepare(lock: &Lockfile, lock_path: &Path, reg: &Registry, ctx: &Ctx, opt
             Some(p) => ctx.cwd.join(p),
             None => env_prefix(lock_path, ctx),
         };
+        sync::ignore_env(&sync::env_dir(target, &prefix, ctx))?;
         let sopts = SyncOptions { prefix: Some(prefix), ..Default::default() };
         let (t, _, iso) = sync::target_ctx(target, ctx, &sopts);
         let root = target.config_root(&t);

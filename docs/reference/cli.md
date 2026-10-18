@@ -159,20 +159,23 @@ Compare the manifest hash recorded in `harness.lock` with the hash of the curren
 missing. See [Using hlock in CI](../guides/ci.md).
 
 For a pinned lock (`kind = "pin"`), `check` needs no `harness.toml`: it re-captures the
-harness and fails with a list of what changed.
+harness and fails with a list of what changed. It checks your own config, or with
+`--prefix DIR`, the isolated root that `hlock sync --prefix DIR` writes (`hlock sync` uses
+`.hlock/env` by default).
 
 For a resolved lock, `check` also fails when the lock is for a different harness than `[target] harness`, or
 when the installed harness's version differs from the one the lock pins (skipped when the
 harness isn't installed).
 
 ```bash
-hlock check
+hlock check [--prefix DIR]
 ```
 
 ## `sync`
 
 Build a plan to reproduce a lock's setup, run its automatic steps, and list what needs you.
-See [Rehydrating with sync](../guides/sync.md).
+The setup goes into an isolated config root under `.hlock/env/` unless you pass
+`--in-place`. See [Rehydrating with sync](../guides/sync.md).
 
 ```bash
 hlock sync [LOCK] [OPTIONS]
@@ -187,7 +190,8 @@ hlock sync [LOCK] [OPTIONS]
 | `--install` | Let hlock run package managers and install scripts |
 | `--pull` | Let hlock download model weights through installed runtimes |
 | `--all-models` | Include models no locked role uses |
-| `--prefix DIR` | Materialize into an isolated config root under `DIR` |
+| `--prefix DIR` | Where isolated config roots live (default `.hlock/env`) |
+| `--in-place` | Write into your own config (`~/.claude`, …) instead of an isolated root |
 | `--docker` | Write a Docker build context to `.hlock/docker/<harness>/` |
 | `--build` | With `--docker`, also run `docker build` |
 | `--skill` | Write an Agent Skill that guides an agent through the remaining steps |
