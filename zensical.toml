@@ -64,6 +64,7 @@ nav = [
 
 [project.theme]
 language = "en"
+custom_dir = "overrides"
 logo = "assets/logo-animated.svg"
 favicon = "assets/logo.svg"
 features = [
@@ -104,6 +105,7 @@ toggle.icon = "lucide/moon"
 toggle.name = "Switch to system preference"
 
 [project.extra]
+website = "https://www.hlock.ai"
 social = [
   { icon = "fontawesome/brands/github", link = "https://github.com/unionai-oss/hlock" },
   { icon = "fontawesome/brands/python", link = "https://pypi.org/project/hlock/" },
