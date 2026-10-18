@@ -42,6 +42,9 @@ nav = [
     { "Go local" = [
       "guides/localize.md",
     ] },
+    { "Delegate to an agent" = [
+      "guides/meta.md",
+    ] },
     { "Extend" = [
       "guides/harness-profiles.md",
     ] },
@@ -51,6 +54,7 @@ nav = [
     "reference/python-api.md",
     "reference/rust-api.md",
     "reference/manifest.md",
+    "reference/meta-manifest.md",
     "reference/lockfile.md",
     "reference/environment.md",
   ] },
@@ -58,7 +62,7 @@ nav = [
     "project/development.md",
     "project/contributing.md",
     "project/releasing.md",
-    { "Design spec" = "https://github.com/unionai-oss/hlock/blob/main/SPEC.md" },
+    { "Design specs" = "https://github.com/unionai-oss/hlock/tree/main/specs" },
   ] },
 ]
 

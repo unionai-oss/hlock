@@ -27,6 +27,8 @@ thiserror = { workspace = true }
 # only compiled when the `flyte` feature is enabled).
 flyte = { version = "0.1", optional = true }
 serde_norway = "0.9.42"
+# The built-in meta agent's model calls: a small blocking client with rustls (no async runtime).
+ureq = { version = "3", default-features = false, features = ["rustls"] }
 
 [features]
 default = []

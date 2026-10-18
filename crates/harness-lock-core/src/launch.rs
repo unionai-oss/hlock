@@ -271,6 +271,16 @@ fn translate(lock: &Lockfile, lock_path: &Path, source: Option<&HarnessProfile>,
     Ok(())
 }
 
+/// Where a lock's isolated environments live: [`ENV_DIR`], or `ENV_DIR/<stem>` for a
+/// lock not named `harness.lock`, so two locks never share a root.
+pub fn env_prefix(lock_path: &Path, ctx: &Ctx) -> PathBuf {
+    let dir = match lock_path.file_stem().and_then(|s| s.to_str()) {
+        Some("harness") | None => PathBuf::from(ENV_DIR),
+        Some(stem) => PathBuf::from(ENV_DIR).join(stem),
+    };
+    ctx.cwd.join(dir)
+}
+
 /// Prepare a launch: verify, materialize, and build the command to `exec`.
 /// `args` are passed through to the harness (or, for a code harness, joined into the prompt).
 pub fn prepare(lock: &Lockfile, lock_path: &Path, reg: &Registry, ctx: &Ctx, opts: &LaunchOptions, args: &[String]) -> Result<LaunchPrep> {
@@ -327,12 +337,11 @@ pub fn prepare(lock: &Lockfile, lock_path: &Path, reg: &Registry, ctx: &Ctx, opt
     if same && opts.in_place {
         prep.notes.push("using your own config (no isolation)".into());
     } else {
-        // each lock file gets its own environments, so two locks never share a root
-        let prefix = opts.prefix.clone().unwrap_or_else(|| match lock_path.file_stem().and_then(|s| s.to_str()) {
-            Some("harness") | None => PathBuf::from(ENV_DIR),
-            Some(stem) => PathBuf::from(ENV_DIR).join(stem),
-        });
-        let prefix = if prefix.is_absolute() { prefix } else { ctx.cwd.join(prefix) };
+        let prefix = match opts.prefix.clone() {
+            Some(p) if p.is_absolute() => p,
+            Some(p) => ctx.cwd.join(p),
+            None => env_prefix(lock_path, ctx),
+        };
         let sopts = SyncOptions { prefix: Some(prefix), ..Default::default() };
         let (t, _, iso) = sync::target_ctx(target, ctx, &sopts);
         let root = target.config_root(&t);

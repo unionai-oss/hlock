@@ -76,5 +76,5 @@ uv run python scripts/cli_screenshot.py         # writes docs/assets/quickstart.
 ## Where things live
 
 See [Architecture](../concepts/architecture.md#repository-layout) for the repository
-layout, and [SPEC.md](https://github.com/unionai-oss/hlock/blob/main/SPEC.md) for
+layout, and the [design specs](https://github.com/unionai-oss/hlock/tree/main/specs) for
 the full design.

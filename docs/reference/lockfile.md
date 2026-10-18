@@ -218,6 +218,13 @@ plus what tuning produced: the chosen hyperparameters, applied prompts, fine-tun
 adapters, the data split, and the budget, all content-addressed. Adopt it into
 `harness.lock` with `hlock tune --apply`.
 
+## `harness.meta.lock`
+
+[`hlock meta pin`](../guides/meta.md) writes the meta harness's lock: a pinned lock
+(`kind = "pin"`) of hlock's built-in agent, or of an installed harness's own config root.
+See the [`harness.meta.toml` reference](meta-manifest.md#harnessmetalock) for what it
+records.
+
 ## `harness.lock.prev`
 
 [`hlock upgrade --apply`](../guides/upgrade.md) saves the previous lock here so

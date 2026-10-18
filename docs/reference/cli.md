@@ -29,6 +29,7 @@ Failures print a one-line error with a hint and exit `1`.
 | [`tune cancel`](#tune-cancel) | Stop a running tune job |
 | [`upgrade`](#upgrade) | Plan, apply, or roll back component upgrades on a resolved lock |
 | [`localize`](#localize) | Write an all-local equivalent of a lock |
+| [`meta`](#meta) | Set up and run the meta harness, the agent hlock uses for its own work |
 | [`harness list`](#harness-list) | List known harnesses and what's installed |
 | [`harness show`](#harness-show) | Show a harness profile and the paths it reads here |
 | [`runtime list`](#runtime-list) | List local inference runtimes and what's installed |
@@ -413,6 +414,63 @@ hlock localize [LOCK] [OPTIONS]
 | `--allow-network` | | Keep self-hosted runtimes on your network |
 | `--json` | | Print the localize report as JSON |
 
+## `meta`
+
+Set up the [meta harness](../guides/meta.md), the agent hlock uses for its own work
+(hlock's built-in agent by default, or an open-source harness you install), pinned in
+`harness.meta.lock`, and run jobs in it. The meta files live next to the
+project's lock.
+
+| Command | Description |
+|---|---|
+| `hlock meta init` | Choose the meta harness and its model, write `harness.meta.toml`, install, and pin |
+| `hlock meta pin` | Apply `[model]` to the meta harness's config and pin it into `harness.meta.lock` |
+| `hlock meta check` | Fail if the meta harness drifted from `harness.meta.lock` or `harness.meta.toml` |
+| `hlock meta show` | Show the meta lock and whether the API key variable is set |
+| `hlock meta sync` | Rehydrate an installed meta harness's config (`--plan`, `--json`, `-y`, `--install`, `--pull`, `-v`) |
+| `hlock meta launch [ARGS...]` | Start an interactive session in an installed meta harness |
+| `hlock meta jobs` | List built-in and custom jobs (`--json`) |
+| `hlock meta run JOB [INSTRUCTIONS...]` | Run a job in the meta harness, then verify it |
+| `hlock meta verify JOB` | Run only a job's verification (`--out`, `--count`, `--json`) |
+
+### `meta init`
+
+```bash
+hlock meta init [OPTIONS]
+```
+
+| Option | Default | Description |
+|---|---|---|
+| `--harness` | `builtin` | `builtin` (ships with hlock), or an installed open-source harness: `pi`, `codex`, `goose`, `opencode`, `hermes` |
+| `--provider` | the first provider whose API key is set | An API provider: `anthropic`, `openai`, `google`, `openrouter` (an installed harness may support fewer) |
+| `--model` | one per provider, or the best local model that fits | The model |
+| `--local` | | Use a local runtime instead of an API |
+| `--runtime` | the best installed | The local runtime; implies `--local` |
+| `--memory-gb` | measured | Memory budget for local weights |
+| `--base-url` | the provider's or runtime's | The model API's URL, such as an OpenAI-compatible gateway |
+| `-y`, `--yes` | | Install the harness and download weights without asking |
+| `--force` | | Start over: replace `harness.meta.toml` and rebuild the meta harness's config |
+
+### `meta run`
+
+```bash
+hlock meta run JOB [INSTRUCTIONS...] [OPTIONS]
+```
+
+| Option | Default | Description |
+|---|---|---|
+| `--headless` / `--interactive` | `[run] mode`, else interactive | Run non-interactively, or as a session you watch |
+| `--out DIR` | the manifest's first eval pack, else `./evals` | `bootstrap-evals`: the pack directory |
+| `--count N` | `10` | `bootstrap-evals`: how many tasks to aim for |
+| `-t`, `--template` | `coding` | `bootstrap-evals`: the template to scaffold when there's no pack yet (`hlock evals templates`) |
+| `--pin` | | `update`: re-pin the project's lock when something changed |
+| `--allow-version-mismatch` | | Run even if the installed meta harness differs from its lock |
+| `--dry-run` | | Print the command and the prompt, and run nothing |
+| `--json` | | With `--dry-run`: print the run plan as JSON |
+
+`meta run` and `meta verify` exit `0` when the job is verified, `1` when it isn't, and `3`
+when only you can finish it.
+
 ## Exit codes
 
 | Code | Meaning |
@@ -420,4 +478,4 @@ hlock localize [LOCK] [OPTIONS]
 | `0` | Success |
 | `1` | Failure: drift (`check`), a failed task (`run`), a failed sync step, a missing or invalid file, or a tuning error |
 | `2` | Invalid command-line usage |
-| `3` | `sync` finished its automatic steps, but manual steps remain |
+| `3` | `sync` finished its automatic steps, but manual steps remain; or a `meta` job left steps only you can do |

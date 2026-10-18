@@ -316,7 +316,7 @@ pub(crate) fn pretty(p: &Path, ctx: &Ctx) -> String {
     p.to_string_lossy().into_owned()
 }
 
-fn shell_join(argv: &[String]) -> String {
+pub(crate) fn shell_join(argv: &[String]) -> String {
     argv.iter()
         .map(|a| if a.chars().all(|c| c.is_ascii_alphanumeric() || "-_./:@=+".contains(c)) { a.clone() } else { format!("'{}'", a.replace('\'', "'\\''")) })
         .collect::<Vec<_>>()
@@ -324,7 +324,7 @@ fn shell_join(argv: &[String]) -> String {
 }
 
 /// The command that installs a package by method, or `None` for app/manual installs.
-fn install_command(method: &str, package: Option<&str>, version: Option<&str>, script: Option<&str>) -> Option<Vec<String>> {
+pub(crate) fn install_command(method: &str, package: Option<&str>, version: Option<&str>, script: Option<&str>) -> Option<Vec<String>> {
     let v = |sep: &str| version.map(|v| format!("{sep}{v}")).unwrap_or_default();
     match (method, package) {
         ("npm", Some(p)) => Some(vec!["npm".into(), "install".into(), "-g".into(), format!("{p}{}", v("@"))]),

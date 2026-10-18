@@ -119,7 +119,9 @@ or `record` (a digest only, for project files that are already in git).
 | `skills` | `dirs`, `write`, `builtin-dirs`, `builtin-manifest` |
 | `bundles` | Plugins/packages: `kind`, `extractor` (`claude-plugins`, `pi-packages`, `npm-list`), `source`, `lockfile` |
 | `instructions` | Instruction files the harness reads |
-| `launch` | `args`, `model-flag`, and `prompt`: the arguments that run one prompt non-interactively, with `{prompt}` replaced (`hlock run`) |
+| `launch` | `args`, `model-flag`; `prompt`: the arguments that run one prompt non-interactively, with `{prompt}` replaced (`hlock run`, and [`hlock meta run --headless`](meta.md)); `interactive`: the arguments that start a session with `{prompt}` as its first message (`hlock meta run`) |
+| `api-keys` | API providers the harness talks to, and the variable each reads its key from: `[{ provider = "anthropic", env = "ANTHROPIC_API_KEY" }]` |
+| `api-provider` | How [`hlock meta`](meta.md) sets an API provider and model: a list of `{ file, set }` like `local-provider`, with `{provider}` and `{model}` substituted |
 | `open-source`, `local-models` | Used by [`hlock localize`](localize.md) to choose local-capable harnesses |
 | `local-provider` | How `localize` points the harness at a local endpoint: a list of `{ file, set }`, where `set` maps JSON pointers to values; `{provider}`, `{model}`, `{base_url}` and `{host}` are substituted |
 | `packages` | Packages to pin for code harnesses, e.g. `pypi:pydantic-ai` |

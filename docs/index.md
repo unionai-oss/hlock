@@ -137,6 +137,15 @@ recognize:
     your MCP servers, skills, and instructions. Give it an eval pack, and it measures the
     local candidates against your tasks.
 
+-   :lucide-bot:{ .lg .middle } **Delegate the busywork**
+
+    ---
+
+    [`hlock meta`](guides/meta.md) hands work that needs judgment to an agent built into
+    hlock: installing what a lock needs on a new machine, filling in an eval pack,
+    updating skills and MCP servers. It runs on your API key or a local model, and hlock
+    checks every result.
+
 </div>
 
 ## Where to next
@@ -144,5 +153,6 @@ recognize:
 - **New here?** Start with [Installation](getting-started/installation.md) and the
   [Quickstart](getting-started/quickstart.md).
 - **Want the mental model?** Read [How it works](concepts/index.md).
+- **Want an agent to do the setup?** See [Delegating to the meta harness](guides/meta.md).
 - **Looking something up?** See the [CLI](reference/cli.md),
   [Python API](reference/python-api.md), or [`harness.toml`](reference/manifest.md) reference.

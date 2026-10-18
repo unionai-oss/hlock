@@ -18,7 +18,7 @@
 [**Documentation**](https://docs.hlock.ai/) ·
 [Quickstart](https://docs.hlock.ai/getting-started/quickstart/) ·
 [CLI reference](https://docs.hlock.ai/reference/cli/) ·
-[Design spec](https://github.com/unionai-oss/hlock/blob/main/SPEC.md)
+[Design specs](https://github.com/unionai-oss/hlock/tree/main/specs)
 
 </div>
 
@@ -100,10 +100,21 @@ hlock run "count the words in words.txt"  # run the locked agent
 and models served by Ollama or LM Studio, keeping your MCP servers, skills, and
 instructions.
 
+**Let an agent do the busywork.** `hlock meta` hands work that needs judgment (installing
+what a lock needs on a new machine, filling in an eval pack, updating skills and MCP
+servers) to a pinned agent and checks the result itself. The default is an agent built
+into hlock, so there's nothing to install: give it an API key or a local model.
+
+```bash
+hlock meta init                 # pick a model for the built-in agent, and pin it
+hlock meta run install          # install what harness.lock still needs, then verify
+```
+
 See [Finding the best stack](https://docs.hlock.ai/guides/resolve/),
 [Eval packs](https://docs.hlock.ai/guides/eval-packs/),
 [Tuning](https://docs.hlock.ai/guides/tune/), and
-[Going local](https://docs.hlock.ai/guides/localize/).
+[Going local](https://docs.hlock.ai/guides/localize/), and
+[The meta harness](https://docs.hlock.ai/guides/meta/).
 
 <details>
 <summary><b>Python API</b></summary>
@@ -196,7 +207,8 @@ What works today: `pin`, `check`, `sync`, and `launch` for the
 [supported harnesses](https://docs.hlock.ai/guides/harnesses/), `localize`, manifest and
 lockfile schema v1, a content-addressed store, eval packs (`hlock evals`) with graders, the
 reference provider and harness, grid search with Pareto selection, `upgrade`
-(plan/apply/rollback), and `tune` across the `local`, `devbox`, and `cluster` backends. [SPEC.md](https://github.com/unionai-oss/hlock/blob/main/SPEC.md) describes the full design,
+(plan/apply/rollback), `tune` across the `local`, `devbox`, and `cluster` backends, and the
+`meta` harness. The [design specs](https://github.com/unionai-oss/hlock/tree/main/specs) describe the full design,
 much of which is still on the roadmap.
 
 ## License
