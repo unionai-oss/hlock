@@ -106,6 +106,7 @@ toggle.name = "Switch to system preference"
 
 [project.extra]
 website = "https://www.hlock.ai"
+analytics = { provider = "google", property = "G-80E0EPQCZM" }
 social = [
   { icon = "fontawesome/brands/github", link = "https://github.com/unionai-oss/hlock" },
   { icon = "fontawesome/brands/python", link = "https://pypi.org/project/hlock/" },
