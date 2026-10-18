@@ -39,11 +39,11 @@ nav = [
       "guides/backends.md",
       "guides/ci.md",
     ] },
-    { "Delegate to an agent" = [
-      "guides/meta.md",
-    ] },
     { "Go local" = [
       "guides/localize.md",
+    ] },
+    { "Delegate to an agent" = [
+      "guides/meta.md",
     ] },
     { "Extend" = [
       "guides/harness-profiles.md",
@@ -54,6 +54,7 @@ nav = [
     "reference/python-api.md",
     "reference/rust-api.md",
     "reference/manifest.md",
+    "reference/meta-manifest.md",
     "reference/lockfile.md",
     "reference/environment.md",
   ] },

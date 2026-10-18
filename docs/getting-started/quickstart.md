@@ -165,7 +165,8 @@ MCP servers, skills, and instructions over. See [Launching a locked harness](../
 
 ## Where to next
 
-Your setup is pinned, versioned, and portable. From here, two paths:
+Your setup is pinned, versioned, and portable. From here, two paths, and a helper for
+both:
 
 **Optimize your harness.** Measure your setup against your own tasks and let hlock find a
 better one:
@@ -183,3 +184,10 @@ better one:
 that runs entirely on your machine, with an open-source harness and local models. Give it
 an eval pack, and it measures the local candidates against your tasks and records the
 evidence next to your original lock's.
+
+**Let an agent do the busywork.** On a new machine, `hlock sync` lists the steps it can't
+do itself, like installing a harness at the pinned version. `hlock meta init` sets up
+hlock's built-in agent with your API key or a local model, and `hlock meta run install`
+has it do those steps, then checks that the machine matches the lock. The same agent can
+fill in an eval pack (`hlock meta run bootstrap-evals`). See
+[Delegating to the meta harness](../guides/meta.md).

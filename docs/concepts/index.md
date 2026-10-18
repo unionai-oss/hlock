@@ -25,6 +25,7 @@ flowchart LR
     L --> S["📦 hlock sync · launch"]
     L --> O["⚙️ hlock tune · upgrade"]
     L --> Z["🏠 hlock localize"]
+    L -.-> A["🤖 hlock meta<br/><sub>an agent for the busywork</sub>"]
 ```
 
 ## Pinning
@@ -101,6 +102,27 @@ a PR tells you what changed in the agent and what evidence supports the change.
 | [`hlock tune`](../guides/tune.md) | Goes beyond choosing: tunes prompts and hyperparameters, and can fine-tune small models, writing `harness.tune.lock`. |
 | [`hlock localize`](../guides/localize.md) | Writes an equivalent lock that runs entirely on your machine. |
 | [`hlock meta`](../guides/meta.md) | Hands work that needs judgment (installs, filling in eval packs, updates) to a pinned agent (built into hlock, or an open-source harness), and checks the result. |
+
+## The meta harness
+
+Some of the work around a lock needs judgment: installing a harness at its pinned version
+on a machine hlock has never seen, turning a repository's history into eval tasks,
+updating a dozen skills and MCP servers. That's a job for an agent, not for
+deterministic code. [`hlock meta`](../guides/meta.md) gives hlock an agent of its own for
+it, the **meta harness**: by default an agent built into hlock, running on your API key
+or a local model.
+
+The meta harness gets the same treatment as your agent. It's configured in
+`harness.meta.toml`, pinned in `harness.meta.lock`, and checked with `hlock meta check`.
+Each job splits the work the same way:
+
+- hlock decides what's needed (a sync plan, an eval pack's format, the lock's skills) and
+  writes the prompt;
+- the agent works out how to do it on this machine, within the commands you allow;
+- hlock checks the result itself (re-plans the sync, loads the pack, re-captures the
+  harness) and exits non-zero if the job isn't done.
+
+The agent never decides whether it succeeded.
 
 ## Search and holdout splits
 

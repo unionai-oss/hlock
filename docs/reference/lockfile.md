@@ -220,9 +220,10 @@ adapters, the data split, and the budget, all content-addressed. Adopt it into
 
 ## `harness.meta.lock`
 
-[`hlock meta pin`](../guides/meta.md) writes a pinned lock (`kind = "pin"`) of the meta
-harness's own config root, with its vendored files in `.hlock/vendor/meta/`. Commit both,
-with `harness.meta.toml`.
+[`hlock meta pin`](../guides/meta.md) writes the meta harness's lock: a pinned lock
+(`kind = "pin"`) of hlock's built-in agent, or of an installed harness's own config root.
+See the [`harness.meta.toml` reference](meta-manifest.md#harnessmetalock) for what it
+records.
 
 ## `harness.lock.prev`
 
