@@ -224,6 +224,25 @@ hlock launch [HARNESS] [OPTIONS] [-- HARNESS_ARGS...]
 
 Other arguments are passed to the harness. hlock's own options count anywhere before `--`.
 
+Where the harness's config can reference environment variables (Claude Code's MCP servers,
+OpenCode's config), secrets are written as references, and their values are passed in the
+harness's environment. `--json` never includes them.
+
+## `secret`
+
+Store and inspect the values for a lock's `HLOCK_SECRET_*` placeholders. A value comes
+from the environment variable, else a reference in `~/.config/hlock/secrets.toml`, else
+the OS keychain. Values are never printed. See [Secrets](../guides/secrets.md).
+
+```bash
+hlock secret list [--json]     # the lock's secrets and where each value would come from
+hlock secret set NAME          # store a value in the keychain (prompted, or read from stdin)
+hlock secret rm NAME           # remove it from the keychain
+```
+
+`NAME` works with or without the `HLOCK_SECRET_` prefix. The keychain is the macOS
+Keychain (through `security`) or the Secret Service on Linux (through `secret-tool`).
+
 ## `show`
 
 Print the locked stack (harness, models by role, decision model, backend) and the

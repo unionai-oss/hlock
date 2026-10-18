@@ -36,6 +36,8 @@ isolated = "{root}/.claude.json"
 format = "json"
 restore = "pointers"
 pointers = ["/mcpServers"]
+# Claude Code expands ${VAR} in MCP server command, args, env, url and headers.
+env-ref = "${{name}}"
 [files.project-mcp]
 path = ".mcp.json"
 format = "json"

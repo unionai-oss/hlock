@@ -63,7 +63,9 @@ GITHUB_TOKEN = "${HLOCK_SECRET_GITHUB_GITHUB_TOKEN}"
 ```
 
 Values that are already environment references (`${GITHUB_TOKEN}`, `{env:KEY}`) are kept as
-they are. The lock's `[[secret]]` entries list every placeholder and what uses it.
+they are. The lock's `[[secret]]` entries list every placeholder and what uses it. When
+you restore the setup, each value comes from the environment, your OS keychain
+(`hlock secret set`), or a password-manager reference. See [Secrets](secrets.md).
 
 ## Vendoring
 

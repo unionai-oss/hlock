@@ -45,6 +45,9 @@ from harness_lock import (
     meta_verify,
     run_code_harness,
     runtimes,
+    secret_delete,
+    secret_set,
+    secret_status,
     sync_dockerfile,
     sync_ignore_env,
     sync_plan,
@@ -828,11 +831,13 @@ def sync(lock: str, plan_only: bool, as_json: bool, yes: bool, install: bool, pu
                 console.print(f"     [cmd]{st['command']}[/]")
         if secrets:
             n = len(others) + 1
-            console.print(f"  {n}. Set {len(secrets)} secret{'s' if len(secrets) != 1 else ''}, then re-run "
+            console.print(f"  {n}. Store {len(secrets)} secret{'s' if len(secrets) != 1 else ''} in your keychain, then re-run "
                           f"[cmd]{again}[/] [muted](values stay out of the lock)[/]")
             for st in secrets:
                 name, _, used = st["title"].partition(" (")
-                console.print(f"     [cmd]export {name}=…[/]  [muted]# {used.rstrip(')')}[/]")
+                short = name.removeprefix("HLOCK_SECRET_")
+                console.print(f"     [cmd]hlock secret set {short}[/]  [muted]# {used.rstrip(')')}[/]")
+            console.print("     [muted]or export each variable, or reference it in ~/.config/hlock/secrets.toml[/]")
         hints = []
         if any("--install" in (st.get("reason") or "") for st in remaining):
             hints.append(f"{again} --install")
@@ -1013,7 +1018,8 @@ def _harness_kind(name: str) -> str | None:
 def _run_cli_harness(prompt: str, as_json: bool) -> None:
     with _working("Preparing the locked environment…"):
         prep = json.loads(launch_prepare(_l(), prompt=prompt, manifest=_m()))
-    env = {**os.environ, **prep["env"]}
+    secret_env = prep.pop("secret_env", {})  # values for the config's references; never shown
+    env = {**os.environ, **prep["env"], **secret_env}
     if not as_json:
         _print_prep(prep)
         sys.stdout.flush()
@@ -1102,13 +1108,14 @@ def launch(args: tuple[str, ...], lock: str | None, prefix: str | None, in_place
         prep = json.loads(launch_prepare(lock or _l(), harness=harness, prefix=prefix,
                                          allow_version_mismatch=allow_version_mismatch,
                                          in_place=in_place, args=rest, manifest=_m()))
+    secret_env = prep.pop("secret_env", {})  # values for the config's references; never shown
     if as_json:
         console.print_json(data=prep)
         return
     _print_prep(prep)
     if dry_run:
         return
-    env = {**os.environ, **prep["env"]}
+    env = {**os.environ, **prep["env"], **secret_env}
     sys.stdout.flush()
     sys.stderr.flush()
     try:
@@ -1541,6 +1548,74 @@ def runtime_list(as_json: bool) -> None:
         installed = f"[bold]{p.get('version') or 'yes'}[/]" if p["installed"] else "[muted]—[/]"
         t.add_row(r["id"], installed, ", ".join(str(x) for x in r["ports"]), r.get("models_dir") or "")
     console.print(t)
+
+
+@main.group()
+def secret() -> None:
+    """Store and inspect the secrets a lock needs ([cmd]HLOCK_SECRET_*[/]).
+
+    A lock holds placeholders, never values. hlock fills one from the environment
+    variable of the same name, else from a reference in [path]~/.config/hlock/secrets.toml[/]
+    (a command, another variable, or a file), else from the OS keychain. Values are
+    never printed.
+    """
+
+
+@secret.command("list")
+@click.option("--json", "as_json", is_flag=True, help="Print the list as JSON.")
+def secret_list(as_json: bool) -> None:
+    """List the lock's secrets and where each value would come from."""
+    with _friendly_errors():
+        st = json.loads(secret_status(_l(), manifest=_m()))
+    if as_json:
+        console.print_json(data=st)
+        return
+    if not st["secrets"]:
+        console.print(f"[muted]{_ld()} needs no secrets[/]")
+        return
+    t = Table(box=None, header_style="bold", pad_edge=False)
+    t.add_column("secret", style="key")
+    t.add_column("from")
+    t.add_column("used by", style="muted")
+    for r in st["secrets"]:
+        t.add_row(r["name"], r["source"] or "[warn]not set[/]", r["used_by"])
+    console.print(t)
+    keychain = st["keychain"] or "none found"
+    console.print(f"[muted]secrets file[/] {_tilde(st['file'])}  [muted]· keychain[/] {keychain}")
+    if any(not r["source"] for r in st["secrets"]):
+        _next("hlock secret set NAME")
+
+
+@secret.command("set")
+@click.argument("name")
+def secret_set_cmd(name: str) -> None:
+    """Store a secret in the OS keychain (macOS Keychain, or libsecret on Linux).
+
+    NAME is the placeholder variable, with or without its [cmd]HLOCK_SECRET_[/] prefix. The value
+    is read without echo, or from stdin when it isn't a terminal:
+    [cmd]op read op://Work/GitHub/token | hlock secret set GITHUB_GITHUB_TOKEN[/]
+    """
+    if sys.stdin.isatty():
+        value = click.prompt(f"value for {name}", hide_input=True)
+    else:
+        value = sys.stdin.read().strip()
+    if not value:
+        _fail("no value given")
+    with _friendly_errors():
+        full = secret_set(name, value)
+    _ok(f"stored [key]{full}[/] in the keychain")
+
+
+@secret.command("rm")
+@click.argument("name")
+def secret_rm(name: str) -> None:
+    """Remove a secret from the OS keychain."""
+    with _friendly_errors():
+        removed = secret_delete(name)
+    if removed:
+        _ok(f"removed [key]{name}[/] from the keychain")
+    else:
+        console.print(f"[muted]the keychain has no {name}[/]")
 
 
 def _manifest_target() -> str | None:
@@ -2003,6 +2078,7 @@ def meta_run_cmd(job: str, instructions: tuple[str, ...], headless: bool | None,
                                        count=count, instructions=" ".join(instructions),
                                        guide=str(guide) if guide else None, headless=headless,
                                        allow_version_mismatch=allow_version_mismatch, dry_run=dry_run))
+    secret_env = prep.pop("secret_env", {})  # values for the config's references; never shown
     prompt_file = run_dir / "prompt.md"
     prompt_file.write_text(prep["prompt"])
     if dry_run and as_json:
@@ -2022,7 +2098,7 @@ def meta_run_cmd(job: str, instructions: tuple[str, ...], headless: bool | None,
         console.print(f"[warn]![/] {prep['harness_name']} can't take a first message; when it starts, tell it:")
         console.print(f"  [cmd]Read {_show(prompt_file)} and do the job it describes.[/]", soft_wrap=True)
 
-    env = {**os.environ, **prep["env"]}
+    env = {**os.environ, **prep["env"], **secret_env}
     # the agent runs `hlock meta verify`: make it the same hlock, however this one was installed
     exe = Path(sys.argv[0])
     dirs = [str(exe.resolve().parent)] if exe.name in ("hlock", "harness-lock") and exe.is_file() else []

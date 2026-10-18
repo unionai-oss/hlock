@@ -25,6 +25,7 @@ pub mod profiles;
 pub mod providers;
 pub mod resolver;
 pub mod search;
+pub mod secrets;
 pub mod store;
 pub mod sync;
 pub mod tasks;

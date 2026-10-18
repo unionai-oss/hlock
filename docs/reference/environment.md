@@ -10,7 +10,9 @@
 | `HLOCK_LOCKFILE` | `harness.lock` next to the manifest | Same as `--lock` |
 | `HLOCK_HARNESS` | unset | Target harness, between `--harness` and `[target] harness` in precedence. See [Harnesses](../guides/harnesses.md#target-a-harness). |
 | `HLOCK_PROFILE_PATH` | unset | Extra profile directories (`:`-separated). See [Harness profiles](../guides/harness-profiles.md). |
-| `HLOCK_SECRET_*` | unset | Values for secret placeholders in a pinned lock. See [Pinning your setup](../guides/pin.md#secrets-stay-out). |
+| `HLOCK_SECRET_*` | unset | Values for secret placeholders in a pinned lock. They take precedence over the secrets file and the keychain. See [Secrets](../guides/secrets.md). |
+| `HLOCK_SECRETS_FILE` | `~/.config/hlock/secrets.toml` | Where secret references live. See [Secrets](../guides/secrets.md#reference-a-password-manager). |
+| `HLOCK_KEYCHAIN` | on | `0` stops hlock from reading or writing the OS keychain |
 | `HLOCK_META_MANIFEST` | `harness.meta.toml` next to the lock | The [meta harness](../guides/meta.md)'s manifest |
 | `HLOCK_META_LOCK` | `harness.meta.lock` next to the lock | The meta harness's lock |
 | `HLOCK_META_RESTORE` | set by `hlock meta run` | Inside a meta harness session: the config variables isolation changed, with their original values. `hlock` commands put them back. Don't set it yourself. |

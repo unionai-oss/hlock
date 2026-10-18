@@ -719,6 +719,7 @@ fn sync_options(prefix: Option<String>, in_place: bool, docker: Option<String>, 
         pull,
         all_models,
         exact,
+        inject: false,
     }
 }
 
@@ -750,6 +751,38 @@ fn sync_ignore_env(plan: &str) -> PyResult<()> {
         Some(dir) => core::sync::ignore_env(dir).map_err(py_err),
         None => Ok(()),
     }
+}
+
+/// The secrets a lock's placeholders need, and where each would come from (no values):
+/// JSON `{"file": …, "keychain": …, "secrets": [{name, used_by, source}]}`.
+#[pyfunction]
+#[pyo3(signature = (path="harness.lock".to_string(), manifest=None))]
+fn secret_status(path: String, manifest: Option<String>) -> PyResult<String> {
+    let (_, ctx, _) = registry(manifest.as_deref(), Some(&lock_dir(&path)))?;
+    let lock = core::Lockfile::load(Path::new(&path)).map_err(py_err)?;
+    core::secrets::references(&ctx).map_err(py_err)?; // surface a malformed secrets file
+    let rows: Vec<_> = lock
+        .secret
+        .iter()
+        .map(|s| serde_json::json!({"name": s.name, "used_by": s.used_by, "source": core::secrets::locate(&s.name, &ctx)}))
+        .collect();
+    Ok(json_str(serde_json::json!({
+        "file": core::secrets::secrets_file(&ctx),
+        "keychain": core::secrets::keychain(&ctx).map(|(k, _)| k),
+        "secrets": rows,
+    })))
+}
+
+/// Store a secret in the OS keychain; returns its full `HLOCK_SECRET_…` name.
+#[pyfunction]
+fn secret_set(name: &str, value: &str) -> PyResult<String> {
+    core::secrets::keychain_set(name, value, &core::profiles::Ctx::from_process()).map_err(py_err)
+}
+
+/// Remove a secret from the OS keychain; false when it had none.
+#[pyfunction]
+fn secret_delete(name: &str) -> PyResult<bool> {
+    core::secrets::keychain_delete(name, &core::profiles::Ctx::from_process()).map_err(py_err)
 }
 
 /// The rehydrate Agent Skill (SKILL.md text) for a plan.
@@ -1098,6 +1131,9 @@ fn _harness_lock(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(sync_run_step, m)?)?;
     m.add_function(wrap_pyfunction!(sync_skill, m)?)?;
     m.add_function(wrap_pyfunction!(sync_ignore_env, m)?)?;
+    m.add_function(wrap_pyfunction!(secret_status, m)?)?;
+    m.add_function(wrap_pyfunction!(secret_set, m)?)?;
+    m.add_function(wrap_pyfunction!(secret_delete, m)?)?;
     m.add_function(wrap_pyfunction!(sync_dockerfile, m)?)?;
     m.add_function(wrap_pyfunction!(launch_prepare, m)?)?;
     m.add_function(wrap_pyfunction!(run_code_harness, m)?)?;

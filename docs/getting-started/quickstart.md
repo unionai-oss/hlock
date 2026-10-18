@@ -100,7 +100,8 @@ config instead.
 ## 4. Rehydrate it elsewhere
 
 On a new laptop, a VM, or a teammate's machine, clone the repository, set the secrets the
-lock asks for, and run `hlock sync`:
+lock asks for (as variables, as here, or once in your keychain with
+[`hlock secret set`](../guides/secrets.md)), and run `hlock sync`:
 
 ```console
 $ export HLOCK_SECRET_GITHUB_GITHUB_TOKEN=ghp_…

@@ -39,13 +39,15 @@ Sync plan for Claude Code 2.1.0 → .hlock/env/claude-code/config
 ✓ Write .hlock/env/claude-code/config/CLAUDE.md
 
 1 step needs you:
-  1. Set 1 secret, then re-run hlock sync (values stay out of the lock)
-     export HLOCK_SECRET_GITHUB_GITHUB_TOKEN=…  # mcp github GITHUB_TOKEN
+  1. Store 1 secret in your keychain, then re-run hlock sync (values stay out of the lock)
+     hlock secret set GITHUB_GITHUB_TOKEN  # mcp github GITHUB_TOKEN
+     or export each variable, or reference it in ~/.config/hlock/secrets.toml
 next → hlock sync --skill (let your agent do it)
 ```
 
 Without `--yes`, `sync` shows the plan and asks before it runs the automatic steps. Set the
-secret and run it again. Re-running is always safe: satisfied steps are skipped, and `sync`
+secret (here from the environment; see [Secrets](secrets.md) for the keychain and
+password managers) and run it again. Re-running is always safe: satisfied steps are skipped, and `sync`
 exits `3` while manual steps remain and `0` once everything matches.
 
 ```console
@@ -87,9 +89,11 @@ Some steps are always manual: apps without a CLI installer (the LM Studio app), 
 inference servers on another machine (`location = "network"` in the lock: hlock lists the
 models the server should serve and a `curl` to check it), and secrets.
 
-Secrets are filled from `HLOCK_SECRET_*` environment variables. If a variable isn't set but
-the target config already has a real value in that place (say, you're syncing on the machine
-you pinned), `sync` keeps it and never replaces a real secret with a placeholder.
+Secrets are filled from the `HLOCK_SECRET_*` environment variables, your secrets file, or
+your OS keychain, in that order (see [Secrets](secrets.md)). If none has a value but the
+target config already has a real value in that place (say, you're syncing on the machine
+you pinned), `sync` keeps it and never replaces a real secret with a placeholder. Files
+that receive secret values, and their backups, are readable only by you (`0600`).
 
 Models a provider lists but no locked role uses are optional; `--all-models` includes them.
 `--exact` also moves aside skills in the target skill directory that aren't in the lock.
@@ -181,8 +185,9 @@ next →
 and instruction files go into `home/` and are copied to the image's home. The `Dockerfile`
 installs the harness with a method that works on Linux (Homebrew casks fall back to npm or the
 install script) and runs the plugin installs. Secrets are never baked into the image: the
-entrypoint fills `${HLOCK_SECRET_*}` placeholders from `-e` variables when the container
-starts. Model weights stay on the host. A local runtime is reached at
+entrypoint fills `${HLOCK_SECRET_*}` placeholders when the container starts, from `-e`
+variables or from secret files mounted at `/run/secrets` (Docker and Compose secrets; see
+[Secrets](secrets.md#in-docker)). Model weights stay on the host. A local runtime is reached at
 `http://host.docker.internal:<port>`, which the Dockerfile notes. `--build` also runs
 `docker build`.
 

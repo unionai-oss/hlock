@@ -23,9 +23,12 @@ $ hlock launch
    `CODEX_HOME`, `PI_CODING_AGENT_DIR`, `HERMES_HOME`, `CURSOR_CONFIG_DIR`,
    `XDG_CONFIG_HOME`), replacing the `hlock` process.
 
-On the machine where you pinned, secrets come from your live config, so MCP servers and
-providers work without exporting anything. Elsewhere, set the `HLOCK_SECRET_*` variables
-first; `launch` warns about any that are missing. Sign-in state isn't copied, so the first
+Secrets come from the environment, your secrets file, or your keychain (see
+[Secrets](secrets.md)). On the machine where you pinned, they also come from your live
+config, so MCP servers and providers work without setting anything up. `launch` warns about
+any that are missing. For Claude Code and OpenCode, `launch` writes a reference such as
+`${HLOCK_SECRET_GITHUB_GITHUB_TOKEN}` into the config and passes the value in the
+harness's environment, so it never reaches the disk. Sign-in state isn't copied, so the first
 session in a new environment may ask you to log in.
 
 Arguments after the harness name go to the harness:

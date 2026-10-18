@@ -76,7 +76,7 @@ def test_sync_is_isolated_by_default(machines, monkeypatch):
 
     r = invoke("sync", "--yes")
     assert r.exit_code == MANUAL_EXIT, r.output
-    assert "export HLOCK_SECRET_GITHUB_GITHUB_TOKEN" in r.output
+    assert "hlock secret set GITHUB_GITHUB_TOKEN" in r.output
     state = json.loads((ENV_ROOT / ".claude.json").read_text())
     assert state["mcpServers"]["github"]["env"]["GITHUB_TOKEN"] == "${HLOCK_SECRET_GITHUB_GITHUB_TOKEN}"
     assert (ENV_ROOT / "skills/my-skill/SKILL.md").is_file()

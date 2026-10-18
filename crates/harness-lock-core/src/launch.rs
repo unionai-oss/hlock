@@ -17,6 +17,7 @@ use crate::capture::{live_mcp_servers, read_config, render_config, tree_digest};
 use crate::error::{Error, Result};
 use crate::lockfile::{Lockfile, Tool};
 use crate::profiles::{probe_harness, Ctx, HarnessProfile, Registry};
+use crate::secrets;
 use crate::sync::{self, copy_tree, lock_dir_of, placeholders, pretty, set_pointer, SyncOptions};
 
 /// Default directory for isolated launch environments.
@@ -55,6 +56,9 @@ pub struct LaunchPrep {
     /// Things to know: what didn't carry over, version notes.
     pub notes: Vec<String>,
     pub missing_secrets: Vec<String>,
+    /// Secret values the harness reads from its environment through the references
+    /// written in its config. Added to the environment when it starts; never printed.
+    pub secret_env: BTreeMap<String, String>,
 }
 
 /// The locked model to pass on the command line, if the target can use it.
@@ -128,9 +132,10 @@ pub fn mcp_entry(t: &Tool, shape: &str) -> Value {
     }
 }
 
-/// Fill `${HLOCK_SECRET_*}` in a tool from the environment, else from the same
-/// server's entry in the source harness's live config.
-fn fill_tool(t: &Tool, live: Option<&Value>, ctx: &Ctx, missing: &mut BTreeSet<String>) -> Tool {
+/// Fill `${HLOCK_SECRET_*}` in a tool from [`secrets::lookup`], else from the same
+/// server's entry in the source harness's live config. With `env_ref`, write the
+/// target harness's environment reference instead, and collect the value in `values`.
+fn fill_tool(t: &Tool, live: Option<&Value>, ctx: &Ctx, env_ref: Option<&str>, values: &mut BTreeMap<String, String>, missing: &mut BTreeSet<String>) -> Tool {
     let mut t = t.clone();
     let lookup = |section: &[&str], key: &str| -> Option<String> {
         let entry = live?;
@@ -141,10 +146,32 @@ fn fill_tool(t: &Tool, live: Option<&Value>, ctx: &Ctx, missing: &mut BTreeSet<S
         if names.is_empty() {
             return v.to_string();
         }
+        let found: BTreeMap<String, String> = names.iter().filter_map(|n| secrets::lookup(n, ctx).map(|f| (n.clone(), f.value))).collect();
+        if let Some(tpl) = env_ref {
+            // the live config's value for a lone placeholder (`Bearer ${X}` → `Bearer abc`)
+            let from_live = |n: &str| -> Option<String> {
+                let lv = live_value.as_deref().filter(|x| placeholders(x).is_empty())?;
+                let (pre, post) = v.split_once(&format!("${{{n}}}"))?;
+                (names.len() == 1 && lv.len() > pre.len() + post.len() && lv.starts_with(pre) && lv.ends_with(post)).then(|| lv[pre.len()..lv.len() - post.len()].to_string())
+            };
+            let mut out = v.to_string();
+            for n in &names {
+                match found.get(n).cloned().or_else(|| from_live(n)) {
+                    Some(val) => {
+                        values.insert(n.clone(), val);
+                    }
+                    None => {
+                        missing.insert(n.clone());
+                    }
+                }
+                out = out.replace(&format!("${{{n}}}"), &secrets::env_ref(tpl, n));
+            }
+            return out;
+        }
         let mut out = v.to_string();
         let mut unfilled = false;
         for n in &names {
-            match ctx.var(n) {
+            match found.get(n) {
                 Some(val) => out = out.replace(&format!("${{{n}}}"), val),
                 None => unfilled = true,
             }
@@ -153,7 +180,7 @@ fn fill_tool(t: &Tool, live: Option<&Value>, ctx: &Ctx, missing: &mut BTreeSet<S
             if let Some(lv) = live_value.filter(|x| placeholders(x).is_empty()) {
                 return lv;
             }
-            missing.extend(names.into_iter().filter(|n| ctx.var(n).is_none()));
+            missing.extend(names.into_iter().filter(|n| !found.contains_key(n)));
         }
         out
     };
@@ -192,13 +219,19 @@ fn translate(lock: &Lockfile, lock_path: &Path, source: Option<&HarnessProfile>,
                 let live = source.map(|s| live_mcp_servers(s, ctx)).unwrap_or_default();
                 let shape = target.mcp.shape.as_deref().unwrap_or("standard");
                 let mut missing = BTreeSet::new();
+                let mut values = BTreeMap::new();
+                let env_ref = spec.env_ref.as_deref();
                 let servers: Map<String, Value> = tools
                     .iter()
                     .filter(|x| x.enabled != Some(false) || matches!(shape, "opencode" | "goose"))
-                    .map(|x| (x.name.clone(), mcp_entry(&fill_tool(x, live.get(&x.name), ctx, &mut missing), shape)))
+                    .map(|x| (x.name.clone(), mcp_entry(&fill_tool(x, live.get(&x.name), ctx, env_ref, &mut values, &mut missing), shape)))
                     .collect();
                 let n = servers.len();
                 write_pointer(&path, &spec.format, ptr, Value::Object(servers))?;
+                if env_ref.is_none() && tools.iter().any(|x| x.env.values().chain(x.headers.values()).chain(x.url.iter()).any(|v| !placeholders(v).is_empty())) {
+                    secrets::restrict(&path)?; // secret values were written into it
+                }
+                prep.secret_env.extend(values);
                 prep.done.push(format!("wrote {n} MCP server{} to {}", if n == 1 { "" } else { "s" }, pretty(&path, ctx)));
                 prep.missing_secrets.extend(missing);
             }
@@ -343,7 +376,8 @@ pub fn prepare(lock: &Lockfile, lock_path: &Path, reg: &Registry, ctx: &Ctx, opt
             None => env_prefix(lock_path, ctx),
         };
         sync::ignore_env(&sync::env_dir(target, &prefix, ctx))?;
-        let sopts = SyncOptions { prefix: Some(prefix), ..Default::default() };
+        // secrets go in the harness's environment where its config can reference them
+        let sopts = SyncOptions { prefix: Some(prefix), inject: true, ..Default::default() };
         let (t, _, iso) = sync::target_ctx(target, ctx, &sopts);
         let root = target.config_root(&t);
         std::fs::create_dir_all(&root)?;
@@ -358,6 +392,9 @@ pub fn prepare(lock: &Lockfile, lock_path: &Path, reg: &Registry, ctx: &Ctx, opt
             for st in plan.steps.iter().filter(|s| s.kind == "secret" && s.status == "manual") {
                 prep.missing_secrets.push(st.id.trim_start_matches("secret:").to_string());
             }
+            let (values, missing) = sync::secret_env(lock, lock_path, reg, ctx, &sopts)?;
+            prep.secret_env.extend(values);
+            prep.missing_secrets.extend(missing);
         } else {
             translate(lock, lock_path, source, target, &t, &root, ctx, &mut prep)?;
         }
@@ -396,14 +433,26 @@ mod tests {
 
     #[test]
     fn secrets_from_live_config() {
-        let ctx = Ctx { home: "/h".into(), cwd: "/w".into(), env: BTreeMap::new(), path: vec![] };
+        let ctx = Ctx { home: "/h".into(), cwd: "/w".into(), env: [("HLOCK_KEYCHAIN".to_string(), "0".to_string())].into(), path: vec![] };
         let t = Tool { name: "gh".into(), kind: "mcp".into(), env: [("TOKEN".to_string(), "${HLOCK_SECRET_GH_TOKEN}".to_string())].into(), ..Default::default() };
         let live = json!({"command": "npx", "env": {"TOKEN": "real"}});
-        let mut missing = BTreeSet::new();
-        assert_eq!(fill_tool(&t, Some(&live), &ctx, &mut missing).env["TOKEN"], "real");
-        assert!(missing.is_empty());
-        let filled = fill_tool(&t, None, &ctx, &mut missing);
+        let (mut missing, mut values) = (BTreeSet::new(), BTreeMap::new());
+        assert_eq!(fill_tool(&t, Some(&live), &ctx, None, &mut values, &mut missing).env["TOKEN"], "real");
+        assert!(missing.is_empty() && values.is_empty());
+        let filled = fill_tool(&t, None, &ctx, None, &mut values, &mut missing);
         assert_eq!(filled.env["TOKEN"], "${HLOCK_SECRET_GH_TOKEN}");
         assert!(missing.contains("HLOCK_SECRET_GH_TOKEN"));
+    }
+
+    #[test]
+    fn secrets_as_environment_references() {
+        let ctx = Ctx { home: "/h".into(), cwd: "/w".into(), env: [("HLOCK_KEYCHAIN".to_string(), "0".to_string())].into(), path: vec![] };
+        let t = Tool { name: "api".into(), kind: "mcp".into(), headers: [("Authorization".to_string(), "Bearer ${HLOCK_SECRET_API}".to_string())].into(), ..Default::default() };
+        let live = json!({"headers": {"Authorization": "Bearer abc"}});
+        let (mut missing, mut values) = (BTreeSet::new(), BTreeMap::new());
+        let filled = fill_tool(&t, Some(&live), &ctx, Some("{env:{name}}"), &mut values, &mut missing);
+        assert_eq!(filled.headers["Authorization"], "Bearer {env:HLOCK_SECRET_API}"); // no value on disk
+        assert_eq!(values["HLOCK_SECRET_API"], "abc"); // passed in the environment instead
+        assert!(missing.is_empty());
     }
 }
