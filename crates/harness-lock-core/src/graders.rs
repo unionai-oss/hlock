@@ -389,7 +389,7 @@ fn run_limited(mut cmd: Command, limit: Duration) -> (Option<i32>, String) {
             Ok(Some(s)) => break s.code().or(Some(-1)),
             Ok(None) if start.elapsed() > limit => {
                 #[cfg(unix)]
-                let _ = Command::new("kill").args(["-KILL", &format!("-{}", child.id())]).stderr(Stdio::null()).status();
+                kill_group(child.id());
                 let _ = child.kill();
                 let _ = child.wait();
                 break None;
@@ -404,6 +404,21 @@ fn run_limited(mut cmd: Command, limit: Duration) -> (Option<i32>, String) {
         out.push_str(&format!("\ntimed out after {}s", limit.as_secs()));
     }
     (code, out)
+}
+
+/// Stop a process group (the command and everything it started) with SIGKILL. A call
+/// into libc rather than the `kill` program, whose handling of `-PID` differs (procps
+/// reads it as a signal).
+#[cfg(unix)]
+fn kill_group(pgid: u32) {
+    extern "C" {
+        fn kill(pid: i32, sig: i32) -> i32;
+    }
+    const SIGKILL: i32 = 9;
+    // SAFETY: kill(2) takes plain integers; a negative pid names the process group.
+    unsafe {
+        kill(-(pgid as i32), SIGKILL);
+    }
 }
 
 fn tail(text: &str) -> String {
