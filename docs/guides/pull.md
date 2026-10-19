@@ -21,7 +21,7 @@ $ hlock pull github:alice/agent-setup
 ╰────────────────────────────────────────────────────────────────────────╯
 ! starts MCP servers with: npx  · review before syncing into your own config
 also in the repo: harness.fast.lock  → hlock pull github:alice/agent-setup/harness.fast.lock
-next → hlock launch --lock alice  ·  hlock sync alice --plan
+next → hlock launch --lock alice  ·  hlock sync alice --in-place --plan
 ```
 
 The lock and the files it vendors go into hlock's store, `~/.hlock/pulls/alice/`, laid out
@@ -42,20 +42,29 @@ touching your own config, launch it. `launch` restores the lock into an isolated
 hlock launch --lock alice
 ```
 
-To make it your setup, sync it. Look at the plan first:
-
-```bash
-hlock sync alice --plan
-hlock sync alice
-```
-
-`sync` and `launch` also take a source directly and pull it first, so either is one command:
+`hlock sync alice` restores into that same root without starting anything, as `sync` does
+for any lock (it's [isolated by default](sync.md)). `sync` and `launch` also take a source
+directly and pull it first:
 
 ```console
 $ hlock sync github:alice/agent-setup --plan
 ✓ pulled github:alice/agent-setup @ b259f53 → alice
 ! starts MCP servers with: npx
-Sync plan for Claude Code 2.1.285 → your config
+Sync plan for Claude Code 2.1.285 → ~/.hlock/env/alice/claude-code/config
+✓  harness  Claude Code 2.1.285
+✓  mcp      `npx` for MCP servers: github
+●  config   Write ~/.hlock/env/alice/claude-code/config/settings.json
+●  config   Write ~/.hlock/env/alice/claude-code/config/.claude.json /mcpServers
+●  skill    Copy skill review → ~/.hlock/env/alice/claude-code/config/skills/review
+○  secret   HLOCK_SECRET_GITHUB_GITHUB_TOKEN (mcp github GITHUB_TOKEN)  not set
+```
+
+To make it your own setup, sync it into your config with `--in-place`. Look at the plan
+first:
+
+```console
+$ hlock sync alice --in-place --plan
+Sync plan for Claude Code 2.1.285 → your config ~/.claude
 ✓  harness  Claude Code 2.1.285
 ✓  mcp      `npx` for MCP servers: github
 ●  config   Write ~/.claude/settings.json
@@ -64,8 +73,8 @@ Sync plan for Claude Code 2.1.285 → your config
 ○  secret   HLOCK_SECRET_GITHUB_GITHUB_TOKEN (mcp github GITHUB_TOKEN)  not set
 ```
 
-Secrets were never in the lock; supply your own as `HLOCK_SECRET_*` variables, as with any
-[sync](sync.md#on-a-new-machine).
+Secrets were never in the lock; supply your own values, from the environment, your keychain
+(`hlock secret set`), or a password manager. See [Secrets](secrets.md).
 
 ## Manage what you've pulled
 
@@ -113,7 +122,7 @@ $ hlock pull github:alice/agent-setup -o harness.alice.lock
 copied 3 vendored entries into .hlock/vendor/alice/claude-code/
 ! starts MCP servers with: npx  · review before syncing into your own config
 also in the repo: harness.fast.lock  → hlock pull github:alice/agent-setup/harness.fast.lock
-next → hlock launch --lock harness.alice.lock  ·  hlock sync harness.alice.lock --plan
+next → hlock launch --lock harness.alice.lock  ·  hlock sync harness.alice.lock --in-place --plan
 ```
 
 A named lock file gets its own vendor directory, so it never mixes with your

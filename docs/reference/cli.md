@@ -162,20 +162,23 @@ Compare the manifest hash recorded in `harness.lock` with the hash of the curren
 missing. See [Using hlock in CI](../guides/ci.md).
 
 For a pinned lock (`kind = "pin"`), `check` needs no `harness.toml`: it re-captures the
-harness and fails with a list of what changed.
+harness and fails with a list of what changed. It checks your own config, or with
+`--prefix DIR`, the isolated root that `hlock sync --prefix DIR` writes (`hlock sync` uses
+`.hlock/env` by default).
 
 For a resolved lock, `check` also fails when the lock is for a different harness than `[target] harness`, or
 when the installed harness's version differs from the one the lock pins (skipped when the
 harness isn't installed).
 
 ```bash
-hlock check
+hlock check [--prefix DIR]
 ```
 
 ## `sync`
 
 Build a plan to reproduce a lock's setup, run its automatic steps, and list what needs you.
-See [Rehydrating with sync](../guides/sync.md).
+The setup goes into an isolated config root under `.hlock/env/` unless you pass
+`--in-place`. See [Rehydrating with sync](../guides/sync.md).
 
 ```bash
 hlock sync [LOCK] [OPTIONS]
@@ -183,14 +186,15 @@ hlock sync [LOCK] [OPTIONS]
 
 | Option | Description |
 |---|---|
-| `LOCK` | Lock to sync (default `harness.lock`): a path, a [pulled](#pull) lock's name, or a source to pull first |
+| `LOCK` | Lock to sync (default `harness.lock`): a path, a [pulled](#pull) lock's name, or a source to pull first. A pulled lock's isolated root is `~/.hlock/env/<name>/`, the one `launch` uses |
 | `--plan` | Print the plan and change nothing |
 | `--json` | Print the plan as JSON and change nothing |
 | `-y`, `--yes` | Don't ask before running automatic steps (required when stdin isn't a terminal) |
 | `--install` | Let hlock run package managers and install scripts |
 | `--pull` | Let hlock download model weights through installed runtimes |
 | `--all-models` | Include models no locked role uses |
-| `--prefix DIR` | Materialize into an isolated config root under `DIR` |
+| `--prefix DIR` | Where isolated config roots live (default `.hlock/env`) |
+| `--in-place` | Write into your own config (`~/.claude`, …) instead of an isolated root |
 | `--docker` | Write a Docker build context to `.hlock/docker/<harness>/` |
 | `--build` | With `--docker`, also run `docker build` |
 | `--skill` | Write an Agent Skill that guides an agent through the remaining steps |
@@ -222,6 +226,25 @@ hlock launch [HARNESS] [OPTIONS] [-- HARNESS_ARGS...]
 | `--json` | With `--dry-run`, print the launch plan as JSON |
 
 Other arguments are passed to the harness. hlock's own options count anywhere before `--`.
+
+Where the harness's config can reference environment variables (Claude Code's MCP servers,
+OpenCode's config), secrets are written as references, and their values are passed in the
+harness's environment. `--json` never includes them.
+
+## `secret`
+
+Store and inspect the values for a lock's `HLOCK_SECRET_*` placeholders. A value comes
+from the environment variable, else a reference in `~/.config/hlock/secrets.toml`, else
+the OS keychain. Values are never printed. See [Secrets](../guides/secrets.md).
+
+```bash
+hlock secret list [--json]     # the lock's secrets and where each value would come from
+hlock secret set NAME          # store a value in the keychain (prompted, or read from stdin)
+hlock secret rm NAME           # remove it from the keychain
+```
+
+`NAME` works with or without the `HLOCK_SECRET_` prefix. The keychain is the macOS
+Keychain (through `security`) or the Secret Service on Linux (through `secret-tool`).
 
 ## `pull`
 

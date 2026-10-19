@@ -17,12 +17,12 @@ What's missing is the step that gets it from a repository onto your machine.
 ```bash
 hlock pull github:alice/agent-setup          # → ~/.hlock/pulls/alice/
 hlock launch --lock alice                    # try it in an isolated config root, from any project
-hlock sync alice                             # or adopt it into your own config
+hlock sync alice --in-place                  # or adopt it into your own config
 hlock list                                   # what you've pulled
 hlock pull                                   # later: refresh every pulled lock
 hlock rm alice
 
-hlock sync github:alice/agent-setup          # pull and sync in one step
+hlock sync github:alice/agent-setup          # pull and sync (into ~/.hlock/env/alice/) in one step
 hlock pull github:alice/agent-setup -o harness.alice.lock   # into a project, to commit it
 ```
 
@@ -160,9 +160,11 @@ directory next to it), so `sync` and `launch` read it with no special casing, an
   name exists. An existing path always wins, so nothing that worked before changes meaning.
   `launch` keeps `--lock NAME` rather than `launch NAME`, because its positional argument is
   already a harness (`hlock launch pi`) and a pulled lock named `pi` would be ambiguous.
-- **Launch environments live with the lock.** `launch --lock alice` defaults its prefix to
-  `~/.hlock/env/alice/`, so the isolated root is reused across projects and nothing lands in
-  the project's `.hlock/env/`. The session still starts in the current directory.
+- **Isolated roots live with the lock.** `launch --lock alice` and `sync alice` default their
+  prefix to `~/.hlock/env/alice/`, so the isolated root is shared between them, reused across
+  projects, and nothing lands in the project's `.hlock/env/`. The session still starts in the
+  current directory. (`sync` is isolated by default for every lock; adopting a pulled setup
+  into your own config is `sync alice --in-place`, so the next step `pull` suggests.)
 - **`hlock list` and `hlock rm`.** `list` shows name, harness, source, commit and age; `rm`
   deletes the entry and its launch environments. A bare `list` is generic next to
   `harness list` and `runtime list`, but "my pulled setups" is the obvious reading.
@@ -279,8 +281,9 @@ the project as `FILE` instead.
   repository (an update), or with `--force`. Otherwise it fails and suggests `--as` (or
   another `-o FILE`).
 
-Nothing else is written, and nothing from the lock is run. `launch` with a stored lock
-defaults its prefix to `$HLOCK_HOME/env/<name>/`; `rm` deletes `pulls/<name>/` and
+Nothing else is written, and nothing from the lock is run. `launch` and `sync` (unless
+`--in-place`, `--prefix` or `--docker`) with a stored lock default their prefix to
+`$HLOCK_HOME/env/<name>/`; `rm` deletes `pulls/<name>/` and
 `env/<name>/`.
 
 ### 4.5 Output
@@ -295,7 +298,7 @@ $ hlock pull github:alice/agent-setup
 ╰─────────────────────────────────────────────────────╯
 ! starts MCP servers with: npx  · review before syncing into your own config
 also in the repo: harness.fast.lock  → hlock pull github:alice/agent-setup/harness.fast.lock
-next → hlock launch --lock alice  ·  hlock sync alice --plan
+next → hlock launch --lock alice  ·  hlock sync alice --in-place --plan
 
 $ hlock list
 name   harness              source                    commit   pulled

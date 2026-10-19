@@ -419,6 +419,7 @@ pub fn pin(reg: &Registry, ctx: &Ctx, meta: &MetaManifest, out: &Path, project: 
     }
     let profile = eligible_harness(reg, &harness)?;
     let (tctx, _, root) = meta_env(profile, ctx, out);
+    sync::ignore_env(&sync::env_dir(profile, &launch::env_prefix(out, ctx), ctx))?;
     std::fs::create_dir_all(&root)?;
     let mut model = meta.model.clone();
     if model.is_local() {
@@ -725,6 +726,9 @@ fn install_goal(input: &JobInput, reg: &Registry, ctx: &Ctx) -> Result<(String, 
         plan.harness_name,
         plan.version.as_deref().unwrap_or("")
     );
+    if let Some(p) = &plan.prefix {
+        s.push_str(&format!("`hlock sync` restores the config into an isolated root under `{p}`, not the user's own config. Don't change the user's own config unless they ask.\n\n"));
+    }
     let pending: Vec<&sync::Step> = plan.steps.iter().filter(|st| st.status != "satisfied" && !st.optional).collect();
     let (secrets, steps): (Vec<&sync::Step>, Vec<&sync::Step>) = pending.into_iter().partition(|st| st.kind == "secret");
     if steps.is_empty() {
@@ -752,7 +756,7 @@ fn install_goal(input: &JobInput, reg: &Registry, ctx: &Ctx) -> Result<(String, 
     if !secrets.is_empty() {
         let names: Vec<String> = secrets.iter().map(|st| st.id.trim_start_matches("secret:").to_string()).collect();
         s.push_str(&format!(
-            "These secrets are the user's to set; tell them which ones are missing at the end, and don't set them: {}.\n\n",
+            "These secrets are the user's to set; tell them which ones are missing at the end (they can store each with `hlock secret set NAME`), and don't set them: {}.\n\n",
             names.join(", ")
         ));
     }
@@ -1028,6 +1032,8 @@ pub struct Prepared {
     pub done: Vec<String>,
     pub notes: Vec<String>,
     pub missing_secrets: Vec<String>,
+    /// Secret values for the harness's environment (see [`launch::LaunchPrep`]); never printed.
+    pub secret_env: BTreeMap<String, String>,
 }
 
 /// Build the command that runs `job` in the meta harness pinned in `meta_lock`.
@@ -1115,6 +1121,7 @@ pub fn prepare(job: &str, input: &JobInput, meta: Option<&MetaManifest>, meta_lo
         done: prep.done,
         notes,
         missing_secrets: prep.missing_secrets,
+        secret_env: prep.secret_env,
     })
 }
 
@@ -1165,6 +1172,7 @@ fn prepare_builtin(job: &str, input: &JobInput, meta: Option<&MetaManifest>, met
         done: Vec::new(),
         notes,
         missing_secrets: Vec::new(),
+        secret_env: BTreeMap::new(),
     })
 }
 

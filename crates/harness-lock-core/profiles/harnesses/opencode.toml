@@ -31,6 +31,8 @@ path-hints = ["/.opencode/bin/"]
 path = "{root}/opencode.json"
 format = "jsonc"
 restore = "whole"
+# OpenCode substitutes {env:VAR} across the whole file's text before parsing it.
+env-ref = "{env:{name}}"
 [files.project]
 path = "opencode.json"
 format = "jsonc"

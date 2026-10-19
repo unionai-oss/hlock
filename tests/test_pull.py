@@ -54,6 +54,7 @@ def world(tmp_path, monkeypatch):
     monkeypatch.setenv("NO_COLOR", "1")
     monkeypatch.setenv("HLOCK_GITHUB_URL", remotes.as_uri())
     monkeypatch.setenv("HLOCK_HOME", str(tmp_path / "hlock-home"))
+    monkeypatch.setenv("HLOCK_KEYCHAIN", "0")
 
     (alice / ".claude/skills/review").mkdir(parents=True)
     (alice / ".claude/skills/review/SKILL.md").write_text("---\nname: review\ndescription: d\n---\nbody\n")
@@ -92,7 +93,7 @@ def test_pull_into_the_store(world):
     assert r.exit_code == 0, r.output
     assert f"pulled github:alice/agent-setup @ {world['head'][:7]} → alice" in r.output
     assert "starts MCP servers with: npx" in r.output
-    assert "hlock launch --lock alice" in r.output and "hlock sync alice --plan" in r.output
+    assert "hlock launch --lock alice" in r.output and "hlock sync alice --in-place --plan" in r.output
     # the project is untouched
     assert sorted(p.name for p in world["project"].iterdir()) == ["harness.lock"]
     assert (world["project"] / "harness.lock").read_text() == "# my own lock\n"
@@ -123,10 +124,16 @@ def test_pull_into_the_project(world):
     assert r.exit_code == 0 and "harness.alice.lock is up to date" in r.output, r.output
 
 
-def test_pulled_lock_syncs(world):
+def test_pulled_lock_syncs_into_its_env_or_in_place(world):
     assert invoke("pull", "github:alice/agent-setup").exit_code == 0
     r = invoke("sync", "alice", "--yes")
     assert r.exit_code == MANUAL_EXIT, r.output  # the GitHub token is still needed
+    root = world["home"] / "env/alice/claude-code/config"  # the root `launch --lock alice` uses
+    assert (root / "skills/review/SKILL.md").is_file()
+    assert not any(world["me"].iterdir()) and not (world["project"] / ".hlock").exists()
+
+    r = invoke("sync", "alice", "--in-place", "--yes")
+    assert r.exit_code == MANUAL_EXIT, r.output
     assert (world["me"] / ".claude/skills/review/SKILL.md").is_file()
     assert json.loads((world["me"] / ".claude/settings.json").read_text())["model"] == "opus"
 

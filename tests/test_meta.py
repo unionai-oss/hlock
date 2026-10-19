@@ -81,6 +81,7 @@ def test_init_with_an_api_key(project, monkeypatch):
     settings = json.loads((project["project"] / META_ROOT / "settings.json").read_text())
     assert settings == {"defaultProvider": "openai", "defaultModel": "gpt-5.5"}
     assert not (project["home"] / ".pi").exists()
+    assert (project["project"] / META_ROOT).parent.joinpath(".gitignore").read_text().endswith("*\n")
     lock = json.loads(Lockfile.load("harness.meta.lock").to_json())
     assert lock["kind"] == "pin" and lock["harness"]["name"] == "pi"
     assert [(x["provider"], x["model"]) for x in lock["llm"]] == [("openai", "gpt-5.5")]
@@ -199,19 +200,16 @@ def test_install_job(project, monkeypatch):
     assert invoke("pin", "--harness", "claude").exit_code == 0
     monkeypatch.setenv("ANTHROPIC_API_KEY", "k")
     assert invoke("meta", "init", "--harness", "pi").exit_code == 0
-    assert invoke("meta", "verify", "install").exit_code == 0
-    # lose the skill: the sync plan has a step again
-    import shutil
-
-    shutil.rmtree(home / ".claude/skills/my-skill")
+    # the setup is restored into an isolated root, which doesn't have the skill yet
     r = invoke("meta", "verify", "install")
     assert r.exit_code == 1 and "my-skill" in r.output
     prompt = json.loads(invoke("meta", "run", "install", "--dry-run", "--headless", "--json").output)["prompt"]
-    assert "my-skill" in prompt and "hlock sync --yes" in prompt
+    assert "my-skill" in prompt and "hlock sync --yes" in prompt and "isolated root under `.hlock/env`" in prompt
     monkeypatch.setenv("FAKE_AGENT", '"$HL_PYTHON" -m harness_lock.cli sync --yes')
     r = invoke("meta", "run", "install", "--headless")
     assert r.exit_code == 0, r.output
-    assert (home / ".claude/skills/my-skill/SKILL.md").is_file()
+    assert (project["project"] / ".hlock/env/claude-code/config/skills/my-skill/SKILL.md").is_file()
+    assert invoke("meta", "verify", "install").exit_code == 0
 
 
 def test_update_job_reports_and_repins(project, monkeypatch):

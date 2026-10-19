@@ -18,14 +18,18 @@ use crate::capture::{host_port, locate_model, read_config, render_config, tree_d
 use crate::error::{Error, Result};
 use crate::lockfile::{Lockfile, Native, Runtime};
 use crate::profiles::{probe_harness, probe_runtime, python_package_versions, run_capture, Ctx, HarnessProfile, Registry};
+use crate::secrets;
 
 /// Where a sync materializes the setup.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct SyncOptions {
-    /// Materialize into an isolated config root under this directory instead of
-    /// the user's real one (the "virtual environment" `launch` uses).
+    /// Materialize into an isolated config root under this directory (the
+    /// "virtual environment" `launch` uses). Default: `.hlock/env` next to the lock.
     pub prefix: Option<PathBuf>,
+    /// Write into the user's real config root (`~/.claude`, …) instead of an
+    /// isolated one. Only an explicit opt-in touches global config.
+    pub in_place: bool,
     /// Materialize into a Docker build context: files land under `<dir>/home`.
     pub docker: Option<PathBuf>,
     /// Let hlock run package managers (npm, brew, uv, pip, install scripts).
@@ -36,6 +40,10 @@ pub struct SyncOptions {
     pub all_models: bool,
     /// Remove skills in the harness's skill directory that aren't in the lock.
     pub exact: bool,
+    /// Write secrets as the harness's own environment references (profile
+    /// `env-ref`) instead of their values, for a caller that passes the values in
+    /// the harness's environment ([`secret_env`]). `hlock launch` sets it.
+    pub inject: bool,
 }
 
 /// One concrete thing an `auto` step does.
@@ -52,6 +60,9 @@ pub enum Action {
         pointers: Vec<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         fallback: Option<PathBuf>,
+        /// Write secrets as this environment reference template instead of values.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        env_ref: Option<String>,
     },
     /// Copy a vendored directory (a skill) into place.
     CopyDir { from: PathBuf, to: PathBuf },
@@ -117,12 +128,30 @@ pub struct Plan {
     pub root: PathBuf,
     /// Environment that points the harness at `root` (empty in `home` mode).
     pub isolation: BTreeMap<String, String>,
+    /// In `prefix` mode, the directory isolated roots live under, for display
+    /// (relative to the project when it's inside it).
+    pub prefix: Option<String>,
+    /// In `prefix` mode, this harness's own directory under the prefix, which
+    /// [`ignore_env`] marks as not for version control.
+    pub env: Option<PathBuf>,
     pub steps: Vec<Step>,
 }
 
 impl Plan {
     pub fn count(&self, status: &str) -> usize {
         self.steps.iter().filter(|s| s.status == status && !s.optional).count()
+    }
+
+    /// The `hlock sync` and `hlock check` commands that target the same place as this plan.
+    pub fn commands(&self) -> (String, String) {
+        match (self.mode.as_str(), &self.prefix) {
+            ("prefix", Some(p)) => {
+                let p = shell_join(std::slice::from_ref(p));
+                (format!("hlock sync --prefix {p}"), format!("hlock check --prefix {p}"))
+            }
+            ("docker", _) => ("hlock sync --docker".into(), "hlock check".into()),
+            _ => ("hlock sync --in-place".into(), "hlock check".into()),
+        }
     }
 }
 
@@ -158,17 +187,20 @@ fn collect_placeholders(v: &Value, out: &mut BTreeSet<String>) {
     }
 }
 
-/// Fill placeholders from the environment, else keep the target's existing value
+/// Looks a placeholder's value up ([`secrets::lookup`] in practice).
+pub(crate) type Resolve<'a> = &'a dyn Fn(&str) -> Option<String>;
+
+/// Fill placeholders from `resolve`, else keep the target's existing value
 /// at the same place (so a sync never overwrites a real secret with a
 /// placeholder). Returns the names still missing.
-fn fill(desired: &Value, actual: Option<&Value>, env: &BTreeMap<String, String>, missing: &mut BTreeSet<String>) -> Value {
+fn fill(desired: &Value, actual: Option<&Value>, resolve: Resolve, missing: &mut BTreeSet<String>) -> Value {
     match desired {
         Value::String(s) if s.contains(PH_OPEN) => {
             let mut out = s.clone();
             let mut unfilled = Vec::new();
             for name in placeholders(s) {
-                match env.get(&name).filter(|v| !v.is_empty()) {
-                    Some(v) => out = out.replace(&format!("${{{name}}}"), v),
+                match resolve(&name).filter(|v| !v.is_empty()) {
+                    Some(v) => out = out.replace(&format!("${{{name}}}"), &v),
                     None => unfilled.push(name),
                 }
             }
@@ -176,7 +208,8 @@ fn fill(desired: &Value, actual: Option<&Value>, env: &BTreeMap<String, String>,
                 return Value::String(out);
             }
             match actual.and_then(Value::as_str) {
-                Some(a) if !a.contains(PH_OPEN) && !a.is_empty() => Value::String(a.to_string()),
+                // a placeholder or a harness's reference to one (`{env:HLOCK_SECRET_…}`) isn't a value
+                Some(a) if !a.contains(secrets::PREFIX) && !a.is_empty() => Value::String(a.to_string()),
                 _ => {
                     missing.extend(unfilled);
                     Value::String(out)
@@ -185,11 +218,11 @@ fn fill(desired: &Value, actual: Option<&Value>, env: &BTreeMap<String, String>,
         }
         Value::Object(m) => {
             let am = actual.and_then(Value::as_object);
-            Value::Object(m.iter().map(|(k, v)| (k.clone(), fill(v, am.and_then(|a| a.get(k)), env, missing))).collect())
+            Value::Object(m.iter().map(|(k, v)| (k.clone(), fill(v, am.and_then(|a| a.get(k)), resolve, missing))).collect())
         }
         Value::Array(items) => {
             let aa = actual.and_then(Value::as_array);
-            Value::Array(items.iter().enumerate().map(|(i, v)| fill(v, aa.and_then(|a| a.get(i)), env, missing)).collect())
+            Value::Array(items.iter().enumerate().map(|(i, v)| fill(v, aa.and_then(|a| a.get(i)), resolve, missing)).collect())
         }
         other => other.clone(),
     }
@@ -228,38 +261,106 @@ fn overlay(a: Option<Value>, b: Option<Value>) -> Option<Value> {
             }
             Some(Value::Object(am))
         }
-        (Some(Value::String(s)), b) if s.contains(PH_OPEN) => b.or(Some(Value::String(s))),
+        (Some(Value::String(s)), b) if s.contains(secrets::PREFIX) => b.or(Some(Value::String(s))),
         (Some(a), _) => Some(a),
         (None, b) => b,
     }
 }
 
-/// The file contents a `WriteConfig` would produce, and the secrets it lacks.
-fn desired_config(vendored: &Path, format: &str, pointers: &[String], target: &Path, fallback: Option<&Path>, env: &BTreeMap<String, String>) -> Result<(Value, BTreeSet<String>)> {
+/// The value each single-placeholder string in `desired` took in `filled`
+/// (`"Bearer ${HLOCK_SECRET_X}"` → `"Bearer abc"` gives `X = abc`).
+fn extract(desired: &Value, filled: &Value, out: &mut BTreeMap<String, String>) {
+    match (desired, filled) {
+        (Value::String(d), Value::String(f)) => {
+            if let [name] = placeholders(d).as_slice() {
+                let (pre, post) = d.split_once(&format!("${{{name}}}")).unwrap_or_default();
+                if !f.contains(PH_OPEN) && f.len() > pre.len() + post.len() && f.starts_with(pre) && f.ends_with(post) {
+                    out.insert(name.clone(), f[pre.len()..f.len() - post.len()].to_string());
+                }
+            }
+        }
+        (Value::Object(d), Value::Object(f)) => d.iter().for_each(|(k, v)| if let Some(x) = f.get(k) { extract(v, x, out) }),
+        (Value::Array(d), Value::Array(f)) => d.iter().zip(f).for_each(|(a, b)| extract(a, b, out)),
+        _ => {}
+    }
+}
+
+/// Placeholders rewritten as the harness's environment references.
+fn to_refs(v: &Value, template: &str) -> Value {
+    match v {
+        Value::String(s) if s.contains(PH_OPEN) => {
+            Value::String(placeholders(s).iter().fold(s.clone(), |acc, n| acc.replace(&format!("${{{n}}}"), &secrets::env_ref(template, n))))
+        }
+        Value::Object(m) => Value::Object(m.iter().map(|(k, x)| (k.clone(), to_refs(x, template))).collect()),
+        Value::Array(a) => Value::Array(a.iter().map(|x| to_refs(x, template)).collect()),
+        other => other.clone(),
+    }
+}
+
+/// What a `WriteConfig` would produce.
+pub(crate) struct Desired {
+    pub doc: Value,
+    /// Secrets with no value.
+    pub missing: BTreeSet<String>,
+    /// With `env_ref`: the values the references stand for, to pass in the environment.
+    pub values: BTreeMap<String, String>,
+    /// The file carries secrets (so it's written for its owner only).
+    pub has_secrets: bool,
+}
+
+/// The file contents a `WriteConfig` would produce. With `env_ref`, secrets are
+/// written as references, and their values (from `resolve`, else the live config)
+/// come back in `values`.
+fn desired_config(vendored: &Path, format: &str, pointers: &[String], target: &Path, fallback: Option<&Path>, resolve: Resolve, env_ref: Option<&str>) -> Result<Desired> {
     let src_fmt = if pointers.is_empty() { if format == "jsonc" { "json" } else { format } } else { "json" };
     let desired = read_config(vendored, src_fmt)?.ok_or_else(|| Error::Lockfile(format!("vendored file missing: {}", vendored.display())))?;
     let actual = read_config(target, format).ok().flatten();
     let live = fallback.and_then(|f| read_config(f, format).ok().flatten());
-    let secrets_from = overlay(actual.clone(), live);
-    let mut missing = BTreeSet::new();
-    if pointers.is_empty() {
-        return Ok((fill(&desired, secrets_from.as_ref(), env, &mut missing), missing));
-    }
-    let mut out = actual.clone().filter(Value::is_object).unwrap_or_else(|| json!({}));
-    for p in pointers {
-        if let Some(sub) = desired.get(p) {
-            let cur = secrets_from.as_ref().and_then(|a| a.pointer(p));
-            set_pointer(&mut out, p, fill(sub, cur, env, &mut missing));
+    // a target written with references holds no values to keep
+    let secrets_from = if env_ref.is_some() { live } else { overlay(actual.clone(), live) };
+    let mut all = BTreeSet::new();
+    collect_placeholders(&desired, &mut all);
+    let mut d = Desired { doc: Value::Null, missing: BTreeSet::new(), values: BTreeMap::new(), has_secrets: !all.is_empty() };
+    let produce = |sub: &Value, cur: Option<&Value>, d: &mut Desired| -> Value {
+        let filled = fill(sub, cur, resolve, &mut d.missing);
+        match env_ref {
+            Some(tpl) => {
+                extract(sub, &filled, &mut d.values);
+                to_refs(sub, tpl)
+            }
+            None => filled,
         }
+    };
+    if pointers.is_empty() {
+        d.doc = produce(&desired, secrets_from.as_ref(), &mut d);
+    } else {
+        let mut out = actual.clone().filter(Value::is_object).unwrap_or_else(|| json!({}));
+        for p in pointers {
+            if let Some(sub) = desired.get(p) {
+                let cur = secrets_from.as_ref().and_then(|a| a.pointer(p));
+                let v = produce(sub, cur, &mut d);
+                set_pointer(&mut out, p, v);
+            }
+        }
+        d.doc = out;
     }
-    Ok((out, missing))
+    if env_ref.is_some() {
+        d.missing = all.into_iter().filter(|n| !d.values.contains_key(n)).collect();
+    }
+    Ok(d)
+}
+
+/// Resolve placeholders through [`secrets::lookup`] in `ctx`.
+fn resolver(ctx: &Ctx) -> impl Fn(&str) -> Option<String> + '_ {
+    move |n: &str| secrets::lookup(n, ctx).map(|f| f.value)
 }
 
 // --------------------------------------------------------------------------- //
 // Targets
 // --------------------------------------------------------------------------- //
 
-/// The context a plan writes into, and the environment that selects it.
+/// The context a plan writes into, and the environment that selects it. With
+/// neither `docker` nor `prefix` set, that's the user's real config (`home` mode).
 pub(crate) fn target_ctx(profile: &HarnessProfile, ctx: &Ctx, opts: &SyncOptions) -> (Ctx, String, BTreeMap<String, String>) {
     let mut t = ctx.clone();
     let mut iso = BTreeMap::new();
@@ -271,8 +372,7 @@ pub(crate) fn target_ctx(profile: &HarnessProfile, ctx: &Ctx, opts: &SyncOptions
         return (t, "docker".into(), iso);
     }
     if let Some(prefix) = &opts.prefix {
-        let base = if prefix.is_absolute() { prefix.clone() } else { ctx.cwd.join(prefix) };
-        let base = base.join(&profile.id);
+        let base = env_dir(profile, prefix, ctx);
         let root = match &profile.config_root.suffix {
             Some(sfx) => base.join("xdg").join(sfx),
             None => base.join("config"),
@@ -290,6 +390,24 @@ pub(crate) fn target_ctx(profile: &HarnessProfile, ctx: &Ctx, opts: &SyncOptions
         return (t, "prefix".into(), iso);
     }
     (t, "home".into(), iso)
+}
+
+/// A harness's own directory under an isolated-environment prefix.
+pub(crate) fn env_dir(profile: &HarnessProfile, prefix: &Path, ctx: &Ctx) -> PathBuf {
+    let base = if prefix.is_absolute() { prefix.to_path_buf() } else { ctx.cwd.join(prefix) };
+    base.join(&profile.id)
+}
+
+/// Create an isolated environment directory with a `.gitignore` that keeps all of it
+/// out of version control: it's restored from the lock, and holds filled-in secrets
+/// and the harness's own state. An existing `.gitignore` is left alone.
+pub fn ignore_env(dir: &Path) -> Result<()> {
+    std::fs::create_dir_all(dir)?;
+    let ignore = dir.join(".gitignore");
+    if !ignore.exists() {
+        std::fs::write(ignore, "# hlock's isolated harness environment, restored from the lock; not for version control\n*\n")?;
+    }
+    Ok(())
 }
 
 /// Expand a lock's portable path (`{root}/…`, `~/…`, relative) for a target.
@@ -399,8 +517,12 @@ fn install_step(id: String, kind: &str, what: &str, version: Option<&str>, sourc
 /// Build the sync plan for a lock. Nothing is changed.
 pub fn plan(lock: &Lockfile, lock_path: &Path, reg: &Registry, ctx: &Ctx, opts: &SyncOptions) -> Result<Plan> {
     let profile = reg.require_harness(&lock.harness.name)?;
+    let opts = &isolated(opts, lock_path, ctx);
     let (t, mode, isolation) = target_ctx(profile, ctx, opts);
     let root = profile.config_root(&t);
+    let prefix = opts.prefix.as_ref().filter(|_| mode == "prefix").map(|p| pretty(&if p.is_absolute() { p.clone() } else { ctx.cwd.join(p) }, ctx));
+    let env = opts.prefix.as_ref().filter(|_| mode == "prefix").map(|p| env_dir(profile, p, ctx));
+    let (sync_cmd, _) = Plan { mode: mode.clone(), prefix: prefix.clone(), ..Default::default() }.commands();
     let lock_dir = lock_dir_of(lock_path, ctx);
     let docker = mode == "docker";
     let mut steps: Vec<Step> = Vec::new();
@@ -460,7 +582,9 @@ pub fn plan(lock: &Lockfile, lock_path: &Path, reg: &Registry, ctx: &Ctx, opts: 
         };
         let vendored = lock_dir.join(vend);
         let fallback = (mode == "prefix").then(|| profile.file_path(&c.id, ctx)).flatten();
-        let (desired, missing) = desired_config(&vendored, &c.format, &c.pointers, &target, fallback.as_deref(), &t.env)?;
+        let env_ref = opts.inject.then(|| profile.files.get(&c.id).and_then(|f| f.env_ref.clone())).flatten();
+        let resolve = resolver(ctx);
+        let Desired { doc: desired, missing, .. } = desired_config(&vendored, &c.format, &c.pointers, &target, fallback.as_deref(), &resolve, env_ref.as_deref())?;
         collect_placeholders(&read_config(&vendored, if c.pointers.is_empty() && c.format != "jsonc" { &c.format } else { "json" })?.unwrap_or_default(), &mut all_secrets);
         missing_secrets.extend(missing.iter().cloned());
         let actual = read_config(&target, &c.format).ok().flatten();
@@ -477,7 +601,7 @@ pub fn plan(lock: &Lockfile, lock_path: &Path, reg: &Registry, ctx: &Ctx, opts: 
             title: if same { what } else if actual.is_some() { format!("Update {what}") } else { format!("Write {what}") },
             status: if same { "satisfied" } else { "auto" }.into(),
             reason: if same { "matches the lock".into() } else if actual.is_some() { "the current file is kept as .hlock-bak".into() } else { String::new() },
-            action: (!same).then(|| Action::WriteConfig { path: target.clone(), vendored, format: c.format.clone(), pointers: c.pointers.clone(), fallback }),
+            action: (!same).then(|| Action::WriteConfig { path: target.clone(), vendored, format: c.format.clone(), pointers: c.pointers.clone(), fallback, env_ref }),
             ..Default::default()
         });
     }
@@ -598,27 +722,28 @@ pub fn plan(lock: &Lockfile, lock_path: &Path, reg: &Registry, ctx: &Ctx, opts: 
     }
 
     // ---- secrets ----
-    let env_has = |n: &str| ctx.var(n).is_some();
     for r in &lock.secret {
         if !all_secrets.contains(&r.name) {
             continue;
         }
         let missing = missing_secrets.contains(&r.name);
+        let found = if docker || missing { None } else { secrets::lookup(&r.name, ctx) };
+        let short = r.name.trim_start_matches(secrets::PREFIX);
         steps.push(Step {
             id: format!("secret:{}", r.name),
             kind: "secret".into(),
             title: format!("{} ({})", r.name, r.used_by),
             status: if missing && !docker { "manual" } else { "satisfied" }.into(),
             reason: if docker {
-                "supplied at `docker run -e` time".into()
-            } else if !missing && env_has(&r.name) {
-                "set in the environment".into()
+                format!("supplied when the container starts (`docker run -e` or /run/secrets/{})", r.name)
+            } else if let Some(f) = found {
+                format!("from the {}", f.source)
             } else if !missing {
                 "kept the value already configured here".into()
             } else {
                 "not set".into()
             },
-            command: (missing && !docker).then(|| format!("export {}=…   # then re-run hlock sync", r.name)),
+            command: (missing && !docker).then(|| format!("hlock secret set {short}   # or export {}=…, then re-run {sync_cmd}", r.name)),
             ..Default::default()
         });
     }
@@ -631,8 +756,46 @@ pub fn plan(lock: &Lockfile, lock_path: &Path, reg: &Registry, ctx: &Ctx, opts: 
         mode,
         root,
         isolation,
+        prefix,
+        env,
         steps,
     })
+}
+
+/// Isolated by default: without `in_place` or `docker`, a plan writes under the
+/// lock's `.hlock/env` prefix.
+fn isolated(opts: &SyncOptions, lock_path: &Path, ctx: &Ctx) -> SyncOptions {
+    let mut o = opts.clone();
+    if o.prefix.is_none() && o.docker.is_none() && !o.in_place {
+        o.prefix = Some(crate::launch::env_prefix(lock_path, ctx));
+    }
+    o
+}
+
+/// With `opts.inject`: the secret values behind the environment references a plan
+/// writes, keyed by variable, to pass in the harness's environment; and the
+/// secrets that have no value. Values come from [`secrets::lookup`], else from the
+/// user's own config on the machine that pinned the lock.
+pub fn secret_env(lock: &Lockfile, lock_path: &Path, reg: &Registry, ctx: &Ctx, opts: &SyncOptions) -> Result<(BTreeMap<String, String>, BTreeSet<String>)> {
+    let mut values = BTreeMap::new();
+    let mut missing = BTreeSet::new();
+    if !opts.inject || opts.in_place || opts.docker.is_some() {
+        return Ok((values, missing));
+    }
+    let profile = reg.require_harness(&lock.harness.name)?;
+    let (t, _, _) = target_ctx(profile, ctx, &isolated(opts, lock_path, ctx));
+    let lock_dir = lock_dir_of(lock_path, ctx);
+    let resolve = resolver(ctx);
+    for c in lock.config.iter().filter(|c| c.restore != "record") {
+        let (Some(vend), Some(tpl)) = (&c.vendored, profile.files.get(&c.id).and_then(|f| f.env_ref.as_deref())) else { continue };
+        let Some(target) = profile.file_path(&c.id, &t) else { continue };
+        let fallback = profile.file_path(&c.id, ctx);
+        let d = desired_config(&lock_dir.join(vend), &c.format, &c.pointers, &target, fallback.as_deref(), &resolve, Some(tpl))?;
+        values.extend(d.values);
+        missing.extend(d.missing);
+    }
+    missing.retain(|n| !values.contains_key(n));
+    Ok((values, missing))
 }
 
 fn native_step(n: &Native, profile: &HarnessProfile, t: &Ctx, root: &Path, env: BTreeMap<String, String>, opts: &SyncOptions, ctx: &Ctx) -> Option<Step> {
@@ -832,21 +995,33 @@ pub(crate) fn copy_tree(from: &Path, to: &Path) -> Result<()> {
 pub fn run_step(step: &Step, ctx: &Ctx) -> Result<String> {
     let Some(action) = &step.action else { return Ok("nothing to do".into()) };
     match action {
-        Action::WriteConfig { path, vendored, format, pointers, fallback } => {
-            let (desired, missing) = desired_config(vendored, format, pointers, path, fallback.as_deref(), &ctx.env)?;
+        Action::WriteConfig { path, vendored, format, pointers, fallback, env_ref } => {
+            let resolve = resolver(ctx);
+            let d = desired_config(vendored, format, pointers, path, fallback.as_deref(), &resolve, env_ref.as_deref())?;
+            let missing = d.missing;
             let fmt = if format == "jsonc" { "json" } else { format.as_str() };
-            let text = render_config(&desired, fmt).map_err(Error::Profile)?;
+            let text = render_config(&d.doc, fmt).map_err(Error::Profile)?;
             if let Some(parent) = path.parent() {
                 std::fs::create_dir_all(parent)?;
             }
-            let bak = if path.exists() {
-                let b = PathBuf::from(format!("{}.hlock-bak", path.display()));
+            let b = PathBuf::from(format!("{}.hlock-bak", path.display()));
+            if env_ref.is_some() {
+                // an isolated root is restored from the lock; a backup would only keep old values on disk
+                let _ = std::fs::remove_file(&b);
+            }
+            let bak = if path.exists() && env_ref.is_none() {
                 std::fs::copy(path, &b)?;
+                if d.has_secrets {
+                    secrets::restrict(&b)?;
+                }
                 Some(b)
             } else {
                 None
             };
             std::fs::write(path, text)?;
+            if d.has_secrets {
+                secrets::restrict(path)?; // it may hold secret values: owner only
+            }
             let mut msg = format!("wrote {}", path.display());
             if let Some(b) = bak {
                 msg.push_str(&format!(" (previous: {})", b.display()));
@@ -930,17 +1105,21 @@ pub fn rehydrate_skill(plan: &Plan, lock_name: &str) -> String {
         plan.harness_name,
         plan.version.as_deref().unwrap_or("")
     ));
-    s.push_str("## Rules\n\n- Ask the user before installing system software or downloading large model weights, and say how big the download is.\n- Never print, log, or commit secret values. Ask the user to set secrets in their shell; don't type them yourself.\n- Run each step's check before moving on. If a step fails, stop and report the error.\n- Finish by running `hlock sync`, which performs the remaining automatic steps, then `hlock check`.\n\n");
+    let (sync_cmd, check_cmd) = plan.commands();
+    s.push_str(&format!("## Rules\n\n- Ask the user before installing system software or downloading large model weights, and say how big the download is.\n- Never print, log, or commit secret values. Ask the user to set secrets in their shell; don't type them yourself.\n- Run each step's check before moving on. If a step fails, stop and report the error.\n- Finish by running `{sync_cmd}`, which performs the remaining automatic steps, then `{check_cmd}`.\n\n"));
+    if let (true, Some(p)) = (plan.mode == "prefix", &plan.prefix) {
+        s.push_str(&format!("The setup is restored into an isolated config root under `{p}`, not the user's own config. Don't change the user's own config unless they ask.\n\n"));
+    }
     let pending: Vec<&Step> = plan.steps.iter().filter(|st| st.status != "satisfied" && !st.optional).collect();
     if pending.is_empty() {
-        s.push_str("## Steps\n\nNothing is missing. Run `hlock check` to confirm.\n");
+        s.push_str(&format!("## Steps\n\nNothing is missing. Run `{check_cmd}` to confirm.\n"));
         return s;
     }
     s.push_str("## Steps\n\n");
     for (i, st) in pending.iter().enumerate() {
         s.push_str(&format!("{}. **{}**", i + 1, st.title));
         if st.status == "auto" {
-            s.push_str(" (`hlock sync` does this)");
+            s.push_str(&format!(" (`{sync_cmd}` does this)"));
         }
         s.push('\n');
         if !st.reason.is_empty() {
@@ -960,7 +1139,7 @@ pub fn rehydrate_skill(plan: &Plan, lock_name: &str) -> String {
             s.push_str(&format!("- {}{}\n", st.title, st.command.as_ref().map(|c| format!(": `{c}`")).unwrap_or_default()));
         }
     }
-    s.push_str("\n## Finish\n\n1. Run `hlock sync` and confirm it reports no remaining steps.\n2. Run `hlock check`.\n");
+    s.push_str(&format!("\n## Finish\n\n1. Run `{sync_cmd}` and confirm it reports no remaining steps.\n2. Run `{check_cmd}`.\n"));
     s
 }
 
@@ -1012,19 +1191,30 @@ pub fn dockerfile(plan: &Plan, lock: &Lockfile, profile: &HarnessProfile) -> (St
     d.push_str(&format!("CMD [\"{bin}\"]\n"));
 
     let entry = r#"#!/bin/sh
-# Fill ${HLOCK_SECRET_*} placeholders in the harness config from the environment, then run.
+# Fill ${HLOCK_SECRET_*} placeholders in the harness config, then run. A value comes from
+# the environment (docker run -e), else from a mounted secret file: /run/secrets/<NAME>,
+# with or without the HLOCK_SECRET_ prefix (Docker and Compose secrets; HLOCK_SECRETS_DIR moves it).
 python3 - <<'PY'
 import os, pathlib, re
 pat = re.compile(r"\$\{(HLOCK_SECRET_[A-Z0-9_]+)\}")
+def value(name):
+    if os.environ.get(name):
+        return os.environ[name]
+    for f in (name, name.removeprefix("HLOCK_SECRET_")):
+        p = pathlib.Path(os.environ.get("HLOCK_SECRETS_DIR", "/run/secrets")) / f
+        if p.is_file():
+            return p.read_text().strip()
+    return None
 for p in pathlib.Path.home().rglob("*"):
     if p.is_file() and p.suffix in {".json", ".jsonc", ".toml", ".yaml", ".yml"} and p.stat().st_size < 5_000_000:
         try:
             text = p.read_text()
         except Exception:
             continue
-        new = pat.sub(lambda m: os.environ.get(m.group(1), m.group(0)), text)
+        new = pat.sub(lambda m: value(m.group(1)) or m.group(0), text)
         if new != text:
             p.write_text(new)
+            p.chmod(0o600)
 PY
 exec "$@"
 "#
@@ -1038,14 +1228,31 @@ mod tests {
     use crate::capture::parse_config;
 
     #[test]
+    fn plan_commands_target_the_same_place() {
+        let plan = |mode: &str, prefix: Option<&str>| Plan { mode: mode.into(), prefix: prefix.map(String::from), ..Default::default() }.commands();
+        assert_eq!(plan("prefix", Some(".hlock/env")), ("hlock sync --prefix .hlock/env".into(), "hlock check --prefix .hlock/env".into()));
+        assert_eq!(plan("home", None), ("hlock sync --in-place".into(), "hlock check".into()));
+    }
+
+    #[test]
     fn placeholder_fill_keeps_existing_secrets() {
         let desired = json!({"a": {"apiKey": "${HLOCK_SECRET_A}"}, "b": "Bearer ${HLOCK_SECRET_B}", "c": "${HLOCK_SECRET_C}"});
         let actual = json!({"a": {"apiKey": "real-key"}});
         let env: BTreeMap<String, String> = [("HLOCK_SECRET_B".to_string(), "tok".to_string())].into();
         let mut missing = BTreeSet::new();
-        let v = fill(&desired, Some(&actual), &env, &mut missing);
+        let v = fill(&desired, Some(&actual), &|n: &str| env.get(n).cloned(), &mut missing);
         assert_eq!(v, json!({"a": {"apiKey": "real-key"}, "b": "Bearer tok", "c": "${HLOCK_SECRET_C}"}));
         assert_eq!(missing.into_iter().collect::<Vec<_>>(), ["HLOCK_SECRET_C"]);
+        // as environment references: the values come back separately, the file keeps references
+        let mut values = BTreeMap::new();
+        extract(&desired, &v, &mut values);
+        assert_eq!(values, [("HLOCK_SECRET_A".to_string(), "real-key".to_string()), ("HLOCK_SECRET_B".to_string(), "tok".to_string())].into());
+        assert_eq!(to_refs(&desired, "{env:{name}}")["b"], "Bearer {env:HLOCK_SECRET_B}");
+        // a reference left by `launch` isn't a configured value to keep
+        let refs = json!({"c": "{env:HLOCK_SECRET_C}"});
+        let mut missing = BTreeSet::new();
+        assert_eq!(fill(&json!({"c": "${HLOCK_SECRET_C}"}), Some(&refs), &|_: &str| None, &mut missing)["c"], "${HLOCK_SECRET_C}");
+        assert!(missing.contains("HLOCK_SECRET_C"));
     }
 
     #[test]

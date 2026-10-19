@@ -1492,9 +1492,27 @@ pub fn pin(
 
 /// Re-capture the harness a pinned lock is for and list what drifted.
 pub fn check_pin(lock: &Lockfile, reg: &Registry, ctx: &Ctx) -> Result<Vec<String>> {
+    check_pin_at(lock, reg, ctx, None)
+}
+
+/// [`check_pin`] against the isolated root `hlock sync --prefix <prefix>` writes, or
+/// the user's real config when `prefix` is `None`.
+pub fn check_pin_at(lock: &Lockfile, reg: &Registry, ctx: &Ctx, prefix: Option<&Path>) -> Result<Vec<String>> {
     let profile = reg.require_harness(&lock.harness.name)?;
     let project = lock.stack.get("name").and_then(Value::as_str);
-    let cap = capture(profile, reg, ctx, project)?;
+    let Some(prefix) = prefix else {
+        let cap = capture(profile, reg, ctx, project)?;
+        return Ok(diff_locks(lock, &cap.lock));
+    };
+    let target = crate::sync::target_ctx(profile, ctx, &crate::sync::SyncOptions { prefix: Some(prefix.to_path_buf()), ..Default::default() }).0;
+    let mut cap = capture(profile, reg, &target, project)?;
+    // a file outside the root normally (`~/.claude.json`) lives inside an isolated one:
+    // the same file, so compare it under the lock's path
+    for c in cap.lock.config.iter_mut() {
+        if let Some(locked) = lock.config.iter().find(|l| l.id == c.id) {
+            c.path = locked.path.clone();
+        }
+    }
     Ok(diff_locks(lock, &cap.lock))
 }
 

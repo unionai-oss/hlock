@@ -178,6 +178,11 @@ pub struct FileSpec {
     /// `whole` (restore the file) | `pointers` (restore only `pointers`) | `record` (digest only)
     pub restore: String,
     pub pointers: Vec<String>,
+    /// How the harness reads an environment variable inside this file, with `{name}`
+    /// for the variable: `${{name}}` (Claude Code), `{env:{name}}` (OpenCode). Set
+    /// only when the harness expands it wherever hlock writes secrets in the file;
+    /// `hlock launch` then writes the reference and passes the value in the environment.
+    pub env_ref: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
