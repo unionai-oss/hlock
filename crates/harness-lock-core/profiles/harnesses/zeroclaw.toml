@@ -1,0 +1,54 @@
+# Harness profile: ZeroClaw.
+id = "zeroclaw"
+name = "ZeroClaw"
+kind = "cli"
+autonomous = true  # a daemon with chat channels, a scheduler, heartbeats and memory
+aliases = ["zero-claw"]
+vendor = "ZeroClaw Labs"
+homepage = "https://github.com/zeroclaw-labs/zeroclaw"
+support = "basic"
+open-source = true
+local-models = true
+binaries = ["zeroclaw"]
+version = { args = ["--version"] }
+config-root = { env = "ZEROCLAW_CONFIG_DIR", default = "~/.zeroclaw" }
+# Each agent has its own workspace, agents/<alias>/workspace. These are the files of
+# the `assistant` agent, the alias ZeroClaw's quickstart examples create. MEMORY.md
+# and DAILY.md are left out: the agent writes them as it runs.
+instructions = [
+    "{root}/agents/assistant/workspace/AGENTS.md",
+    "{root}/agents/assistant/workspace/SOUL.md",
+    "{root}/agents/assistant/workspace/IDENTITY.md",
+    "{root}/agents/assistant/workspace/USER.md",
+    "{root}/agents/assistant/workspace/TOOLS.md",
+]
+
+[[install]]
+method = "script"
+command = "curl -fsSL https://raw.githubusercontent.com/zeroclaw-labs/zeroclaw/master/install.sh | sh"
+path-hints = ["/.cargo/bin/zeroclaw"]
+[[install]]
+method = "brew"
+package = "zeroclaw"
+
+# The model sits under providers.models.<type>.<alias>, chosen per agent by
+# agents.<alias>.model_provider, so there's no single pointer to it: the whole file
+# is pinned instead.
+[files.config]
+path = "{root}/config.toml"
+format = "toml"
+restore = "whole"
+
+[mcp]
+# [[mcp.servers]]: a list of servers, each with a `name`. hlock reads it but doesn't
+# write it, so `launch` from another harness's lock leaves MCP servers to you.
+sources = ["config#/mcp/servers"]
+
+[skills]
+dirs = ["{root}/agents/assistant/workspace/skills"]
+write = "{root}/agents/assistant/workspace/skills"
+
+[launch]
+args = ["agent", "-a", "assistant"]  # `--model` is a flag of `zeroclaw agent`
+model-flag = "--model"
+prompt = ["-m", "{prompt}"]  # `hlock run`: one message to the `assistant` agent

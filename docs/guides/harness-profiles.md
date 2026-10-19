@@ -51,7 +51,7 @@ path-hints = ["/.my-agent/bin/"]   # identifies this method from the binary's re
 
 [files.settings]
 path = "{root}/settings.json"
-format = "json"                    # json | jsonc | toml | yaml
+format = "json"                    # json | jsonc | json5 | toml | yaml
 restore = "whole"                  # whole | pointers | record
 
 [model]
@@ -93,6 +93,30 @@ value wins:
 Set `model.format = "provider/model"` when the model value carries its provider (OpenCode's
 `anthropic/claude-sonnet-4-5`), or `model.default-provider` when the harness only talks to one.
 
+An MCP source is a map of servers by name, or a list of servers that each have a `name`
+key (ZeroClaw's `[[mcp.servers]]`). `launch` writes servers as a map, so a harness that
+keeps a list leaves out `mcp.write`.
+
+### Config formats
+
+`format` is `json`, `jsonc` (JSON with comments and trailing commas), `json5` (also
+unquoted keys, single-quoted strings and hex numbers, as in OpenClaw's `openclaw.json`),
+`toml` or `yaml`. hlock writes `jsonc` and `json5` files back as plain JSON, which both
+formats accept, so comments don't survive a `sync` or `launch`.
+
+### Autonomous agents
+
+Set `autonomous = true` on a `cli` profile for an agent that runs on its own, as a gateway
+with chat channels, schedules and memory, rather than in a session a person drives. Every
+command treats it as an agent CLI. Only `hlock harness list` and the
+[Supported harnesses](../reference/harnesses.md#autonomous-agents) page group it apart, and
+`hlock harness show` labels it.
+
+List only the workspace files you author in `instructions`, such as `SOUL.md` and
+`AGENTS.md`. If the profile lists files the agent writes as it runs, such as `MEMORY.md` or
+daily notes, `hlock check` reports drift after every conversation, and `hlock sync`
+overwrites the agent's memory.
+
 ### Restore policies
 
 `restore` says what a file contributes to a locked setup: `whole` (the whole file),
@@ -115,6 +139,7 @@ harness expands references everywhere hlock writes secrets in that file. See
 |---|---|
 | `id`, `name`, `aliases` | Identity; any alias works wherever a harness name does |
 | `kind` | `cli`, `framework`, or `custom` (default: `cli`, or `custom` with `run`) |
+| `autonomous` | `true` for a `cli` harness that runs as a long-lived gateway (OpenClaw, nanobot, …); see [Autonomous agents](#autonomous-agents) |
 | `support` | `full` or `basic` (default `basic`) |
 | `vendor`, `homepage` | Informational |
 | `binaries` | Names to look up on `PATH`, in order |
@@ -125,7 +150,7 @@ harness expands references everywhere hlock writes secrets in that file. See
 | `files.<id>` | `path`, `isolated`, `format`, `restore`, `pointers`, `env-ref` |
 | `model` | `default`, `small`, `provider`, `base-url` sources; `format`; `default-provider` |
 | `providers` | `source`, plus pointers into each provider for `base-url` and `models` |
-| `mcp` | `sources`, `write`, `shape` (`standard`, `opencode`, `codex`, `goose`): how `launch` writes servers |
+| `mcp` | `sources`, `write`, `shape` (`standard`, `opencode`, `codex`, `goose`, `openclaw`, `nanobot`): how `launch` writes servers |
 | `skills` | `dirs`, `write`, `builtin-dirs`, `builtin-manifest` |
 | `bundles` | Plugins/packages: `kind`, `extractor` (`claude-plugins`, `pi-packages`, `npm-list`), `source`, `lockfile` |
 | `instructions` | Instruction files the harness reads |
@@ -133,7 +158,7 @@ harness expands references everywhere hlock writes secrets in that file. See
 | `api-keys` | API providers the harness talks to, and the variable each reads its key from: `[{ provider = "anthropic", env = "ANTHROPIC_API_KEY" }]` |
 | `api-provider` | How [`hlock meta`](meta.md) sets an API provider and model: a list of `{ file, set }` like `local-provider`, with `{provider}` and `{model}` substituted |
 | `open-source`, `local-models` | Used by [`hlock localize`](localize.md) to choose local-capable harnesses |
-| `local-provider` | How `localize` points the harness at a local endpoint: a list of `{ file, set }`, where `set` maps JSON pointers to values; `{provider}`, `{model}`, `{base_url}` and `{host}` are substituted |
+| `local-provider` | How `localize` points the harness at a local endpoint: a list of `{ file, set, runtimes }`, where `set` maps JSON pointers to values; `{provider}`, `{model}`, `{base_url}` and `{host}` are substituted. An entry with `runtimes` applies only to those runtimes; entries apply in order, so one for `["ollama"]` after a generic one overrides it (OpenClaw uses Ollama's native API this way) |
 | `packages` | Packages to pin for code harnesses, e.g. `pypi:pydantic-ai` |
 | `framework` | For `custom` harnesses: a framework profile to inherit packages from |
 | `run` | For code harnesses: `entrypoint`, `command`, `python`, `env` |

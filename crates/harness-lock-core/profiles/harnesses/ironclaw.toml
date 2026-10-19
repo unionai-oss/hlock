@@ -1,0 +1,49 @@
+# Harness profile: IronClaw (NEAR AI), its "Reborn" configuration.
+id = "ironclaw"
+name = "IronClaw"
+kind = "cli"
+autonomous = true  # an always-on agent with chat channels, routines and memory
+aliases = ["iron-claw", "nearai-ironclaw"]
+vendor = "NEAR AI"
+homepage = "https://github.com/nearai/ironclaw"
+support = "basic"
+open-source = true
+local-models = true
+binaries = ["ironclaw"]
+version = { args = ["--version"] }
+config-root = { env = "IRONCLAW_REBORN_HOME", default = "~/.ironclaw/reborn" }
+
+api-keys = [{ provider = "anthropic", env = "ANTHROPIC_API_KEY" }, { provider = "openai", env = "OPENAI_API_KEY" }, { provider = "google", env = "GEMINI_API_KEY" }, { provider = "nearai", env = "NEARAI_API_KEY" }]
+
+[[install]]
+method = "manual"
+command = "run ironclaw-installer.sh from a release at https://github.com/nearai/ironclaw/releases"
+
+# IronClaw never keeps secrets in config.toml: `api_key_env` names the variable.
+[files.config]
+path = "{root}/config.toml"
+format = "toml"
+restore = "whole"
+
+[model]
+default = ["config#/llm/default/model"]
+provider = ["config#/llm/default/provider_id"]
+base-url = ["config#/llm/default/base_url"]
+
+[skills]
+# Outside the config root, so hlock reads them but doesn't write them: an isolated
+# `launch` would otherwise change your own install.
+dirs = ["~/.ironclaw/skills", "~/.ironclaw/installed_skills"]
+
+[launch]
+prompt = ["run", "-m", "{prompt}"]  # `hlock run`: one message, then exit
+
+# How `hlock localize` points this harness at a local OpenAI-compatible endpoint.
+[[local-provider]]
+file = "config"
+set = { "/llm/default" = { provider_id = "openai_compatible", base_url = "{base_url}", model = "{model}" } }
+# Ollama has a provider of its own.
+[[local-provider]]
+file = "config"
+runtimes = ["ollama"]
+set = { "/llm/default" = { provider_id = "ollama", base_url = "{host}", model = "{model}" } }

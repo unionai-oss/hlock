@@ -57,7 +57,7 @@ $ hlock launch opencode --dry-run
 |---|---|
 | MCP servers | Rewritten in the target's config shape (`mcpServers` for most, OpenCode's `mcp` with `local`/`remote`, Codex's `mcp_servers` in TOML, Goose's `extensions`). Secrets come from the environment, else from the source harness's live config. |
 | Skills | Copied into the target's skills directory |
-| User instructions | The source's user-level file (e.g. `~/.claude/CLAUDE.md`) becomes the target's (e.g. OpenCode's `AGENTS.md`) |
+| User instructions | The source's user-level file (e.g. `~/.claude/CLAUDE.md`) becomes the target's (e.g. OpenCode's `AGENTS.md`). A file the target also reads by the same name, such as an autonomous agent's `SOUL.md`, goes to that file; any other file doesn't carry over |
 | Model | Passed with the target's model flag when it can reach the provider (`provider/model` for OpenCode and Pi); otherwise `launch` says so and the target uses its default |
 
 Plugins, built-in skills, and harness-specific settings (permissions, hooks, providers,

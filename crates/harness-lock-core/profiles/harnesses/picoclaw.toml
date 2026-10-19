@@ -1,0 +1,56 @@
+# Harness profile: PicoClaw (Sipeed).
+id = "picoclaw"
+name = "PicoClaw"
+kind = "cli"
+autonomous = true  # a gateway with chat channels, heartbeats, cron jobs and memory
+aliases = ["pico-claw", "sipeed-picoclaw"]
+vendor = "Sipeed"
+homepage = "https://github.com/sipeed/picoclaw"
+support = "basic"
+open-source = true
+local-models = true
+binaries = ["picoclaw"]
+version = { args = ["version"] }
+config-root = { env = "PICOCLAW_HOME", default = "~/.picoclaw" }
+# The workspace's prompt files (AGENTS.md is the legacy name of AGENT.md). memory/,
+# sessions/, state/ and cron/ are left out: the agent and gateway write them.
+instructions = [
+    "{root}/workspace/AGENT.md",
+    "{root}/workspace/AGENTS.md",
+    "{root}/workspace/SOUL.md",
+    "{root}/workspace/USER.md",
+    "{root}/workspace/IDENTITY.md",
+]
+
+[[install]]
+method = "manual"
+command = "download a release from https://github.com/sipeed/picoclaw/releases"
+
+# API keys can also live in .security.yml next to config.json; hlock doesn't read it.
+[files.config]
+path = "{root}/config.json"
+format = "json"
+restore = "whole"
+
+[model]
+# `model_name` names an entry in `model_list`, not a provider's model id.
+default = ["env:PICOCLAW_AGENTS_DEFAULTS_MODEL_NAME", "config#/agents/defaults/model_name"]
+provider = ["env:PICOCLAW_AGENTS_DEFAULTS_PROVIDER", "config#/agents/defaults/provider"]
+
+[mcp]
+sources = ["config#/tools/mcp/servers"]
+write = "config#/tools/mcp/servers"
+
+[skills]
+dirs = ["{root}/workspace/skills", "{root}/skills"]
+write = "{root}/skills"
+
+[launch]
+args = ["agent"]  # `--model` is a flag of `picoclaw agent`, so the subcommand comes first
+model-flag = "--model"
+prompt = ["-m", "{prompt}"]  # `hlock run`: one message, then exit
+
+# How `hlock localize` points this harness at a local OpenAI-compatible endpoint.
+[[local-provider]]
+file = "config"
+set = { "/model_list" = [{ model_name = "{model}", provider = "openai", model = "{model}", api_base = "{base_url}", api_keys = ["local"], enabled = true }], "/agents/defaults/model_name" = "{model}", "/agents/defaults/provider" = "openai" }

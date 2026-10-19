@@ -108,6 +108,15 @@ pub fn mcp_entry(t: &Tool, shape: &str) -> Value {
         }
         ("goose", false) => json!({"type": "stdio", "name": t.name, "cmd": t.command, "args": t.args, "envs": env, "enabled": enabled, "timeout": 300}),
         ("goose", true) => json!({"type": "streamable_http", "name": t.name, "uri": t.url, "headers": headers, "enabled": enabled, "timeout": 300}),
+        (s @ ("openclaw" | "nanobot"), true) => {
+            // the key and the name each uses for streamable HTTP
+            let (key, http) = if s == "openclaw" { ("transport", "streamable-http") } else { ("type", "streamableHttp") };
+            let mut e = json!({key: if t.transport.as_deref() == Some("sse") { "sse" } else { http }, "url": t.url});
+            if !t.headers.is_empty() {
+                e["headers"] = headers;
+            }
+            e
+        }
         ("codex", true) => {
             let mut e = json!({"url": t.url});
             if !t.headers.is_empty() {
@@ -273,11 +282,11 @@ fn translate(lock: &Lockfile, lock_path: &Path, source: Option<&HarnessProfile>,
         prep.notes.push(format!("{} has no skills directory; skills weren't carried over", target.name));
     }
 
-    // user-level instruction files → the target's user-level instruction file
+    // user-level instruction files → the target's user-level instruction files
     let user_ins: Vec<_> = lock.instructions.iter().filter(|i| i.scope == "user").collect();
-    if let Some(first) = user_ins.first() {
-        let dest_tpl = target.instructions.iter().find(|i| i.starts_with("{root}/"));
-        let src = first.vendored.as_ref().map(|v| lock_dir.join(v)).or_else(|| Some(ctx.expand(&first.name, source_root.as_deref()))).filter(|p| p.is_file());
+    let names: Vec<String> = user_ins.iter().map(|i| i.name.clone()).collect();
+    for (ins, dest_tpl) in user_ins.iter().zip(user_instruction_targets(target, &names)) {
+        let src = ins.vendored.as_ref().map(|v| lock_dir.join(v)).or_else(|| Some(ctx.expand(&ins.name, source_root.as_deref()))).filter(|p| p.is_file());
         match (dest_tpl, src) {
             (Some(tpl), Some(src)) => {
                 let dest = t.expand(tpl, Some(root));
@@ -285,9 +294,9 @@ fn translate(lock: &Lockfile, lock_path: &Path, source: Option<&HarnessProfile>,
                     std::fs::create_dir_all(parent)?;
                 }
                 std::fs::copy(&src, &dest)?;
-                prep.done.push(format!("wrote {} from {}", pretty(&dest, ctx), first.name));
+                prep.done.push(format!("wrote {} from {}", pretty(&dest, ctx), ins.name));
             }
-            _ => prep.notes.push(format!("user instructions {} weren't carried over", first.name)),
+            _ => prep.notes.push(format!("user instructions {} weren't carried over", ins.name)),
         }
     }
 
@@ -302,6 +311,26 @@ fn translate(lock: &Lockfile, lock_path: &Path, source: Option<&HarnessProfile>,
         prep.notes.push(format!("{}-specific settings (permissions, hooks, theme, providers) don't carry over", source.map(|s| s.name.as_str()).unwrap_or("source")));
     }
     Ok(())
+}
+
+/// Where each of a lock's user-level instruction files (`names`) goes in `target`:
+/// the target's file of the same name (an autonomous agent's `SOUL.md`), else the
+/// target's first user-level file, for the first file nothing else took. `None`: it
+/// doesn't carry over, so two files never land on one path.
+pub(crate) fn user_instruction_targets<'a>(target: &'a HarnessProfile, names: &[String]) -> Vec<Option<&'a str>> {
+    let file = |p: &str| p.rsplit('/').next().unwrap_or(p).to_string();
+    let tpls: Vec<&str> = target.instructions.iter().map(String::as_str).filter(|i| i.starts_with("{root}/")).collect();
+    let mut used = BTreeSet::new();
+    let mut out: Vec<Option<&str>> = names
+        .iter()
+        .map(|n| tpls.iter().copied().find(|t| file(t) == file(n)).filter(|t| used.insert(*t)))
+        .collect();
+    if let Some(first) = tpls.first().filter(|t| !used.contains(*t)) {
+        if let Some(slot) = out.iter_mut().find(|o| o.is_none()) {
+            *slot = Some(first);
+        }
+    }
+    out
 }
 
 /// Where a lock's isolated environments live: [`ENV_DIR`], or `ENV_DIR/<stem>` for a
@@ -403,9 +432,13 @@ pub fn prepare(lock: &Lockfile, lock_path: &Path, reg: &Registry, ctx: &Ctx, opt
     }
     // pinned locks restore the model through config; otherwise pass it explicitly
     if !same || !has_config {
-        if let (Some(flag), Some(m)) = (target.launch.model_flag.clone(), model_arg(lock, target, &mut prep.notes)) {
-            argv.push(flag);
-            argv.push(m);
+        match (target.launch.model_flag.clone(), model_arg(lock, target, &mut prep.notes)) {
+            (Some(flag), Some(m)) => {
+                argv.push(flag);
+                argv.push(m);
+            }
+            (None, Some(m)) => prep.notes.push(format!("{} takes no model flag, so it uses its own configured model, not the locked {m}", target.name)),
+            _ => {}
         }
     }
     argv.extend(args.iter().cloned());
@@ -429,6 +462,25 @@ mod tests {
         assert_eq!(mcp_entry(&http, "codex"), json!({"url": "https://x/mcp", "http_headers": {"Authorization": "Bearer t"}}));
         assert_eq!(mcp_entry(&stdio, "goose")["cmd"], "npx");
         assert_eq!(mcp_entry(&http, "standard")["type"], "http");
+        assert_eq!(mcp_entry(&http, "openclaw"), json!({"transport": "streamable-http", "url": "https://x/mcp", "headers": {"Authorization": "Bearer t"}}));
+        assert_eq!(mcp_entry(&stdio, "openclaw"), mcp_entry(&stdio, "standard"));
+        assert_eq!(mcp_entry(&http, "nanobot")["type"], "streamableHttp");
+    }
+
+    #[test]
+    fn user_instructions_land_on_their_own_files() {
+        let r = Registry::builtin();
+        let names = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let oc = names(&["{root}/workspace/AGENTS.md", "{root}/workspace/SOUL.md", "{root}/workspace/TOOLS.md"]);
+        // same names match; nanobot has no TOOLS.md, so it doesn't carry over
+        assert_eq!(
+            user_instruction_targets(r.harness("nanobot").unwrap(), &oc),
+            [Some("{root}/workspace/AGENTS.md"), Some("{root}/workspace/SOUL.md"), None]
+        );
+        // a harness with one file takes the first, and never two onto one path
+        assert_eq!(user_instruction_targets(r.harness("claude-code").unwrap(), &oc), [Some("{root}/CLAUDE.md"), None, None]);
+        assert_eq!(user_instruction_targets(r.harness("hermes").unwrap(), &oc), [None, Some("{root}/SOUL.md"), None]);
+        assert_eq!(user_instruction_targets(r.harness("openclaw").unwrap(), &names(&["{root}/CLAUDE.md"])), [Some("{root}/workspace/AGENTS.md")]);
     }
 
     #[test]

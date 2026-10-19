@@ -386,7 +386,7 @@ pub fn configure(profile: &HarnessProfile, model: &MetaModel, tctx: &Ctx) -> Res
     } else {
         (&profile.api_provider, vec![("provider", model.provider.clone().unwrap_or_default()), ("model", name)])
     };
-    if templates.is_empty() {
+    if !templates.iter().any(|lp| lp.applies_to(model.runtime.as_deref())) {
         return Err(Error::Profile(format!(
             "the {} profile doesn't say how to set {} model; configure it in `hlock meta launch`, then run `hlock meta pin`",
             profile.name,
@@ -395,7 +395,7 @@ pub fn configure(profile: &HarnessProfile, model: &MetaModel, tctx: &Ctx) -> Res
     }
     let vars: Vec<(&str, &str)> = vars.iter().map(|(k, v)| (*k, v.as_str())).collect();
     let mut per_file: BTreeMap<String, Vec<(String, Value)>> = BTreeMap::new();
-    for lp in templates {
+    for lp in templates.iter().filter(|lp| lp.applies_to(model.runtime.as_deref())) {
         for (ptr, v) in &lp.set {
             let ptr = subst_value(&Value::String(ptr.clone()), &vars).as_str().unwrap_or_default().to_string();
             per_file.entry(lp.file.clone()).or_default().push((ptr, subst_value(v, &vars)));

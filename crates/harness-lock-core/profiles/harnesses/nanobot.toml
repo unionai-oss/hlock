@@ -1,0 +1,62 @@
+# Harness profile: nanobot (HKU Data Intelligence Lab).
+id = "nanobot"
+name = "nanobot"
+kind = "cli"
+autonomous = true  # a gateway with chat channels, heartbeats, cron jobs and memory
+aliases = ["nanobot-ai", "hkuds-nanobot"]
+vendor = "HKUDS"
+homepage = "https://github.com/HKUDS/nanobot"
+support = "basic"
+open-source = true
+local-models = true
+binaries = ["nanobot"]
+version = { args = ["--version"] }
+# nanobot relocates its home with `nanobot --home <dir>`, not an environment variable.
+config-root = { default = "~/.nanobot" }
+# The workspace's bootstrap files. memory/ and HEARTBEAT.md are left out: the agent
+# writes them as it runs.
+instructions = ["{root}/workspace/AGENTS.md", "{root}/workspace/SOUL.md", "{root}/workspace/USER.md"]
+
+[[install]]
+method = "uv-tool"
+package = "nanobot-ai"
+[[install]]
+method = "pip"
+package = "nanobot-ai"
+[[install]]
+method = "script"
+command = "curl -fsSL https://raw.githubusercontent.com/HKUDS/nanobot/main/scripts/install.sh | sh"
+
+[files.config]
+path = "{root}/config.json"
+format = "json"
+restore = "whole"
+# nanobot substitutes ${VAR} in any string value of config.json.
+env-ref = "${{name}}"
+
+[model]
+# A `modelPreset`, when set, takes precedence over these two fields.
+default = ["config#/agents/defaults/model"]
+provider = ["config#/agents/defaults/provider"]
+
+[providers]
+source = ["config#/providers"]
+base-url = ["/apiBase", "/api_base"]
+
+[mcp]
+sources = ["config#/tools/mcpServers"]
+write = "config#/tools/mcpServers"
+shape = "nanobot"
+
+[skills]
+dirs = ["{root}/workspace/skills"]
+write = "{root}/workspace/skills"
+
+[launch]
+prompt = ["agent", "-m", "{prompt}"]  # `hlock run`: one message, then exit
+
+# How `hlock localize` points this harness at a local OpenAI-compatible endpoint:
+# the `custom` provider, through a model preset (presets win over agents.defaults.model).
+[[local-provider]]
+file = "config"
+set = { "/providers/custom" = { apiBase = "{base_url}", apiKey = "local" }, "/modelPresets/local" = { provider = "custom", model = "{model}" }, "/agents/defaults/modelPreset" = "local" }

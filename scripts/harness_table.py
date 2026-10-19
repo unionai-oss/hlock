@@ -68,6 +68,17 @@ def project_instructions(p: dict) -> list[str]:
     return [i for i in p.get("instructions") or [] if not i.startswith(("{root}", "~"))]
 
 
+def all_instructions(p: dict) -> str:
+    """Every instruction file, grouped by directory, with `{root}` spelled as the default
+    config root: `AGENTS.md`; `~/.hermes/`: `SOUL.md`."""
+    root = (p.get("config-root") or {}).get("default") or "{root}"
+    dirs: dict[str, list[str]] = {}
+    for i in p.get("instructions") or []:
+        d, _, name = i.replace("{root}", root).rpartition("/")
+        dirs.setdefault(d, []).append(name)
+    return "; ".join(f"`{d}/`: {code(names)}" if d else code(names) for d, names in dirs.items()) or NO
+
+
 def table(header: list[str], rows: list[list[str]]) -> str:
     lines = ["| " + " | ".join(header) + " |", "|" + "---|" * len(header)]
     lines += ["| " + " | ".join(r) + " |" for r in rows]
@@ -78,28 +89,41 @@ def localize_cell(p: dict) -> str:
     # Mirrors `is_local_harness` in crates/harness-lock-core/src/localize.rs.
     if not p.get("local-models"):
         return NO
-    return YES if p.get("open-source") else "with `--harness`"
+    if not p.get("open-source"):
+        return "with `--harness`"
+    # `localize` picks it, but without `local-provider` you point it at the endpoint
+    return YES if p.get("local-provider") else "by hand"
 
 
 def render(harnesses: list[dict], runtimes: list[dict]) -> dict[str, str]:
-    clis = [p for p in harnesses if p["kind"] == "cli"]
+    clis = [p for p in harnesses if p["kind"] == "cli" and not p.get("autonomous")]
+    autonomous = [p for p in harnesses if p["kind"] == "cli" and p.get("autonomous")]
     frameworks = [p for p in harnesses if p["kind"] == "framework"]
-    return {
-        "clis": table(
+
+    def overview(group: list[dict]) -> str:
+        return table(
             ["Harness", "Vendor", "Name in hlock", "Support", "Open source", "Installs from"],
             [[name_cell(p), p.get("vendor") or NO, id_cell(p), p.get("support") or "basic",
               mark(p.get("open-source")),
               code(dict.fromkeys(i["method"] for i in p.get("install") or []))]
-             for p in clis],
-        ),
-        "capture": table(
+             for p in group],
+        )
+
+    def capture(group: list[dict], instructions) -> str:
+        return table(
             ["Harness", "Model", "Providers", "MCP servers", "Skills", "Plugins", "Instructions", "`localize`"],
             [[p["name"], mark(p["model"]["default"]), mark((p.get("providers") or {}).get("source")),
               mark(p["mcp"]["sources"]), mark(p["skills"]["dirs"]),
               ", ".join(dict.fromkeys(b["kind"] + "s" for b in p.get("bundles") or [])) or NO,
-              code(project_instructions(p)), localize_cell(p)]
-             for p in clis],
-        ),
+              instructions(p), localize_cell(p)]
+             for p in group],
+        )
+
+    return {
+        "clis": overview(clis),
+        "capture": capture(clis, lambda p: code(project_instructions(p))),
+        "autonomous": overview(autonomous),
+        "autonomous-capture": capture(autonomous, all_instructions),
         "frameworks": table(
             ["Framework", "Vendor", "Name in hlock", "Packages pinned", "Instructions", "Skills"],
             [[name_cell(p), p.get("vendor") or NO, id_cell(p),

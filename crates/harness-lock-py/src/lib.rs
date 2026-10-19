@@ -609,7 +609,7 @@ fn harnesses(probe: bool, manifest: Option<String>) -> PyResult<String> {
                 core::profiles::Probe { id: h.id.clone(), active: h.is_active(&ctx), ..Default::default() }
             };
             serde_json::json!({
-                "id": h.id, "name": h.name, "kind": h.kind, "aliases": h.aliases, "support": h.support,
+                "id": h.id, "name": h.name, "kind": h.kind, "autonomous": h.autonomous, "aliases": h.aliases, "support": h.support,
                 "origin": h.origin, "probe": p,
             })
         })

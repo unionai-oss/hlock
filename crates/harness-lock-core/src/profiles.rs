@@ -32,6 +32,12 @@ const BUILTIN_HARNESSES: &[(&str, &str)] = &[
     ("copilot-cli", include_str!("../profiles/harnesses/copilot-cli.toml")),
     ("goose", include_str!("../profiles/harnesses/goose.toml")),
     ("amp", include_str!("../profiles/harnesses/amp.toml")),
+    // autonomous agents: long-running gateways (`autonomous = true`)
+    ("openclaw", include_str!("../profiles/harnesses/openclaw.toml")),
+    ("nanobot", include_str!("../profiles/harnesses/nanobot.toml")),
+    ("picoclaw", include_str!("../profiles/harnesses/picoclaw.toml")),
+    ("zeroclaw", include_str!("../profiles/harnesses/zeroclaw.toml")),
+    ("ironclaw", include_str!("../profiles/harnesses/ironclaw.toml")),
     // frameworks: code harnesses a project builds on (`[harnesses.<id>] framework = …`)
     ("pydantic-ai", include_str!("../profiles/harnesses/pydantic-ai.toml")),
     ("deepagents", include_str!("../profiles/harnesses/deepagents.toml")),
@@ -174,7 +180,7 @@ pub struct FileSpec {
     pub path: String,
     /// Location when the config root is relocated (for files that live outside it).
     pub isolated: Option<String>,
-    /// `json` | `jsonc` | `toml` | `yaml`
+    /// `json` | `jsonc` | `json5` | `toml` | `yaml`
     pub format: String,
     /// `whole` (restore the file) | `pointers` (restore only `pointers`) | `record` (digest only)
     pub restore: String,
@@ -262,6 +268,16 @@ pub struct LaunchSpec {
 pub struct LocalProvider {
     pub file: String,
     pub set: BTreeMap<String, serde_json::Value>,
+    /// Apply only when localizing onto one of these runtimes (empty: any). Entries
+    /// apply in order, so a runtime-specific entry after a generic one overrides it.
+    pub runtimes: Vec<String>,
+}
+
+impl LocalProvider {
+    /// Whether this entry applies on `runtime` (`None`: an API provider, not a runtime).
+    pub fn applies_to(&self, runtime: Option<&str>) -> bool {
+        self.runtimes.is_empty() || runtime.is_some_and(|rt| self.runtimes.iter().any(|r| r == rt))
+    }
 }
 
 /// An API provider a harness supports, and the environment variable holding its key.
@@ -341,6 +357,10 @@ pub struct HarnessProfile {
     /// `cli` (an installed agent CLI), `framework` (a Python/JS agent library), or
     /// `custom` (a project's own agent, declared under `[harnesses.<id>]`).
     pub kind: String,
+    /// A long-running, self-directed agent (a gateway with chat channels, schedules
+    /// and memory) rather than a session a person drives. Docs and `hlock harness list`
+    /// group these apart; everything else treats them like any other `cli` harness.
+    pub autonomous: bool,
     pub aliases: Vec<String>,
     pub vendor: Option<String>,
     pub homepage: Option<String>,
@@ -1005,20 +1025,33 @@ mod tests {
         let r = Registry::builtin();
         assert!(r.harnesses.len() >= 10);
         for id in ["claude-code", "codex", "pi", "opencode", "hermes", "cursor-agent"] {
-            let h = r.harness(id).unwrap();
-            assert_eq!(h.support, "full", "{id}");
+            assert_eq!(r.harness(id).unwrap().support, "full", "{id}");
+        }
+        for h in &r.harnesses {
+            let id = &h.id;
             for (fid, f) in &h.files {
-                assert!(["json", "jsonc", "toml", "yaml"].contains(&f.format.as_str()), "{id}.{fid}");
+                assert!(["json", "jsonc", "json5", "toml", "yaml"].contains(&f.format.as_str()), "{id}.{fid}");
                 assert!(["whole", "pointers", "record"].contains(&f.restore.as_str()), "{id}.{fid}");
             }
             // every `<file>#<pointer>` reference names a declared file
-            let refs = h.model.default.iter().chain(&h.model.small).chain(&h.model.provider).chain(&h.mcp.sources);
+            let refs = h.model.default.iter().chain(&h.model.small).chain(&h.model.provider).chain(&h.model.base_url).chain(&h.mcp.sources).chain(&h.mcp.write);
             for r in refs {
                 if let Some((file, _)) = r.split_once('#') {
                     assert!(h.files.contains_key(file), "{id}: {r}");
                 }
             }
+            for lp in &h.local_provider {
+                assert!(h.files.contains_key(&lp.file), "{id}: local-provider file {}", lp.file);
+                assert!(lp.runtimes.iter().all(|rt| r.runtime(rt).is_some()), "{id}: {:?}", lp.runtimes);
+            }
         }
+        // autonomous agents are agent CLIs, grouped apart in docs and `hlock harness list`
+        for id in ["hermes", "openclaw", "nanobot", "picoclaw", "zeroclaw", "ironclaw"] {
+            let h = r.harness(id).unwrap();
+            assert!(h.autonomous && h.kind == "cli" && h.open_source == Some(true), "{id}");
+        }
+        assert_eq!(r.harness("clawdbot").unwrap().id, "openclaw");
+        assert!(!r.harness("claude-code").unwrap().autonomous);
         for fw in ["pydantic-ai", "deepagents", "langgraph", "openai-agents", "claude-agent-sdk"] {
             let h = r.harness(fw).unwrap();
             assert_eq!(h.kind, "framework", "{fw}");
