@@ -6,7 +6,7 @@ instructions file. It works on your laptop. This walkthrough pins all of it into
 back on another machine, and starts sessions from it. It takes about five minutes.
 
 The examples use Claude Code. The same commands work with Codex, Pi, OpenCode, Cursor,
-Gemini CLI, and the [other supported harnesses](../guides/harnesses.md).
+Gemini CLI, and the [other supported harnesses](../reference/harnesses.md).
 
 ## 1. Pin your setup
 
