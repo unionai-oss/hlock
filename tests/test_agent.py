@@ -115,7 +115,7 @@ def test_builtin_is_the_default(project, monkeypatch):
     assert (h["name"], h["version"], h["source"]) == ("builtin", harness_lock.__version__, f"hlock@{harness_lock.__version__}")
     assert [(x["provider"], x["model"], x["params"]) for x in lock["llm"]] == [
         ("anthropic", "claude-sonnet-5-5", {"key-env": "ANTHROPIC_API_KEY"})]
-    assert lock["policy"]["tool-allowlist"] == ["hlock", "git log", "git show", "git diff", "git status"]
+    assert lock["policy"]["tool-allowlist"] == ["@hlock", "git log", "git show", "git diff", "git status"]
     assert 'harness = "builtin"' in (project / "harness.meta.toml").read_text()
     for p in project.rglob("*"):
         if p.is_file():

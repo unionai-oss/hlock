@@ -123,3 +123,58 @@ harness = ["reference"]
     assert_eq!(m.candidates.harness.len(), 1);
     assert_eq!(m.candidates.harness[0].name, "reference");
 }
+
+fn pack_with_graders(root: &Path, judge: bool) -> PathBuf {
+    fs::create_dir_all(root.join("count/solution")).unwrap();
+    fs::write(root.join("count/prompt.md"), "Write the word count to count.txt.\n").unwrap();
+    fs::write(root.join("count/solution/count.txt"), "9\n").unwrap();
+    let mut toml = String::from("[pack]\nname = \"t/graded\"\nversion = \"0.1.0\"\ndomain = \"demo\"\n");
+    if judge {
+        // a judge that can't be reached: grades fail, but the evidence names it
+        toml.push_str("\n[pack.judge]\nmodel = \"local:judge-1\"\nbase-url = \"http://127.0.0.1:9\"\n");
+    }
+    toml.push_str("\n[[task]]\nid = \"count\"\nprompt = \"count/prompt.md\"\nsolution = \"count/solution/\"\nexpected = { artifacts = [\"count.txt\"] }\n");
+    toml.push_str(if judge {
+        "graders = [{ type = \"artifact\", path = \"count.txt\", equals = \"9\" }, { type = \"judge\", criteria = [\"Is a number\"] }]\n"
+    } else {
+        "graders = [{ type = \"artifact\", path = \"count.txt\", equals = \"9\" }]\n"
+    });
+    fs::write(root.join("pack.toml"), toml).unwrap();
+    root.to_path_buf()
+}
+
+fn files_containing(dir: &Path, needle: &str) -> usize {
+    let Ok(rd) = fs::read_dir(dir) else { return 0 };
+    rd.flatten()
+        .map(|e| {
+            let p = e.path();
+            if p.is_dir() { files_containing(&p, needle) } else { fs::read_to_string(&p).map(|t| t.contains(needle) as usize).unwrap_or(0) }
+        })
+        .sum()
+}
+
+#[test]
+fn content_graders_pass_on_the_reference_harness_and_judges_reach_the_evidence() {
+    let base = std::env::temp_dir().join(format!("hlock-resolver-graded-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&base);
+    for judge in [false, true] {
+        let root = base.join(if judge { "judged" } else { "plain" });
+        let pack = pack_with_graders(&root, judge);
+        let mut m = make_manifest(&pack);
+        m.candidates.llm.get_mut("planner").unwrap().any_of = vec!["reference:qwen-32b".into()];
+        m.candidates.decision = vec!["none".into()];
+        let mut resolver = Resolver::new(m, root.join(".harnesslock"));
+        let lock = resolver.resolve_lock().unwrap();
+        if judge {
+            assert_eq!(lock.evidence.judge.as_deref(), Some("local:judge-1"));
+            assert_eq!(lock.evidence.success_rate["mean"], 0.0, "the unreachable judge fails every trial");
+            assert!(files_containing(&root.join(".harnesslock/store"), "cannot reach") > 0, "grade details go in the traces");
+        } else {
+            assert_eq!(lock.evidence.judge, None);
+            // the reference harness left the solution, so `equals = "9"` passed
+            assert_eq!(lock.evidence.success_rate["mean"], 1.0);
+            assert!(files_containing(&root.join(".harnesslock/store"), "\"grader\":\"artifact:count.txt\"") > 0);
+        }
+    }
+    let _ = fs::remove_dir_all(&base);
+}

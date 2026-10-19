@@ -185,7 +185,7 @@ strategy = "grid"
 | `[policy]` | `retries`, `max-steps`, `human-approval`, `risky-actions`, `tool-allowlist`, `sandbox` |
 | `[context]` | Context `isolation` and `compaction` settings |
 | `[[tool]]`, `[[skill]]`, `[[instructions]]` | MCP servers, skills, and instruction files, each with a source or digest. A pinned lock fills these in; see below. |
-| `[evidence]` | The eval pack and split measured, the trial count, and success-rate, cost, and latency statistics |
+| `[evidence]` | The eval pack and split measured, the trial count, success-rate, cost, and latency statistics, and the `judge` model when the packs have [`judge` graders](../guides/eval-packs.md#judges) |
 | `[verify]` | Runtime verification thresholds: `canary-tasks`, `min-success-rate`, `fingerprint-tolerance` |
 | `[provenance]` | The backend that produced the lock, and the search settings |
 

@@ -20,7 +20,7 @@ key-env = "ANTHROPIC_API_KEY" # the variable holding the API key; the key is nev
 
 [agent]
 # commands that run without asking; others need your OK, and unattended runs refuse them
-allow = ["hlock", "git log", "git show", "git diff", "git status"]
+allow = ["@hlock", "git log", "git show", "git diff", "git status"]
 
 [run]
 mode = "interactive"          # or "headless"
@@ -64,7 +64,7 @@ What the built-in agent may do. Other harnesses use their own permission setting
 
 | Key | Default | Description |
 |---|---|---|
-| `allow` | `["hlock", "git log", "git show", "git diff", "git status"]` | Commands that run without asking. Each entry matches a plain command (no pipes, redirects, `;`, `&&`, `$(…)`) whose first words are the entry's words. |
+| `allow` | `["@hlock", "git log", "git show", "git diff", "git status"]` | Commands that run without asking. Each entry matches a plain command (no pipes, redirects, `;`, `&&`, `$(…)`) whose first words are the entry's words. An entry starting with `!` refuses commands that start with its words and have all of its flags. `@hlock` is the hlock commands that don't run project code or install software; see [the built-in agent](../guides/meta.md#the-built-in-agent). |
 | `max-steps` | `60` | Model turns per job |
 | `timeout-seconds` | `300` | Time limit for each command |
 

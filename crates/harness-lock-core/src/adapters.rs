@@ -90,7 +90,12 @@ impl HarnessAdapter for ReferenceAdapter {
                 }
             }
             if any_ok {
-                for art in &expected {
+                // a simulated success leaves the task's solution, when it has one
+                let solution = task.solution.as_ref().zip(task.pack_dir.as_ref()).map(|(s, d)| d.join(s)).filter(|p| p.is_dir());
+                if let Some(sol) = &solution {
+                    copy_dir(sol, workspace);
+                }
+                for art in expected.iter().filter(|_| solution.is_none()) {
                     let out = workspace.join(art);
                     if let Some(parent) = out.parent() {
                         let _ = fs::create_dir_all(parent);
@@ -120,7 +125,7 @@ impl HarnessAdapter for ReferenceAdapter {
     }
 }
 
-fn copy_dir(src: &Path, dst: &Path) {
+pub(crate) fn copy_dir(src: &Path, dst: &Path) {
     let _ = fs::create_dir_all(dst);
     if let Ok(rd) = fs::read_dir(src) {
         for entry in rd.flatten() {

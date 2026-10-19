@@ -211,11 +211,28 @@ What it may run is up to you:
 
 The allowlist matches whole words at the start of a plain command: `git log` allows
 `git log -5` but not `git push`, and a command with pipes, redirects, `;`, `&&` or `$(…)`
-never matches. The default allows `hlock` and read-only `git`. Change it in `[agent]`:
+never matches. An entry starting with `!` refuses a command that starts with its words
+and has all of its flags: `!npm install --global` refuses `npm install --global x`.
+
+The default allows `@hlock` and read-only `git`. `@hlock` stands for the hlock commands
+the jobs need that don't run code from the project or install software:
+
+- `hlock check`, `show`, `tree`, `harness list`, `harness show`, `runtime list`, and
+  `backend status`
+- `hlock evals init` (but not with `--skill-dir`, which writes outside the project),
+  `evals templates`, and `evals check`, but not `evals check --run` or `evals grade`,
+  which run the pack's test scripts
+- `hlock meta check`, `meta show`, `meta jobs`, and `meta verify`
+- `hlock sync`, but not with `--install`, `--pull`, `--build`, `--in-place`, or `--prefix`
+
+The agent can edit files in the project, so a command that runs what's written there,
+such as `hlock resolve` (code harnesses) or `hlock evals check --run` (test graders), would
+let it run anything. Allow plain `"hlock"` to permit every hlock command. Change the list in
+`[agent]`:
 
 ```toml title="harness.meta.toml"
 [agent]
-allow = ["hlock", "git log", "git show", "brew install", "npm install"]
+allow = ["@hlock", "git log", "git show", "brew install", "npm install"]
 max-steps = 60                # model turns per job
 timeout-seconds = 300         # per command
 ```
@@ -274,7 +291,7 @@ $ hlock meta show
 │  llm · default  anthropic:claude-sonnet-5-5  │
 │                                              │
 ╰──────────────────────────────────────────────╯
-allowed hlock, git log, git show, git diff, git status  (without asking; at most 60
+allowed @hlock, git log, git show, git diff, git status  (without asking; at most 60
 steps a job)
 api key ANTHROPIC_API_KEY is set
 ```

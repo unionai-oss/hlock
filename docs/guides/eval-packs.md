@@ -17,7 +17,7 @@ hello-world pack that runs as is:
 ```console
 $ hlock evals init
 ✓ wrote evals/pack.toml  (hello-world, 3 tasks)
-  6 files under evals
+  10 files under evals
 next → hlock evals check ./evals  ·  hlock init --pack ./evals
 ```
 
@@ -56,7 +56,8 @@ timeout-seconds = 900
 ```
 
 A session that created no file gets a `TODO(hlock)` slot for one, which `hlock evals check`
-reports until you fill it in. The drafts are a start, not a finished pack: a request often
+reports until you fill it in. A drafted task only checks that its files exist, and `hlock
+evals check` warns about that too: add [graders](#grading) that check what's in them. The drafts are a start, not a finished pack: a request often
 leans on its session ("fix it like before"), and each task's `workspace/` starts empty. The
 `hlock-eval-pack` skill written next to the pack tells your agent how to review them with
 you: which tasks to keep, how to make each prompt stand on its own, and which files to copy
@@ -75,7 +76,8 @@ left out, and nothing leaves your machine.
 ### Fill in a template with your agent
 
 For a real pack, start from a template. Each one writes task slots for one kind of work,
-marked `TODO(hlock)`:
+marked `TODO(hlock)`, and a grader stub for each: a `check.py` [test script](#tests) for work a
+program can check, or a `rubric.md` for a [judge](#judges):
 
 ```console
 $ hlock evals templates
@@ -106,7 +108,7 @@ slots with real tasks from your project:
 ```console
 $ hlock evals init -t coding
 ✓ wrote evals/pack.toml  (coding template, 10 task slots)
-  21 files under evals
+  41 files under evals
 ✓ wrote .agents/skills/hlock-eval-pack/SKILL.md  (Agent Skill hlock-eval-pack)
 open your agent here and ask it to fill in ./evals with the hlock-eval-pack skill
 next → hlock evals check ./evals
@@ -120,8 +122,10 @@ Then open your agent in the project and ask it to fill in `./evals` with the
 - propose a list of tasks and wait for you to agree before writing anything;
 - copy only the files each task needs into its `workspace/`, with no secrets or personal
   data;
-- give every task an output file that can be checked, and remove each `TODO(hlock)`;
-- run `hlock evals check` until it reports no errors.
+- give every task a grader that checks the result, not just that a file exists, and a
+  known-good result in its `solution/` directory, such as the code after the real fix;
+- remove each `TODO(hlock)`;
+- run `hlock evals check --run` until it reports no errors.
 
 To have hlock run the agent and check the pack itself, use the
 [meta harness](meta.md#bootstrap-evals): `hlock meta run bootstrap-evals -t coding` writes
@@ -141,21 +145,26 @@ on errors:
 ```console
 $ hlock evals check
 my-service/evals 0.1.0  10 tasks · evals
-  ✗ pack.toml still has 20 TODO(hlock) (lines 10, 15, 21, 26, 32, …)
+  ✗ pack.toml still has 20 TODO(hlock) (lines 13, 19, 25, 31, 37, …)
   ✗ bug_fix_1  bug_fix_1/prompt.md still has 2 TODO(hlock)
+  ✗ bug_fix_1  tests grader file bug_fix_1/check.py still has 2 TODO(hlock)
   ✗ feature_1  feature_1/prompt.md still has 2 TODO(hlock)
+  ✗ feature_1  tests grader file feature_1/check.py still has 2 TODO(hlock)
   …
-✗ 11 errors, 0 warnings
+✗ 21 errors, 0 warnings
 ```
 
 | Errors (the pack isn't usable yet) | Warnings (it runs, but the evidence is weak) |
 |---|---|
 | `[pack]` is missing `name`, `version`, or `domain` | A task has no expected artifacts or graders, so it always passes |
-| A `TODO(hlock)` is left in `pack.toml` or a prompt | An expected artifact is already in the fixtures, so it passes without any work |
-| A task id is missing or duplicated | A grader type that isn't supported yet |
-| A prompt file is missing or empty, or a fixtures directory is missing | Fewer than 10 tasks, so the holdout split is too small |
+| A `TODO(hlock)` is left in `pack.toml`, a prompt, a test script, or a rubric | A task only checks that its files exist |
+| A task id is missing or duplicated | An expected artifact is already in the fixtures, so it passes without any work |
+| A prompt file is missing or empty, or a fixtures or solution directory is missing | The pack has `judge` graders but no judge model |
+| A grader doesn't parse, or a file it names is missing | A `trace` grader, which isn't supported yet and is skipped |
+| | Fewer than 10 tasks, so the holdout split is too small |
 
-`hlock resolve` also warns about any pack with errors before it runs.
+`hlock resolve` also warns about any pack with errors before it runs. To check the graders
+themselves, run `check --run` (see [Check your graders](#check-your-graders)).
 
 ## Layout
 
@@ -166,10 +175,14 @@ evals/
 ├── pack.toml
 ├── clean_csv/
 │   ├── prompt.md
-│   └── workspace/
-│       └── orders.csv
+│   ├── check.py            # a tests grader
+│   ├── workspace/          # fixtures: what the run starts from
+│   │   └── orders.csv
+│   └── solution/           # what a correct run leaves
+│       └── cleaned.csv
 └── summarize_report/
-    └── prompt.md
+    ├── prompt.md
+    └── rubric.md           # a judge grader's rubric
 ```
 
 ## `pack.toml`
@@ -181,12 +194,17 @@ version = "0.1.0"
 license = "Apache-2.0"
 domain = "research-analyst"
 
+[pack.judge]
+model = "anthropic:claude-sonnet-5-5"
+
 [[task]]
 id = "clean_csv"
 prompt = "clean_csv/prompt.md"
 fixtures = "clean_csv/workspace/"
+solution = "clean_csv/solution/"
 tools = ["python"]
 expected = { artifacts = ["cleaned.csv"] }
+graders = ["tests:clean_csv/check.py"]
 tags = ["data-cleaning"]
 timeout-seconds = 600
 
@@ -195,6 +213,7 @@ id = "summarize_report"
 prompt = "summarize_report/prompt.md"
 tools = ["python", "filesystem"]
 expected = { artifacts = ["summary.md"] }
+graders = ["judge:summarize_report/rubric.md"]
 tags = ["writing"]
 ```
 
@@ -206,6 +225,7 @@ tags = ["writing"]
 | `version` | yes | Pack version. Change it when you change the tasks. |
 | `domain` | yes | The domain the pack represents |
 | `license` | no | License of the pack contents |
+| `judge` | no | The model that scores `judge` graders: a table with `model`, and optionally `base-url` and `key-env`. See [Judges](#judges). |
 
 ### `[[task]]`
 
@@ -214,18 +234,210 @@ tags = ["writing"]
 | `id` | yes | | Unique task id within the pack |
 | `prompt` | yes | | Path to the prompt file, relative to the pack directory |
 | `fixtures` | no | | Directory copied into the task's workspace before the run |
+| `solution` | no | | Directory with the files a correct run leaves, used to [check the graders](#check-your-graders) |
 | `tools` | no | `[]` | Tools the task may use |
-| `expected` | no | `{}` | What a successful run produces, e.g. `{ artifacts = ["out.csv"] }` |
-| `graders` | no | `[]` | Grader ids. Empty means artifact checks on `expected.artifacts`. |
+| `expected` | no | `{}` | What a successful run produces, e.g. `{ artifacts = ["out.csv"] }`. Every file listed must exist after the run. |
+| `graders` | no | `[]` | How the run is scored: strings or tables, see [Grading](#grading). Empty means only the `expected.artifacts` check. |
 | `tags` | no | `[]` | Free-form labels for slicing results |
 | `timeout-seconds` | no | `600` | Per-task timeout |
 
 ## Grading
 
-Today, a task succeeds when every file in `expected.artifacts` exists in the task's
-workspace after the run. This is the `artifact:` grader, and it's the default when
-`graders` is empty. Richer graders (tests, rubric judges) are on the
-[roadmap](https://github.com/unionai-oss/hlock/blob/main/specs/v0.md).
+A run passes when every grader on its task passes. Each grader also scores the run from 0
+to 1, and the run's score is the mean, so a near miss counts for more than nothing. Every
+file in `expected.artifacts` must exist after the run, so a task with no `graders` is graded
+on that alone.
+
+`graders` is a list. Each entry is a short string, such as `"tests:clean_csv/check.py"`, or a
+table with a `type`. There are three types:
+
+| Type | Checks | Use it for |
+|---|---|---|
+| `artifact` | Output files exist and match expected content | Exact answers, required phrases, golden files |
+| `tests` | A script or command, run in the workspace after the agent, exits 0 | Code, data, and anything a program can check |
+| `judge` | A model scores the output against a rubric | Writing and judgment calls a program can't check |
+
+Prefer the first two: they're fast, free, and give the same answer every time. Use a judge
+only where a program can't decide. Paths to grader files are relative to the pack directory.
+
+### Artifact checks
+
+```toml
+graders = [
+  { type = "artifact", path = "count.txt", equals = "9" },
+  { type = "artifact", path = "report.md", contains = ["Q3 revenue", "$1.2M"] },
+  { type = "artifact", path = "cleaned.csv", same-as = "clean_csv/expected.csv" },
+]
+```
+
+| Key | Description |
+|---|---|
+| `path`, `paths` | The workspace files to check. Default: `expected.artifacts`. |
+| `equals` | The file's text must be exactly this, ignoring whitespace around it and line-ending style |
+| `same-as` | The file must match this file in the pack, the same way |
+| `contains` | Strings the file must contain (a string or a list) |
+
+With no content keys, it checks that the files exist. `"artifact:out.csv"` is the short
+form for that. The score is the fraction of files that pass.
+
+### Tests
+
+A `tests` grader runs a script or a command in the task's workspace after the agent
+finishes. Exit code 0 passes:
+
+```toml
+graders = [
+  "tests:greet_people/check.py",
+  { type = "tests", command = "python -m pytest -q tests/", files = ["fix_pagination/tests"], timeout-seconds = 120 },
+]
+```
+
+| Key | Default | Description |
+|---|---|---|
+| `script` | | A file in the pack. A `.py` file runs with `python3` (or `HL_PYTHON`); anything else runs directly. `"tests:<path>"` is the short form. |
+| `command` | | A shell command, instead of a `script` |
+| `files` | `[]` | Files or directories in the pack that are copied into the workspace, by name, before it runs. They replace anything the agent wrote with the same name. |
+| `timeout-seconds` | `300` | The command is stopped, and fails, after this long |
+
+Keep tests the agent shouldn't see out of `workspace/`, and copy them in with `files`.
+Then the agent can't read them or change them.
+
+The command gets these environment variables:
+
+| Variable | Value |
+|---|---|
+| `HLOCK_WORKSPACE` | The workspace, also the working directory |
+| `HLOCK_PACK_DIR` | The pack directory, for reference data kept next to the script |
+| `HLOCK_TASK` | The task id |
+| `HLOCK_GRADE` | A path where the command may write `{"score": 0.5, "success": false, "detail": "…"}` |
+
+Without a `HLOCK_GRADE` file, the score is 1 on exit code 0 and 0 otherwise. Each key in
+the file is optional, and `success` defaults to the exit code. The last lines of output
+from a failing command become the grade's detail. Here is the hello-world pack's script,
+which gives partial credit:
+
+```python title="evals/greet_people/check.py"
+"""Grader for greet_people: one `Hello, <name>!` line per name in names.csv, in order.
+
+hlock runs this in the task's workspace after the agent finishes. Exit 0 passes. The
+score written to $HLOCK_GRADE gives partial credit for the lines that are right.
+"""
+
+import csv
+import json
+import os
+import sys
+
+want = [f"Hello, {row['name']}!" for row in csv.DictReader(open("names.csv"))]
+try:
+    got = [line.strip() for line in open("greetings.md") if line.strip()]
+except FileNotFoundError:
+    sys.exit("greetings.md is missing")
+right = sum(a == b for a, b in zip(got, want))
+detail = "" if got == want else f"{right} of {len(want)} lines right: expected {want}, got {got}"
+if "HLOCK_GRADE" in os.environ:
+    with open(os.environ["HLOCK_GRADE"], "w") as f:
+        json.dump({"score": right / len(want), "detail": detail}, f)
+sys.exit(0 if got == want else 1)
+```
+
+!!! warning "Test commands run on your machine"
+    A `tests` grader runs with your permissions, the same as the agent being measured, and
+    it often runs code the agent wrote. Read the graders in a pack you didn't write before
+    you resolve against it.
+
+### Judges
+
+A `judge` grader sends the task's prompt, a rubric, and the files the run left (the first
+20,000 characters of each) to a model, and asks for a score:
+
+```toml
+graders = [
+  "judge:summarize_report/rubric.md",
+  { type = "judge", criteria = [
+      "States Q3 revenue and its change from Q2",
+      "Is under 200 words",
+      "Names the report it summarizes",
+  ], pass = 0.6 },
+]
+```
+
+| Key | Default | Description |
+|---|---|---|
+| `rubric` | | A file in the pack describing a good result. The model scores the files from 0 to 1 against it. `"judge:<path>"` is the short form. |
+| `criteria` | | A list of points, instead of a `rubric`. The model says which ones the files meet, and the score is the fraction met. |
+| `artifacts` | `expected.artifacts` | The workspace files the model reads |
+| `pass` | `0.7` | The lowest score that passes |
+
+Criteria give steadier scores than a free-form rubric, because the model makes one yes or
+no call per point. The grade's detail lists the unmet criteria and the model's reason.
+
+The judge model comes from `[evals.judge]` in `harness.toml`, and otherwise from
+`[pack.judge]` in `pack.toml`, so a pack can name the judge its rubrics were written for and
+a project can override it:
+
+```toml title="harness.toml"
+[evals.judge]
+model = "anthropic:claude-sonnet-5-5"   # provider:model
+# base-url = "http://localhost:11434/v1"  # an OpenAI-compatible endpoint, e.g. a local model
+# key-env = "MY_JUDGE_KEY"                 # where the API key is read from
+```
+
+| Provider | API key variable |
+|---|---|
+| `anthropic` | `ANTHROPIC_API_KEY` |
+| `openai` | `OPENAI_API_KEY` |
+| `google` | `GEMINI_API_KEY` |
+| `openrouter` | `OPENROUTER_API_KEY` |
+
+For any other provider, set `base-url` to an OpenAI-compatible endpoint. With a `base-url`
+the key is optional, which suits local runtimes such as Ollama. A judge grader fails when
+no judge model is set or the model can't be reached, and the grade's detail says why. The
+lock records the judge model in its evidence (`[evidence] judge`).
+
+### Check your graders
+
+A grader can be wrong in two ways: it passes work that wasn't done, or it fails work that
+was. Give each task a `solution` directory holding what a correct run leaves, such as the
+code after the real fix or the reply that was sent, and `hlock evals check --run` tests the
+graders both ways, judges aside. On the fixtures alone the graders should fail. On the
+fixtures plus the solution, they should pass:
+
+```console
+$ hlock evals check --run
+hlock-demo/evals 0.1.0  3 tasks · evals
+  ! 3 tasks leaves 1 for the holdout split; add tasks until there are at least 10
+✓ ready  (1 warning)
+next → hlock init --pack ./evals
+```
+
+A solution its graders fail is an error, and a task that passes with no work is a warning.
+`--run` runs the pack's test commands, in temporary directories.
+
+`hlock evals grade` grades one directory with all of a task's graders, judges included, and
+shows each result. Point it at the output of a real run to see why it failed, or leave the
+directory out to grade the task's solution:
+
+```console
+$ hlock evals grade greet_people
+greet_people  its solution · score 1.00
+  ✓ artifact:greetings.md  1.00
+  ✓ tests:greet_people/check.py  1.00
+✓ passed
+
+$ hlock evals grade greet_people run
+greet_people  run · score 0.67
+  ✓ artifact:greetings.md  1.00
+  ✗ tests:greet_people/check.py  0.33
+      1 of 3 lines right: expected ['Hello, Ada!', 'Hello, Grace!', 'Hello, Linus!'], got ['Hello, Ada!', 'Hi, Grace!']
+✗ 1 of 2 graders failed
+```
+
+It grades a copy, so the directory isn't changed. Try a judge on the solution and on a
+weak answer before you trust it.
+
+On the offline `reference` harness, a simulated successful run leaves the task's solution
+in the workspace, so a pack's graders run for real even in the [demo](resolve.md).
 
 ## Using a pack
 
@@ -256,6 +468,8 @@ exact tasks.
 - **Keep the split meaningful.** With fewer than about ten tasks, the holdout split is
   too small to say much. Add tasks before you trust a narrow win.
 - **Make success checkable.** Every task should produce something a grader can check
-  without a human.
+  without a human, and its graders should check what's in it, not just that it exists.
+- **Keep a solution.** A known-good result for each task lets `hlock evals check --run`
+  prove the graders work.
 - **Version the pack.** Bump `version` when tasks change, so evidence from different
   versions isn't compared by accident.

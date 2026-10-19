@@ -192,6 +192,21 @@ def test_bootstrap_evals_adds_to_a_complete_pack(project, monkeypatch):
     assert (project["project"] / "evals/pack.toml").read_text() == PACK  # nothing scaffolded over it
 
 
+def test_bootstrap_evals_verify_uses_the_manifest_judge(project, monkeypatch):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "k")
+    assert invoke("meta", "init", "--harness", "pi").exit_code == 0
+    pack = project["project"] / "evals"
+    (pack / "one").mkdir(parents=True)
+    (pack / "one/prompt.md").write_text("do it\n")
+    (pack / "one/rubric.md").write_text("- Names the cause.\n")
+    (pack / "pack.toml").write_text(PACK + 'graders = ["judge:one/rubric.md"]\n')
+    r = invoke("meta", "verify", "bootstrap-evals", "--json")
+    assert "judge graders need a model" in r.output
+    (project["project"] / "harness.toml").write_text('[evals]\npacks = ["./evals"]\n\n[evals.judge]\nmodel = "openai:gpt-x"\n')
+    r = invoke("meta", "verify", "bootstrap-evals", "--json")
+    assert r.exit_code == 0 and "judge graders need a model" not in r.output, r.output
+
+
 def test_install_job(project, monkeypatch):
     home = project["home"]
     (home / ".claude/skills/my-skill").mkdir(parents=True)
