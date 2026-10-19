@@ -152,8 +152,9 @@ def test_check_reports_a_changed_policy(project, fake):
 
 
 def test_hook_defers_without_a_lock_or_a_model(project):
-    r = invoke("decide", "hook", "stop", "--format", "codex", "--lock", "nope.lock", "-v", input="{}")
-    assert r.exit_code == 0 and r.stdout == ""
+    # no decision: exit 0 and print nothing (older click mixes -v's stderr into the output)
+    r = invoke("decide", "hook", "stop", "--format", "codex", "--lock", "nope.lock", input="{}")
+    assert r.exit_code == 0 and r.output == ""
 
 
 def test_pin_records_hermes_native_approvals(project):
