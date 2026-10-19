@@ -81,7 +81,8 @@ If you've used `uv`, `cargo`, or `npm`, you already know the shape of `hlock`:
     ---
 
     The harness version, models, MCP servers, skills, plugins, instruction files, and
-    config, each with a digest. [Claude Code, Codex, Pi, OpenCode, and more](reference/harnesses.md).
+    config, each with a digest. [Claude Code, Codex, Pi, OpenCode, autonomous agents like
+    OpenClaw, and more](reference/harnesses.md).
 
 -   :lucide-key-round:{ .lg .middle } **Secrets stay out**
 

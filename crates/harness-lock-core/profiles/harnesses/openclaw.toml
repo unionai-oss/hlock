@@ -1,0 +1,79 @@
+# Harness profile: OpenClaw (formerly Clawdbot, then Moltbot).
+id = "openclaw"
+name = "OpenClaw"
+kind = "cli"
+autonomous = true  # a gateway with chat channels, heartbeats, cron jobs and memory
+aliases = ["clawdbot", "moltbot"]
+homepage = "https://openclaw.ai"
+support = "basic"
+open-source = true
+local-models = true
+binaries = ["openclaw"]
+version = { args = ["--version"] }
+active-env = ["OPENCLAW_SHELL"]
+config-root = { env = "OPENCLAW_STATE_DIR", default = "~/.openclaw" }
+# The persona and operating files in the default workspace. MEMORY.md, memory/ and
+# BOOTSTRAP.md are left out: the agent writes them as it runs, so pinning them
+# would report drift after every conversation.
+instructions = [
+    "{root}/workspace/AGENTS.md",
+    "{root}/workspace/SOUL.md",
+    "{root}/workspace/IDENTITY.md",
+    "{root}/workspace/USER.md",
+    "{root}/workspace/TOOLS.md",
+]
+
+api-keys = [{ provider = "anthropic", env = "ANTHROPIC_API_KEY" }, { provider = "openai", env = "OPENAI_API_KEY" }, { provider = "google", env = "GEMINI_API_KEY" }]
+
+[[install]]
+method = "npm"
+package = "openclaw"
+[[install]]
+method = "script"
+command = "curl -fsSL https://openclaw.ai/install.sh | bash"
+
+[files.config]
+path = "{root}/openclaw.json"
+format = "json5"
+restore = "whole"
+# OpenClaw substitutes ${VAR} in any string value of the config.
+env-ref = "${{name}}"
+
+[model]
+# `agents.defaults.model` is either a "provider/model" string or { primary, fallbacks }
+default = ["config#/agents/defaults/model/primary", "config#/agents/defaults/model"]
+format = "provider/model"
+
+[providers]
+source = ["config#/models/providers"]
+base-url = ["/baseUrl", "/baseURL"]
+models = ["/models"]
+
+[mcp]
+sources = ["config#/mcp/servers"]
+write = "config#/mcp/servers"
+shape = "openclaw"
+
+[skills]
+dirs = ["{root}/workspace/skills", "{root}/workspace/.agents/skills", "~/.agents/skills", "{root}/skills"]
+write = "{root}/skills"
+
+[launch]
+# No model-flag: `--model` belongs to a subcommand (`agent exec`, `agent`), and a bare
+# `hlock launch` has none. A pinned OpenClaw lock restores the model with the config.
+prompt = ["agent", "exec", "{prompt}"]  # `hlock run`: one embedded turn, no gateway
+
+# How `hlock localize` points this harness at a local OpenAI-compatible endpoint.
+[[local-provider]]
+file = "config"
+set = { "/models/providers/{provider}" = { baseUrl = "{base_url}", api = "openai-completions", models = [{ id = "{model}", name = "{model}" }] }, "/agents/defaults/model/primary" = "{provider}/{model}" }
+# Ollama: the native API, since its /v1 endpoint makes tool calling unreliable in OpenClaw.
+[[local-provider]]
+file = "config"
+runtimes = ["ollama"]
+set = { "/models/providers/{provider}" = { baseUrl = "{host}", api = "ollama", apiKey = "ollama-local", models = [{ id = "{model}", name = "{model}" }] } }
+
+# How `hlock meta` sets an API provider and model.
+[[api-provider]]
+file = "config"
+set = { "/agents/defaults/model/primary" = "{provider}/{model}" }

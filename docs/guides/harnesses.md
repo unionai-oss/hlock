@@ -15,12 +15,20 @@ Agent CLIs
    pi            1.0.0               npm:@earendil-works/pi-coding-agen  full
                                      t@1.0.0
    opencode      1.18.18             brew:opencode@1.18.18               full
-   hermes        0.20.0              script@0.20.0                       full
    cursor-agent  2026.05.28-a70ca7c  script@2026.05.28-a70ca7c           full
    gemini-cli    —                                                       basic
    copilot-cli   —                                                       basic
    goose         —                                                       basic
    amp           —                                                       basic
+
+Autonomous agents
+  harness   installed  source         support
+  hermes    0.20.0     script@0.20.0  full
+  openclaw  —                         basic
+  nanobot   —                         basic
+  picoclaw  —                         basic
+  zeroclaw  —                         basic
+  ironclaw  —                         basic
 
 Frameworks
   harness           installed  source
@@ -31,7 +39,9 @@ Frameworks
 ● you're running inside Claude Code
 ```
 
-The `●` marks the harness hlock is running inside, detected from the variables each harness
+Autonomous agents, such as OpenClaw, are agent CLIs that run as long-lived gateways you
+message from chat apps. They're listed apart, and work with the same commands. The `●`
+marks the harness hlock is running inside, detected from the variables each harness
 sets in the processes it spawns. `source` is how the installed copy was installed, which is
 what a lock pins. `full` profiles are covered by tests for every harness-aware command;
 `basic` ones cover detection, version, MCP servers and skills.

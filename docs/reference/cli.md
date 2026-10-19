@@ -400,8 +400,9 @@ hlock tree
 
 ## `harness list`
 
-List every known harness (agent CLIs, frameworks, and project harnesses from
-`[harnesses.<id>]`) with the installed version and install source. `●` marks the harness
+List every known harness (agent CLIs, autonomous agents, frameworks, and project harnesses
+from `[harnesses.<id>]`) with the installed version and install source. `--json` marks
+autonomous agents with `"autonomous": true`. `●` marks the harness
 hlock is running inside. See [Harnesses](../guides/harnesses.md).
 
 ```bash

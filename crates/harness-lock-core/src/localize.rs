@@ -495,10 +495,28 @@ pub fn localize(source: &Lockfile, source_path: &Path, reg: &Registry, ctx: &Ctx
         lock.native.retain(|n| n.kind == "package");
         lock.config.clear();
         lock.skill.retain(|s| !matches!(s.origin.as_str(), "harness-builtin" | "bundled"));
-        if let Some(tpl) = target.instructions.iter().find(|i| i.starts_with("{root}/")) {
-            for i in lock.instructions.iter_mut().filter(|i| i.scope == "user") {
-                i.name = tpl.clone();
+        // each user-level file goes to its own file in the target, so two never share a path
+        let user: Vec<String> = lock.instructions.iter().filter(|i| i.scope == "user").map(|i| i.name.clone()).collect();
+        let mut dests = crate::launch::user_instruction_targets(target, &user).into_iter();
+        let mut dropped = Vec::new();
+        let has_dest = target.instructions.iter().any(|i| i.starts_with("{root}/"));
+        lock.instructions.retain_mut(|i| {
+            if i.scope != "user" || !has_dest {
+                return true;
             }
+            match dests.next().flatten() {
+                Some(tpl) => {
+                    i.name = tpl.to_string();
+                    true
+                }
+                None => {
+                    dropped.push(i.name.clone());
+                    false
+                }
+            }
+        });
+        if !dropped.is_empty() {
+            notes.push(format!("{} has no place for user instructions {}", target.name, dropped.join(", ")));
         }
     }
 
@@ -507,8 +525,9 @@ pub fn localize(source: &Lockfile, source_path: &Path, reg: &Registry, ctx: &Ctx
     let host = format!("http://localhost:{port}");
     let vars = [("provider", runtime.id.as_str()), ("model", default_model.as_str()), ("base_url", base_url.as_str()), ("host", host.as_str())];
     let mut per_file: BTreeMap<String, Map<String, Value>> = BTreeMap::new();
-    if target.kind == "cli" && !target.local_provider.is_empty() {
-        for lp in &target.local_provider {
+    let local_provider: Vec<_> = target.local_provider.iter().filter(|lp| lp.applies_to(Some(&runtime.id))).collect();
+    if target.kind == "cli" && !local_provider.is_empty() {
+        for lp in local_provider {
             let entry = per_file.entry(lp.file.clone()).or_default();
             for (ptr, v) in &lp.set {
                 let ptr = subst_value(&json!(ptr), &vars).as_str().unwrap_or_default().to_string();

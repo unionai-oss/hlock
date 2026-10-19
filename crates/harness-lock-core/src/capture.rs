@@ -60,6 +60,14 @@ pub fn parse_config(text: &str, format: &str) -> std::result::Result<Value, Stri
             }
             serde_json::from_str(text).or_else(|_| serde_json::from_str(&strip_jsonc(text))).map_err(|e| e.to_string())
         }
+        // JSON5 (OpenClaw): unquoted keys, single quotes, comments. Written back as JSON,
+        // which is valid JSON5.
+        "json5" => {
+            if text.trim().is_empty() {
+                return Ok(json!({}));
+            }
+            serde_json::from_str(text).or_else(|_| serde_json::from_str(&strip_jsonc(&json5_to_jsonc(text)))).map_err(|e| e.to_string())
+        }
         "toml" => toml::from_str::<Value>(text).map_err(|e| e.to_string()),
         "yaml" => {
             let v: Value = serde_norway::from_str(text).map_err(|e| e.to_string())?;
@@ -67,6 +75,111 @@ pub fn parse_config(text: &str, format: &str) -> std::result::Result<Value, Stri
         }
         other => Err(format!("unknown config format {other:?}")),
     }
+}
+
+/// Rewrite the JSON5 that config files use into JSON with trailing commas: drop
+/// comments, double-quote single-quoted strings and unquoted keys, rewrite the escapes
+/// and line continuations JSON lacks, and turn hex, `+`-signed and `.5`/`5.` numbers
+/// into plain ones. `Infinity` and `NaN` have no JSON form and stay as they are (and
+/// fail to parse).
+pub fn json5_to_jsonc(text: &str) -> String {
+    let b: Vec<char> = text.chars().collect();
+    let mut out = String::with_capacity(text.len() + 16);
+    let mut i = 0;
+    while i < b.len() {
+        let c = b[i];
+        if c == '"' || c == '\'' {
+            out.push('"');
+            i += 1;
+            while i < b.len() && b[i] != c {
+                match b[i] {
+                    '\\' if b.get(i + 1) == Some(&'\'') => out.push('\''),
+                    // a line continuation, `\` then LF, CRLF or CR
+                    '\\' if b.get(i + 1) == Some(&'\n') => {}
+                    '\\' if b.get(i + 1) == Some(&'\r') => {
+                        if b.get(i + 2) == Some(&'\n') {
+                            i += 1;
+                        }
+                    }
+                    // escapes JSON lacks
+                    '\\' if b.get(i + 1) == Some(&'0') => out.push_str("\\u0000"),
+                    '\\' if b.get(i + 1) == Some(&'v') => out.push_str("\\u000b"),
+                    '\\' if b.get(i + 1) == Some(&'x') => {
+                        out.push_str("\\u00");
+                        out.extend(b.iter().skip(i + 2).take(2));
+                        i += 2;
+                    }
+                    '\\' => {
+                        out.push('\\');
+                        out.extend(b.get(i + 1));
+                    }
+                    ch => {
+                        match ch {
+                            '"' => out.push_str("\\\""),
+                            // JSON5 allows a raw tab in a string; JSON doesn't
+                            '\t' => out.push_str("\\t"),
+                            ch => out.push(ch),
+                        }
+                        i += 1;
+                        continue;
+                    }
+                }
+                i += 2;
+            }
+            out.push('"');
+            i += 1;
+        } else if c == '/' && b.get(i + 1) == Some(&'/') {
+            while i < b.len() && b[i] != '\n' {
+                i += 1;
+            }
+        } else if c == '/' && b.get(i + 1) == Some(&'*') {
+            i += 2;
+            while i + 1 < b.len() && !(b[i] == '*' && b[i + 1] == '/') {
+                i += 1;
+            }
+            i += 2;
+        } else if (c.is_ascii_digit() && !matches!(b.get(i + 1), Some('x') | Some('X'))) || (c == '.' && b.get(i + 1).is_some_and(char::is_ascii_digit)) {
+            // a number, exponent included, so `1e5` isn't read as `1` and a key `e5`;
+            // JSON5's `.5` and `5.` become `0.5` and `5.0`
+            if c == '.' {
+                out.push('0');
+            }
+            while i < b.len() && (b[i].is_ascii_digit() || matches!(b[i], '.' | 'e' | 'E') || (matches!(b[i], '+' | '-') && matches!(b[i - 1], 'e' | 'E'))) {
+                out.push(b[i]);
+                i += 1;
+            }
+            if b[i - 1] == '.' {
+                out.push('0');
+            }
+        } else if c.is_alphabetic() || c == '_' || c == '$' {
+            let start = i;
+            while i < b.len() && (b[i].is_alphanumeric() || b[i] == '_' || b[i] == '$') {
+                i += 1;
+            }
+            let word: String = b[start..i].iter().collect();
+            if matches!(word.as_str(), "true" | "false" | "null" | "Infinity" | "NaN") {
+                out.push_str(&word);
+            } else {
+                out.push('"');
+                out.push_str(&word);
+                out.push('"');
+            }
+        } else if c == '0' && matches!(b.get(i + 1), Some('x') | Some('X')) {
+            let start = i + 2;
+            i = start;
+            while i < b.len() && b[i].is_ascii_hexdigit() {
+                i += 1;
+            }
+            let hex: String = b[start..i].iter().collect();
+            out.push_str(&u64::from_str_radix(&hex, 16).map(|n| n.to_string()).unwrap_or(hex));
+        } else if c == '+' && b.get(i + 1).is_some_and(|d| d.is_ascii_digit() || *d == '.') {
+            i += 1;
+        } else {
+            out.push(c);
+            i += 1;
+        }
+    }
+    out
 }
 
 /// Remove `//` and `/* */` comments and trailing commas, leaving strings intact.
@@ -1091,14 +1204,12 @@ pub fn capture(profile: &HarnessProfile, reg: &Registry, ctx: &Ctx, project: Opt
             Some(p) if is_project_path(&p, &root, ctx) || s.contains("{cwd}") => "project",
             _ => "user",
         };
-        if let Some(Value::Object(servers)) = src.get(s) {
-            for (name, cfg) in &servers {
-                if tools.iter().any(|t| &t.name == name) {
-                    continue;
-                }
-                if let Some(t) = normalize_mcp(name, cfg, scope, &mut secrets) {
-                    tools.push(t);
-                }
+        for (name, cfg) in &named_servers(src.get(s)) {
+            if tools.iter().any(|t| &t.name == name) {
+                continue;
+            }
+            if let Some(t) = normalize_mcp(name, cfg, scope, &mut secrets) {
+                tools.push(t);
             }
         }
     }
@@ -1339,13 +1450,21 @@ pub(crate) fn live_mcp_servers(profile: &HarnessProfile, ctx: &Ctx) -> BTreeMap<
     let src = Sources::new(profile, ctx);
     let mut out = BTreeMap::new();
     for s in &profile.mcp.sources {
-        if let Some(Value::Object(m)) = src.get(s) {
-            for (k, v) in m {
-                out.entry(k).or_insert(v);
-            }
+        for (k, v) in named_servers(src.get(s)) {
+            out.entry(k).or_insert(v);
         }
     }
     out
+}
+
+/// MCP servers from a config value: a map by name, or a list of servers that each
+/// carry a `name` (ZeroClaw's `[[mcp.servers]]`).
+fn named_servers(v: Option<Value>) -> Vec<(String, Value)> {
+    match v {
+        Some(Value::Object(m)) => m.into_iter().collect(),
+        Some(Value::Array(a)) => a.into_iter().filter_map(|v| Some((v.get("name")?.as_str()?.to_string(), v))).collect(),
+        _ => Vec::new(),
+    }
 }
 
 // --------------------------------------------------------------------------- //
@@ -1593,6 +1712,31 @@ mod tests {
         let v = parse_config(t, "jsonc").unwrap();
         assert_eq!(v["a"], "http://x//y");
         assert_eq!(v["b"], json!([1, 2]));
+    }
+
+    #[test]
+    fn json5() {
+        let t = r#"{
+          // c
+          agents: { defaults: { model: { primary: 'anthropic/claude-opus-4-6' }, heartbeat: { every: "30m" } } },
+          mcp: { servers: { fetch: { command: "uvx", args: ['mcp-server-fetch'], }, /* off */ }, },
+          'quoted': 'it\'s "fine" // not a comment',
+          $x_1: [0x1F, +2, 1.5e3, -1e-2, true, null],
+        }"#;
+        let v = parse_config(t, "json5").unwrap();
+        assert_eq!(v.pointer("/agents/defaults/model/primary"), Some(&json!("anthropic/claude-opus-4-6")));
+        assert_eq!(v.pointer("/agents/defaults/heartbeat/every"), Some(&json!("30m")));
+        assert_eq!(v.pointer("/mcp/servers/fetch/args/0"), Some(&json!("mcp-server-fetch")));
+        assert_eq!(v["quoted"], json!("it's \"fine\" // not a comment"));
+        assert_eq!(v["$x_1"], json!([31, 2, 1500.0, -0.01, true, null]));
+        assert_eq!(parse_config("", "json5").unwrap(), json!({}));
+        // escapes, line continuations and numbers JSON lacks
+        let v = parse_config("{a: 'x\\x41\\0\\v\ty', b: 'one \\\r\ntwo', c: [.5, 5., -.25, +.5]}", "json5").unwrap();
+        assert_eq!(v["a"], json!("xA\u{0}\u{b}\ty"));
+        assert_eq!(v["b"], json!("one two"));
+        assert_eq!(v["c"], json!([0.5, 5.0, -0.25, 0.5]));
+        // written back as JSON, which reads as JSON5
+        assert_eq!(parse_config(&render_config(&v, "json5").unwrap(), "json5").unwrap(), v);
     }
 
     #[test]

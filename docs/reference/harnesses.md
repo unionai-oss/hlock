@@ -4,7 +4,8 @@ description: The agent harnesses, agent frameworks, and local inference runtimes
 
 # Supported harnesses
 
-hlock supports agent CLIs, agent frameworks, and local inference runtimes. Each one is
+hlock supports agent CLIs, autonomous agents, agent frameworks, and local inference
+runtimes. Each one is
 described by a [profile](../guides/harness-profiles.md), a TOML file that tells hlock where
 the harness keeps its config, model, MCP servers, skills and plugins, and how it was
 installed. These tables are generated from the built-in profiles, so they match the
@@ -28,7 +29,6 @@ of them are installed on your machine.
 | [Codex CLI](https://developers.openai.com/codex/cli) | OpenAI | `codex` (`codex-cli`, `openai-codex`) | full | ✓ | `npm`, `brew-cask` |
 | [Pi](https://pi.dev) | — | `pi` (`pi-coding-agent`, `pi-agent`) | full | ✓ | `npm` |
 | [OpenCode](https://opencode.ai) | — | `opencode` (`open-code`, `sst-opencode`) | full | ✓ | `brew`, `npm`, `script` |
-| [Hermes Agent](https://github.com/NousResearch/hermes-agent) | Nous Research | `hermes` (`hermes-agent`, `nous-hermes`) | full | ✓ | `script` |
 | [Cursor Agent](https://cursor.com/cli) | Anysphere | `cursor-agent` (`cursor`, `cursor-cli`) | full | — | `script` |
 | [Gemini CLI](https://github.com/google-gemini/gemini-cli) | Google | `gemini-cli` (`gemini`) | basic | ✓ | `npm`, `brew` |
 | [GitHub Copilot CLI](https://github.com/github/copilot-cli) | GitHub | `copilot-cli` (`copilot`, `github-copilot`) | basic | — | `npm`, `brew` |
@@ -60,7 +60,6 @@ of the harness's own that `pin` reads.
 | Codex CLI | ✓ | ✓ | ✓ | ✓ | — | `AGENTS.md`, `AGENTS.override.md` | ✓ | approve, stop (hooks) |
 | Pi | ✓ | ✓ | ✓ | ✓ | packages | `AGENTS.md`, `CLAUDE.md` | ✓ | approve (plugin) |
 | OpenCode | ✓ | ✓ | ✓ | ✓ | plugins | `AGENTS.md`, `CLAUDE.md` | ✓ | approve (plugin) |
-| Hermes Agent | ✓ | — | ✓ | ✓ | — | `AGENTS.md`, `.hermes.md` | ✓ | approve (recorded) |
 | Cursor Agent | ✓ | — | ✓ | ✓ | — | `AGENTS.md`, `CLAUDE.md`, `.cursorrules` | — | approve (hooks) |
 | Gemini CLI | ✓ | — | ✓ | ✓ | — | `GEMINI.md`, `AGENTS.md` | — | approve, stop, tool (hooks) |
 | GitHub Copilot CLI | ✓ | — | ✓ | ✓ | — | `AGENTS.md`, `.github/copilot-instructions.md` | — | approve (hooks) |
@@ -78,10 +77,90 @@ of the harness's own that `pin` reads.
 - **`localize`**: whether [`hlock localize`](../guides/localize.md) can move a lock onto
   this harness with local models. ✓ means it's open source and can use a local endpoint.
   *with `--harness`* means it can use a local model but isn't open source, so `localize`
-  uses it only when you ask for it.
+  uses it only when you ask for it. *by hand* means `localize` can move a lock onto it, but
+  doesn't know the harness's settings for a local endpoint, so it tells you what to set.
 
 Every agent CLI also runs one prompt non-interactively with
 [`hlock run`](cli.md#run).
+
+## Autonomous agents
+
+Autonomous agents run on their own instead of in a session you drive. Each one is a
+long-running gateway that you message from chat apps (Telegram, Slack, WhatsApp, …). It wakes
+itself on heartbeats and schedules, and keeps a workspace of persona files, skills, and
+memory it writes as it goes. To hlock they're agent CLIs, so `pin`, `check`, `sync`,
+`launch`, `run` and `localize` work the same way. `hlock harness list` lists them in their
+own group.
+
+<!-- generated:autonomous -->
+| Harness | Vendor | Name in hlock | Support | Open source | Installs from |
+|---|---|---|---|---|---|
+| [Hermes Agent](https://github.com/NousResearch/hermes-agent) | Nous Research | `hermes` (`hermes-agent`, `nous-hermes`) | full | ✓ | `script` |
+| [OpenClaw](https://openclaw.ai) | — | `openclaw` (`clawdbot`, `moltbot`) | basic | ✓ | `npm`, `script` |
+| [nanobot](https://github.com/HKUDS/nanobot) | HKUDS | `nanobot` (`nanobot-ai`, `hkuds-nanobot`) | basic | ✓ | `uv-tool`, `pip`, `script` |
+| [PicoClaw](https://github.com/sipeed/picoclaw) | Sipeed | `picoclaw` (`pico-claw`, `sipeed-picoclaw`) | basic | ✓ | `manual` |
+| [ZeroClaw](https://github.com/zeroclaw-labs/zeroclaw) | ZeroClaw Labs | `zeroclaw` (`zero-claw`) | basic | ✓ | `script`, `brew` |
+| [IronClaw](https://github.com/nearai/ironclaw) | NEAR AI | `ironclaw` (`iron-claw`, `nearai-ironclaw`) | basic | ✓ | `manual` |
+<!-- /generated:autonomous -->
+
+<!-- generated:autonomous-capture -->
+| Harness | Model | Providers | MCP servers | Skills | Plugins | Instructions | `localize` | Deciders |
+|---|---|---|---|---|---|---|---|---|
+| Hermes Agent | ✓ | — | ✓ | ✓ | — | `AGENTS.md`, `.hermes.md`; `~/.hermes/`: `SOUL.md` | ✓ | approve (recorded) |
+| OpenClaw | ✓ | ✓ | ✓ | ✓ | — | `~/.openclaw/workspace/`: `AGENTS.md`, `SOUL.md`, `IDENTITY.md`, `USER.md`, `TOOLS.md` | ✓ | — |
+| nanobot | ✓ | ✓ | ✓ | ✓ | — | `~/.nanobot/workspace/`: `AGENTS.md`, `SOUL.md`, `USER.md` | ✓ | — |
+| PicoClaw | ✓ | — | ✓ | ✓ | — | `~/.picoclaw/workspace/`: `AGENT.md`, `AGENTS.md`, `SOUL.md`, `USER.md`, `IDENTITY.md` | ✓ | — |
+| ZeroClaw | — | — | ✓ | ✓ | — | `~/.zeroclaw/agents/assistant/workspace/`: `AGENTS.md`, `SOUL.md`, `IDENTITY.md`, `USER.md`, `TOOLS.md` | by hand | — |
+| IronClaw | ✓ | — | — | ✓ | — | — | ✓ | — |
+<!-- /generated:autonomous-capture -->
+
+**Instructions** here are the persona and operating files in the agent's workspace, under
+its config root. hlock pins the files you write: who the agent is (`SOUL.md`,
+`IDENTITY.md`), how it works (`AGENTS.md`, `TOOLS.md`) and who it works for (`USER.md`). It
+leaves out what the agent writes as it runs, such as `MEMORY.md`, `memory/`, `HEARTBEAT.md`,
+sessions and cron state. A conversation therefore isn't drift, but a changed persona is, and
+`hlock sync` restores the pinned one.
+
+What hlock doesn't do for these agents:
+
+- **Run the gateway.** `hlock launch` and `hlock run` start the agent's CLI. `run` sends one
+  message and waits for the reply, for example `openclaw agent exec`, `nanobot agent -m`, or
+  `picoclaw agent -m`. Keeping a gateway running, and the channel accounts it logs into,
+  stay with the agent's own service commands.
+- **Pin channel credentials.** Bot tokens in the agent's config are secrets. hlock handles
+  them like any other [secret](../guides/secrets.md) and never writes them into a lock.
+- **Evaluate them in trials.** As with the other agent CLIs, `hlock resolve` runs trials on
+  the reference adapter.
+
+Notes on each agent:
+
+- **OpenClaw** keeps its config in JSON5. hlock reads JSON5 and writes plain JSON, which
+  OpenClaw also reads, so comments in the file don't survive a `sync`. hlock pins the
+  default workspace, `~/.openclaw/workspace`. If `agents.defaults.workspace` points
+  somewhere else, copy the profile and change the paths. `--model` is a flag of
+  OpenClaw's subcommands, so when you `hlock launch openclaw` with another harness's lock,
+  OpenClaw keeps its own model and `launch` says so. On Ollama, `localize` uses
+  OpenClaw's native `ollama` API, because OpenClaw calls tools unreliably through Ollama's
+  `/v1` endpoint.
+- **nanobot** moves its home with `nanobot --home`, not with an environment variable, so an
+  isolated `launch` relocates `HOME` instead. A `modelPreset` in its config takes precedence
+  over `agents.defaults.model`, which is the model `pin` records. `localize` therefore sets
+  a preset.
+- **PicoClaw**'s model is a `model_name` that refers to an entry in `model_list`, and `pin`
+  records that name. hlock doesn't read API keys kept in `.security.yml`. MCP servers need
+  `tools.mcp.enabled` set to `true`.
+- **ZeroClaw** chooses a model per agent, so `pin` records the whole `config.toml` instead
+  of a model. hlock reads instruction files and skills from the workspace of the
+  `assistant` agent, the name used in ZeroClaw's quickstart examples. `hlock run` messages
+  that agent too. ZeroClaw has no `localize` settings yet, so `localize` tells you what to
+  set by hand.
+- **IronClaw** manages MCP servers as extensions and keeps its identity files in its memory
+  store, so hlock pins neither. It pins the model, the provider and `config.toml`.
+
+Hermes Agent is listed here because it also runs as a gateway. It's as fully supported as
+the agent CLIs above. NanoClaw isn't supported: it's a git checkout that you customize by editing its
+code, and its settings live in a SQLite database rather than in a config file a profile can
+describe.
 
 ## Agent frameworks
 
