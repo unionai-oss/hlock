@@ -64,6 +64,7 @@ hlock check                     # see what changed since the pin; re-pin to lock
 hlock sync                      # on another machine: rehydrate it into .hlock/env (or --in-place, --docker)
 hlock launch                    # start a session on the locked setup, isolated from your config
 hlock run "summarize README.md"  # or run one prompt through it (claude -p, codex exec, …)
+hlock pull github:alice/agents  # get someone else's pinned setup; then hlock launch --lock alice
 ```
 
 For your own work, `hlock evals init -t coding` (or `data`, `research`, `support`) writes

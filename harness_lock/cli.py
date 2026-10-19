@@ -35,6 +35,7 @@ from harness_lock import (
     agent_run,
     harness_profile,
     harnesses,
+    is_pull_source,
     launch_prepare,
     load,
     meta_check,
@@ -60,6 +61,11 @@ from harness_lock import evals as _evals
 from harness_lock import jobs as _jobs
 from harness_lock import localize as _localize
 from harness_lock import pin as _pin
+from harness_lock import pull as _pull
+from harness_lock import pull_env as _pull_env
+from harness_lock import pull_find as _pull_find
+from harness_lock import pull_list as _pull_list
+from harness_lock import pull_remove as _pull_remove
 from harness_lock import resolve as _resolve
 from harness_lock import select_harness as _select_harness
 from harness_lock import traces as _traces
@@ -87,7 +93,8 @@ def _find_up(name: str, start: Path) -> Path | None:
 def _set_project(manifest: str | None, lock: str | None) -> None:
     """`-m` / `HLOCK_MANIFEST`, else the nearest harness.toml at or above the working
     directory, else ./harness.toml. The lock defaults to harness.lock next to the
-    manifest (or the nearest harness.lock when there's no manifest)."""
+    manifest (or the nearest harness.lock when there's no manifest). `--lock NAME`
+    names a pulled lock when no such file exists."""
     cwd = Path.cwd()
     m = Path(manifest).expanduser() if manifest else _find_up(MANIFEST, cwd)
     if m is not None and not m.is_absolute():
@@ -95,6 +102,8 @@ def _set_project(manifest: str | None, lock: str | None) -> None:
     if lock:
         lk = Path(lock).expanduser()
         lk = lk if lk.is_absolute() else cwd / lk
+        if not lk.is_file() and (stored := _pull_find(lock)):
+            lk = Path(stored)
     elif m is not None:
         lk = m.parent / LOCK
     else:
@@ -219,8 +228,8 @@ def _next(*steps: str) -> None:
     console.print(Text.from_markup("[muted]next →[/] " + "[muted]  ·  [/]".join(f"[cmd]{s}[/]" for s in steps)))
 
 
-def _ok(message: str) -> None:
-    console.print(f"[ok]✓[/] {message}")
+def _ok(message: str, soft_wrap: bool = False) -> None:
+    console.print(f"[ok]✓[/] {message}", soft_wrap=soft_wrap)
 
 
 def _pct(v) -> str:
@@ -325,6 +334,9 @@ def _pin_panel(lock: dict, title: str | None = None) -> Panel:
     secrets = lock.get("secret") or []
     if secrets:
         t.add_row("secrets", f"{len(secrets)} redacted  [muted](supplied as HLOCK_SECRET_* when syncing)[/]")
+    pulled = lock.get("pulled") or {}
+    if pulled.get("from"):
+        t.add_row("pulled", f"{escape(pulled['from'])} [muted]@ {pulled.get('commit', '')[:7]}[/]")
     return Panel(t, title=f"[brand]📌 {title} · pinned[/]", title_align="left", border_style="magenta",
                  expand=False, padding=(1, 2))
 
@@ -650,6 +662,187 @@ def _vendor_dir(vendored: list[str], harness: str) -> str:
     return "/".join(parts[:cut]) + "/"
 
 
+def _short(commit: str | None) -> str:
+    return (commit or "")[:7]
+
+
+def _mcp_commands(lock: dict) -> list[str]:
+    """The executables a lock's stdio MCP servers start (they run when the harness does)."""
+    seen: list[str] = []
+    for t in lock.get("tool") or []:
+        cmd = t.get("command")
+        if t.get("kind", "mcp") == "mcp" and cmd and cmd not in seen:
+            seen.append(cmd)
+    return seen
+
+
+def _pull_label(result: dict) -> str:
+    """How to refer to a pull's lock: its store name, or its path in the project."""
+    return result["name"] if result.get("stored") else _show(result["path"])
+
+
+def _print_pull(result: dict) -> None:
+    lock, label = result["lock"], _pull_label(result)
+    src = result["source"]["spec"]
+    prev = result.get("previous_commit")
+    if prev and prev == result["commit"] and not result["diff"]:
+        _ok(f"[path]{label}[/] is up to date with {escape(src)} [muted]@ {_short(prev)}[/]", soft_wrap=True)
+        return
+    if prev:
+        _ok(f"updated [path]{label}[/] from {escape(src)}  [muted]{_short(prev)} → {_short(result['commit'])}[/]", soft_wrap=True)
+    else:
+        _ok(f"pulled {escape(src)} [muted]@ {_short(result['commit'])}[/] → [path]{label}[/]", soft_wrap=True)
+    for w in result["warnings"]:
+        console.print(f"[warn]![/] {w}")
+    if lock.get("kind") == "pin":
+        console.print(_pin_panel(lock, label))
+    else:
+        console.print(_lock_panel(Lockfile.load(result["path"]), label))
+    if not result.get("stored") and result["vendored"]:
+        n = len(result["vendored"])
+        console.print(f"[muted]copied {n} vendored {'entry' if n == 1 else 'entries'} into[/] "
+                      f"[path]{_vendor_dir(result['vendored'], lock['harness']['name'])}[/]")
+    if prev and result["diff"]:
+        console.print("[bold]changes[/]")
+        for line in result["diff"]:
+            style = {"+": "ok", "-": "fail", "~": "warn"}.get(line[:1], "muted")
+            console.print(f"  [{style}]{line}[/]")
+    cmds = _mcp_commands(lock)
+    if cmds:
+        console.print(f"[warn]![/] starts MCP servers with: [cmd]{', '.join(cmds)}[/]  "
+                      "[muted]· review before syncing into your own config[/]")
+    for other in result["others"]:
+        console.print(f"[muted]also in the repo:[/] {other['path']}  [muted]→[/] "
+                      f"[cmd]hlock pull {escape(other['source'])}[/]", soft_wrap=True)
+
+
+def _lock_ref(arg: str, as_json: bool = False) -> tuple[str, str | None]:
+    """A lock argument → (lock path, store name). An existing file is a path; a source
+    (`github:…`) is pulled into the store first; otherwise a pulled lock's name."""
+    if Path(arg).expanduser().is_file():
+        return arg, None
+    if is_pull_source(arg):
+        with _working(f"Pulling {arg}…"):
+            result = json.loads(_pull(arg))
+        if not as_json:
+            prev = result.get("previous_commit")
+            change = f"{_short(prev)} → {_short(result['commit'])}" if prev and prev != result["commit"] else _short(result["commit"])
+            _ok(f"pulled {escape(arg)} [muted]@ {change}[/] → [path]{result['name']}[/]", soft_wrap=True)
+            cmds = _mcp_commands(result["lock"])
+            if cmds:
+                console.print(f"[warn]![/] starts MCP servers with: [cmd]{', '.join(cmds)}[/]")
+        return result["path"], result["name"]
+    if stored := _pull_find(arg):
+        return stored, arg
+    return arg, None
+
+
+@main.command()
+@click.argument("sources", nargs=-1, metavar="[SOURCE | NAME | LOCK]...")
+@click.option("--as", "name", default=None, metavar="NAME",
+              help="Name to store the lock under.  [dim]\\[default: the repo owner][/]")
+@click.option("-o", "--out", default=None, metavar="FILE",
+              help="Write the lock into the project as FILE (e.g. harness.alice.lock) instead of the store.")
+@click.option("--force", is_flag=True, help="Replace an existing lock of that name that came from somewhere else.")
+@click.option("--json", "as_json", is_flag=True, help="Print the result as JSON.")
+def pull(sources: tuple[str, ...], name: str | None, out: str | None, force: bool, as_json: bool) -> None:
+    """Pull someone else's [path]harness.lock[/] from a git repository.
+
+    SOURCE is [cmd]github:OWNER/REPO\\[/PATH]\\[@REF][/], [cmd]gitlab:GROUP/REPO\\[//PATH]\\[@REF][/],
+    [cmd]git:URL\\[//PATH]\\[@REF][/], or a repository or file URL copied from the browser. The lock
+    and the files it vendors are stored under [path]~/.hlock/pulls/NAME/[/], so you can use it
+    from any project by name: [cmd]hlock launch --lock NAME[/], [cmd]hlock sync NAME[/]. Nothing from
+    the lock runs until you do.
+
+    With no SOURCE, refreshes every pulled lock; with NAMEs or LOCK files, refreshes those.
+    """
+    remote = [s for s in sources if is_pull_source(s)]
+    if remote and len(sources) > 1:
+        _fail("pull one source at a time", "run [cmd]hlock pull[/] once per source")
+    if name and out:
+        _fail("--as and -o both name the lock", "use [cmd]--as NAME[/] for the store, or [cmd]-o FILE[/] for the project")
+    if remote:
+        with _working(f"Pulling {remote[0]}…"):
+            result = json.loads(_pull(remote[0], out=out, name=name, force=force))
+        if as_json:
+            console.print_json(data=result)
+            return
+        _print_pull(result)
+        label = _pull_label(result)
+        _next(f"hlock launch --lock {label}", f"hlock sync {label} --in-place --plan")
+        return
+
+    if name or out:
+        _fail("--as and -o need a SOURCE", "e.g. [cmd]hlock pull github:alice/agent-setup --as alice[/]")
+    # (lock path, store name or None for a project file)
+    targets: list[tuple[str, str | None]] = []
+    if sources:
+        for s in sources:
+            path, stored = (s, None) if Path(s).is_file() else (_pull_find(s), s)
+            if path is None:
+                _fail(f"no pulled lock named {s!r}", "see what's pulled with [cmd]hlock list[/]")
+            targets.append((path, stored))
+    else:
+        targets = [(e["path"], e["name"]) for e in json.loads(_pull_list()) if not e.get("error")]
+        targets += [(str(p), None) for p in sorted(_Project.lock.parent.glob("harness.*.lock"))]
+    jobs: list[tuple[str, str | None, str]] = []
+    for path, stored in targets:
+        with _friendly_errors():
+            pulled = json.loads(Lockfile.load(path).to_json()).get("pulled") or {}
+        if pulled.get("from"):
+            jobs.append((path, stored, pulled["from"]))
+        elif sources:
+            _fail(f"{_show(path)} wasn't pulled, so there's nothing to refresh it from",
+                  "pull a lock with [cmd]hlock pull github:OWNER/REPO[/]")
+    if not jobs:
+        _fail("no pulled locks to refresh", "pull one with [cmd]hlock pull github:OWNER/REPO[/]")
+    results = []
+    for path, stored, spec in jobs:
+        with _working(f"Refreshing {stored or _show(path)} from {spec}…"):
+            results.append(json.loads(_pull(spec, out=None if stored else path, name=stored, force=force)))
+    if as_json:
+        console.print_json(data=results)
+        return
+    for r in results:
+        _print_pull(r)
+
+
+@main.command("list")
+@click.option("--json", "as_json", is_flag=True, help="Print the pulled locks as JSON.")
+def list_(as_json: bool) -> None:
+    """List the locks you've pulled, from any project."""
+    entries = json.loads(_pull_list())
+    if as_json:
+        console.print_json(data=entries)
+        return
+    if not entries:
+        console.print("[muted]no pulled locks yet[/]")
+        _next("hlock pull github:OWNER/REPO")
+        return
+    t = Table(box=None, header_style="bold", pad_edge=False)
+    for col in ("name", "harness", "source", "commit", "pulled"):
+        t.add_column(col)
+    for e in entries:
+        if e.get("error"):
+            t.add_row(f"[key]{e['name']}[/]", f"[fail]{escape(e['error'])}[/]", "", "", "")
+            continue
+        p = e.get("pulled") or {}
+        t.add_row(f"[key]{e['name']}[/]", f"{e['harness']} {e.get('version') or ''}".strip(),
+                  escape(p.get("from", "—")), _short(p.get("commit")) or "—", _ago((p.get("at") or "").replace("Z", "+00:00") or None))
+    console.print(t)
+    _next(f"hlock launch --lock {entries[0]['name']}", "hlock pull [muted](refresh all)[/]")
+
+
+@main.command()
+@click.argument("names", nargs=-1, required=True, metavar="NAME...")
+def rm(names: tuple[str, ...]) -> None:
+    """Remove pulled locks (and the environments [cmd]launch[/] made for them)."""
+    for n in names:
+        with _friendly_errors():
+            _pull_remove(n)
+        _ok(f"removed [path]{n}[/]")
+
+
 _STATUS = {"satisfied": "[ok]✓[/]", "auto": "[brand]●[/]", "manual": "[warn]○[/]"}
 MANUAL_EXIT = 3
 
@@ -728,9 +921,11 @@ def sync(lock: str, plan_only: bool, as_json: bool, yes: bool, install: bool, pu
     The setup goes into an isolated config root in [path].hlock/env/[/] (the one [cmd]hlock launch[/]
     uses), so your own config isn't touched. Pass [cmd]--in-place[/] to write into it instead.
     """
-    lock = lock or _l()
     if in_place and (prefix or docker):
         _fail("--in-place doesn't work with --prefix or --docker", "pick one place to write the setup")
+    lock, stored = _lock_ref(lock, as_json) if lock else (_l(), None)
+    if stored and prefix is None and not in_place and not docker:
+        prefix = _pull_env(stored)  # the same isolated root `hlock launch --lock NAME` uses
     docker_dir = None
     if docker:
         with _friendly_errors():
@@ -742,7 +937,7 @@ def sync(lock: str, plan_only: bool, as_json: bool, yes: bool, install: bool, pu
     if as_json:
         console.print_json(data=plan)
         return
-    where = {"home": f"your config [path]{_tilde(plan['root'])}[/]", "prefix": f"[path]{_rel(plan['root'])}[/]",
+    where = {"home": f"your config [path]{_tilde(plan['root'])}[/]", "prefix": f"[path]{_tilde(_rel(plan['root']))}[/]",
              "docker": f"[path]{docker_dir}[/]"}[plan["mode"]]
     console.print(f"[bold]Sync plan[/] for {plan['harness_name']} {plan.get('version') or ''} → {where}")
     console.print(_plan_table(plan, verbose))
@@ -1104,6 +1299,10 @@ def launch(args: tuple[str, ...], lock: str | None, prefix: str | None, in_place
         else:
             rest.append(a)
         i += 1
+    if lock:
+        lock, stored = _lock_ref(lock, as_json)
+        if stored and prefix is None:
+            prefix = _pull_env(stored)  # a pulled lock's environments live with it, not in this project
     with _working("Preparing the locked environment…"):
         prep = json.loads(launch_prepare(lock or _l(), harness=harness, prefix=prefix,
                                          allow_version_mismatch=allow_version_mismatch,

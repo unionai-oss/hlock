@@ -30,6 +30,7 @@ nav = [
       "guides/pin.md",
       "guides/sync.md",
       "guides/launch.md",
+      "guides/pull.md",
       "guides/secrets.md",
     ] },
     { "Optimize your harness" = [

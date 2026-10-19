@@ -316,6 +316,9 @@ pub struct Lockfile {
     /// What `hlock localize` replaced and how it chose (localized locks only).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub localize: Option<serde_json::Value>,
+    /// Where `hlock pull` got this lock: source, git URL, ref, commit (pulled locks only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pulled: Option<serde_json::Value>,
 }
 
 impl Default for Lockfile {
@@ -345,6 +348,7 @@ impl Default for Lockfile {
             kind: None,
             tune: None,
             localize: None,
+            pulled: None,
         }
     }
 }
