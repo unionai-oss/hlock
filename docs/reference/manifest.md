@@ -62,6 +62,9 @@ target = "local"
 | `judge.model` | the pack's `[pack.judge]` | The model that scores [`judge` graders](../guides/eval-packs.md#judges), as `"provider:model"` |
 | `judge.base-url` | the provider's API | An OpenAI-compatible endpoint, for other providers and local models |
 | `judge.key-env` | the provider's usual variable | The environment variable the judge's API key is read from |
+| `judge.protocol` | inferred | `systemone` or `decisions` for a decision model, `chat` for an LLM |
+| `judge.fallback` | | An LLM that re-judges a decision model's uncertain grades, and its `judge.fallback-base-url` |
+| `judge.uncertain` | `0.15` | How close to `pass` a decision model's grade is uncertain |
 
 This section used to be called `[tasks]`, and that name still works.
 
@@ -148,3 +151,25 @@ the v0.1 resolver doesn't search over them yet.
 The lock records a SHA-256 hash of the manifest file exactly as written, comments and
 whitespace included. [`hlock check`](../guides/ci.md) compares it to the live file, so
 any edit to `harness.toml` needs a fresh `hlock resolve`.
+
+## `[deciders.<use>]`
+
+[Decision models](../guides/deciders.md), by what they decide: `approve` and `stop` in the
+agent, and `default`, `judge` and `draft` for hlock's own judgments.
+
+```toml
+[deciders.approve]
+model = "typesafe:jev-1.13.0"
+policy = ".hlock/approve.md"
+```
+
+| Key | Default | Description |
+|---|---|---|
+| `model` | | `provider:model`, or `none` |
+| `any-of` | | Candidates for `hlock resolve`, instead of `model` |
+| `may` | `["deny", "ask"]` | `approve` only: which of `allow`, `ask`, `deny` it may answer |
+| `policy` | | A file of rules added to the question |
+| `min-probability` | allow 0.9, ask 0.5, deny 0.8; stop 0.9 | How sure it must be to act: a number, or a table per answer for `approve` |
+| `hooks` | the harness profile's | Harness events to wire it to |
+| `timeout-ms` | `2000` | How long a hook waits |
+| `base-url`, `key-env`, `protocol`, `long-context` | the provider's | Where and how it's reached |

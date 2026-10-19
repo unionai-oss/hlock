@@ -5,3 +5,6 @@ kind = "framework"
 vendor = "LangChain"
 homepage = "https://langchain-ai.github.io/langgraph/"
 packages = ["pypi:langgraph", "pypi:langchain-core"]
+
+# a decider's System One endpoint, for the framework's own decision-model support
+decider-env = [["TYPESAFE_BASE_URL", "TYPESAFE_API_KEY"]]

@@ -69,3 +69,30 @@ min-memory-gb = 3
 tier = 1
 tools = true
 roles = ["small", "decision"]
+
+# Decision models (`hlock decide`, judges, `[deciders.*]`): Kev answers typed questions
+# at /v1/systemone (Ollama 0.40.4 or later). Never picked as a chat model.
+[[catalog]]
+id = "kev:0.8b"
+params-b = 0.8
+min-memory-gb = 2
+tier = 0
+roles = ["decider"]
+[[catalog]]
+id = "kev:4b"
+params-b = 4
+min-memory-gb = 5
+tier = 0
+roles = ["decider"]
+[[catalog]]
+id = "kev:9b"
+params-b = 9
+min-memory-gb = 10
+tier = 0
+roles = ["decider"]
+[[catalog]]
+id = "kev:27b"
+params-b = 27
+min-memory-gb = 24
+tier = 0
+roles = ["decider"]

@@ -141,6 +141,11 @@ pub fn invocation(
     if let Some(b) = &base_url {
         env.insert("HLOCK_LLM_BASE_URL".into(), b.clone());
     }
+    if let Some(l) = lock {
+        let deciders: Vec<(String, crate::decide::DeciderConfig)> = l.decider.iter().map(|d| (d.use_.clone(), crate::decide::entry_config(d))).collect();
+        let var = |k: &str| ctx.var(k).map(str::to_string);
+        env.extend(crate::decide::decider_env(&deciders, &profile.decider_env, &var));
+    }
     if let Some(p) = lock_path {
         let abs = if p.is_absolute() { p.to_path_buf() } else { ctx.cwd.join(p) };
         env.insert("HLOCK_LOCK".into(), abs.to_string_lossy().into_owned());
@@ -255,11 +260,18 @@ fn copy_dir(src: &Path, dst: &Path) {
 pub struct CommandAdapter {
     profile: HarnessProfile,
     ctx: Ctx,
+    deciders: BTreeMap<String, crate::decide::DeciderSpec>,
 }
 
 impl CommandAdapter {
     pub fn new(profile: HarnessProfile, ctx: Ctx) -> Self {
-        CommandAdapter { profile, ctx }
+        CommandAdapter { profile, ctx, deciders: BTreeMap::new() }
+    }
+
+    /// The manifest's `[deciders.*]`, for the endpoint settings of a stack's deciders.
+    pub fn with_deciders(mut self, deciders: BTreeMap<String, crate::decide::DeciderSpec>) -> Self {
+        self.deciders = deciders;
+        self
     }
 }
 
@@ -276,7 +288,14 @@ impl HarnessAdapter for CommandAdapter {
             }
         }
         let model = stack.llm.get("planner").or_else(|| stack.llm.values().next()).cloned();
-        let inv = invocation(&self.profile, None, None, model.as_deref(), &task.prompt_text, workspace, seed, &self.ctx)?;
+        let mut inv = invocation(&self.profile, None, None, model.as_deref(), &task.prompt_text, workspace, seed, &self.ctx)?;
+        let deciders: Vec<(String, crate::decide::DeciderConfig)> = stack
+            .deciders
+            .iter()
+            .map(|(u, m)| (u.clone(), self.deciders.get(u).map(|s| s.config(m)).unwrap_or_else(|| crate::decide::DeciderConfig { model: m.clone(), ..Default::default() })))
+            .collect();
+        let var = |k: &str| self.ctx.var(k).map(str::to_string);
+        inv.env.extend(crate::decide::decider_env(&deciders, &self.profile.decider_env, &var));
         let r = run(&inv, &self.ctx, Duration::from_secs(task.timeout_seconds.max(1)))?;
         let mut trace = r.trace.clone();
         if let Value::Array(a) = &mut trace {

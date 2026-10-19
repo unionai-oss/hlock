@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::error::{Error, Result};
-pub use crate::graders::{Grade, GradeOptions, Grader, JudgeConfig};
+pub use crate::graders::{Grade, GradeOptions, Grader, JudgeConfig, Judges};
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(default)]
@@ -103,6 +103,22 @@ pub const PLACEHOLDER: &str = "TODO(hlock)";
 
 /// Below this many tasks the holdout split is too small to say much.
 pub const MIN_TASKS: usize = 10;
+
+/// One comparison [`EvalPack::calibrate`] makes: a criterion (or the overall
+/// `(passes)`) on one run, as judges `a` and `b` scored it.
+#[derive(Debug, Clone, Serialize)]
+pub struct CalibrationRow {
+    pub task: String,
+    /// `solution` or `fixtures` (the run with no work done).
+    pub run: String,
+    pub grader: String,
+    pub criterion: String,
+    pub a: f64,
+    pub b: f64,
+    pub agree: bool,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub note: String,
+}
 
 /// A problem [`EvalPack::check`] found. `level` is `error` (the pack isn't usable
 /// yet) or `warn` (it runs, but the evidence it produces is weak).
@@ -232,16 +248,15 @@ impl EvalPack {
                         files.extend(paths.iter().filter(|p| !artifacts.contains(p)).cloned());
                     }
                 }
-                issues.push(PackIssue::warn(id, if files.is_empty() {
-                    "none of its graders can run yet, so it always passes".to_string()
-                } else {
-                    format!("only checks that {} exist{}; add a content check, tests, or a judge", files.join(", "), if files.len() == 1 { "s" } else { "" })
-                }));
+                issues.push(PackIssue::warn(id, format!(
+                    "only checks that {} exist{}; add a content check, tests, or a judge",
+                    files.join(", "),
+                    if files.len() == 1 { "s" } else { "" }
+                )));
             }
             for (n, g) in graders.iter().enumerate() {
                 match g {
                     Err(e) => issues.push(PackIssue::error(id, format!("grader {}: {e}", n + 1))),
-                    Ok(Grader::Unsupported(k)) => issues.push(PackIssue::warn(id, format!("{k} graders aren't supported yet, so it's skipped"))),
                     Ok(g) => {
                         for (f, problem) in crate::graders::pack_file_problems(g, &self.path) {
                             issues.push(PackIssue::error(id, format!("{} grader file {f} {problem}", g.label().split(':').next().unwrap_or("a"))));
@@ -255,9 +270,31 @@ impl EvalPack {
                 }
             }
         }
-        let judged = self.tasks.iter().any(|t| t.grader_list().iter().any(|g| matches!(g, Ok(Grader::Judge { .. }))));
-        if judged && self.judge.is_none() && !judge.is_some_and(JudgeConfig::is_set) {
-            issues.push(PackIssue::warn(None, "judge graders need a model: set [pack.judge] model in pack.toml, or [evals.judge] in harness.toml".into()));
+        let judged = self.tasks.iter().any(|t| t.grader_list().iter().any(|g| matches!(g, Ok(Grader::Judge { .. } | Grader::Trace { .. }))));
+        let effective = judge.filter(|j| j.is_set()).or(self.judge.as_ref());
+        if judged && effective.is_none() {
+            issues.push(PackIssue::warn(None, "judge graders need a model: set [pack.judge] model in pack.toml or [evals.judge] in harness.toml (hlock otherwise looks for Kev on Ollama or Ollaya, then TYPESAFE_API_KEY)".into()));
+        }
+        if let Some(j) = self.judge.as_ref().filter(|j| j.model.ends_with("-latest") || j.model.ends_with("-preview")) {
+            issues.push(PackIssue::warn(None, format!("[pack.judge] model {:?} is an alias that moves between releases; name a version (e.g. {})", j.model, crate::graders::DEFAULT_HOSTED_JUDGE)));
+        }
+        for t in &self.tasks {
+            let id = Some(t.id.as_str()).filter(|s| !s.is_empty());
+            for g in t.grader_list().into_iter().flatten() {
+                match &g {
+                    Grader::Judge { rubric: Some(r), .. } if effective.is_some_and(JudgeConfig::is_decider) => {
+                        let text = std::fs::read_to_string(self.path.join(r)).unwrap_or_default();
+                        let (c, l) = crate::graders::rubric_parts(&text);
+                        if !text.is_empty() && c.is_empty() && l.is_empty() {
+                            issues.push(PackIssue::warn(id, format!("{r} has no criteria (`- ` items) or `## Levels`, so a decision model can't judge it; add them, or use an LLM judge")));
+                        }
+                    }
+                    Grader::Trace { .. } if effective.is_some_and(|j| !j.is_decider()) => {
+                        issues.push(PackIssue::warn(id, "trace graders need a decision model as the judge".into()));
+                    }
+                    _ => {}
+                }
+            }
         }
         if self.tasks.len() < MIN_TASKS {
             let (_, holdout) = self.split(0.7, 0);
@@ -294,9 +331,21 @@ impl EvalPack {
         self.grade_with(task, workspace, &GradeOptions::default())
     }
 
-    /// Grade with options; `opts.judge` (from `harness.toml`) wins over the pack's.
+    /// The judge grading uses: `opts.judge` (`[evals.judge]`), else the pack's
+    /// `[pack.judge]`, else `opts.default_judge` (`[deciders.judge]`/`[deciders.default]`),
+    /// else, with `opts.auto`, one hlock finds ([`crate::graders::auto_judge`]).
+    pub fn judge_for(&self, opts: &GradeOptions) -> Option<JudgeConfig> {
+        opts.judge
+            .clone()
+            .filter(JudgeConfig::is_set)
+            .or_else(|| self.judge.clone())
+            .or_else(|| opts.default_judge.clone().filter(JudgeConfig::is_set))
+            .or_else(|| if opts.auto { crate::graders::auto_judge() } else { None })
+    }
+
+    /// Grade with options, using [`judge_for`](Self::judge_for).
     pub fn grade_with(&self, task: &Task, workspace: &Path, opts: &GradeOptions) -> Vec<Grade> {
-        let opts = GradeOptions { judge: opts.judge.clone().filter(JudgeConfig::is_set).or_else(|| self.judge.clone()), ..opts.clone() };
+        let opts = GradeOptions { judge: self.judge_for(opts), ..opts.clone() };
         crate::graders::grade(task, workspace, &opts)
     }
 
@@ -330,12 +379,69 @@ impl EvalPack {
         Ok(grades)
     }
 
-    /// Try each task's graders without an agent, judges aside: on its fixtures alone
-    /// they should fail (or the task passes with no work), and on its fixtures plus
-    /// its `solution` they should pass. Runs `tests` commands, in temporary directories.
-    pub fn check_graders(&self) -> Vec<PackIssue> {
+    /// Grade task `t` in a fresh temporary workspace: its fixtures, plus `extra` (a
+    /// solution) when given.
+    fn grade_fresh(&self, t: &Task, extra: Option<&Path>, opts: &GradeOptions) -> Vec<Grade> {
+        static N: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let ws = std::env::temp_dir().join(format!("hlock-fresh-{}-{n}", std::process::id())).join(&t.id);
+        let _ = std::fs::create_dir_all(&ws);
+        for src in t.fixtures.iter().map(|f| self.path.join(f)).chain(extra.map(Path::to_path_buf)).filter(|p| p.is_dir()) {
+            crate::adapters::copy_dir(&src, &ws);
+        }
+        let grades = self.grade_with(t, &ws, opts);
+        let _ = std::fs::remove_dir_all(ws.parent().unwrap_or(&ws));
+        grades
+    }
+
+    /// Judge each task's solution and fixtures-only run with judges `a` and `b` (a
+    /// decision model and an LLM, usually), and compare their verdicts per criterion.
+    pub fn calibrate(&self, a: &JudgeConfig, b: &JudgeConfig) -> Vec<CalibrationRow> {
+        let mut rows = Vec::new();
+        let judge_only = |j: &JudgeConfig| GradeOptions { judge: Some(j.clone()), ..Default::default() };
+        let base = |label: &str| label.rsplit_once(" (").map(|(l, _)| l.to_string()).unwrap_or_else(|| label.to_string());
+        for t in &self.tasks {
+            if !t.grader_list().iter().any(|g| matches!(g, Ok(Grader::Judge { .. }))) {
+                continue;
+            }
+            let sol = t.solution.as_ref().map(|s| self.path.join(s)).filter(|p| p.is_dir());
+            let runs: Vec<(&str, Option<&Path>)> = sol.as_deref().map(|p| ("solution", Some(p))).into_iter().chain([("fixtures", None)]).collect();
+            for (run, extra) in runs {
+                let ga: Vec<Grade> = self.grade_fresh(t, extra, &judge_only(a)).into_iter().filter(|g| g.grader.starts_with("judge:")).collect();
+                let gb: Vec<Grade> = self.grade_fresh(t, extra, &judge_only(b)).into_iter().filter(|g| g.grader.starts_with("judge:")).collect();
+                for (x, y) in ga.iter().zip(&gb) {
+                    let grader = base(&x.grader);
+                    let failed = |g: &Grade| g.parts.is_empty() && !g.detail.is_empty() && g.score == 0.0 && !g.success;
+                    if failed(x) || failed(y) {
+                        let which = if failed(x) { x } else { y };
+                        rows.push(CalibrationRow { task: t.id.clone(), run: run.into(), grader: grader.clone(), criterion: "(error)".into(), a: x.score, b: y.score, agree: false, note: which.detail.clone() });
+                        continue;
+                    }
+                    for (px, py) in x.parts.iter().zip(&y.parts) {
+                        let level = px.label.starts_with("level") || py.label == "level";
+                        let agree = if level { px.value.round() == py.value.round() } else { (px.value >= 0.5) == (py.value >= 0.5) };
+                        rows.push(CalibrationRow { task: t.id.clone(), run: run.into(), grader: grader.clone(), criterion: px.label.clone(), a: px.value, b: py.value, agree, note: String::new() });
+                    }
+                    rows.push(CalibrationRow { task: t.id.clone(), run: run.into(), grader, criterion: "(passes)".into(), a: x.score, b: y.score, agree: x.success == y.success, note: String::new() });
+                }
+            }
+        }
+        rows
+    }
+
+    /// Try each task's graders without an agent: on its fixtures alone they should fail
+    /// (or the task passes with no work), and on its fixtures plus its `solution` they
+    /// should pass. Runs `tests` commands in temporary directories, and the judges
+    /// `opts.judges` allows (decision models, for `hlock evals check --run`).
+    pub fn check_graders(&self, opts: &GradeOptions) -> Vec<PackIssue> {
         let mut issues = Vec::new();
-        let opts = GradeOptions { skip_judges: true, ..Default::default() };
+        let judge = self.judge_for(opts);
+        let judges_run = match opts.judges {
+            Judges::All => judge.is_some(),
+            Judges::Deciders => judge.as_ref().is_some_and(JudgeConfig::is_decider),
+            Judges::None => false,
+        };
+        let opts = GradeOptions { judge: judge.clone(), auto: false, trace: None, ..opts.clone() };
         static N: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
         let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let root = std::env::temp_dir().join(format!("hlock-check-{}-{n}", std::process::id()));
@@ -353,10 +459,10 @@ impl EvalPack {
                     crate::adapters::copy_dir(&src, &ws);
                 }
             };
-            // skipped judges might fail where the rest pass, so only judge-free tasks can be
-            // said to pass without any work
+            // skipped judges might fail where the rest pass, so a judged task can only be
+            // said to pass without any work when its judges ran
             let judged = graders.iter().any(|g| matches!(g, Ok(Grader::Judge { .. })));
-            if !graders.is_empty() && !judged {
+            if !graders.is_empty() && (!judged || judges_run) {
                 fresh(None);
                 let grades = self.grade_with(t, &ws, &opts);
                 if !grades.is_empty() && grades.iter().all(|g| g.success) {
@@ -366,7 +472,13 @@ impl EvalPack {
             match t.solution.as_ref().map(|s| self.path.join(s)).filter(|p| p.is_dir()) {
                 Some(sol) => {
                     fresh(Some(&sol));
-                    for g in self.grade_with(t, &ws, &opts).iter().filter(|g| !g.success) {
+                    let grades = self.grade_with(t, &ws, &opts);
+                    for g in grades.iter().filter(|g| g.success && g.uncertain) {
+                        let weakest = g.parts.iter().min_by(|a, b| (a.value - 0.5).abs().total_cmp(&(b.value - 0.5).abs()));
+                        let which = weakest.map(|p| format!(": {:?} P={:.2}", p.label, p.value)).unwrap_or_default();
+                        issues.push(PackIssue::warn(id, format!("{} is uncertain on its solution{which}", g.grader)));
+                    }
+                    for g in grades.iter().filter(|g| !g.success) {
                         let lines: Vec<&str> = g.detail.lines().filter(|l| !l.trim().is_empty()).collect();
                         let detail = match lines.as_slice() {
                             [] => String::new(),

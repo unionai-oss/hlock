@@ -91,6 +91,12 @@ For a custom job:
 | `verify` | A shell command run in the project after the agent exits. Exit 0 means verified. Without it, the run is reported as unverified. |
 | `instructions` | Text added to the prompt |
 
+## `[deciders.default]`
+
+The [decision model](../guides/deciders.md) the meta harness's checks use, such as
+`bootstrap-evals` reviewing tasks: `model`, and optionally `base-url`, `key-env` and
+`protocol`. Other uses aren't taken here.
+
 ## `harness.meta.lock`
 
 `hlock meta pin` writes a pinned lock (`kind = "pin"`):

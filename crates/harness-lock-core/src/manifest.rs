@@ -132,6 +132,9 @@ pub struct Manifest {
     /// Project-defined harnesses (`[harnesses.<id>]`): framework agents and custom scripts.
     #[serde(default)]
     pub harnesses: BTreeMap<String, serde_json::Value>,
+    /// Decision models by what they decide (`[deciders.<use>]`).
+    #[serde(default)]
+    pub deciders: BTreeMap<String, serde_json::Value>,
     #[serde(skip)]
     pub source_path: Option<PathBuf>,
 }
@@ -214,6 +217,33 @@ impl Manifest {
             .get("judge")
             .and_then(|v| serde_json::from_value::<crate::graders::JudgeConfig>(v.clone()).ok())
             .filter(|j| j.is_set())
+    }
+
+    /// `[deciders.<use>]`, checked, with defaults filled in.
+    pub fn deciders(&self) -> Result<BTreeMap<String, crate::decide::DeciderSpec>> {
+        self.deciders
+            .iter()
+            .map(|(use_, v)| {
+                let spec: crate::decide::DeciderSpec = serde_json::from_value(v.clone()).map_err(|e| Error::Manifest(format!("[deciders.{use_}]: {e}")))?;
+                Ok((use_.clone(), spec.validated(use_).map_err(Error::Manifest)?))
+            })
+            .collect()
+    }
+
+    /// The judge `[deciders.judge]`, else `[deciders.default]`, names: used when
+    /// neither `[evals.judge]` nor a pack's `[pack.judge]` is set.
+    pub fn default_judge(&self) -> Option<crate::graders::JudgeConfig> {
+        let specs = self.deciders().ok()?;
+        let spec = specs.get("judge").or_else(|| specs.get("default"))?;
+        let model = spec.model.clone()?;
+        Some(crate::graders::JudgeConfig {
+            model,
+            protocol: spec.protocol.clone(),
+            base_url: spec.base_url.clone(),
+            key_env: spec.key_env.clone(),
+            long_context: spec.long_context,
+            ..Default::default()
+        })
     }
 
     pub fn backend_target(&self) -> String {

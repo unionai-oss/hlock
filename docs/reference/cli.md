@@ -22,7 +22,8 @@ Failures print a one-line error with a hint and exit `1`.
 | [`list`](#list) | List the locks you've pulled |
 | [`rm`](#rm) | Remove pulled locks |
 | [`run`](#run) | Run the locked agent on a prompt |
-| [`evals`](#evals) | Write a starter eval pack from a template, and check one |
+| [`evals`](#evals) | Write a starter eval pack from a template, check it, and grade with it |
+| [`decide`](#decide) | Ask a decision model typed questions, and answer harness hooks with one |
 | [`init`](#init) | Write a starter `harness.toml` |
 | [`resolve`](#resolve) | Search the space and pin the winner in `harness.lock` |
 | [`tune`](#tune) | Tune prompts, hyperparameters, and small models into `harness.tune.lock` |
@@ -119,16 +120,17 @@ parse and whose files exist, no `TODO(hlock)` left, and tasks that can fail. Exi
 errors; warnings don't fail. Takes `--json`.
 
 ```bash
-hlock evals check [DIRECTORY] [--run] [--json]
+hlock evals check [DIRECTORY] [--run [--judges]] [--json]
 ```
 
 | Option | Default | Description |
 |---|---|---|
 | `DIRECTORY` | `./evals` | The pack |
-| `--run` | | Also run each task's graders, judges aside, on its fixtures alone (they should fail) and on its fixtures plus its `solution` (they should pass). Runs the pack's test commands. See [Check your graders](../guides/eval-packs.md#check-your-graders). |
+| `--run` | | Also run each task's graders on its fixtures alone (they should fail) and on its fixtures plus its `solution` (they should pass): test commands, and judges that are decision models. Warns when a judge is uncertain on a solution. See [Check your graders](../guides/eval-packs.md#check-your-graders). |
+| `--judges` | | With `--run`, also run LLM judges |
 
-`--run` runs nothing while the pack has errors, and says so. A `[evals.judge]` in the
-project's `harness.toml` counts as the pack's judge model.
+`--run` runs nothing while the pack has errors, and says so. The project's judge settings
+(`[evals.judge]`, `[deciders.judge]`, `[deciders.default]`) apply.
 
 ### `evals grade`
 
@@ -148,7 +150,61 @@ hlock evals grade TASK [WORKSPACE] [--pack DIR] [--json]
 | `--pack` | `./evals` | The pack |
 
 Judges use `[evals.judge]` from the project's `harness.toml`, else the pack's
-`[pack.judge]`.
+`[pack.judge]`, else `[deciders.judge]` or `[deciders.default]`, else one hlock finds (see
+[Which judge](../guides/eval-packs.md#which-judge)). A judge's grade lists each criterion's
+probability, and is marked `uncertain` near the line.
+
+### `evals calibrate`
+
+Judge each task's solution, and its run with no work done, with the pack's judge and with
+a second one, and print the criteria they disagree on and the share they agree on. Takes
+`--json`.
+
+```bash
+hlock evals calibrate [DIRECTORY] --against MODEL [--against-base-url URL] [--model MODEL] [--json]
+```
+
+| Option | Default | Description |
+|---|---|---|
+| `DIRECTORY` | `./evals` | The pack |
+| `--against` | | The second judge, as `provider:model` (an LLM, usually) |
+| `--against-base-url` | | An OpenAI-compatible endpoint for `--against`, for a local LLM |
+| `--model` | the pack's judge | The judge to calibrate |
+
+## `decide`
+
+[Decision models](../guides/deciders.md): typed questions answered with probabilities.
+
+### `decide ask`
+
+Ask a decision model about `STATE`: text, `@file`, or `-` for stdin. Prints each answer
+with its probability, the model that answered, the input tokens, and the cost when the
+provider publishes a price. Takes `--json`.
+
+```bash
+hlock decide ask STATE [--noul TEXT]... [--choice "Q=A,B"]... [--score "Q=L0|L1|…"]... [--model MODEL] [--use USE] [--json]
+```
+
+| Option | Description |
+|---|---|
+| `--noul` | A yes/no question |
+| `--choice` | A question and its options after `=`, comma-separated |
+| `--score` | A question and its levels after `=`, `|`-separated, worst first |
+| `--model` | `provider:model`. Default: `[deciders.<use>]`, else `[deciders.default]` in `harness.toml`, else Kev on a local Ollama or Ollaya, else Jev when `TYPESAFE_API_KEY` is set. |
+| `--use` | Use `[deciders.<use>]`'s model and settings |
+
+### `decide hook`
+
+Answer one harness hook event on stdin with the lock's decider for `USE` (`approve` or
+`stop`), in the harness's format (`claude-code` or `codex`). [`sync`](#sync) writes this
+command into the harness's config, with the lock as the global `--lock`. It prints the
+harness's own answer when the decider is sure enough and `may` allows it, and otherwise
+prints nothing, so the harness does what it would have done. It always exits `0`.
+`-v` (or `HLOCK_DECIDE_VERBOSE=1`) says what happened on stderr.
+
+```bash
+hlock decide hook USE --format claude-code|codex [--lock PATH] [-v]
+```
 
 ## `resolve`
 

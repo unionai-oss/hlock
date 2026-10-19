@@ -66,6 +66,14 @@ kind = "plugin"
 extractor = "claude-plugins"
 source = "{root}/plugins/installed_plugins.json"
 
+# How hlock wires decision models in (`[deciders.<use>]` in harness.toml): hooks in
+# settings.json. `approve` answers permission prompts (PreToolUse, when a project sets
+# `hooks`, gates every call); `stop` keeps the agent going when the task isn't done.
+[deciders.approve]
+hook = { file = "settings", events = ["PermissionRequest"], format = "claude-code" }
+[deciders.stop]
+hook = { file = "settings", events = ["Stop"], format = "claude-code" }
+
 [launch]
 model-flag = "--model"
 prompt = ["-p", "{prompt}"]  # `hlock run`: one prompt, non-interactively

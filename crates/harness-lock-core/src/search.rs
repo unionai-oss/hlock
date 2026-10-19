@@ -26,6 +26,8 @@ pub struct Stack {
     pub temperature: Option<f64>,
     /// Per-step tool timeout in seconds (an HPO axis at deeper depths).
     pub tool_timeout_seconds: Option<u64>,
+    /// Decision models, by use (`approve` → `ollama:kev:4b`).
+    pub deciders: BTreeMap<String, String>,
 }
 
 impl Default for Stack {
@@ -43,6 +45,7 @@ impl Default for Stack {
             retries: 0,
             temperature: None,
             tool_timeout_seconds: None,
+            deciders: BTreeMap::new(),
         }
     }
 }
@@ -54,7 +57,7 @@ impl Stack {
     }
 
     pub fn to_value(&self) -> serde_json::Value {
-        json!({
+        let mut v = json!({
             "llm": self.llm,
             "harness": self.harness,
             "pattern": self.pattern,
@@ -66,7 +69,11 @@ impl Stack {
             "retries": self.retries,
             "temperature": self.temperature,
             "tool_timeout_seconds": self.tool_timeout_seconds,
-        })
+        });
+        if !self.deciders.is_empty() {
+            v["deciders"] = json!(self.deciders); // only when set, so other stacks keep their hashes
+        }
+        v
     }
 
     pub fn hash(&self) -> String {

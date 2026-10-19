@@ -11,7 +11,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{json, Value};
 
 use crate::capture::{read_config, render_config, PinOutcome};
 use crate::error::{Error, Result};
@@ -110,9 +110,19 @@ pub struct MetaManifest {
     pub agent: AgentSpec,
     pub run: RunDefaults,
     pub jobs: BTreeMap<String, JobSpec>,
+    /// `[deciders.default]`: the decision model the meta harness's checks ask.
+    pub deciders: BTreeMap<String, Value>,
 }
 
 impl MetaManifest {
+    /// `[deciders.default]`, when it names a model.
+    pub fn default_decider(&self) -> Result<Option<crate::decide::DeciderConfig>> {
+        let Some(v) = self.deciders.get("default") else { return Ok(None) };
+        let spec: crate::decide::DeciderSpec = serde_json::from_value(v.clone()).map_err(|e| Error::Manifest(format!("{META_MANIFEST_PATH}: [deciders.default]: {e}")))?;
+        let spec = spec.validated("default").map_err(|e| Error::Manifest(format!("{META_MANIFEST_PATH}: {e}")))?;
+        Ok(spec.model.clone().map(|m| spec.config(&m)))
+    }
+
     pub fn load(path: &Path) -> Result<MetaManifest> {
         let text = std::fs::read_to_string(path).map_err(|e| Error::Manifest(format!("cannot read {}: {e}", path.display())))?;
         MetaManifest::from_str(&text)
@@ -128,6 +138,10 @@ impl MetaManifest {
         if m.model.name.is_some() && m.model.provider.is_none() && m.model.runtime.is_none() {
             return Err(Error::Manifest(format!("{META_MANIFEST_PATH}: [model] needs a `provider` (an API provider) or a `runtime` (a local one)")));
         }
+        if let Some(other) = m.deciders.keys().find(|k| *k != "default") {
+            return Err(Error::Manifest(format!("{META_MANIFEST_PATH}: [deciders.{other}] isn't used here; the meta harness takes [deciders.default]")));
+        }
+        m.default_decider()?;
         for (name, spec) in &m.jobs {
             let builtin = BUILTIN_JOBS.iter().any(|(b, _)| b == name);
             if builtin && (spec.prompt.is_some() || spec.verify.is_some()) {
@@ -884,6 +898,52 @@ impl Verdict {
     }
 }
 
+/// Ask a decision model about each task: does its prompt stand alone, do its graders
+/// check what it asks, and does its solution do it. Advisory: warnings, never errors.
+fn review_tasks(pack: &EvalPack, cfg: &crate::decide::DeciderConfig) -> Vec<String> {
+    use crate::decide::Question;
+    let var = |k: &str| std::env::var(k).ok();
+    let ep = match cfg.endpoint(&var) {
+        Ok(ep) => ep,
+        Err(e) => return vec![format!("warning: couldn't review the tasks with {}: {e}", cfg.model)],
+    };
+    let mut out = Vec::new();
+    for t in &pack.tasks {
+        let graders: Vec<String> = t.grader_list().into_iter().flatten().map(|g| g.label()).collect();
+        let mut solution = serde_json::Map::new();
+        if let Some(dir) = t.solution.as_ref().map(|s| pack.path.join(s)).filter(|p| p.is_dir()) {
+            for e in std::fs::read_dir(&dir).into_iter().flatten().flatten().take(3) {
+                if let Ok(text) = std::fs::read_to_string(e.path()) {
+                    solution.insert(e.file_name().to_string_lossy().into_owned(), json!(text.chars().take(4000).collect::<String>()));
+                }
+            }
+        }
+        let state = json!({"prompt": t.prompt_text.trim(), "expected_files": t.expected_artifacts(), "graders": graders, "solution": solution});
+        let mut qs = vec![
+            ("stands alone", "the prompt may lean on context it doesn't give", Question::noul("alone", "The task's prompt stands on its own: someone with only this prompt and the workspace could do the task, with no earlier conversation.")),
+            ("graders", "its graders may not check what the prompt asks for", Question::noul("graders", "The graders check what the prompt asks for, not just that a file exists.")),
+        ];
+        if !solution.is_empty() {
+            qs.push(("solution", "its solution may not do what the prompt asks", Question::noul("solution", "The solution files do what the prompt asks.")));
+        }
+        let questions: Vec<Question> = qs.iter().map(|(_, _, q)| q.clone()).collect();
+        match crate::decide::decide(&ep, &state, &questions) {
+            Ok(d) => {
+                for (_, warning, q) in &qs {
+                    if let Some(p) = d.get(&q.id).map(|a| a.probability()).filter(|p| *p < 0.5) {
+                        out.push(format!("warning: {}: {warning} ({} P={p:.2})", t.id, d.model));
+                    }
+                }
+            }
+            Err(e) => {
+                out.push(format!("warning: couldn't review the tasks with {}: {e}", cfg.model));
+                break;
+            }
+        }
+    }
+    out
+}
+
 /// hlock's own check of a job's result.
 pub fn verify(job: &str, input: &JobInput, meta: Option<&MetaManifest>, reg: &Registry, ctx: &Ctx) -> Result<Verdict> {
     let spec = job_spec(job, meta)?;
@@ -929,6 +989,13 @@ pub fn verify(job: &str, input: &JobInput, meta: Option<&MetaManifest>, reg: &Re
                 v
             };
             v.details.extend(issues.iter().filter(|i| i.level != "error").map(line));
+            let decider = match meta.map(MetaManifest::default_decider).transpose()?.flatten() {
+                Some(d) => Some(d),
+                None => input.manifest.as_ref().and_then(|m| m.deciders().ok()).and_then(|d| d.get("default").and_then(|s| s.model.clone().map(|m| s.config(&m)))),
+            };
+            if let Some(cfg) = decider {
+                v.details.extend(review_tasks(&pack, &cfg));
+            }
             if input.count > 0 && n < input.count && v.status == "verified" {
                 v.details.push(format!("asked for {}, got {n}", input.count));
             }

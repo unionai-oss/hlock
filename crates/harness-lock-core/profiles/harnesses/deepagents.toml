@@ -7,5 +7,7 @@ vendor = "LangChain"
 homepage = "https://github.com/langchain-ai/deepagents"
 packages = ["pypi:deepagents", "pypi:langchain", "pypi:langgraph"]
 instructions = ["AGENTS.md"]
+# a decider's System One endpoint, for the framework's own decision-model support
+decider-env = [["TYPESAFE_BASE_URL", "TYPESAFE_API_KEY"]]
 [skills]
 dirs = ["skills", ".deepagents/skills"]

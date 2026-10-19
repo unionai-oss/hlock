@@ -47,6 +47,13 @@ dirs = ["{root}/skills", "~/.agents/skills", ".agents/skills", ".codex/skills"]
 write = "{root}/skills"
 builtin-dirs = ["{root}/skills/.system"]
 
+# How hlock wires decision models in: hooks in config.toml's [hooks] table, laid out
+# like Claude Code's. Codex's PreToolUse can allow or deny, not ask.
+[deciders.approve]
+hook = { file = "config", events = ["PermissionRequest"], format = "codex" }
+[deciders.stop]
+hook = { file = "config", events = ["Stop"], format = "codex" }
+
 [launch]
 model-flag = "--model"
 prompt = ["exec", "{prompt}"]  # `hlock run`: one prompt, non-interactively

@@ -10,3 +10,6 @@ vendor = "Pydantic"
 homepage = "https://ai.pydantic.dev"
 packages = ["pypi:pydantic-ai-slim", "pypi:pydantic-ai"]
 instructions = ["AGENTS.md"]
+
+# a decider's System One endpoint, for the framework's own decision-model support
+decider-env = [["SYSTEM_ONE_BASE_URL", "SYSTEM_ONE_API_KEY"]]

@@ -6,7 +6,7 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 
-use harness_lock_core::tasks::{EvalPack, GradeOptions, JudgeConfig};
+use harness_lock_core::tasks::{EvalPack, GradeOptions, JudgeConfig, Judges};
 
 fn tmp(name: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("hlock-graders-{name}-{}", std::process::id()));
@@ -127,13 +127,12 @@ graders = [
     let p = EvalPack::load(p.path.to_str().unwrap(), None).unwrap();
     let issues: Vec<(String, String)> = p.check().into_iter().map(|i| (i.level, i.message)).collect();
     let has = |level: &str, m: &str| issues.iter().any(|(l, x)| l == level && x == m);
-    assert!(has("error", r#"grader 1: unknown grader type "lint" (use artifact, tests, or judge)"#), "{issues:?}");
+    assert!(has("error", r#"grader 1: unknown grader type "lint" (use artifact, tests, judge, or trace)"#), "{issues:?}");
     assert!(has("error", "grader 2: a tests grader needs a `command` or a `script` (one of them)"), "{issues:?}");
     assert!(has("error", "grader 3: unknown key `equal` in a artifact grader (expected path, paths, equals, same-as, contains)"), "{issues:?}");
     assert!(has("error", "judge grader file a/rubric.md still has 1 TODO(hlock)"), "{issues:?}");
     assert!(has("error", "tests grader file a/missing.py not found"), "{issues:?}");
-    assert!(has("warn", "trace graders aren't supported yet, so it's skipped"), "{issues:?}");
-    assert!(has("warn", "judge graders need a model: set [pack.judge] model in pack.toml, or [evals.judge] in harness.toml"), "{issues:?}");
+    assert!(issues.iter().any(|(l, m)| l == "warn" && m.starts_with("judge graders need a model")), "{issues:?}");
     // a judge from harness.toml satisfies it
     let judge = JudgeConfig { model: "openai:gpt-x".into(), ..Default::default() };
     assert!(!p.check_with(Some(&judge)).iter().any(|i| i.message.starts_with("judge graders need")));
@@ -181,7 +180,7 @@ graders = [{ type = "artifact", path = "count.txt", contains = ["9"] }]
     write(&root, "wrong/solution/count.txt", "8\n");
     write(&root, "free/workspace/count.txt", "9\n");
     let p = EvalPack::load(root.to_str().unwrap(), None).unwrap();
-    let issues: Vec<(String, Option<String>, String)> = p.check_graders().into_iter().map(|i| (i.level, i.task, i.message)).collect();
+    let issues: Vec<(String, Option<String>, String)> = p.check_graders(&GradeOptions { judges: Judges::None, ..Default::default() }).into_iter().map(|i| (i.level, i.task, i.message)).collect();
     assert_eq!(issues, [
         ("error".to_string(), Some("wrong_solution".to_string()), "its solution fails tests:grep -q 9 count.txt: exit code 1".to_string()),
         ("warn".into(), Some("free".into()), "its graders pass on the fixtures alone, so it passes without any work".into()),
@@ -230,7 +229,7 @@ graders = [{ type = "judge", criteria = ["Names the revenue figure", "Under 100 
     let ws = root.join("ws");
     write(&ws, "summary.md", "Revenue was $1.2M.\n");
     let (url, req) = fake_model("Here you go:\n{\"criteria\": [true, true, false], \"reason\": \"No source is cited.\"}");
-    let judge = JudgeConfig { model: "local:tiny".into(), base_url: Some(url), key_env: None };
+    let judge = JudgeConfig { model: "local:tiny".into(), base_url: Some(url), key_env: None, ..Default::default() };
     let g = p.grade_with(&p.tasks[0], &ws, &GradeOptions { judge: Some(judge), ..Default::default() });
     let sent: serde_json::Value = serde_json::from_str(&req.join().unwrap()).unwrap();
     assert_eq!(sent["model"], "tiny");
@@ -251,7 +250,7 @@ graders = ["judge:a/rubric.md"]"#);
     write(&root, "a/rubric.md", "A good summary names the revenue figure.\n");
     let g = grade(&p, &root);
     assert!(!g[1].1 && g[1].3.starts_with("no judge model"), "{g:?}");
-    let offline = p.grade_with(&p.tasks[0], &root, &GradeOptions { skip_judges: true, ..Default::default() });
+    let offline = p.grade_with(&p.tasks[0], &root, &GradeOptions { judges: Judges::None, ..Default::default() });
     assert_eq!(offline.iter().map(|g| g.grader.as_str()).collect::<Vec<_>>(), ["artifact:summary.md"]);
 }
 
@@ -264,7 +263,7 @@ graders = ["judge:a/rubric.md"]"#);
     let ws = root.join("ws");
     write(&ws, "summary.md", "Revenue was $1.2M.\n");
     let (url, req) = serve(serde_json::json!({"content": [{"type": "text", "text": "{\"score\": 0.4, \"reason\": \"Vague.\"}"}], "usage": {"input_tokens": 9, "output_tokens": 4}}));
-    let judge = JudgeConfig { model: "anthropic:claude-x".into(), base_url: Some(url), key_env: Some("HLOCK_TEST_NO_SUCH_KEY".into()) };
+    let judge = JudgeConfig { model: "anthropic:claude-x".into(), base_url: Some(url), key_env: Some("HLOCK_TEST_NO_SUCH_KEY".into()), ..Default::default() };
     let g = p.grade_with(&p.tasks[0], &ws, &GradeOptions { judge: Some(judge), ..Default::default() });
     let sent: serde_json::Value = serde_json::from_str(&req.join().unwrap()).unwrap();
     assert_eq!(sent["model"], "claude-x");
@@ -297,13 +296,13 @@ graders = [
         r#""tests:" needs a file: "tests:<path in the pack>""#,
         r#""judge" needs a file: "judge:<path in the pack>""#,
         r#"a grader must be a string like "tests:check.py" or a table with a `type`"#,
-        "a grader table needs a `type` (artifact, tests, or judge)",
+        "a grader table needs a `type` (artifact, tests, judge, or trace)",
         "set `equals` or `same-as`, not both",
         "`path` must be a string",
         "`timeout-seconds` must be a positive integer",
-        "a judge grader needs a `rubric` file or a list of `criteria` (one of them)",
+        "a judge grader needs a `rubric` file or inline `criteria` and `levels`, not both",
         "`pass` must be a number from 0 to 1",
-        "`criteria` must be a list of strings",
+        "`criteria` must be a list of strings or tables",
     ]);
     // shorthand artifact graders take a comma list, or default to expected.artifacts
     assert_eq!(got[10], Ok("artifact:a.txt,b.txt".into()));
@@ -330,7 +329,7 @@ fn a_judge_without_its_key_fails_with_the_variable_to_set() {
 expected = { artifacts = ["summary.md"] }
 graders = [{ type = "judge", criteria = ["Is short"] }]"#);
     write(&root, "summary.md", "short\n");
-    let judge = JudgeConfig { model: "openai:gpt-x".into(), key_env: Some("HLOCK_TEST_UNSET_KEY".into()), base_url: None };
+    let judge = JudgeConfig { model: "openai:gpt-x".into(), key_env: Some("HLOCK_TEST_UNSET_KEY".into()), base_url: None, ..Default::default() };
     let g = p.grade_with(&p.tasks[0], &root, &GradeOptions { judge: Some(judge), ..Default::default() });
     assert_eq!(g[1].detail, "HLOCK_TEST_UNSET_KEY isn't set; the judge reads its openai API key from it");
     let judge = JudgeConfig { model: "no-colon".into(), ..Default::default() };
@@ -378,13 +377,13 @@ fn a_timeout_stops_what_the_command_started() {
 }
 
 #[test]
-fn check_names_the_files_and_counts_skipped_graders_as_nothing() {
-    let (_, p) = pack("nudge2", r#"graders = ["artifact:a.txt", "trace:x"]"#);
+fn check_names_the_files_a_task_only_checks_exist() {
+    let (_, p) = pack("nudge2", r#"graders = ["artifact:a.txt"]"#);
     let warns: Vec<String> = p.check().into_iter().filter(|i| i.level == "warn").map(|i| i.message).collect();
     assert!(warns.contains(&"only checks that a.txt exists; add a content check, tests, or a judge".to_string()), "{warns:?}");
-    let (_, p) = pack("nudge3", r#"graders = ["trace:x"]"#);
-    let warns: Vec<String> = p.check().into_iter().filter(|i| i.level == "warn").map(|i| i.message).collect();
-    assert!(warns.contains(&"none of its graders can run yet, so it always passes".to_string()), "{warns:?}");
+    // a trace grader checks the run, so there's no nudge
+    let (_, p) = pack("nudge3", r#"graders = ["artifact:a.txt", "trace:Never ran sudo"]"#);
+    assert!(!p.check().iter().any(|i| i.message.starts_with("only checks")));
 }
 
 #[test]
@@ -395,7 +394,7 @@ expected = { artifacts = ["summary.md"] }
 graders = [{ type = "judge", criteria = ["Is short"] }]"#);
     write(&root, "a/workspace/summary.md", "already here\n");
     let p = EvalPack::load(p.path.to_str().unwrap(), None).unwrap();
-    let issues: Vec<String> = p.check_graders().into_iter().map(|i| i.message).collect();
+    let issues: Vec<String> = p.check_graders(&GradeOptions { judges: Judges::None, ..Default::default() }).into_iter().map(|i| i.message).collect();
     assert!(!issues.iter().any(|m| m.contains("without any work")), "{issues:?}");
 }
 
@@ -439,7 +438,7 @@ graders = [{ type = "judge", criteria = ["Is short"] }]"#);
     // the pack's judge (unreachable here) is used, unless options name another
     let g = p.grade(&p.tasks[0], &root);
     assert!(g[1].grader.ends_with("(pack:model)") && g[1].detail.contains("cannot reach"), "{g:?}");
-    let judge = JudgeConfig { model: "openai:gpt-x".into(), key_env: Some("HLOCK_TEST_UNSET_KEY".into()), base_url: None };
+    let judge = JudgeConfig { model: "openai:gpt-x".into(), key_env: Some("HLOCK_TEST_UNSET_KEY".into()), base_url: None, ..Default::default() };
     let g = p.grade_with(&p.tasks[0], &root, &GradeOptions { judge: Some(judge), ..Default::default() });
     assert!(g[1].grader.ends_with("(openai:gpt-x)"), "{g:?}");
 }

@@ -1,7 +1,48 @@
 # Decision models: typed judgments across hlock
 
-Status: draft, not built. Extends `v0.md` §7.1 (graders), §7.3 (decision models) and §11
-(open models), and `meta-harness.md`. Supersedes the `[decision]` table in `v0.md` §5.
+Status: partly built (see §0). Extends `v0.md` §7.1 (graders), §7.3 (decision models) and
+§11 (open models), and `meta-harness.md`.
+
+## 0. Implementation status
+
+Built (`feat/deciders`):
+
+- The client (`decide.rs`): System One and Decisions, the provider table, batching, retries,
+  Cloudflare's wrapper, pricing, and finding Kev on a local Ollama or Ollaya.
+- Judges on decision models (§8.1–8.4): `criteria` with `true`/`false`, `levels`, rubric
+  files parsed into both, the judge order with auto-detection, `uncertain`, `fallback`
+  (with `fallback-base-url`), `check --run` running decider judges (`--judges` for LLMs),
+  per-criterion output in `evals grade`, `evals calibrate` (with `--against-base-url`),
+  and `[evidence.judge]`.
+- Trace graders (§8.5) and `$HLOCK_TRACE`; drafting from traces with a decider (§8.6).
+- `[deciders.<use>]` and `[[decider]]` (§6.2–6.4), with `any-of` searched by `resolve`,
+  policy and question digests, and drift in `hlock check`.
+- Hooks (§7.2) for Claude Code and Codex, `approve` and `stop`, written by `sync`; `pin`
+  ignores them when it vendors config, and records Hermes's `auxiliary.approval`.
+- Code-harness variables (§7.4), the Ollaya runtime and Kev in Ollama's catalog (§10),
+  `localize` moving hosted deciders to Kev.
+- `hlock decide ask` and `hlock decide hook` (§11), and `[deciders.default]` in
+  `harness.meta.toml` reviewing `bootstrap-evals` tasks (§9).
+
+Changed from the design below:
+
+- The stack's `[decision]` table and `[candidates] decision` stay as they were: a label for
+  rule sets (`none`, `rules:default`). Deciders are separate (§6.5).
+- `hlock decide STATE` is `hlock decide ask STATE`, since `hook` is a subcommand too.
+- The hook takes the lock as hlock's global `--lock`.
+- A native setting (§7.1) is read by `pin`, never written: Hermes needs a plugin to reach
+  a decision model through it.
+- Drafting skips requests whose result clearly can't be checked; there's no `--strict`.
+
+Not built yet:
+
+- Hooks for Gemini CLI, Cursor, Copilot, Amp, OpenCode and Pi; questions for `route` and
+  `tool` (they're simulated on the reference harness and passed to code harnesses only).
+- Pi's classifier models in `pin`.
+- The meta jobs' other uses (§9: `install`, `update`, `stop` and risk notes for the
+  built-in agent) and `meta init` offering a decider.
+- `upgrade` across decider versions, decider cost in the evidence, tuning thresholds, and
+  the Python shim's `hlock.decide(use, state)`.
 
 ## 1. Summary
 
@@ -331,10 +372,9 @@ hook as drift.
 
 ### 6.5 Compatibility
 
-- `[candidates] decision = ["none", "rules:default"]` loads as `[deciders.default]
-  any-of`.
-- A lock's `[decision]` table loads as one `[[decider]]` per entry in its `decisions`,
-  with `via = "simulated"` for the reference harness. New locks write `[[decider]]` only.
+- `[candidates] decision` and a lock's `[decision]` table are unchanged: they name the
+  stack's rule set (`none`, `rules:default`), which nothing runs yet. Deciders live
+  beside them in `[deciders.*]` and `[[decider]]`.
 - Locks without deciders are unchanged.
 
 ## 7. Wiring deciders into harnesses
@@ -542,7 +582,7 @@ LLMs:
 
 | Command | Change |
 |---|---|
-| `hlock decide STATE --noul "…" [--choice …] [--score …]` | New: ask a decider one-off questions, to try criteria or policies. `--model`, `--use`, `--json`. |
+| `hlock decide ask STATE --noul "…" [--choice …] [--score …]` | New: ask a decider one-off questions, to try criteria or policies. `--model`, `--use`, `--json`. |
 | `hlock decide hook USE --format F` | New: the hook entry point (§7.2) |
 | `hlock evals check --run`, `evals grade`, `evals calibrate` | §8.4 |
 | `hlock pin`, `sync`, `launch`, `check` | Capture, wire, and check deciders (§6.4, §7.2) |

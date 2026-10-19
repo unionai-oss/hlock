@@ -38,6 +38,11 @@ dirs = ["{root}/skills"]
 write = "{root}/skills"
 builtin-manifest = "{root}/skills/.bundled_manifest"
 
+# The model Hermes's smart approvals use (`approvals.mode: smart`); a plugin such as
+# jev-approvals points it at a decision model. `hlock pin` records it.
+[deciders.approve]
+native = { file = "config", pointer = "/auxiliary/approval", provider-key = "provider", model-key = "model", base-url-key = "base_url" }
+
 [launch]
 model-flag = "--model"
 prompt = ["-z", "{prompt}"]  # `hlock run`: one prompt, non-interactively

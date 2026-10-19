@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 import sys
 import time
@@ -55,8 +56,12 @@ from harness_lock import (
     sync_run_step,
     sync_skill,
 )
+from harness_lock import calibrate_eval_pack as _calibrate_eval_pack
 from harness_lock import check_eval_pack as _check_eval_pack
 from harness_lock import check_pin as _check_pin
+from harness_lock import decide as _decide
+from harness_lock import decide_hook as _decide_hook
+from harness_lock import decider_drift as _decider_drift
 from harness_lock import evals as _evals
 from harness_lock import grade_eval_task as _grade_eval_task
 from harness_lock import jobs as _jobs
@@ -164,7 +169,7 @@ click.rich_click.COMMAND_GROUPS = {
     "hlock": [
         {"name": "Lock", "commands": ["pin", "check"]},
         {"name": "Rehydrate & run", "commands": ["sync", "launch", "run"]},
-        {"name": "Optimize", "commands": ["evals", "init", "resolve", "tune", "upgrade"]},
+        {"name": "Optimize", "commands": ["evals", "init", "resolve", "tune", "upgrade", "decide"]},
         {"name": "Go local", "commands": ["localize"]},
         {"name": "Harness", "commands": ["harness", "runtime"]},
         {"name": "Inspect", "commands": ["show", "tree", "backend"]},
@@ -216,7 +221,7 @@ def _friendly_errors():
         yield
     except ValueError as e:
         msg = str(e).strip()
-        _fail(msg, _hint_for(msg))
+        _fail(escape(msg), _hint_for(msg))  # core messages name tables like [deciders.stop]
 
 
 @contextmanager
@@ -267,6 +272,8 @@ def _lock_panel(lf, title: str | None = None) -> Panel:
     for role, spec in json.loads(lf.llm):
         stack.add_row(f"llm · {role}", f"[bold]{spec}[/]")
     stack.add_row("decision", lf.decision)
+    for d in json.loads(lf.to_json()).get("decider") or []:
+        stack.add_row(f"decider · {d['use']}", _decider_cell(d))
     stack.add_row("backend", lf.provenance)
 
     evidence = _kv_table()
@@ -276,6 +283,15 @@ def _lock_panel(lf, title: str | None = None) -> Panel:
     lat = ev.get("latency_s_per_task") or {}
     evidence.add_row("latency", f"p50 {_secs(lat.get('p50'))}  ·  p95 {_secs(lat.get('p95'))}")
     evidence.add_row("trials", str(ev.get("trials", "—")))
+    judge = ev.get("judge")
+    if judge:
+        judge = judge if isinstance(judge, dict) else {"model": judge}
+        extra = []
+        if judge.get("answered") and judge["answered"] not in judge["model"]:
+            extra.append(f"answered by {judge['answered']}")
+        if judge.get("uncertain_grades") is not None:
+            extra.append(f"{_pct(judge['uncertain_grades'])} uncertain")
+        evidence.add_row("judge", f"{escape(judge['model'])}" + (f"  [muted]{' · '.join(extra)}[/]" if extra else ""))
 
     digest = (lf.manifest_hash or "—").split(":", 1)[-1][:12]
     return Panel(
@@ -290,6 +306,14 @@ def _lock_panel(lf, title: str | None = None) -> Panel:
         expand=False,
         padding=(1, 2),
     )
+
+
+def _decider_cell(d: dict) -> str:
+    """`ollama:kev:4b  hook: PermissionRequest · may deny, ask`, for the lock panels."""
+    where = ", ".join(w["event"] for w in d.get("wiring") or [])
+    how = f"{d['via']}: {where}" if where else d["via"]
+    may = f" · may {', '.join(d['may'])}" if d.get("may") else ""
+    return f"[bold]{escape(d['provider'])}:{escape(d['model'])}[/]  [muted]{escape(how)}{may}[/]"
 
 
 def _count_by(items, key) -> str:
@@ -335,6 +359,8 @@ def _pin_panel(lock: dict, title: str | None = None) -> Panel:
     secrets = lock.get("secret") or []
     if secrets:
         t.add_row("secrets", f"{len(secrets)} redacted  [muted](supplied as HLOCK_SECRET_* when syncing)[/]")
+    for d in lock.get("decider") or []:
+        t.add_row(f"decider · {d['use']}", _decider_cell(d))
     pulled = lock.get("pulled") or {}
     if pulled.get("from"):
         t.add_row("pulled", f"{escape(pulled['from'])} [muted]@ {pulled.get('commit', '')[:7]}[/]")
@@ -398,6 +424,11 @@ def main(manifest: str | None, lock_path: str | None) -> None:
     Get started: [cmd]hlock pin[/] → [cmd]hlock check[/] → [cmd]hlock sync[/]
     """
     _restore_meta_env()
+    # the hooks `sync` writes for deciders run this hlock, however it was installed
+    if "HLOCK_BIN" not in os.environ:
+        found = shutil.which("hlock")
+        if found:
+            os.environ["HLOCK_BIN"] = found
     _set_project(manifest, lock_path)
 
 
@@ -511,9 +542,16 @@ def _evals_from_traces(directory: str, source: str | None, name: str | None, n_t
             where = source or f"agent sessions for {_show(project)} (Claude Code, Codex, Pi)"
             _fail(f"no requests found in {where}",
                   "pass [cmd]--from-traces PATH[/] with session logs or JSONL/CSV records that have a prompt")
+        decider = Manifest.load(_m()).decider("draft") if Path(_m()).exists() else None
+        decide = None
+        if decider:
+            console.print(f"[muted]reviewing the requests with {escape(decider)} ([key]\\[deciders.draft][/] or "
+                          "[key]\\[deciders.default][/]); a hosted model sees the redacted prompts[/]")
+            def decide(state, questions):
+                return _decide(state, questions, model=decider, use_="draft", manifest=_m())
         try:
             written, n = _evals.draft_from_traces(directory, sessions, name=name, n_tasks=n_tasks, project=project,
-                                                  force=force)
+                                                  force=force, decide=decide)
         except OSError as e:
             _fail(f"cannot write {directory}: {e.strerror}")
     counts: dict[str, int] = {}
@@ -561,24 +599,29 @@ def evals_templates(as_json: bool) -> None:
 @click.option("--run", is_flag=True,
               help="Also run each task's graders, judges aside, on its fixtures alone (they should fail) and on "
                    "its solution (they should pass). Runs the pack's test commands.")
+@click.option("--judges", is_flag=True,
+              help="With --run, also run LLM judges, which cost more and can't be compared run to run. "
+                   "Decision-model judges always run with --run.")
 @click.option("--json", "as_json", is_flag=True, help="Print the result as JSON.")
-def evals_check(directory: str, run: bool, as_json: bool) -> None:
+def evals_check(directory: str, run: bool, judges: bool, as_json: bool) -> None:
     """Check that an eval pack is ready: required fields, prompts, fixtures, graders, and
     no [key]TODO(hlock)[/] slots left. Exits 1 on errors; warnings don't fail."""
     manifest = _m() if Path(_m()).exists() else None
     with _friendly_errors():
-        result = json.loads(_check_eval_pack(directory, run=run, manifest=manifest))
+        result = json.loads(_check_eval_pack(directory, run=run, manifest=manifest, judges=judges))
     issues = result["issues"]
     errors = [i for i in issues if i["level"] == "error"]
     if as_json:
         console.print_json(data=result)
         sys.exit(1 if errors else 0)
-    head = f"[bold]{result['name'] or '(unnamed)'}[/] {result['version']}  [muted]{len(result['tasks'])} tasks · {_show(directory)}[/]"
+    judge = result.get("judge")
+    judged = f" · judge {escape(judge['model'])}" if judge and run else ""
+    head = f"[bold]{result['name'] or '(unnamed)'}[/] {result['version']}  [muted]{len(result['tasks'])} tasks · {_show(directory)}{judged}[/]"
     console.print(head)
     for i in issues:
         mark = "[fail]✗[/]" if i["level"] == "error" else "[warn]![/]"
         where = f"[key]{i['task']}[/]  " if i["task"] else ""
-        console.print(f"  {mark} {where}{i['message']}", soft_wrap=True)
+        console.print(f"  {mark} {where}{escape(i['message'])}", soft_wrap=True)
     warns = len(issues) - len(errors)
     plural = lambda n, word: f"{n} {word}{'' if n == 1 else 's'}"
     if errors:
@@ -610,7 +653,11 @@ def evals_grade(task: str, workspace: str | None, pack: str, as_json: bool) -> N
     console.print(f"[bold]{escape(task)}[/]  [muted]{escape(what)} · score {result['score']:.2f}[/]")
     for g in result["grades"]:
         mark = "[ok]✓[/]" if g["success"] else "[fail]✗[/]"
-        console.print(f"  {mark} {escape(g['grader'])}  [muted]{g['score']:.2f}[/]", soft_wrap=True)
+        unsure = "  [warn]uncertain[/]" if g.get("uncertain") else ""
+        console.print(f"  {mark} {escape(g['grader'])}  [muted]{g['score']:.2f}[/]{unsure}", soft_wrap=True)
+        for part in g.get("parts") or []:
+            value = f"{part['value']:.2f}" if not part["label"].startswith("level") else f"{part['value']:.1f}"
+            console.print(f"      [muted]{value}[/]  {escape(part['label'])}", soft_wrap=True)
         for line in g["detail"].splitlines():
             console.print(f"      [muted]{escape(line)}[/]", soft_wrap=True)
     if not result["success"]:
@@ -618,6 +665,123 @@ def evals_grade(task: str, workspace: str | None, pack: str, as_json: bool) -> N
         err_console.print(f"[fail]✗[/] {failed} of {len(result['grades'])} graders failed")
         sys.exit(1)
     _ok("passed")
+
+
+@evals.command("calibrate")
+@click.argument("directory", default="./evals")
+@click.option("--against", required=True, metavar="MODEL", help="The judge to compare with, as provider:model (an LLM, usually).")
+@click.option("--against-base-url", default=None, metavar="URL",
+              help="An OpenAI-compatible endpoint for --against, for a local LLM (Ollama's is http://localhost:11434/v1).")
+@click.option("--model", default=None, metavar="MODEL", help="The judge to calibrate.  [dim]\\[default: the pack's judge][/]")
+@click.option("--json", "as_json", is_flag=True, help="Print the comparison as JSON.")
+def evals_calibrate(directory: str, against: str, against_base_url: str | None, model: str | None, as_json: bool) -> None:
+    """Judge each task's solution, and its run with no work done, with two judges, and
+    list the criteria they disagree on: the ones to reword, or give [key]true[/] and
+    [key]false[/] descriptions."""
+    manifest = _m() if Path(_m()).exists() else None
+    with _working("Judging with two judges…"):
+        result = json.loads(_calibrate_eval_pack(directory, against, model=model, manifest=manifest,
+                                                 against_base_url=against_base_url))
+    if as_json:
+        console.print_json(data=result)
+        return
+    rows = result["rows"]
+    console.print(f"[bold]{escape(result['a'])}[/] vs [bold]{escape(result['b'])}[/]  [muted]{len(rows)} comparisons[/]")
+    if not rows:
+        console.print("[muted]no judge graders to compare[/]")
+        return
+    t = Table(box=None, pad_edge=False, show_header=True, header_style="muted")
+    for col in ("task", "run", "criterion", result["a"], result["b"], ""):
+        t.add_column(escape(col))
+    for r in rows:
+        if r["agree"]:
+            continue
+        crit = r["criterion"] if not r.get("note") else f"{r['criterion']}: {r['note']}"
+        t.add_row(escape(r["task"]), r["run"], escape(crit), f"{r['a']:.2f}", f"{r['b']:.2f}", "[warn]differ[/]")
+    if t.row_count:
+        console.print(t)
+    _ok(f"they agree on {_pct(result['agreement'])}")
+
+
+@main.group()
+def decide() -> None:
+    """Ask decision models typed questions, and answer harness hooks with them."""
+
+
+def _read_state(state: str) -> str:
+    if state == "-":
+        return sys.stdin.read()
+    if state.startswith("@"):
+        return Path(state[1:]).read_text()
+    return state
+
+
+@decide.command("ask")
+@click.argument("state")
+@click.option("--noul", "nouls", multiple=True, metavar="TEXT", help="A yes/no question. Repeat for more.")
+@click.option("--choice", "choices", multiple=True, metavar="Q=A,B,…", help="Pick one of the options after `=`.")
+@click.option("--score", "scores", multiple=True, metavar="Q=L0|L1|…", help="Place it on levels, worst first, after `=`.")
+@click.option("--model", default=None, metavar="MODEL", help="provider:model.  [dim]\\[default: \\[deciders.default], else one hlock finds][/]")
+@click.option("--use", "use_", default=None, help="Use [key]\\[deciders.<use>][/]'s model and settings.")
+@click.option("--json", "as_json", is_flag=True, help="Print the answers as JSON.")
+def decide_ask(state: str, nouls, choices, scores, model: str | None, use_: str | None, as_json: bool) -> None:
+    """Ask a decision model about STATE: text, [key]@file[/], or [key]-[/] for stdin.
+
+    \b
+      hlock decide ask @ticket.txt --noul "Is it urgent?" --choice "team=billing,auth,infra"
+    """
+    questions = [{"id": f"q{i + 1}", "type": "noul", "instructions": q} for i, q in enumerate(nouls)]
+    for spec in choices:
+        q, _, opts = spec.partition("=")
+        options = [o.strip() for o in opts.split(",") if o.strip()]
+        if not options:
+            _fail(f"--choice {spec!r} needs options after `=`", "e.g. --choice \"team=billing,auth\"")
+        questions.append({"id": f"q{len(questions) + 1}", "type": "choice", "instructions": q, "criteria": {o: o for o in options}})
+    for spec in scores:
+        q, _, levels = spec.partition("=")
+        levels = [lv.strip() for lv in levels.split("|") if lv.strip()]
+        if len(levels) < 2:
+            _fail(f"--score {spec!r} needs at least two levels after `=`", "e.g. --score \"severity=cosmetic|broken|outage\"")
+        questions.append({"id": f"q{len(questions) + 1}", "type": "score", "instructions": q, "criteria": levels})
+    if not questions:
+        _fail("ask at least one question", "--noul, --choice, or --score")
+    manifest = _m() if Path(_m()).exists() else None
+    with _working("Asking…"):
+        result = json.loads(_decide(_read_state(state), json.dumps(questions), model=model, use_=use_, manifest=manifest))
+    if as_json:
+        console.print_json(data=result)
+        return
+    d = result["decided"]
+    cost = "" if d.get("cost_usd") is None else " · no cost (local)" if d["cost_usd"] == 0 else f" · ${d['cost_usd']:.6f}"
+    console.print(f"[bold]{escape(result['provider'])}:{escape(d['model'])}[/]  [muted]{d['input_tokens']} input tokens{cost}[/]")
+    for q, a in zip(questions, d["answers"]):
+        if a["type"] == "noul":
+            ans = "yes" if a["value"] >= 0.5 else "no"
+            detail = f"P(yes) {a['value']:.2f}"
+        elif a["type"] == "choice":
+            ans = str(a["value"])
+            detail = f"P {a['probabilities'].get(ans, 0):.2f}" + (f" · confidence {a['confidence']:.2f}" if a.get("confidence") is not None else "")
+        else:
+            levels = q["criteria"]
+            ans = levels[min(len(levels) - 1, max(0, round(a["value"])))]
+            detail = f"level {a['value']:.2f} of {len(levels) - 1}" + (f" · confidence {a['confidence']:.2f}" if a.get("confidence") is not None else "")
+        console.print(f"  {escape(q['instructions'])}  [bold]{escape(ans)}[/]  [muted]{detail}[/]", soft_wrap=True)
+
+
+@decide.command("hook")
+@click.argument("use_", metavar="USE", type=click.Choice(["approve", "stop"]))
+@click.option("--format", "fmt", required=True, type=click.Choice(["claude-code", "codex"]), help="The harness's hook format.")
+@click.option("--verbose", "-v", is_flag=True, help="Say what happened on stderr.")
+def decide_hook(use_: str, fmt: str, verbose: bool) -> None:
+    """Answer one harness hook event on stdin with the lock's decider for USE (the lock
+    is the global [cmd]--lock[/], which [cmd]hlock sync[/] writes into the hook). It
+    defers, printing nothing, when it's unsure, slow, or can't reach the model."""
+    out = json.loads(_decide_hook(use_, fmt, sys.stdin.read(), _l()))
+    if verbose or os.environ.get("HLOCK_DECIDE_VERBOSE"):
+        print(f"hlock decide hook {use_}: {out['note']}", file=sys.stderr)
+    if out["stdout"]:
+        print(out["stdout"])
+    sys.exit(out["exit"])
 
 
 @main.command()
@@ -1119,6 +1283,8 @@ def check(prefix: str | None) -> None:
     if lf.kind == "pin":
         with _working(f"Re-capturing {lf.harness}…"):
             drift = json.loads(_check_pin(_l(), prefix=prefix, manifest=_m()))
+        with _friendly_errors():
+            drift += _decider_drift(_l())
         which = f"the {lf.harness} setup in [path]{prefix}[/]" if prefix else f"your {lf.harness} setup"
         if drift:
             err_console.print(f"[fail]✗ drift:[/] {which} changed since {_ld()} was pinned")
@@ -1154,6 +1320,14 @@ def check(prefix: str | None) -> None:
         if probe and probe["installed"] and probe.get("version") and probe["version"] != lf.harness_version:
             _fail(f"installed {lf.harness} is {probe['version']}, {_ld()} pins {lf.harness_version}",
                   f"install {lf.harness} {lf.harness_version}, or re-lock with [cmd]hlock resolve[/]")
+    with _friendly_errors():
+        decider_drift = _decider_drift(_l())
+    if decider_drift:
+        err_console.print(f"[fail]✗ drift:[/] {_ld()}'s deciders changed")
+        for line in decider_drift:
+            err_console.print(f"  {line}")
+        err_console.print("  [muted]hint:[/] re-lock with [cmd]hlock resolve[/]")
+        sys.exit(1)
     _ok(f"[path]{_ld()}[/] matches [path]{_md()}[/]  [muted]{live.split(':', 1)[-1][:12]}[/]")
 
 
