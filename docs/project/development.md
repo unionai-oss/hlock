@@ -18,7 +18,7 @@ uv sync
 
 `uv sync` creates `.venv`, builds the Rust core and the PyO3 bindings with
 [maturin](https://www.maturin.rs), installs the package in editable mode, and installs
-the `dev` dependency group (maturin, pytest, ruff) at the versions in `uv.lock`.
+the `dev` dependency group (maturin, pytest, ruff, prek) at the versions in `uv.lock`.
 
 Python changes take effect immediately. When you change Rust code, the next `uv run`
 or `uv sync` rebuilds the extension: `pyproject.toml` lists the Rust sources as uv
@@ -35,6 +35,26 @@ cargo test -p harness-lock-core                 # Rust core + integration tests
 ```
 
 Try the CLI against your working tree with `uv run hlock …`.
+
+## Git hooks
+
+[prek](https://prek.j178.dev) runs quick checks on every commit: trailing whitespace,
+end-of-file newlines, line endings, merge-conflict markers, large files, YAML, TOML,
+and JSON syntax, private keys, and `ruff check`. Install the hook once per clone:
+
+```bash
+uv run prek install
+```
+
+The hooks are configured in `prek.toml`. To run them over the whole repository:
+
+```bash
+uv run prek run --all-files
+```
+
+The whitespace hooks fix files in place; stage the fixes and commit again. Generated
+files (`harness.lock`, `uv.lock`, `Cargo.lock`, `docs/assets/quickstart.svg`) are
+excluded. Tests and `cargo test` don't run on commit; CI runs them.
 
 CI runs the same checks on every PR, on Python 3.9, 3.12, and 3.13. It also builds
 the wheel, the sdist, and the `harness-lock` alias, installs them, and dry-runs

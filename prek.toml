@@ -1,0 +1,31 @@
+# Git hooks for `prek` (https://prek.j178.dev). Install once with `prek install`; run
+# everything by hand with `prek run --all-files`. Only quick checks live here: tests and
+# `cargo test` stay in CI.
+#:schema https://www.schemastore.org/prek.json
+
+# Generated files are rewritten by their tools, never by hand (see AGENTS.md).
+exclude = '^(harness\.lock|uv\.lock|Cargo\.lock|docs/assets/quickstart\.svg)$'
+
+# prek's built-in hooks: Rust ports of pre-commit-hooks, no clone or environment needed.
+[[repos]]
+repo = "builtin"
+hooks = [
+    { id = "trailing-whitespace", args = ["--markdown-linebreak-ext=md"] },
+    { id = "end-of-file-fixer" },
+    { id = "mixed-line-ending", args = ["--fix=lf"] },
+    { id = "check-merge-conflict" },
+    { id = "check-case-conflict" },
+    { id = "check-added-large-files", args = ["--maxkb=1024"] },
+    { id = "check-yaml" },
+    { id = "check-toml" },
+    { id = "check-json" },
+    { id = "detect-private-key" },
+]
+
+# Same paths as the CI lint step. Keep `rev` in step with the ruff version in uv.lock.
+[[repos]]
+repo = "https://github.com/astral-sh/ruff-pre-commit"
+rev = "v0.17.1"
+hooks = [
+    { id = "ruff-check", files = '^(harness_lock|hlock|tests)/' },
+]

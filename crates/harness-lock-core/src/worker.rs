@@ -248,4 +248,3 @@ impl Default for PythonWorker {
         Self::new()
     }
 }
-
