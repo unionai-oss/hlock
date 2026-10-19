@@ -2,6 +2,7 @@
 id = "hermes"
 name = "Hermes Agent"
 kind = "cli"
+autonomous = true  # runs as a gateway too: chat channels, cron jobs, memory
 aliases = ["hermes-agent", "nous-hermes"]
 vendor = "Nous Research"
 homepage = "https://github.com/NousResearch/hermes-agent"

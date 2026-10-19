@@ -1849,17 +1849,21 @@ def harness() -> None:
 def harness_list(as_json: bool) -> None:
     """List known harnesses and what's installed on this machine.
 
-    [bold]cli[/] harnesses are agent CLIs, [bold]framework[/] harnesses are agent libraries a
-    project builds on, and [bold]custom[/] harnesses come from [key]\\[harnesses.<id>][/] in
-    [path]harness.toml[/].
+    [bold]cli[/] harnesses are agent CLIs, listed apart when they're autonomous agents (a
+    long-running gateway with chat channels, schedules and memory), [bold]framework[/]
+    harnesses are agent libraries a project builds on, and [bold]custom[/] harnesses come from
+    [key]\\[harnesses.<id>][/] in [path]harness.toml[/].
     """
     with _working("Probing installed harnesses…"):
         rows = json.loads(harnesses(manifest=_m()))
     if as_json:
         console.print_json(data=rows)
         return
-    for kind, title in (("cli", "Agent CLIs"), ("framework", "Frameworks"), ("custom", f"Project harnesses ({_md()})")):
-        group = [r for r in rows if r["kind"] == kind]
+    groups = (("cli", False, "Agent CLIs"), ("cli", True, "Autonomous agents"), ("framework", False, "Frameworks"),
+              ("custom", False, f"Project harnesses ({_md()})"))
+    for kind, autonomous, title in groups:
+        # only agent CLIs split on `autonomous`, so a framework that sets it still shows up
+        group = [r for r in rows if r["kind"] == kind and (kind != "cli" or bool(r.get("autonomous")) == autonomous)]
         if not group:
             continue
         t = Table(box=None, header_style="bold", pad_edge=False, title=title, title_justify="left",
@@ -1903,7 +1907,8 @@ def harness_show(name: str | None, as_json: bool) -> None:
     prof, probe, paths = info["profile"], info["probe"], info["paths"]
     t = _kv_table()
     t.add_row("id", f"[bold]{prof['id']}[/]  [muted]{', '.join(prof['aliases'])}[/]")
-    t.add_row("kind", prof["kind"] + (f"  [muted](framework {prof['framework']})[/]" if prof.get("framework") else ""))
+    t.add_row("kind", prof["kind"] + ("  [muted](autonomous agent)[/]" if prof.get("autonomous") else "")
+              + (f"  [muted](framework {prof['framework']})[/]" if prof.get("framework") else ""))
     if prof["kind"] == "cli":
         t.add_row("support", _support_badge(prof["support"]))
     run = prof.get("run") or {}
