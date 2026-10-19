@@ -18,6 +18,9 @@ Failures print a one-line error with a hint and exit `1`.
 | [`check`](#check) | Fail if a pinned setup changed, or `harness.toml` has drifted from `harness.lock` |
 | [`sync`](#sync) | Rehydrate the setup in a lock on this machine, in a prefix, or in a Docker image |
 | [`launch`](#launch) | Start a harness session that matches the lock |
+| [`pull`](#pull) | Pull someone else's lock from a git repository |
+| [`list`](#list) | List the locks you've pulled |
+| [`rm`](#rm) | Remove pulled locks |
 | [`run`](#run) | Run the locked agent on a prompt |
 | [`evals`](#evals) | Write a starter eval pack from a template, and check one |
 | [`init`](#init) | Write a starter `harness.toml` |
@@ -42,7 +45,7 @@ Failures print a one-line error with a hint and exit `1`.
 | Option | Environment | Description |
 |---|---|---|
 | `-m`, `--manifest PATH` | `HLOCK_MANIFEST` | The `harness.toml` to use |
-| `--lock PATH` | `HLOCK_LOCKFILE` | The lockfile to use |
+| `--lock PATH` | `HLOCK_LOCKFILE` | The lockfile to use, or the name of a [pulled](#pull) lock |
 | `-V`, `--version` | | Print the version |
 | `-h`, `--help` | | Show help |
 
@@ -180,7 +183,7 @@ hlock sync [LOCK] [OPTIONS]
 
 | Option | Description |
 |---|---|
-| `LOCK` | Lock to sync (default `harness.lock`) |
+| `LOCK` | Lock to sync (default `harness.lock`): a path, a [pulled](#pull) lock's name, or a source to pull first |
 | `--plan` | Print the plan and change nothing |
 | `--json` | Print the plan as JSON and change nothing |
 | `-y`, `--yes` | Don't ask before running automatic steps (required when stdin isn't a terminal) |
@@ -211,7 +214,7 @@ hlock launch [HARNESS] [OPTIONS] [-- HARNESS_ARGS...]
 | Option | Description |
 |---|---|
 | `HARNESS` | Harness to start (default: the lock's) |
-| `--lock FILE` | Lock to launch (default `harness.lock`) |
+| `--lock FILE` | Lock to launch (default `harness.lock`): a path, a [pulled](#pull) lock's name, or a source to pull first. A pulled lock's isolated roots go in `~/.hlock/env/<name>/` |
 | `--prefix DIR` | Where isolated roots live (default `.hlock/env`) |
 | `--in-place` | Use your own config instead of an isolated root (same harness only) |
 | `--allow-version-mismatch` | Start even if the installed version differs from the lock |
@@ -219,6 +222,47 @@ hlock launch [HARNESS] [OPTIONS] [-- HARNESS_ARGS...]
 | `--json` | With `--dry-run`, print the launch plan as JSON |
 
 Other arguments are passed to the harness. hlock's own options count anywhere before `--`.
+
+## `pull`
+
+Fetch a lock and the files it vendors from a git repository into the store,
+`~/.hlock/pulls/<name>/`, recording the source and commit in a `[pulled]` table. Use it from
+any project by name. Nothing from the lock runs. With no source, refresh every pulled lock.
+See [Pulling someone else's lock](../guides/pull.md).
+
+```bash
+hlock pull SOURCE [--as NAME | -o FILE] [--force] [--json]
+hlock pull [NAME | LOCK ...] [--json]
+```
+
+| Option | Default | Description |
+|---|---|---|
+| `SOURCE` | | `github:OWNER/REPO[/PATH][@REF]`, `gitlab:GROUP/REPO[//PATH][@REF]`, `git:URL[//PATH][@REF]`, or a GitHub or GitLab URL |
+| `NAME`, `LOCK` | every pulled lock | Pulled locks to refresh from their recorded source: names in the store, or lock files pulled with `-o` |
+| `--as NAME` | the repository owner | Store the lock as `NAME` |
+| `-o`, `--out FILE` | | Write the lock into the project as `FILE` (its vendored files go in `.hlock/vendor/<name>/`) instead of the store |
+| `--force` | | Replace a lock of that name that wasn't pulled from the same repository |
+| `--json` | | Print the lock, its path, the source, the commit, the diff from the lock it replaced, vendored files, other locks in the repository, and warnings as JSON |
+
+`HLOCK_HOME` moves the store (default `~/.hlock`). `HLOCK_GITHUB_URL` and
+`HLOCK_GITLAB_URL` set the base URL for GitHub Enterprise and self-hosted GitLab. Fetching
+needs `git` on `PATH`.
+
+## `list`
+
+List the pulled locks in the store: name, harness, source, commit, and when it was pulled.
+
+```bash
+hlock list [--json]
+```
+
+## `rm`
+
+Remove pulled locks from the store, along with the isolated roots `launch` made for them.
+
+```bash
+hlock rm NAME...
+```
 
 ## `show`
 

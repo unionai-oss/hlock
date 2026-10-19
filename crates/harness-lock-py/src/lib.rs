@@ -709,6 +709,51 @@ fn check_pin(path: String, manifest: Option<String>) -> PyResult<String> {
     Ok(json_str(serde_json::json!(drift)))
 }
 
+/// Pull the lock at `source` (`github:…`, `gitlab:…`, `git:…`, or a repository URL) into
+/// the store as `~/.hlock/pulls/<name>/harness.lock`, or into the project file `out`.
+/// Returns JSON with the lock, its path and name, the source, the commit, the diff from a
+/// lock it replaced, vendored files, other locks in the repo, and warnings.
+#[pyfunction]
+#[pyo3(signature = (source, out=None, name=None, force=false))]
+fn pull(source: String, out: Option<String>, name: Option<String>, force: bool) -> PyResult<String> {
+    let target = match out {
+        Some(o) => core::pull::Target::File(std::env::current_dir().unwrap_or_default().join(o)),
+        None => core::pull::Target::Store(name),
+    };
+    let o = core::pull::pull(&source, &target, force).map_err(py_err)?;
+    Ok(json_str(serde_json::to_value(&o).map_err(|e| py_err(e.into()))?))
+}
+
+/// The lock path of the stored pull `name`, or None.
+#[pyfunction]
+fn pull_find(name: &str) -> Option<String> {
+    core::pull::find(name).map(|p| p.to_string_lossy().into_owned())
+}
+
+/// Every stored pull as a JSON list (`name`, `path`, `harness`, `version`, `pulled`, `error`).
+#[pyfunction]
+fn pull_list() -> PyResult<String> {
+    Ok(json_str(serde_json::to_value(core::pull::list()).map_err(|e| py_err(e.into()))?))
+}
+
+/// Delete the stored pull `name` and its launch environments; returns the removed directory.
+#[pyfunction]
+fn pull_remove(name: &str) -> PyResult<String> {
+    Ok(core::pull::remove(name).map_err(py_err)?.to_string_lossy().into_owned())
+}
+
+/// Where `launch` keeps isolated config roots for the stored pull `name`.
+#[pyfunction]
+fn pull_env(name: &str) -> String {
+    core::pull::env_dir(name).to_string_lossy().into_owned()
+}
+
+/// True if `arg` names a remote source (`github:`, `gitlab:`, `git:`, a URL) rather than a lock path.
+#[pyfunction]
+fn is_pull_source(arg: &str) -> bool {
+    core::pull::is_source(arg)
+}
+
 fn sync_options(prefix: Option<String>, docker: Option<String>, install: bool, pull: bool, all_models: bool, exact: bool) -> core::sync::SyncOptions {
     core::sync::SyncOptions {
         prefix: prefix.map(PathBuf::from),
@@ -1079,6 +1124,12 @@ fn _harness_lock(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(harness_profile, m)?)?;
     m.add_function(wrap_pyfunction!(select_harness, m)?)?;
     m.add_function(wrap_pyfunction!(pin, m)?)?;
+    m.add_function(wrap_pyfunction!(pull, m)?)?;
+    m.add_function(wrap_pyfunction!(pull_find, m)?)?;
+    m.add_function(wrap_pyfunction!(pull_list, m)?)?;
+    m.add_function(wrap_pyfunction!(pull_remove, m)?)?;
+    m.add_function(wrap_pyfunction!(pull_env, m)?)?;
+    m.add_function(wrap_pyfunction!(is_pull_source, m)?)?;
     m.add_function(wrap_pyfunction!(check_pin, m)?)?;
     m.add_function(wrap_pyfunction!(sync_plan, m)?)?;
     m.add_function(wrap_pyfunction!(sync_run_step, m)?)?;

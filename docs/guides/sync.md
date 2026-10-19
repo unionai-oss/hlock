@@ -49,6 +49,10 @@ $ hlock sync --yes
 
 Then `hlock check` confirms the setup matches the pin.
 
+To start from someone else's setup instead, `hlock sync github:OWNER/REPO` pulls their lock
+first, and `hlock sync NAME` syncs one you've already pulled; see
+[Pulling someone else's lock](pull.md).
+
 ## What hlock does, and what it leaves to you
 
 By default `sync` only does things that are local and reversible: it writes config files

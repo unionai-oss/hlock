@@ -1,0 +1,169 @@
+# Pulling someone else's lock
+
+`hlock pull` gets a pinned lock from someone else's git repository, so you can try their
+agent setup with [`hlock launch`](launch.md) or adopt it with [`hlock sync`](sync.md). Say a
+teammate pinned their Claude Code setup with [`hlock pin`](pin.md) and pushed
+`harness.lock` and `.hlock/` to `github.com/alice/agent-setup`:
+
+```console
+$ hlock pull github:alice/agent-setup
+✓ pulled github:alice/agent-setup @ b259f53 → alice
+╭─ 📌 alice · pinned ────────────────────────────────────────────────────╮
+│                                                                        │
+│  harness        claude-code 2.1.285                                    │
+│  llm · default  anthropic:opus                                         │
+│  mcp            github (stdio)                                         │
+│  skills         1  (1 local)                                           │
+│  config         {root}/settings.json, ~/.claude.json /mcpServers       │
+│  secrets        1 redacted  (supplied as HLOCK_SECRET_* when syncing)  │
+│  pulled         github:alice/agent-setup @ b259f53                     │
+│                                                                        │
+╰────────────────────────────────────────────────────────────────────────╯
+! starts MCP servers with: npx  · review before syncing into your own config
+also in the repo: harness.fast.lock  → hlock pull github:alice/agent-setup/harness.fast.lock
+next → hlock launch --lock alice  ·  hlock sync alice --plan
+```
+
+The lock and the files it vendors go into hlock's store, `~/.hlock/pulls/alice/`, laid out
+like the repository they came from. Nothing is written to your project, so you can use
+`alice` from any directory. The name is the repository owner by default (`alice`, or
+`alice-fast` for a remote `harness.fast.lock`); pass `--as NAME` to choose another.
+
+Pulling runs nothing from the lock. The summary shows what's in it, and the warning lists
+the programs its MCP servers start, because those run as soon as the harness does.
+
+## Try it, or adopt it
+
+Anywhere hlock takes a lock, a pulled lock's name works too. To try the setup without
+touching your own config, launch it. `launch` restores the lock into an isolated config root,
+`~/.hlock/env/alice/`, and starts the harness there in your current directory:
+
+```bash
+hlock launch --lock alice
+```
+
+To make it your setup, sync it. Look at the plan first:
+
+```bash
+hlock sync alice --plan
+hlock sync alice
+```
+
+`sync` and `launch` also take a source directly and pull it first, so either is one command:
+
+```console
+$ hlock sync github:alice/agent-setup --plan
+✓ pulled github:alice/agent-setup @ b259f53 → alice
+! starts MCP servers with: npx
+Sync plan for Claude Code 2.1.285 → your config
+✓  harness  Claude Code 2.1.285
+✓  mcp      `npx` for MCP servers: github
+●  config   Write ~/.claude/settings.json
+●  config   Write ~/.claude.json /mcpServers
+●  skill    Copy skill review → ~/.claude/skills/review
+○  secret   HLOCK_SECRET_GITHUB_GITHUB_TOKEN (mcp github GITHUB_TOKEN)  not set
+```
+
+Secrets were never in the lock; supply your own as `HLOCK_SECRET_*` variables, as with any
+[sync](sync.md#on-a-new-machine).
+
+## Manage what you've pulled
+
+```console
+$ hlock list
+name   harness              source                    commit   pulled
+alice  claude-code 2.1.285  github:alice/agent-setup  b259f53  0s ago
+next → hlock launch --lock alice  ·  hlock pull (refresh all)
+```
+
+`hlock pull` with no source refreshes every pulled lock from where it came from;
+`hlock pull alice` refreshes one. A refresh prints the commit change and what changed in the
+setup, or says the lock is up to date:
+
+```console
+$ hlock pull
+✓ alice is up to date with github:alice/agent-setup @ b259f53
+```
+
+A lock pulled at a tag or commit (`@v2`, `@b259f53…`) stays there; pull it again with another
+ref to move it. Pulling replaces `alice` only if it came from the same repository; otherwise
+`pull` stops and suggests `--as` (or `--force` to replace it).
+
+`hlock rm alice` removes it, along with the isolated roots `launch` made for it.
+
+## Into a project
+
+To commit someone's lock alongside your project, for a team that wants to share it, write it
+into the project with `-o`:
+
+```console
+$ hlock pull github:alice/agent-setup -o harness.alice.lock
+✓ pulled github:alice/agent-setup @ b259f53 → harness.alice.lock
+╭─ 📌 harness.alice.lock · pinned ───────────────────────────────────────╮
+│                                                                        │
+│  harness        claude-code 2.1.285                                    │
+│  llm · default  anthropic:opus                                         │
+│  mcp            github (stdio)                                         │
+│  skills         1  (1 local)                                           │
+│  config         {root}/settings.json, ~/.claude.json /mcpServers       │
+│  secrets        1 redacted  (supplied as HLOCK_SECRET_* when syncing)  │
+│  pulled         github:alice/agent-setup @ b259f53                     │
+│                                                                        │
+╰────────────────────────────────────────────────────────────────────────╯
+copied 3 vendored entries into .hlock/vendor/alice/claude-code/
+! starts MCP servers with: npx  · review before syncing into your own config
+also in the repo: harness.fast.lock  → hlock pull github:alice/agent-setup/harness.fast.lock
+next → hlock launch --lock harness.alice.lock  ·  hlock sync harness.alice.lock --plan
+```
+
+A named lock file gets its own vendor directory, so it never mixes with your
+`harness.lock`. `hlock pull` with no source refreshes these too, and
+`hlock pull harness.alice.lock` refreshes one.
+
+## Sources
+
+| Source | Example |
+|---|---|
+| `github:OWNER/REPO[/PATH][@REF]` | `github:alice/agent-setup/harness.fast.lock@v2` |
+| `gitlab:GROUP[/SUBGROUP…]/REPO[//PATH][@REF]` | `gitlab:acme/platform/agents//team@main` |
+| `git:URL[//PATH][@REF]` | `git:git@github.com:alice/private-setup.git` |
+| A URL from the browser | `https://github.com/alice/agent-setup/blob/main/harness.fast.lock` |
+
+- `PATH` is a lock file or a directory to look in. On GitLab, where groups nest, it follows
+  `//`.
+- `REF` is a branch, tag, or full commit SHA; the default is the repository's default
+  branch. A URL to a file (`…/blob/<ref>/<path>`) sets both.
+- If the directory has `harness.lock`, that's the one pulled, and other `harness.*.lock`
+  files are listed with the command that pulls each. With only named locks and more than
+  one, `pull` lists them and stops.
+
+hlock fetches with `git` (a shallow, sparse fetch of the lock and the files it vendors), so
+private repositories work with whatever credentials `git` already uses: a credential helper,
+an SSH key, or a `url.<base>.insteadOf` rewrite. For GitHub Enterprise or a self-hosted
+GitLab, set `HLOCK_GITHUB_URL` or `HLOCK_GITLAB_URL` to its base URL. `HLOCK_HOME` moves the
+store from `~/.hlock`.
+
+## Where it came from
+
+A pulled lock records its origin in a `[pulled]` table, and `hlock --lock alice show` prints
+it in the summary:
+
+```toml
+[pulled]
+at = "2026-10-18T21:08:32Z"
+commit = "b259f53b541fc06018152866f5482da6f9002f67"
+from = "github:alice/agent-setup"
+path = "harness.lock"
+url = "https://github.com/alice/agent-setup.git"
+```
+
+## Reference
+
+```bash
+hlock pull SOURCE [--as NAME | -o FILE] [--force] [--json]
+hlock pull [NAME | LOCK ...] [--json]
+hlock list [--json]
+hlock rm NAME...
+```
+
+See the [CLI reference](../reference/cli.md#pull) for every option.
