@@ -65,6 +65,24 @@ pub struct AgentConfig {
     /// Ask the user about commands that aren't allowed; otherwise refuse them.
     pub interactive: bool,
     pub project: PathBuf,
+    /// A decision model (`[deciders.default]` in `harness.meta.toml`) that checks the job
+    /// is done before the agent stops, and notes a command's risk when the user is asked.
+    /// It never allows anything.
+    pub decider: Option<crate::decide::DeciderConfig>,
+}
+
+/// How many extra turns the decider may give the agent when it isn't sure the job's done.
+const MAX_CONTINUATIONS: u32 = 2;
+
+/// P(done) below which the agent gets another turn.
+const DONE_BELOW: f64 = 0.5;
+
+/// Ask the decider one yes/no question; `None` when there's none or it can't answer.
+fn ask_decider(cfg: &AgentConfig, state: &Value, question: crate::decide::Question) -> Option<(f64, String)> {
+    let var = |k: &str| std::env::var(k).ok();
+    let ep = cfg.decider.as_ref()?.endpoint(&var).ok()?;
+    let d = crate::decide::decide(&ep, state, &[question]).ok()?;
+    Some((d.answers.first()?.probability(), format!("{}:{}", ep.provider, d.model)))
 }
 
 /// The default base URL for an API provider.
@@ -593,6 +611,13 @@ fn call_tool(cfg: &AgentConfig, allow: &mut Vec<String>, call: &Call, say: &mut 
                         allow.join(", ")
                     ));
                 }
+                let risk = crate::decide::Question::noul(
+                    "risk",
+                    "Running this shell command could delete or overwrite data, change things outside the project, or reach the network.",
+                );
+                if let Some((p, who)) = ask_decider(cfg, &json!({"command": cmd, "project": cfg.project}), risk) {
+                    say("note", &format!("risk P={p:.2} that it deletes or overwrites data, or reaches outside the project ({who})"));
+                }
                 match ask(&cmd).trim().to_ascii_lowercase().as_str() {
                     "y" | "yes" => {}
                     "a" | "always" => {
@@ -637,6 +662,7 @@ pub fn run(cfg: &AgentConfig, prompt: &str, say: &mut Say, ask: &mut Ask) -> Out
     let mut history = vec![Msg::User(prompt.to_string())];
     let mut allow = cfg.allow.clone();
     let mut out = Outcome { status: "max-steps".into(), ..Default::default() };
+    let mut continued = 0;
     while out.steps < cfg.max_steps.max(1) {
         out.steps += 1;
         let reply = if cfg.provider == "anthropic" { ask_anthropic(cfg, &history) } else { ask_openai(cfg, &history) };
@@ -657,6 +683,19 @@ pub fn run(cfg: &AgentConfig, prompt: &str, say: &mut Say, ask: &mut Ask) -> Out
             return out;
         }
         if reply.calls.is_empty() {
+            if continued < MAX_CONTINUATIONS {
+                let done = crate::decide::use_question("stop", None).unwrap();
+                if let Some((p, who)) = ask_decider(cfg, &json!({"request": prompt, "last_message": reply.text}), done).filter(|(p, _)| *p < DONE_BELOW) {
+                    continued += 1;
+                    say("note", &format!("not sure the job is done (P={p:.2}, {who}); one more turn"));
+                    history.push(Msg::Assistant { text: reply.text, calls: vec![] });
+                    history.push(Msg::User(format!(
+                        "hlock's check isn't sure the job is done (P={p:.2}). Look at what's left of the job and finish it, \
+                         or reply with why it's done."
+                    )));
+                    continue;
+                }
+            }
             out.status = "done".into();
             out.summary = reply.text.trim().to_string();
             return out;
@@ -703,6 +742,7 @@ pub fn config_from_lock(lock: &crate::lockfile::Lockfile, project: &Path, intera
         allow: if lock.policy.tool_allowlist.is_empty() { DEFAULT_ALLOW.iter().map(|s| s.to_string()).collect() } else { lock.policy.tool_allowlist.clone() },
         interactive,
         project: project.to_path_buf(),
+        decider: None,
     })
 }
 

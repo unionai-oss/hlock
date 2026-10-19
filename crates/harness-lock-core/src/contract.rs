@@ -145,6 +145,12 @@ pub fn invocation(
         let deciders: Vec<(String, crate::decide::DeciderConfig)> = l.decider.iter().map(|d| (d.use_.clone(), crate::decide::entry_config(d))).collect();
         let var = |k: &str| ctx.var(k).map(str::to_string);
         env.extend(crate::decide::decider_env(&deciders, &profile.decider_env, &var));
+        if let (false, Some(p)) = (l.decider.is_empty(), lock_path) {
+            // `hlock decide hook <use> --format plugin --lock $HLOCK_DECIDE_LOCK` asks them
+            let abs = if p.is_absolute() { p.to_path_buf() } else { ctx.cwd.join(p) };
+            env.insert("HLOCK_DECIDE_LOCK".into(), abs.to_string_lossy().into_owned());
+            env.insert("HLOCK_BIN".into(), ctx.var("HLOCK_BIN").unwrap_or("hlock").to_string());
+        }
     }
     if let Some(p) = lock_path {
         let abs = if p.is_absolute() { p.to_path_buf() } else { ctx.cwd.join(p) };
@@ -292,10 +298,29 @@ impl HarnessAdapter for CommandAdapter {
         let deciders: Vec<(String, crate::decide::DeciderConfig)> = stack
             .deciders
             .iter()
-            .map(|(u, m)| (u.clone(), self.deciders.get(u).map(|s| s.config(m)).unwrap_or_else(|| crate::decide::DeciderConfig { model: m.clone(), ..Default::default() })))
+            .map(|(u, m)| (u.clone(), self.deciders.get(u).map(|s| s.config(m)).unwrap_or_else(|| crate::decide::DeciderConfig::from_ref(crate::decide::split_threshold(m).0))))
             .collect();
         let var = |k: &str| self.ctx.var(k).map(str::to_string);
         inv.env.extend(crate::decide::decider_env(&deciders, &self.profile.decider_env, &var));
+        if !stack.deciders.is_empty() {
+            // a lock holding just this trial's deciders, for `hlock decide hook --format plugin`
+            let entries: Vec<crate::lockfile::Decider> = stack
+                .deciders
+                .iter()
+                .filter_map(|(u, m)| {
+                    let spec = self.deciders.get(u).cloned().unwrap_or_default();
+                    crate::decide::lock_entry(u, m, &spec, "env", vec![], &self.ctx.cwd).ok()
+                })
+                .collect();
+            // absolute: the harness runs in the workspace, so a relative path would miss
+            let ws = if inv.cwd.is_absolute() { inv.cwd.clone() } else { self.ctx.cwd.join(&inv.cwd) };
+            let path = ws.join(".hlock").join("deciders.lock");
+            let lock = Lockfile { decider: entries, ..Default::default() };
+            if lock.save(&path).is_ok() {
+                inv.env.insert("HLOCK_DECIDE_LOCK".into(), path.to_string_lossy().into_owned());
+                inv.env.insert("HLOCK_BIN".into(), self.ctx.var("HLOCK_BIN").unwrap_or("hlock").to_string());
+            }
+        }
         let r = run(&inv, &self.ctx, Duration::from_secs(task.timeout_seconds.max(1)))?;
         let mut trace = r.trace.clone();
         if let Value::Array(a) = &mut trace {

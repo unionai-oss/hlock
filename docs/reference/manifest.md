@@ -155,7 +155,8 @@ any edit to `harness.toml` needs a fresh `hlock resolve`.
 ## `[deciders.<use>]`
 
 [Decision models](../guides/deciders.md), by what they decide: `approve` and `stop` in the
-agent, and `default`, `judge` and `draft` for hlock's own judgments.
+agent (and `route` and `tool`), and `default`, `judge` and `draft` for hlock's own
+judgments.
 
 ```toml
 [deciders.approve]
@@ -169,7 +170,7 @@ policy = ".hlock/approve.md"
 | `any-of` | | Candidates for `hlock resolve`, instead of `model` |
 | `may` | `["deny", "ask"]` | `approve` only: which of `allow`, `ask`, `deny` it may answer |
 | `policy` | | A file of rules added to the question |
-| `min-probability` | allow 0.9, ask 0.5, deny 0.8; stop 0.9 | How sure it must be to act: a number, or a table per answer for `approve` |
+| `min-probability` | allow 0.9, ask 0.5, deny 0.8; stop 0.9; route 0.6; tool 0.3 | How sure it must be to act: a number, a table per answer for `approve`, or a list for `resolve` to choose from |
 | `hooks` | the harness profile's | Harness events to wire it to |
 | `timeout-ms` | `2000` | How long a hook waits |
 | `base-url`, `key-env`, `protocol`, `long-context` | the provider's | Where and how it's reached |

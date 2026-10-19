@@ -428,7 +428,7 @@ A decision model's grade is *uncertain* when its score is within `uncertain` (0.
 `pass`, or one of its answers is close to a coin flip. With a `fallback`, an LLM re-judges
 uncertain grades and its verdict counts, so you pay for the LLM only on the close calls.
 Without one, the grade stands, marked uncertain. The lock's evidence records the judge,
-the model that answered, and the share of uncertain grades:
+the model that answered, the share of uncertain grades, and what judging cost:
 
 ```toml title="harness.lock"
 [evidence.judge]
@@ -436,6 +436,7 @@ model = "typesafe:jev-1.13.0"
 answered = "jev-1.13.0"
 protocol = "systemone"
 uncertain-grades = 0.04
+cost-usd-per-task = 0.0000042            # what judging cost a trial, when there's a price
 ```
 
 A judge grader fails when no judge model is set or the model can't be reached, and the

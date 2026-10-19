@@ -120,6 +120,9 @@ pub struct EvidenceJudge {
     /// The share of judge grades that were uncertain.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub uncertain_grades: Option<f64>,
+    /// What judging cost per trial, when the provider publishes a price.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cost_usd_per_task: Option<f64>,
 }
 
 impl<'de> Deserialize<'de> for EvidenceJudge {
@@ -134,6 +137,7 @@ impl<'de> Deserialize<'de> for EvidenceJudge {
             protocol: Option<String>,
             fallback: Option<String>,
             uncertain_grades: Option<f64>,
+            cost_usd_per_task: Option<f64>,
         }
         #[derive(Deserialize)]
         #[serde(untagged)]
@@ -143,7 +147,7 @@ impl<'de> Deserialize<'de> for EvidenceJudge {
         }
         Ok(match E::deserialize(d)? {
             E::S(model) => EvidenceJudge { model, ..Default::default() },
-            E::T(t) => EvidenceJudge { model: t.model, answered: t.answered, protocol: t.protocol, fallback: t.fallback, uncertain_grades: t.uncertain_grades },
+            E::T(t) => EvidenceJudge { model: t.model, answered: t.answered, protocol: t.protocol, fallback: t.fallback, uncertain_grades: t.uncertain_grades, cost_usd_per_task: t.cost_usd_per_task },
         })
     }
 }

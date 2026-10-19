@@ -176,6 +176,7 @@ workspace:
 | `HLOCK_LOCK` | The lockfile |
 | `HLOCK_OUTPUT` | Where the harness may write a JSON result |
 | `HLOCK_SEED`, `HLOCK_HARNESS` | The trial seed and the harness id |
+| `HLOCK_DECIDER_<USE>`, `HLOCK_DECIDE_LOCK`, `HLOCK_BIN` | The locked [decision models](deciders.md#code-harnesses), and how to ask them |
 
 A `command` gets `{prompt}`, `{model}` and `{workspace}` substituted in its arguments; a
 relative executable path is relative to the project. The result is the JSON in
@@ -187,7 +188,8 @@ An `entrypoint` is called as `fn(prompt, ctx)`, and may be `async`:
 ```python title="triage.py"
 def run(prompt, ctx):
     # ctx.model ("provider:model"), ctx.provider, ctx.model_name, ctx.base_url,
-    # ctx.workspace, ctx.mcp_config, ctx.skills_dir, ctx.lock, ctx.seed
+    # ctx.workspace, ctx.mcp_config, ctx.skills_dir, ctx.lock, ctx.seed,
+    # ctx.decide("route", options=[…], state={…}) for a locked decision model
     (ctx.workspace / "summary.md").write_text(answer(prompt, ctx.model))
     return {"output": "done", "cost_usd": 0.002}
 ```

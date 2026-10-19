@@ -62,6 +62,11 @@ kind = "plugin"
 extractor = "npm-list"
 source = "config#/plugin"
 
+# How hlock wires decision models in: a plugin hlock writes and owns. Its
+# tool.execute.before can only refuse a call.
+[deciders.approve]
+hook = { path = "{root}/plugins/hlock-deciders.js", events = ["tool.execute.before"], format = "opencode" }
+
 [launch]
 model-flag = "--model"
 prompt = ["run", "{prompt}"]  # `hlock run`: one prompt, non-interactively

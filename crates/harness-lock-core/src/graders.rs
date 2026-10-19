@@ -185,11 +185,14 @@ pub struct Grade {
     /// The model that answered, as the provider named it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub judged_by: Option<String>,
+    /// What judging cost, when the provider publishes a price.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cost_usd: Option<f64>,
 }
 
 impl Grade {
     fn new(grader: String, success: bool, score: f64, detail: impl Into<String>) -> Grade {
-        Grade { grader, success, score: score.clamp(0.0, 1.0), detail: detail.into(), parts: vec![], uncertain: false, judged_by: None }
+        Grade { grader, success, score: score.clamp(0.0, 1.0), detail: detail.into(), parts: vec![], uncertain: false, judged_by: None, cost_usd: None }
     }
 }
 
@@ -875,7 +878,7 @@ fn decided_grade(label: String, decided: &crate::decide::Decided, criteria: &[Cr
         detail = format!("score {score:.2} is below {pass}");
     }
     let uncertain = (score - pass).abs() < margin || certainty < 0.5;
-    Grade { parts, uncertain, judged_by: Some(decided.model.clone()), ..Grade::new(label, score >= pass, score, detail) }
+    Grade { parts, uncertain, judged_by: Some(decided.model.clone()), cost_usd: decided.cost_usd, ..Grade::new(label, score >= pass, score, detail) }
 }
 
 fn decider_endpoint(judge: &JudgeConfig) -> Result<crate::decide::Endpoint, String> {

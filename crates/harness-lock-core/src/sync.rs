@@ -74,8 +74,18 @@ pub enum Action {
     Run { argv: Vec<String>, env: BTreeMap<String, String> },
     /// Move a path aside to `<path>.hlock-bak`.
     Remove { path: PathBuf },
-    /// Replace hlock's decider hooks in a config file with `entries` (event → groups).
-    WriteHooks { path: PathBuf, format: String, pointer: String, entries: Value },
+    /// Replace hlock's decider hooks in a config file with `entries` (event → groups),
+    /// and set the top-level keys in `set` (Cursor's `"version": 1`).
+    WriteHooks {
+        path: PathBuf,
+        format: String,
+        pointer: String,
+        entries: Value,
+        #[serde(default, skip_serializing_if = "serde_json::Map::is_empty")]
+        set: serde_json::Map<String, Value>,
+    },
+    /// Write a file hlock owns (a decider plugin, Copilot's hook file).
+    WriteFile { path: PathBuf, content: String },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -777,16 +787,53 @@ fn decider_steps(lock: &Lockfile, lock_path: &Path, profile: &HarnessProfile, t:
     let mut steps = Vec::new();
     let bin = ctx.var("HLOCK_BIN").unwrap_or("hlock").to_string();
     let lock_abs = if lock_path.is_absolute() { lock_path.to_path_buf() } else { ctx.cwd.join(lock_path) };
-    let mut files: BTreeMap<String, (String, String)> = BTreeMap::new();
+    let mut specs: BTreeMap<String, crate::profiles::HookSpec> = BTreeMap::new();
     for w in profile.deciders.values() {
         if let Some(h) = &w.hook {
-            files.insert(h.file.clone(), (h.format.clone(), h.pointer.clone().unwrap_or_else(|| "/hooks".into())));
+            specs.insert(h.target(), h.clone());
         }
     }
-    for (file, (hook_format, pointer)) in files {
-        let Some(path) = profile.file_path(&file, t) else { continue };
-        let fmt = profile.files.get(&file).map(|f| if f.format == "jsonc" { "json".to_string() } else { f.format.clone() }).unwrap_or_else(|| "json".into());
-        let entries = crate::decide::hook_entries(lock, &file, &hook_format, &bin, &lock_abs);
+    for (target, h) in specs {
+        let path = match &h.path {
+            Some(p) => expand(p, &profile.config_root(t), t),
+            None => match profile.file_path(&h.file, t) {
+                Some(p) => p,
+                None => continue,
+            },
+        };
+        let uses: BTreeSet<&str> = lock.decider.iter().filter(|d| d.via == "hook" && d.wiring.iter().any(|w| w.file == target)).map(|d| d.use_.as_str()).collect();
+        let shown = pretty(&path, ctx);
+        let wire = |what: &str| format!("Wire deciders ({}) into {what}", uses.iter().copied().collect::<Vec<_>>().join(", "));
+        if h.owned() {
+            // a file hlock owns: a plugin, or Copilot's hook file
+            let desired = crate::decide::owned_hook_file(lock, &target, &h.format, &bin, &lock_abs);
+            let actual = std::fs::read_to_string(&path).ok();
+            let ours = actual.as_deref().is_some_and(|a| a.contains(crate::decide::HOOK_MARK));
+            if desired.is_none() && !ours {
+                continue;
+            }
+            let same = desired == actual;
+            let title = match &desired {
+                Some(_) => wire(&shown),
+                None => format!("Remove {shown}, hlock's decider hooks"),
+            };
+            steps.push(Step {
+                id: format!("decider:{target}"),
+                kind: "decider".into(),
+                title,
+                status: if same { "satisfied" } else { "auto" }.into(),
+                reason: if same { "matches the lock".into() } else if h.format == "copilot" { "in the repository: Copilot reads hooks only there".into() } else { String::new() },
+                action: (!same).then(|| match desired {
+                    Some(content) => Action::WriteFile { path: path.clone(), content },
+                    None => Action::Remove { path: path.clone() },
+                }),
+                ..Default::default()
+            });
+            continue;
+        }
+        let fmt = profile.files.get(&h.file).filter(|_| h.path.is_none()).map(|f| if f.format == "jsonc" { "json".to_string() } else { f.format.clone() }).unwrap_or_else(|| "json".into());
+        let pointer = h.pointer.clone().unwrap_or_else(|| "/hooks".into());
+        let entries = crate::decide::hook_entries(lock, &target, &h.format, &bin, &lock_abs);
         let actual = read_config(&path, &fmt).ok().flatten();
         let has_ours = actual.as_ref().is_some_and(|a| {
             let mut c = a.clone();
@@ -797,21 +844,23 @@ fn decider_steps(lock: &Lockfile, lock_path: &Path, profile: &HarnessProfile, t:
         }
         let mut desired = actual.clone().unwrap_or_else(|| json!({}));
         crate::decide::merge_hooks(&mut desired, &pointer, &entries);
+        // Cursor's hooks file needs a version
+        let mut set = serde_json::Map::new();
+        if h.format == "cursor" && !entries.is_empty() && desired.get("version").is_none() {
+            set.insert("version".into(), json!(1));
+        }
+        for (k, v) in &set {
+            desired[k.as_str()] = v.clone();
+        }
         let same = actual.as_ref() == Some(&desired);
-        let uses: BTreeSet<&str> = lock.decider.iter().filter(|d| d.via == "hook" && d.wiring.iter().any(|w| w.file == file)).map(|d| d.use_.as_str()).collect();
-        let shown = pretty(&path, ctx);
-        let title = if entries.is_empty() {
-            format!("Remove hlock's decider hooks from {shown}")
-        } else {
-            format!("Wire deciders ({}) into {shown}", uses.into_iter().collect::<Vec<_>>().join(", "))
-        };
+        let title = if entries.is_empty() { format!("Remove hlock's decider hooks from {shown}") } else { wire(&shown) };
         steps.push(Step {
-            id: format!("decider:{file}"),
+            id: format!("decider:{target}"),
             kind: "decider".into(),
             title,
             status: if same { "satisfied" } else { "auto" }.into(),
             reason: if same { "hooks match the lock".into() } else { String::new() },
-            action: (!same).then(|| Action::WriteHooks { path: path.clone(), format: fmt.clone(), pointer: pointer.clone(), entries: Value::Object(entries.clone()) }),
+            action: (!same).then(|| Action::WriteHooks { path: path.clone(), format: fmt.clone(), pointer: pointer.clone(), entries: Value::Object(entries.clone()), set }),
             ..Default::default()
         });
     }
@@ -1182,10 +1231,20 @@ pub fn run_step(step: &Step, ctx: &Ctx) -> Result<String> {
                 Err(Error::Profile(format!("`{}` exited with {}:\n{}", shell_join(argv), out.status, tail.join("\n"))))
             }
         }
-        Action::WriteHooks { path, format, pointer, entries } => {
+        Action::WriteFile { path, content } => {
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            std::fs::write(path, content)?;
+            Ok(format!("wrote {}", path.display()))
+        }
+        Action::WriteHooks { path, format, pointer, entries, set } => {
             let mut doc = read_config(path, format)?.unwrap_or_else(|| json!({}));
             let entries = entries.as_object().cloned().unwrap_or_default();
             crate::decide::merge_hooks(&mut doc, pointer, &entries);
+            for (k, v) in set {
+                doc[k.as_str()] = v.clone();
+            }
             if let Some(parent) = path.parent() {
                 std::fs::create_dir_all(parent)?;
             }

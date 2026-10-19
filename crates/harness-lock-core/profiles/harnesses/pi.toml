@@ -59,6 +59,12 @@ extractor = "pi-packages"
 source = "settings#/packages"
 lockfile = "{root}/npm/package-lock.json"
 
+# How hlock wires decision models in: an extension hlock writes and owns. Its tool_call
+# handler can only refuse a call. (Pi's own classifier models are built-in providers,
+# not configuration, so there's nothing for `pin` to record.)
+[deciders.approve]
+hook = { path = "{root}/extensions/hlock-deciders.ts", events = ["tool_call"], format = "pi" }
+
 [launch]
 model-flag = "--model"
 prompt = ["-p", "{prompt}"]  # `hlock run`: one prompt, non-interactively

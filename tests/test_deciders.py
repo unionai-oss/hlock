@@ -114,7 +114,7 @@ def test_pin_locks_deciders_and_sync_wires_hooks(project, fake):
     lock = str(Path("harness.lock").resolve())
     assert settings["model"] == "opus"
     assert settings["hooks"]["PermissionRequest"][0]["hooks"][0]["command"] == \
-        f"hlock decide hook approve --format claude-code --lock {lock}"
+        f"hlock decide hook approve --format claude-code --event PermissionRequest --lock {lock}"
     assert settings["hooks"]["Stop"][0]["hooks"][0]["command"].startswith("hlock decide hook stop")
 
     # a second sync has nothing to do, and the isolated root matches the lock

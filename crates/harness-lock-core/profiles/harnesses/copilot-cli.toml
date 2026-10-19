@@ -42,6 +42,11 @@ write = "mcp#/mcpServers"
 dirs = ["{root}/skills", ".github/skills", "~/.agents/skills", ".agents/skills"]
 write = "{root}/skills"
 
+# How hlock wires decision models in: Copilot reads hooks only from the repository,
+# so hlock writes .github/hooks/hlock.json there. Its preToolUse can only deny.
+[deciders.approve]
+hook = { path = ".github/hooks/hlock.json", events = ["preToolUse"], format = "copilot" }
+
 [launch]
 model-flag = "--model"
 prompt = ["-p", "{prompt}"]  # `hlock run`: one prompt, non-interactively

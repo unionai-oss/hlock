@@ -250,3 +250,42 @@ fn deciders_are_searched_locked_and_judge_the_evidence() {
     assert_eq!(judge.uncertain_grades, Some(1.0));
     let _ = fs::remove_dir_all(&root);
 }
+
+#[test]
+fn thresholds_multiply_the_stacks_and_judging_costs_reach_the_evidence() {
+    let url = fake_systemone(0.95);
+    let root = std::env::temp_dir().join(format!("hlock-resolver-thr-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(root.join("t/solution")).unwrap();
+    fs::write(root.join("t/prompt.md"), "Write s.md.\n").unwrap();
+    fs::write(root.join("t/solution/s.md"), "x\n").unwrap();
+    // a judge on TypeSafe's price list, served by the fake
+    std::env::set_var("HLOCK_TEST_TYPESAFE_KEY", "k");
+    fs::write(root.join("pack.toml"), format!(
+        "[pack]\nname = \"t/thr\"\nversion = \"0.1.0\"\ndomain = \"demo\"\n\n[pack.judge]\nmodel = \"typesafe:jev-1.13.0\"\nbase-url = \"{url}\"\nkey-env = \"HLOCK_TEST_TYPESAFE_KEY\"\n\n[[task]]\nid = \"t\"\nprompt = \"t/prompt.md\"\nsolution = \"t/solution/\"\nexpected = {{ artifacts = [\"s.md\"] }}\ngraders = [{{ type = \"judge\", criteria = [\"Is there\"] }}]\n"
+    )).unwrap();
+    let mut m = make_manifest(&root);
+    m.candidates.llm.get_mut("planner").unwrap().any_of = vec!["reference:qwen-32b".into()];
+    m.candidates.decision = vec!["none".into()];
+    m.source_path = Some(root.join("harness.toml"));
+    m.deciders.insert("stop".into(), serde_json::json!({"model": "system-one:kev-4b", "base-url": url, "min-probability": [0.6, 0.9]}));
+    let resolver = Resolver::new(m.clone(), root.join(".harnesslock"));
+    let stacks = resolver.enumerate_stacks();
+    let tried: Vec<&String> = stacks.iter().map(|s| &s.deciders["stop"]).collect();
+    assert_eq!(tried, ["system-one:kev-4b@0.6", "system-one:kev-4b@0.9"]);
+    // candidates keep the manifest's order (it decides which stacks a 200-stack cap keeps)
+    let mut m2 = m.clone();
+    m2.deciders.insert("stop".into(), serde_json::json!({"any-of": ["system-one:kev-9b", "none", "system-one:kev-4b"], "base-url": url}));
+    let order: Vec<String> = Resolver::new(m2, root.join(".harnesslock")).enumerate_stacks().iter().map(|s| s.deciders.get("stop").cloned().unwrap_or_else(|| "none".into())).collect();
+    assert_eq!(order, ["system-one:kev-9b", "none", "system-one:kev-4b"]);
+
+    let mut resolver = Resolver::new(m, root.join(".harnesslock"));
+    let lock = resolver.resolve_lock().unwrap();
+    let d = &lock.decider[0];
+    assert!(d.min_probability == serde_json::json!(0.6) || d.min_probability == serde_json::json!(0.9), "{d:?}");
+    assert_eq!(d.model, "kev-4b", "the threshold isn't part of the model");
+    // 10 input tokens a judging at $0.042 per million
+    let judge = lock.evidence.judge.unwrap();
+    assert_eq!(judge.cost_usd_per_task, Some(0.00000042));
+    let _ = fs::remove_dir_all(&root);
+}

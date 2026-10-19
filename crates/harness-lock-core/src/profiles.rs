@@ -332,10 +332,28 @@ pub struct DeciderWiringSpec {
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
 #[serde(default, rename_all = "kebab-case")]
 pub struct HookSpec {
+    /// A profile file the hooks are merged into (`settings`)…
     pub file: String,
+    /// …or a path of its own (`{root}/hooks.json`, `.github/hooks/hlock.json`): merged
+    /// into for `cursor`, written whole for `copilot` and the plugin formats (`amp`,
+    /// `opencode`, `pi`), which hlock owns.
+    pub path: Option<String>,
     pub pointer: Option<String>,
     pub events: Vec<String>,
+    /// `claude-code`, `codex`, `gemini`, `cursor`, `copilot`, `amp`, `opencode`, `pi`
     pub format: String,
+}
+
+impl HookSpec {
+    /// What a lock's `[[decider.wiring]]` names: the profile file, or the path.
+    pub fn target(&self) -> String {
+        self.path.clone().unwrap_or_else(|| self.file.clone())
+    }
+
+    /// Whether hlock writes the whole file (a plugin, Copilot's hook file).
+    pub fn owned(&self) -> bool {
+        self.path.is_some() && matches!(self.format.as_str(), "copilot" | "amp" | "opencode" | "pi")
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]

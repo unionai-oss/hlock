@@ -49,18 +49,22 @@ preferred first. A lock records which one the installed copy came from, and
 
 ### What hlock captures
 
+**Deciders** are the [decision-model](../guides/deciders.md) uses hlock can wire into the
+harness: through hooks in its config, a plugin hlock writes, or, when recorded, a setting
+of the harness's own that `pin` reads.
+
 <!-- generated:capture -->
-| Harness | Model | Providers | MCP servers | Skills | Plugins | Instructions | `localize` |
-|---|---|---|---|---|---|---|---|
-| Claude Code | ✓ | — | ✓ | ✓ | plugins | `CLAUDE.md`, `.claude/CLAUDE.md` | with `--harness` |
-| Codex CLI | ✓ | ✓ | ✓ | ✓ | — | `AGENTS.md`, `AGENTS.override.md` | ✓ |
-| Pi | ✓ | ✓ | ✓ | ✓ | packages | `AGENTS.md`, `CLAUDE.md` | ✓ |
-| OpenCode | ✓ | ✓ | ✓ | ✓ | plugins | `AGENTS.md`, `CLAUDE.md` | ✓ |
-| Cursor Agent | ✓ | — | ✓ | ✓ | — | `AGENTS.md`, `CLAUDE.md`, `.cursorrules` | — |
-| Gemini CLI | ✓ | — | ✓ | ✓ | — | `GEMINI.md`, `AGENTS.md` | — |
-| GitHub Copilot CLI | ✓ | — | ✓ | ✓ | — | `AGENTS.md`, `.github/copilot-instructions.md` | — |
-| Goose | ✓ | — | ✓ | ✓ | — | `.goosehints`, `AGENTS.md` | ✓ |
-| Amp | — | — | ✓ | ✓ | — | `AGENTS.md` | — |
+| Harness | Model | Providers | MCP servers | Skills | Plugins | Instructions | `localize` | Deciders |
+|---|---|---|---|---|---|---|---|---|
+| Claude Code | ✓ | — | ✓ | ✓ | plugins | `CLAUDE.md`, `.claude/CLAUDE.md` | with `--harness` | approve, stop (hooks) |
+| Codex CLI | ✓ | ✓ | ✓ | ✓ | — | `AGENTS.md`, `AGENTS.override.md` | ✓ | approve, stop (hooks) |
+| Pi | ✓ | ✓ | ✓ | ✓ | packages | `AGENTS.md`, `CLAUDE.md` | ✓ | approve (plugin) |
+| OpenCode | ✓ | ✓ | ✓ | ✓ | plugins | `AGENTS.md`, `CLAUDE.md` | ✓ | approve (plugin) |
+| Cursor Agent | ✓ | — | ✓ | ✓ | — | `AGENTS.md`, `CLAUDE.md`, `.cursorrules` | — | approve (hooks) |
+| Gemini CLI | ✓ | — | ✓ | ✓ | — | `GEMINI.md`, `AGENTS.md` | — | approve, stop, tool (hooks) |
+| GitHub Copilot CLI | ✓ | — | ✓ | ✓ | — | `AGENTS.md`, `.github/copilot-instructions.md` | — | approve (hooks) |
+| Goose | ✓ | — | ✓ | ✓ | — | `.goosehints`, `AGENTS.md` | ✓ | — |
+| Amp | — | — | ✓ | ✓ | — | `AGENTS.md` | — | approve, stop (plugin) |
 <!-- /generated:capture -->
 
 - **Model**: the configured model, which `pin` records and `launch` passes to the harness.
@@ -100,14 +104,14 @@ own group.
 <!-- /generated:autonomous -->
 
 <!-- generated:autonomous-capture -->
-| Harness | Model | Providers | MCP servers | Skills | Plugins | Instructions | `localize` |
-|---|---|---|---|---|---|---|---|
-| Hermes Agent | ✓ | — | ✓ | ✓ | — | `AGENTS.md`, `.hermes.md`; `~/.hermes/`: `SOUL.md` | ✓ |
-| OpenClaw | ✓ | ✓ | ✓ | ✓ | — | `~/.openclaw/workspace/`: `AGENTS.md`, `SOUL.md`, `IDENTITY.md`, `USER.md`, `TOOLS.md` | ✓ |
-| nanobot | ✓ | ✓ | ✓ | ✓ | — | `~/.nanobot/workspace/`: `AGENTS.md`, `SOUL.md`, `USER.md` | ✓ |
-| PicoClaw | ✓ | — | ✓ | ✓ | — | `~/.picoclaw/workspace/`: `AGENT.md`, `AGENTS.md`, `SOUL.md`, `USER.md`, `IDENTITY.md` | ✓ |
-| ZeroClaw | — | — | ✓ | ✓ | — | `~/.zeroclaw/agents/assistant/workspace/`: `AGENTS.md`, `SOUL.md`, `IDENTITY.md`, `USER.md`, `TOOLS.md` | by hand |
-| IronClaw | ✓ | — | — | ✓ | — | — | ✓ |
+| Harness | Model | Providers | MCP servers | Skills | Plugins | Instructions | `localize` | Deciders |
+|---|---|---|---|---|---|---|---|---|
+| Hermes Agent | ✓ | — | ✓ | ✓ | — | `AGENTS.md`, `.hermes.md`; `~/.hermes/`: `SOUL.md` | ✓ | approve (recorded) |
+| OpenClaw | ✓ | ✓ | ✓ | ✓ | — | `~/.openclaw/workspace/`: `AGENTS.md`, `SOUL.md`, `IDENTITY.md`, `USER.md`, `TOOLS.md` | ✓ | — |
+| nanobot | ✓ | ✓ | ✓ | ✓ | — | `~/.nanobot/workspace/`: `AGENTS.md`, `SOUL.md`, `USER.md` | ✓ | — |
+| PicoClaw | ✓ | — | ✓ | ✓ | — | `~/.picoclaw/workspace/`: `AGENT.md`, `AGENTS.md`, `SOUL.md`, `USER.md`, `IDENTITY.md` | ✓ | — |
+| ZeroClaw | — | — | ✓ | ✓ | — | `~/.zeroclaw/agents/assistant/workspace/`: `AGENTS.md`, `SOUL.md`, `IDENTITY.md`, `USER.md`, `TOOLS.md` | by hand | — |
+| IronClaw | ✓ | — | — | ✓ | — | — | ✓ | — |
 <!-- /generated:autonomous-capture -->
 
 **Instructions** here are the persona and operating files in the agent's workspace, under

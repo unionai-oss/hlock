@@ -45,6 +45,32 @@ class RunContext:
     seed: int = 0
     harness: str = ""
 
+    def decide(self, use: str, **payload) -> dict:
+        """Ask the locked decider for ``use`` (``approve``, ``stop``, ``route``,
+        ``tool``), through ``hlock decide hook``. Returns its answer, such as
+        ``{"answer": "planner", "reason": …}``, or ``{}`` when there's no decider or it
+        isn't sure: then do what you would have done.
+
+        ``route``: ``options`` (model roles) and ``state``. ``tool``: ``tools`` (names)
+        and ``state``; the answer is the ones to offer. ``approve``: ``tool`` and
+        ``input``. ``stop``: ``request`` and ``last_message``.
+        """
+        lock = os.environ.get("HLOCK_DECIDE_LOCK")
+        if not lock:
+            return {}
+        import subprocess
+
+        event = {"approve": "tool", "tool": "tools"}.get(use, use)
+        try:
+            r = subprocess.run(
+                [os.environ.get("HLOCK_BIN", "hlock"), "decide", "hook", use, "--format", "plugin",
+                 "--lock", lock, "--input", json.dumps({"event": event, **payload})],
+                capture_output=True, text=True, timeout=30,
+            )
+            return json.loads(r.stdout) if r.stdout.strip() else {}
+        except Exception:
+            return {}
+
     @property
     def provider(self) -> str:
         return self.model.split(":", 1)[0] if ":" in self.model else ""

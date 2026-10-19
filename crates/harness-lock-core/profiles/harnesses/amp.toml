@@ -33,5 +33,12 @@ write = "settings#/amp.mcpServers"
 dirs = ["~/.config/agents/skills", ".agents/skills"]
 write = "~/.config/agents/skills"
 
+# How hlock wires decision models in: a plugin hlock writes and owns. tool.call can
+# allow or refuse a call, and agent.end sends the agent back to work.
+[deciders.approve]
+hook = { path = "{root}/plugins/hlock-deciders.js", events = ["tool.call"], format = "amp" }
+[deciders.stop]
+hook = { path = "{root}/plugins/hlock-deciders.js", events = ["agent.end"], format = "amp" }
+
 [launch]
 prompt = ["-x", "{prompt}"]  # `hlock run`: one prompt, non-interactively

@@ -9,12 +9,13 @@ open-weight Kev (which runs on Ollama or Ollaya) followed.
 hlock uses decision models in three places:
 
 - **In your agent.** A decider can answer your harness's permission prompts (`approve`),
-  or keep it working when it stops before the task is done (`stop`). hlock locks the
+  keep it working when it stops before the task is done (`stop`), narrow the tools it's
+  offered (`tool`), or pick which model takes a step (`route`). hlock locks the
   decider in `harness.lock` and wires it into the harness with a hook.
 - **As the judge** of an [eval pack](eval-packs.md#judges): it answers each criterion as a
   yes/no question, cheaply enough to run on every trial.
 - **For hlock's own checks**: drafting eval packs [from traces](eval-packs.md#draft-a-pack-from-your-traces),
-  and reviewing the tasks the [meta harness](meta.md#decision-models) writes.
+  and the [meta harness](meta.md#decision-models)'s checks of its jobs and its built-in agent.
 
 ## Name a decision model
 
@@ -67,7 +68,7 @@ model = "ollama:kev:4b"
 | `any-of` | Candidates for [`hlock resolve`](resolve.md) to choose between, instead of `model`. `none` is one of them. |
 | `may` | `approve` only: which of `allow`, `ask` and `deny` it may answer. Default `["deny", "ask"]`, so it can only make the agent more careful. Add `allow` to let it approve calls for you. |
 | `policy` | A file of rules added to the question. `hlock check` reports when it changes. |
-| `min-probability` | How sure it must be to act: a number, or for `approve` a table (`{ deny = 0.8 }`). Defaults: allow 0.9, ask 0.5, deny 0.8, stop 0.9. |
+| `min-probability` | How sure it must be to act: a number, for `approve` a table (`{ deny = 0.8 }`), or a list for `resolve` to choose from. Defaults: allow 0.9, ask 0.5, deny 0.8, stop 0.9, route 0.6; `tool` drops a tool under 0.3. |
 | `hooks` | The harness events to wire it to, instead of the profile's default |
 | `timeout-ms` | How long the hook waits for an answer (default 2000) |
 | `base-url`, `key-env`, `protocol` | Override the provider's defaults |
@@ -142,14 +143,19 @@ drift. A decider you remove from `harness.toml` loses its hook at the next sync.
 ### What each use does
 
 - **`approve`** gets the tool call (its name, input and directory) and your policy, and
-  picks `allow`, `ask` or `deny`. By default it's wired to Claude Code's and Codex's
-  `PermissionRequest` event: it only sees calls you'd be asked about anyway, so it adds no
-  delay to the rest. There it can deny a call, or approve it when `may` has `allow`. Set
-  `hooks = ["PreToolUse"]` to have it see every call; it can then also ask you about a
-  call that would otherwise run (Claude Code only).
+  picks `allow`, `ask` or `deny`. In Claude Code and Codex it's wired to the
+  `PermissionRequest` event by default: it only sees calls you'd be asked about anyway, so
+  it adds no delay to the rest. There it can deny a call, or approve it when `may` has
+  `allow`. Set `hooks = ["PreToolUse"]` to have it see every call; it can then also ask
+  you about a call that would otherwise run (Claude Code only).
 - **`stop`** gets your first request and the agent's last message when the agent stops.
   If it isn't sure the request is done, the agent gets one more turn with a reason. It
   never fires twice in a row, so it can't loop.
+- **`tool`** gets the tools the agent's next request offers and the recent messages, and
+  drops the ones the next step clearly doesn't need (P(needed) under 0.3). When it would
+  keep all of them or none, it does nothing.
+- **`route`** picks which of the agent's model roles takes the next step. Only code
+  harnesses ask it (below).
 
 ### Which harnesses
 
@@ -157,18 +163,48 @@ drift. A decider you remove from `harness.toml` loses its hook at the next sync.
 |---|---|---|
 | Claude Code | hooks in `settings.json` | `approve`, `stop` |
 | Codex | hooks in `config.toml`'s `[hooks]` | `approve`, `stop` (its `PreToolUse` can't ask) |
+| Gemini CLI | hooks in `settings.json`: `BeforeTool`, `AfterAgent`, `BeforeToolSelection` | `approve` (allow or deny), `stop`, `tool` |
+| Cursor | hooks in `hooks.json`: `preToolUse` | `approve` |
+| Copilot CLI | `.github/hooks/hlock.json` in the repository, the only place Copilot reads hooks | `approve` (deny only) |
+| Amp | a plugin hlock writes: `plugins/hlock-deciders.js` | `approve` (allow or refuse), `stop` |
+| OpenCode | a plugin hlock writes: `plugins/hlock-deciders.js` | `approve` (refuse only) |
+| Pi | an extension hlock writes: `extensions/hlock-deciders.ts` | `approve` (refuse only) |
 | Hermes | its own `auxiliary.approval` setting, recorded by `hlock pin` | `approve` (read, not written) |
-| Code harnesses | environment variables (below) | any |
+| Code harnesses | environment variables, and `ctx.decide` (below) | any |
 | `reference` | simulated by `hlock resolve` | any |
 
-Other harnesses have hooks that could carry deciders; hlock doesn't wire them yet, and
-`pin` and `resolve` say so when a `[deciders.*]` use can't be wired.
+`pin` and `resolve` say so when a `[deciders.*]` use can't be wired into the harness.
+Goose has no hook a decider can answer yet. Pi's own classifier models are built-in
+providers it reaches with your keys, not configuration, so `pin` has nothing of them to
+record.
+
+The plugins for Amp, OpenCode and Pi are small files that run `hlock decide hook` and act
+on its answer; they do nothing when hlock isn't there or isn't sure. They're tested by
+loading them with a stand-in for each harness's plugin API, not inside the harnesses
+themselves. Cursor's docs don't say whether `cursor-agent` runs hooks.
+
+### Code harnesses
 
 A code harness gets `HLOCK_DECIDER_<USE>` (the reference), `HLOCK_DECIDER_<USE>_BASE_URL`
 and `HLOCK_DECIDER_<USE>_PROTOCOL` for each locked decider. For PydanticAI it also sets
 `SYSTEM_ONE_BASE_URL` and `SYSTEM_ONE_API_KEY`, and for LangChain-based harnesses and
 Google ADK `TYPESAFE_BASE_URL` and `TYPESAFE_API_KEY`, so their own decision-model support
 uses the locked one with no code.
+
+To ask hlock's questions instead, a Python entrypoint calls `ctx.decide`:
+
+```python title="my_agent.py"
+def run(prompt, ctx):
+    pick = ctx.decide("route", options=["planner", "executor"], state={"step": prompt})
+    role = pick.get("answer", "planner")      # {} when there's no decider or it isn't sure
+    keep = ctx.decide("tool", tools=["search", "edit", "deploy"], state={"step": prompt})
+    ...
+```
+
+`ctx.decide("approve", tool=…, input=…)` and `ctx.decide("stop", request=…, last_message=…)`
+work the same way. Other code harnesses run `$HLOCK_BIN decide hook <use> --format plugin
+--lock "$HLOCK_DECIDE_LOCK" --input '<JSON>'` themselves. During `hlock resolve`,
+`HLOCK_DECIDE_LOCK` holds just the trial's deciders.
 
 ## Check and change them
 
@@ -184,10 +220,22 @@ $ hlock check
 ```
 
 With `any-of`, [`hlock resolve`](resolve.md) measures each candidate on your evals and
-locks the winner. The offline `reference` harness simulates deciders, so it can't show
+locks the winner. A list of `min-probability` values is searched the same way, so resolve
+can pick how sure a decider must be:
+
+```toml title="harness.toml"
+[deciders.stop]
+any-of = ["ollama:kev:4b", "ollama:kev:9b"]
+min-probability = [0.7, 0.9]       # four candidates: each model at each threshold
+```
+
+Outside `resolve`, `pin` locks the first value of the list. The offline `reference` harness simulates deciders, so it can't show
 what one adds; resolve against your own harness for that.
 [`hlock localize`](localize.md) moves hosted deciders to Kev on the local runtime (the 9B
 with 16 GB or more to spare, else the 4B), and notes that their scores may change.
+[`hlock upgrade`](upgrade.md) lists a newer version of a locked decider
+(`typesafe:jev-1.13.0` → `typesafe:jev-1.14.0`), and with `--apply` re-resolves with it,
+behind the same evidence gate as model upgrades.
 
 ## How they're locked
 

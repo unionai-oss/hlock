@@ -466,7 +466,7 @@ fn approve_hooks_answer_only_when_sure_and_allowed() {
     let ev = |event: &str| json!({"hook_event_name": event, "tool_name": "Bash", "tool_input": {"command": "rm -rf build"}, "cwd": "/p"});
     let run = |choice: &'static str, p: f64, may: &[&str], event: &str, format: &str| {
         let fake = Fake::start(move |_, body, _| (200, systemone(body, 0.0, 0, choice, p)));
-        let out = decide::hook("approve", format, &ev(event), &hook_lock(&fake.url, "approve", may, Value::Null), &root, &no_env);
+        let out = decide::hook("approve", format, None, &ev(event), &hook_lock(&fake.url, "approve", may, Value::Null), &root, &no_env);
         (out, fake.requests())
     };
     let (out, reqs) = run("deny", 0.95, &["deny", "ask"], "PermissionRequest", "claude-code");
@@ -497,9 +497,9 @@ fn approve_hooks_answer_only_when_sure_and_allowed() {
 fn hooks_defer_when_the_decider_is_unavailable() {
     let root = tmp("hook-down");
     let lock = hook_lock("http://127.0.0.1:9", "approve", &["deny"], Value::Null);
-    let out = decide::hook("approve", "claude-code", &json!({"hook_event_name": "PermissionRequest"}), &lock, &root, &no_env);
+    let out = decide::hook("approve", "claude-code", None, &json!({"hook_event_name": "PermissionRequest"}), &lock, &root, &no_env);
     assert!(out.stdout.is_empty() && out.exit == 0 && out.note.starts_with("decider unavailable"), "{out:?}");
-    let out = decide::hook("stop", "claude-code", &json!({"hook_event_name": "Stop"}), &lock, &root, &no_env);
+    let out = decide::hook("stop", "claude-code", None, &json!({"hook_event_name": "Stop"}), &lock, &root, &no_env);
     assert!(out.stdout.is_empty() && out.note.contains("no stop decider"));
 }
 
@@ -510,14 +510,14 @@ fn stop_hooks_keep_the_agent_going_when_it_isnt_done() {
     let fake = Fake::start(|_, body, _| (200, systemone(body, if body["state"]["last_message"] == "Done!" { 0.95 } else { 0.3 }, 0, "", 0.0)));
     let lock = hook_lock(&fake.url, "stop", &[], Value::Null);
     let ev = |last: &str, active: bool| json!({"hook_event_name": "Stop", "stop_hook_active": active, "last_assistant_message": last, "transcript_path": root.join("t.jsonl")});
-    let out = decide::hook("stop", "claude-code", &ev("I looked at it.", false), &lock, &root, &no_env);
+    let out = decide::hook("stop", "claude-code", None, &ev("I looked at it.", false), &lock, &root, &no_env);
     let v: Value = serde_json::from_str(&out.stdout).unwrap();
     assert_eq!(v["decision"], "block");
     assert_eq!(fake.requests()[0].1["state"]["request"], "Fix the failing test");
-    assert!(decide::hook("stop", "claude-code", &ev("Done!", false), &lock, &root, &no_env).stdout.is_empty());
+    assert!(decide::hook("stop", "claude-code", None, &ev("Done!", false), &lock, &root, &no_env).stdout.is_empty());
     // already continuing because of a stop hook: never loop
     let n = fake.requests().len();
-    assert!(decide::hook("stop", "claude-code", &ev("I looked at it.", true), &lock, &root, &no_env).stdout.is_empty());
+    assert!(decide::hook("stop", "claude-code", None, &ev("I looked at it.", true), &lock, &root, &no_env).stdout.is_empty());
     assert_eq!(fake.requests().len(), n, "it doesn't even ask");
 }
 
@@ -527,7 +527,7 @@ fn hook_entries_merge_and_strip_without_touching_the_users_hooks() {
     lock.decider.push(Decider { use_: "stop".into(), via: "hook".into(), wiring: vec![Wiring { file: "settings".into(), event: "Stop".into() }], ..lock.decider[0].clone() });
     let entries = decide::hook_entries(&lock, "settings", "claude-code", "/usr/local/bin/hlock", Path::new("/p/harness.lock"));
     assert_eq!(entries["PermissionRequest"][0]["matcher"], "*");
-    assert_eq!(entries["PermissionRequest"][0]["hooks"][0]["command"], "/usr/local/bin/hlock decide hook approve --format claude-code --lock /p/harness.lock");
+    assert_eq!(entries["PermissionRequest"][0]["hooks"][0]["command"], "/usr/local/bin/hlock decide hook approve --format claude-code --event PermissionRequest --lock /p/harness.lock");
     assert!(entries["Stop"][0].get("matcher").is_none());
     let mine = json!({"type": "command", "command": "./my-lint.sh"});
     let mut doc = json!({"model": "opus", "hooks": {"PermissionRequest": [{"matcher": "Bash", "hooks": [mine]}]}});
@@ -539,5 +539,219 @@ fn hook_entries_merge_and_strip_without_touching_the_users_hooks() {
     assert_eq!(doc, json!({"model": "opus", "hooks": {"PermissionRequest": [{"matcher": "Bash", "hooks": [mine]}]}}));
     assert!(!decide::strip_hooks(&mut doc));
     // a path with a space is quoted
-    assert_eq!(decide::hook_command("hlock", "stop", "codex", Path::new("/my proj/harness.lock")), "hlock decide hook stop --format codex --lock '/my proj/harness.lock'");
+    assert_eq!(decide::hook_command("hlock", "stop", "codex", Some("Stop"), Path::new("/my proj/harness.lock")), "hlock decide hook stop --format codex --event Stop --lock '/my proj/harness.lock'");
+}
+
+// --------------------------------------------------------------------------- //
+// More harnesses: Gemini CLI, Cursor, Copilot, and the plugin format
+// --------------------------------------------------------------------------- //
+
+fn answer_with(choice: &'static str, p: f64, noul: f64) -> Fake {
+    Fake::start(move |_, body, _| (200, systemone(body, noul, 0, choice, p)))
+}
+
+fn lock_for(url: &str, use_: &str, may: &[&str]) -> Lockfile {
+    hook_lock(url, use_, may, Value::Null)
+}
+
+#[test]
+fn gemini_hooks_allow_deny_continue_and_narrow_tools() {
+    let root = tmp("gemini");
+    let tool = json!({"tool_name": "run_shell_command", "tool_input": {"command": "rm -rf /"}});
+    let fake = answer_with("deny", 0.95, 0.0);
+    let out = decide::hook("approve", "gemini", Some("BeforeTool"), &tool, &lock_for(&fake.url, "approve", &["deny", "ask"]), &root, &no_env);
+    let v: Value = serde_json::from_str(&out.stdout).unwrap();
+    assert_eq!(v["decision"], "deny");
+    assert!(v["reason"].as_str().unwrap().contains("deny at P=0.95"));
+    // Gemini CLI's BeforeTool can't ask
+    let fake = answer_with("ask", 0.9, 0.0);
+    assert!(decide::hook("approve", "gemini", Some("BeforeTool"), &tool, &lock_for(&fake.url, "approve", &["deny", "ask"]), &root, &no_env).stdout.is_empty());
+
+    // AfterAgent: the agent goes back to work with a reason
+    let fake = answer_with("", 0.0, 0.2);
+    let stop = json!({"prompt": "Fix the build", "prompt_response": "I looked.", "stop_hook_active": false});
+    let out = decide::hook("stop", "gemini", Some("AfterAgent"), &stop, &lock_for(&fake.url, "stop", &[]), &root, &no_env);
+    let v: Value = serde_json::from_str(&out.stdout).unwrap();
+    assert_eq!(v["decision"], "deny");
+    assert_eq!(fake.requests()[0].1["state"], json!({"request": "Fix the build", "last_message": "I looked."}));
+    assert!(decide::hook("stop", "gemini", Some("AfterAgent"), &json!({"stop_hook_active": true}), &lock_for(&fake.url, "stop", &[]), &root, &no_env).stdout.is_empty());
+
+    // BeforeToolSelection: drop the tools the next step clearly doesn't need
+    let fake = Fake::start(|_, body, _| {
+        let mut answers = serde_json::Map::new();
+        for (id, q) in body["questions"].as_object().unwrap() {
+            let needed = if q["instructions"].as_str().unwrap().ends_with("`web_fetch`") { 0.05 } else { 0.8 };
+            answers.insert(id.clone(), json!({"type": "noul", "noul": needed}));
+        }
+        (200, json!({"model": "kev", "answers": answers}))
+    });
+    let sel = json!({"llm_request": {"messages": [{"role": "user", "content": "edit main.rs"}], "config": {"tools": [{"functionDeclarations": [{"name": "read_file"}, {"name": "web_fetch"}, {"name": "write_file"}]}]}}});
+    let out = decide::hook("tool", "gemini", Some("BeforeToolSelection"), &sel, &lock_for(&fake.url, "tool", &[]), &root, &no_env);
+    let v: Value = serde_json::from_str(&out.stdout).unwrap();
+    assert_eq!(v["hookSpecificOutput"]["toolConfig"]["allowedFunctionNames"], json!(["read_file", "write_file"]));
+    assert_eq!(fake.requests()[0].1["state"]["tools"], json!(["read_file", "web_fetch", "write_file"]));
+    // the wrong use for an event: no decision
+    assert!(decide::hook("approve", "gemini", Some("AfterAgent"), &stop, &lock_for(&fake.url, "approve", &["deny"]), &root, &no_env).note.contains("doesn't answer stop events"));
+}
+
+#[test]
+fn cursor_and_copilot_answer_in_their_own_shapes() {
+    let root = tmp("cursor");
+    let fake = answer_with("ask", 0.9, 0.0);
+    let ev = json!({"tool_name": "Shell", "tool_input": {"command": "git push"}, "cwd": "/p"});
+    let out = decide::hook("approve", "cursor", Some("preToolUse"), &ev, &lock_for(&fake.url, "approve", &["deny", "ask"]), &root, &no_env);
+    let v: Value = serde_json::from_str(&out.stdout).unwrap();
+    assert_eq!(v["permission"], "ask");
+    assert!(v["user_message"].as_str().unwrap().contains("ask at P=0.90"));
+
+    // Copilot sends its tool arguments as a JSON string, and can only deny
+    let fake = answer_with("deny", 0.97, 0.0);
+    let ev = json!({"toolName": "bash", "toolArgs": "{\"command\": \"rm -rf .\"}"});
+    let out = decide::hook("approve", "copilot", Some("preToolUse"), &ev, &lock_for(&fake.url, "approve", &["deny", "ask"]), &root, &no_env);
+    assert_eq!(serde_json::from_str::<Value>(&out.stdout).unwrap()["permissionDecision"], "deny");
+    assert_eq!(fake.requests()[0].1["state"]["input"], json!({"command": "rm -rf ."}));
+    let fake = answer_with("allow", 0.99, 0.0);
+    assert!(decide::hook("approve", "copilot", Some("preToolUse"), &ev, &lock_for(&fake.url, "approve", &["allow"]), &root, &no_env).note.contains("can only deny"));
+}
+
+#[test]
+fn the_plugin_format_answers_every_use() {
+    let root = tmp("plugin");
+    let fake = answer_with("deny", 0.95, 0.0);
+    let out = decide::hook("approve", "plugin", None, &json!({"event": "tool", "tool": "bash", "input": {"command": "rm x"}}), &lock_for(&fake.url, "approve", &["deny"]), &root, &no_env);
+    assert_eq!(serde_json::from_str::<Value>(&out.stdout).unwrap()["answer"], "deny");
+    let fake = answer_with("", 0.0, 0.1);
+    let out = decide::hook("stop", "plugin", None, &json!({"event": "stop", "request": "x", "last_message": "y"}), &lock_for(&fake.url, "stop", &[]), &root, &no_env);
+    assert_eq!(serde_json::from_str::<Value>(&out.stdout).unwrap()["answer"], "continue");
+
+    // route: one of the options, when it's sure enough (0.6 by default)
+    let fake = answer_with("executor", 0.85, 0.0);
+    let route = json!({"event": "route", "options": ["planner", "executor"], "state": {"step": "write the code"}});
+    let out = decide::hook("route", "plugin", None, &route, &lock_for(&fake.url, "route", &[]), &root, &no_env);
+    assert_eq!(serde_json::from_str::<Value>(&out.stdout).unwrap()["answer"], "executor");
+    assert_eq!(fake.requests()[0].1["state"], json!({"step": "write the code"}));
+    assert_eq!(fake.requests()[0].1["questions"]["route"]["criteria"], json!({"planner": "the planner model", "executor": "the executor model"}));
+    let fake = answer_with("executor", 0.55, 0.0);
+    assert!(decide::hook("route", "plugin", None, &route, &lock_for(&fake.url, "route", &[]), &root, &no_env).stdout.is_empty());
+    assert!(decide::hook("route", "plugin", None, &json!({"event": "route", "options": ["planner"]}), &lock_for(&fake.url, "route", &[]), &root, &no_env).note.contains("nothing to choose"));
+
+    // tool: the tools to offer
+    let fake = Fake::start(|_, body, _| {
+        let answers: serde_json::Map<String, Value> = body["questions"].as_object().unwrap().iter().map(|(id, _)| (id.clone(), json!({"type": "noul", "noul": if id == "t2" { 0.1 } else { 0.9 }}))).collect();
+        (200, json!({"model": "kev", "answers": answers}))
+    });
+    let out = decide::hook("tool", "plugin", None, &json!({"event": "tools", "tools": ["search", "deploy", "edit"]}), &lock_for(&fake.url, "tool", &[]), &root, &no_env);
+    assert_eq!(serde_json::from_str::<Value>(&out.stdout).unwrap()["answer"], json!(["search", "edit"]));
+}
+
+#[test]
+fn hook_entries_in_each_layout() {
+    let mut lock = lock_for("http://x", "approve", &["deny"]);
+    let bin = "hlock";
+    let lp = Path::new("/p/harness.lock");
+    lock.decider[0].wiring = vec![Wiring { file: "settings".into(), event: "BeforeTool".into() }];
+    let gem = decide::hook_entries(&lock, "settings", "gemini", bin, lp);
+    assert_eq!(gem["BeforeTool"][0]["matcher"], ".*");
+    assert_eq!(gem["BeforeTool"][0]["hooks"][0]["timeout"], 3000, "Gemini CLI's timeout is in milliseconds");
+    assert!(gem["BeforeTool"][0]["hooks"][0]["command"].as_str().unwrap().contains("--format gemini --event BeforeTool"));
+
+    lock.decider[0].wiring = vec![Wiring { file: "{root}/hooks.json".into(), event: "preToolUse".into() }];
+    let cur = decide::hook_entries(&lock, "{root}/hooks.json", "cursor", bin, lp);
+    assert_eq!(cur["preToolUse"][0]["timeout"], 3);
+    let mut doc = json!({"version": 1, "hooks": {"preToolUse": [{"command": "./mine.sh"}]}});
+    decide::merge_hooks(&mut doc, "/hooks", &cur);
+    assert_eq!(doc["hooks"]["preToolUse"].as_array().unwrap().len(), 2);
+    assert!(decide::strip_hooks(&mut doc));
+    assert_eq!(doc, json!({"version": 1, "hooks": {"preToolUse": [{"command": "./mine.sh"}]}}), "flat entries strip too");
+
+    lock.decider[0].wiring = vec![Wiring { file: ".github/hooks/hlock.json".into(), event: "preToolUse".into() }];
+    let file = decide::owned_hook_file(&lock, ".github/hooks/hlock.json", "copilot", bin, lp).unwrap();
+    let v: Value = serde_json::from_str(&file).unwrap();
+    assert_eq!(v["version"], 1);
+    assert!(v["hooks"]["preToolUse"][0]["bash"].as_str().unwrap().contains("--format copilot --event preToolUse"));
+    assert!(decide::owned_hook_file(&lock, "elsewhere", "copilot", bin, lp).is_none());
+
+    lock.decider[0].wiring = vec![Wiring { file: "{root}/plugins/hlock-deciders.js".into(), event: "tool.call".into() }];
+    for f in ["amp", "opencode", "pi"] {
+        let src = decide::owned_hook_file(&lock, "{root}/plugins/hlock-deciders.js", f, "/opt/hlock bin", lp).unwrap();
+        assert!(src.contains(r#"const BIN = "/opt/hlock bin", LOCK = "/p/harness.lock", USES = ["approve"];"#), "{f}: {src}");
+        assert!(!src.contains("__"), "{f}: every placeholder is filled");
+    }
+}
+
+#[test]
+fn route_and_tool_questions() {
+    let qs = decide::use_questions("tool", None, &["a".into(), "b".into()]);
+    assert_eq!(qs.iter().map(|q| q.id.as_str()).collect::<Vec<_>>(), ["t1", "t2"]);
+    assert!(qs[1].instructions.ends_with("`b`"));
+    assert!(decide::use_questions("route", None, &[]).is_empty());
+    // the project's policy reaches route and tool questions too
+    let qs = decide::use_questions("route", Some("Plan with the planner."), &["planner".into(), "executor".into()]);
+    assert!(qs[0].instructions.ends_with("Plan with the planner."));
+    assert!(decide::use_questions("tool", Some("No network."), &["a".into()])[0].instructions.ends_with("No network."));
+    for u in ["approve", "stop", "route", "tool"] {
+        assert!(decide::questions_digest(u).is_some(), "{u}");
+    }
+    assert_eq!(decide::min_probability("tool", &Value::Null, "keep"), 0.3);
+}
+
+#[test]
+fn thresholds_are_tried_and_the_winner_is_locked() {
+    assert_eq!(decide::split_threshold("ollama:kev:4b@0.8"), ("ollama:kev:4b", Some(0.8)));
+    assert_eq!(decide::split_threshold("ollama:kev:4b"), ("ollama:kev:4b", None));
+    // a version after `@` isn't a probability
+    assert_eq!(decide::split_threshold("vertex:kev@20250514"), ("vertex:kev@20250514", None));
+    let spec: DeciderSpec = toml::from_str("model = \"ollama:kev:4b\"\nmin-probability = [0.6, 0.9]").unwrap();
+    let spec = spec.validated("stop").unwrap();
+    assert_eq!(spec.thresholds(), [Some(0.6), Some(0.9)]);
+    assert!(toml::from_str::<DeciderSpec>("model = \"ollama:kev:4b\"\nmin-probability = [2]").unwrap().validated("stop").is_err());
+    let root = tmp("thr");
+    let d = decide::lock_entry("stop", "ollama:kev:4b@0.9", &spec, "simulated", vec![], &root).unwrap();
+    assert_eq!((d.model.as_str(), d.min_probability.clone()), ("kev:4b", json!(0.9)));
+    // outside resolve, a list locks its first value
+    let d = decide::lock_entry("stop", "ollama:kev:4b", &spec, "hook", vec![], &root).unwrap();
+    assert_eq!(d.min_probability, json!(0.6));
+    assert_eq!(spec.config("ollama:kev:4b@0.9").model, "ollama:kev:4b");
+}
+
+#[test]
+fn upgrade_plans_newer_decider_versions() {
+    assert_eq!(decide::newer_version("typesafe", "jev-1.13.0").as_deref(), Some("jev-1.14.0"));
+    assert_eq!(decide::newer_version("typesafe", "jev-1.14.0"), None);
+    assert_eq!(decide::newer_version("ollama", "kev:4b"), None);
+    let mut lock = lock_for("http://x", "approve", &["deny"]);
+    lock.decider[0].provider = "typesafe".into();
+    lock.decider[0].model = "jev-1.13.0".into();
+    let m = harness_lock_core::Manifest::from_str("[project]\nname = \"x\"\n").unwrap();
+    let spec = harness_lock_core::ops::UpgradeSpec { to: None, all: false, apply: false, rollback: false, force: false, workdir: tmp("up"), lock: None };
+    let plan = harness_lock_core::ops::plan_upgrade(Some(&lock), &m, &spec);
+    let entry = plan["upgradeable"].as_array().unwrap().iter().find(|e| e.get("decider").is_some()).cloned().unwrap();
+    assert_eq!(entry, json!({"role": "decider · approve", "decider": "approve", "from": "typesafe:jev-1.13.0", "to": "typesafe:jev-1.14.0"}));
+}
+
+#[test]
+fn the_built_in_agent_checks_its_job_is_done() {
+    use harness_lock_core::agent;
+    // an LLM that says it's done every time
+    let llm = Fake::start(|_, _, n| (200, json!({"choices": [{"message": {"content": format!("All done ({n}).")}}], "usage": {}})));
+    // a decider that isn't sure the first time, then is
+    let decider = Fake::start(|_, body, n| (200, systemone(body, if n == 1 { 0.2 } else { 0.95 }, 0, "", 0.0)));
+    let cfg = agent::AgentConfig {
+        provider: "local".into(),
+        model: "tiny".into(),
+        base_url: llm.url.clone(),
+        max_steps: 10,
+        project: tmp("agent"),
+        decider: Some(DeciderConfig { model: "system-one:kev-4b".into(), base_url: Some(decider.url.clone()), ..Default::default() }),
+        ..Default::default()
+    };
+    let mut said: Vec<(String, String)> = Vec::new();
+    let out = agent::run(&cfg, "Write NOTES.md", &mut |k, t| { said.push((k.into(), t.into())); true }, &mut |_| "n".into());
+    assert_eq!((out.status.as_str(), out.steps), ("done", 2), "{said:?}");
+    assert_eq!(out.summary, "All done (2).");
+    assert!(said.iter().any(|(k, t)| k == "note" && t.starts_with("not sure the job is done (P=0.20")), "{said:?}");
+    // the model was told why it got another turn
+    let second = &llm.requests()[1].1["messages"];
+    assert!(second.as_array().unwrap().last().unwrap()["content"].as_str().unwrap().starts_with("hlock's check isn't sure the job is done (P=0.20)"));
+    assert_eq!(decider.requests()[0].1["state"]["request"], "Write NOTES.md");
 }
