@@ -797,7 +797,10 @@ fn pack_goal(input: &JobInput) -> (String, Option<String>) {
     };
     match &input.guide {
         Some(g) => s.push_str(&format!("Follow the guide in `{}`: where to look for tasks, the task kinds, and the rules for writing them.", input.show(g))),
-        None => s.push_str("Each task needs a prompt file, the fixtures it needs in `workspace/`, and an expected artifact a program can check. Never copy secrets or personal data into a task."),
+        None => s.push_str("Each task needs a prompt file, the fixtures it needs in `workspace/`, an expected artifact, and graders that check \
+             what's in it, not just that it exists: a `tests` script for what a program can check, or a `judge` rubric for writing \
+             (see https://docs.hlock.ai/guides/eval-packs/#grading). Put what a correct run leaves in the task's `solution/`. \
+             Never copy secrets or personal data into a task."),
     }
     if let Some(t) = input.manifest.as_ref().and_then(Manifest::target_harness) {
         s.push_str(&format!("\n\nThe project's agent runs in {t}."));
@@ -914,7 +917,7 @@ pub fn verify(job: &str, input: &JobInput, meta: Option<&MetaManifest>, reg: &Re
                     return Ok(v);
                 }
             };
-            let issues = pack.check();
+            let issues = pack.check_with(input.manifest.as_ref().and_then(Manifest::judge).as_ref());
             let line = |i: &crate::tasks::PackIssue| format!("{}{}{}", if i.level == "error" { "" } else { "warning: " }, i.task.as_deref().map(|t| format!("{t}: ")).unwrap_or_default(), i.message);
             let errors: Vec<String> = issues.iter().filter(|i| i.level == "error").map(line).collect();
             let n = pack.tasks.len();

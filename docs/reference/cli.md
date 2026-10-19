@@ -82,7 +82,7 @@ hlock init [--name NAME] [--pack PATH] [--harness NAME] [--force]
 
 ## `evals`
 
-Write and check [eval packs](../guides/eval-packs.md).
+Write, check, and grade [eval packs](../guides/eval-packs.md).
 
 ### `evals init`
 
@@ -114,13 +114,41 @@ List the templates, with the kinds of task each one has slots for. Takes `--json
 
 ### `evals check`
 
-Check that a pack is ready: required fields, prompts and fixtures present, no
-`TODO(hlock)` left, and tasks that can fail. Exits `1` on errors; warnings don't fail.
-Takes `--json`.
+Check that a pack is ready: required fields, prompts and fixtures present, graders that
+parse and whose files exist, no `TODO(hlock)` left, and tasks that can fail. Exits `1` on
+errors; warnings don't fail. Takes `--json`.
 
 ```bash
-hlock evals check [DIRECTORY] [--json]
+hlock evals check [DIRECTORY] [--run] [--json]
 ```
+
+| Option | Default | Description |
+|---|---|---|
+| `DIRECTORY` | `./evals` | The pack |
+| `--run` | | Also run each task's graders, judges aside, on its fixtures alone (they should fail) and on its fixtures plus its `solution` (they should pass). Runs the pack's test commands. See [Check your graders](../guides/eval-packs.md#check-your-graders). |
+
+`--run` runs nothing while the pack has errors, and says so. A `[evals.judge]` in the
+project's `harness.toml` counts as the pack's judge model.
+
+### `evals grade`
+
+Grade a directory as if a run of a task left it, with all of the task's graders, judges
+included, and print each grade with its score and detail. With no `WORKSPACE`, grade the
+task's solution. It grades a copy, so the directory isn't changed. Exits `1` if a grader
+fails. Takes `--json`.
+
+```bash
+hlock evals grade TASK [WORKSPACE] [--pack DIR] [--json]
+```
+
+| Option | Default | Description |
+|---|---|---|
+| `TASK` | | The task id |
+| `WORKSPACE` | the task's fixtures and solution | The directory to grade |
+| `--pack` | `./evals` | The pack |
+
+Judges use `[evals.judge]` from the project's `harness.toml`, else the pack's
+`[pack.judge]`.
 
 ## `resolve`
 

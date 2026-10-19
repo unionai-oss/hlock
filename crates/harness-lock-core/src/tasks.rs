@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::error::{Error, Result};
+pub use crate::graders::{Grade, GradeOptions, Grader, JudgeConfig};
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(default)]
@@ -13,12 +14,16 @@ pub struct Task {
     pub id: String,
     pub prompt: String,
     pub fixtures: Option<PathBuf>,
+    /// Files a correct run leaves in the workspace, used to check the graders and by
+    /// the offline reference harness.
+    pub solution: Option<PathBuf>,
     #[serde(default)]
     pub tools: Vec<String>,
     #[serde(default)]
     pub expected: BTreeMap<String, serde_json::Value>,
+    /// Graders as written in `pack.toml`: strings or tables (see [`crate::graders`]).
     #[serde(default)]
-    pub graders: Vec<String>,
+    pub graders: Vec<serde_json::Value>,
     #[serde(default)]
     pub tags: Vec<String>,
     #[serde(rename = "timeout-seconds", default = "default_timeout")]
@@ -46,6 +51,11 @@ impl Task {
             .unwrap_or_default()
     }
 
+    /// The task's graders, parsed; an entry that doesn't parse is an `Err` saying why.
+    pub fn grader_list(&self) -> Vec<std::result::Result<Grader, String>> {
+        self.graders.iter().map(|g| crate::graders::parse(g, self)).collect()
+    }
+
     pub fn load_prompt_text(&mut self) {
         if !self.prompt_text.is_empty() {
             return;
@@ -66,6 +76,8 @@ pub struct PackHeader {
     pub version: String,
     pub domain: String,
     pub license: String,
+    /// `[pack.judge]`: the model that scores this pack's `judge` graders.
+    pub judge: Option<JudgeConfig>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -83,6 +95,7 @@ pub struct EvalPack {
     pub path: PathBuf,
     pub hash: String,
     pub tasks: Vec<Task>,
+    pub judge: Option<JudgeConfig>,
 }
 
 /// Marks a spot in a scaffolded eval pack that still needs filling in.
@@ -113,13 +126,6 @@ impl PackIssue {
 #[deprecated(note = "renamed to `EvalPack`")]
 pub type TaskPack = EvalPack;
 
-#[derive(Debug, Clone)]
-pub struct Grade {
-    pub grader: String,
-    pub success: bool,
-    pub score: f64,
-}
-
 impl EvalPack {
     pub fn load(source: &str, base: Option<&Path>) -> Result<EvalPack> {
         let p = PathBuf::from(source);
@@ -148,6 +154,7 @@ impl EvalPack {
             path: p,
             hash,
             tasks,
+            judge: file.pack.judge.filter(JudgeConfig::is_set),
         })
     }
 
@@ -155,6 +162,11 @@ impl EvalPack {
     /// prompts and fixtures present, no unfilled [`PLACEHOLDER`]s, and tasks that
     /// can fail.
     pub fn check(&self) -> Vec<PackIssue> {
+        self.check_with(None)
+    }
+
+    /// [`check`](Self::check), knowing the judge `harness.toml` sets (`[evals.judge]`).
+    pub fn check_with(&self, judge: Option<&JudgeConfig>) -> Vec<PackIssue> {
         let mut issues = Vec::new();
         for (key, value) in [("name", &self.name), ("version", &self.version), ("domain", &self.domain)] {
             if value.trim().is_empty() {
@@ -204,18 +216,48 @@ impl EvalPack {
                     issues.push(PackIssue::error(id, format!("fixtures directory {} not found", t.fixtures.as_ref().unwrap().display())));
                 }
             }
+            if let Some(sol) = &t.solution {
+                if !self.path.join(sol).is_dir() {
+                    issues.push(PackIssue::error(id, format!("solution directory {} not found", sol.display())));
+                }
+            }
             let artifacts = t.expected_artifacts();
+            let graders = t.grader_list();
             if artifacts.is_empty() && t.graders.is_empty() {
                 issues.push(PackIssue::warn(id, "no expected artifacts or graders, so it always passes".into()));
+            } else if !graders.iter().any(|g| matches!(g, Ok(g) if g.checks_content())) && graders.iter().all(|g| g.is_ok()) {
+                let mut files = artifacts.clone();
+                for g in &graders {
+                    if let Ok(Grader::Artifact { paths, .. }) = g {
+                        files.extend(paths.iter().filter(|p| !artifacts.contains(p)).cloned());
+                    }
+                }
+                issues.push(PackIssue::warn(id, if files.is_empty() {
+                    "none of its graders can run yet, so it always passes".to_string()
+                } else {
+                    format!("only checks that {} exist{}; add a content check, tests, or a judge", files.join(", "), if files.len() == 1 { "s" } else { "" })
+                }));
+            }
+            for (n, g) in graders.iter().enumerate() {
+                match g {
+                    Err(e) => issues.push(PackIssue::error(id, format!("grader {}: {e}", n + 1))),
+                    Ok(Grader::Unsupported(k)) => issues.push(PackIssue::warn(id, format!("{k} graders aren't supported yet, so it's skipped"))),
+                    Ok(g) => {
+                        for (f, problem) in crate::graders::pack_file_problems(g, &self.path) {
+                            issues.push(PackIssue::error(id, format!("{} grader file {f} {problem}", g.label().split(':').next().unwrap_or("a"))));
+                        }
+                    }
+                }
             }
             if let Some(dir) = fixtures.as_ref().filter(|d| d.is_dir()) {
                 for a in artifacts.iter().filter(|a| dir.join(a).exists()) {
                     issues.push(PackIssue::warn(id, format!("expected artifact {a} is already in the fixtures, so it passes without any work")));
                 }
             }
-            for g in t.graders.iter().filter(|g| !g.starts_with("artifact:") && !g.starts_with("tests:")) {
-                issues.push(PackIssue::warn(id, format!("grader {g:?} isn't supported yet; the task is graded on its artifacts")));
-            }
+        }
+        let judged = self.tasks.iter().any(|t| t.grader_list().iter().any(|g| matches!(g, Ok(Grader::Judge { .. }))));
+        if judged && self.judge.is_none() && !judge.is_some_and(JudgeConfig::is_set) {
+            issues.push(PackIssue::warn(None, "judge graders need a model: set [pack.judge] model in pack.toml, or [evals.judge] in harness.toml".into()));
         }
         if self.tasks.len() < MIN_TASKS {
             let (_, holdout) = self.split(0.7, 0);
@@ -247,30 +289,100 @@ impl EvalPack {
         (search, holdout)
     }
 
-    /// Grade a task against its workspace. v0.1 uses artifact checks by default.
+    /// Grade a task's run on what it left in `workspace`, with the pack's judge.
     pub fn grade(&self, task: &Task, workspace: &Path) -> Vec<Grade> {
-        let expected = task.expected_artifacts();
-        if task.graders.is_empty() || task.graders.iter().all(|g| g.starts_with("artifact:")) {
-            let missing: Vec<String> = expected
-                .iter()
-                .filter(|a| !workspace.join(a).exists())
-                .cloned()
-                .collect();
-            let success = missing.is_empty();
-            return vec![Grade {
-                grader: format!("artifact:{}", expected.join(",")),
-                success,
-                score: if success { 1.0 } else { 0.0 },
-            }];
+        self.grade_with(task, workspace, &GradeOptions::default())
+    }
+
+    /// Grade with options; `opts.judge` (from `harness.toml`) wins over the pack's.
+    pub fn grade_with(&self, task: &Task, workspace: &Path, opts: &GradeOptions) -> Vec<Grade> {
+        let opts = GradeOptions { judge: opts.judge.clone().filter(JudgeConfig::is_set).or_else(|| self.judge.clone()), ..opts.clone() };
+        crate::graders::grade(task, workspace, &opts)
+    }
+
+    /// Grade a copy of `dir` as if it were the workspace a run of task `id` left; with
+    /// no `dir`, the task's fixtures plus its solution. Copies, because `tests`
+    /// graders write into the workspace.
+    pub fn grade_dir(&self, id: &str, dir: Option<&Path>, opts: &GradeOptions) -> Result<Vec<Grade>> {
+        let task = self.tasks.iter().find(|t| t.id == id).ok_or_else(|| {
+            Error::EvalPack(format!("no task {id:?} in {} (tasks: {})", self.path.display(), self.tasks.iter().map(|t| t.id.as_str()).collect::<Vec<_>>().join(", ")))
+        })?;
+        let sources: Vec<PathBuf> = match dir {
+            Some(d) if d.is_dir() => vec![d.to_path_buf()],
+            Some(d) => return Err(Error::EvalPack(format!("{} isn't a directory", d.display()))),
+            None => {
+                let sol = task.solution.as_ref().map(|s| self.path.join(s)).filter(|p| p.is_dir()).ok_or_else(|| {
+                    Error::EvalPack(format!("task {id} has no solution directory; name a directory to grade"))
+                })?;
+                task.fixtures.iter().map(|f| self.path.join(f)).filter(|p| p.is_dir()).chain([sol]).collect()
+            }
+        };
+        static N: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let ws = std::env::temp_dir().join(format!("hlock-grade-{}-{n}", std::process::id())).join(id);
+        let _ = std::fs::remove_dir_all(&ws);
+        std::fs::create_dir_all(&ws)?;
+        for src in &sources {
+            crate::adapters::copy_dir(src, &ws);
         }
-        // For v0.1 the only supported extra grader type is "tests:" which we
-        // treat as a failed grade unless an artifact check passes too. This
-        // mirrors the reference (deterministic) grader set.
-        let expected_ok = expected.iter().all(|a| workspace.join(a).exists());
-        vec![Grade {
-            grader: "tests:check".into(),
-            success: expected_ok,
-            score: if expected_ok { 1.0 } else { 0.0 },
-        }]
+        let grades = self.grade_with(task, &ws, opts);
+        let _ = std::fs::remove_dir_all(ws.parent().unwrap_or(&ws));
+        Ok(grades)
+    }
+
+    /// Try each task's graders without an agent, judges aside: on its fixtures alone
+    /// they should fail (or the task passes with no work), and on its fixtures plus
+    /// its `solution` they should pass. Runs `tests` commands, in temporary directories.
+    pub fn check_graders(&self) -> Vec<PackIssue> {
+        let mut issues = Vec::new();
+        let opts = GradeOptions { skip_judges: true, ..Default::default() };
+        static N: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let root = std::env::temp_dir().join(format!("hlock-check-{}-{n}", std::process::id()));
+        for t in &self.tasks {
+            let id = Some(t.id.as_str()).filter(|s| !s.is_empty());
+            let graders = t.grader_list();
+            if graders.iter().any(|g| g.is_err()) || (graders.is_empty() && t.expected_artifacts().is_empty()) {
+                continue; // `check` reports these
+            }
+            let ws = root.join(&t.id);
+            let fresh = |extra: Option<&Path>| {
+                let _ = std::fs::remove_dir_all(&ws);
+                let _ = std::fs::create_dir_all(&ws);
+                for src in t.fixtures.iter().map(|f| self.path.join(f)).chain(extra.map(Path::to_path_buf)).filter(|p| p.is_dir()) {
+                    crate::adapters::copy_dir(&src, &ws);
+                }
+            };
+            // skipped judges might fail where the rest pass, so only judge-free tasks can be
+            // said to pass without any work
+            let judged = graders.iter().any(|g| matches!(g, Ok(Grader::Judge { .. })));
+            if !graders.is_empty() && !judged {
+                fresh(None);
+                let grades = self.grade_with(t, &ws, &opts);
+                if !grades.is_empty() && grades.iter().all(|g| g.success) {
+                    issues.push(PackIssue::warn(id, "its graders pass on the fixtures alone, so it passes without any work".into()));
+                }
+            }
+            match t.solution.as_ref().map(|s| self.path.join(s)).filter(|p| p.is_dir()) {
+                Some(sol) => {
+                    fresh(Some(&sol));
+                    for g in self.grade_with(t, &ws, &opts).iter().filter(|g| !g.success) {
+                        let lines: Vec<&str> = g.detail.lines().filter(|l| !l.trim().is_empty()).collect();
+                        let detail = match lines.as_slice() {
+                            [] => String::new(),
+                            [one] => one.to_string(),
+                            [first, .., last] => format!("{first}: {}", last.trim()),
+                        };
+                        issues.push(PackIssue::error(id, format!("its solution fails {}: {detail}", g.grader)));
+                    }
+                }
+                None if t.solution.is_none() => {
+                    issues.push(PackIssue::warn(id, "no solution, so its graders weren't tried on a known-good result".into()));
+                }
+                None => {} // `check` reports a missing solution directory
+            }
+        }
+        let _ = std::fs::remove_dir_all(&root);
+        issues
     }
 }

@@ -129,18 +129,38 @@ or is in the wrong state.
 ### `check_eval_pack`
 
 ```python
-check_eval_pack(path) -> str
+check_eval_pack(path, run=False, manifest=None) -> str
 ```
 
 Load the [eval pack](../guides/eval-packs.md) at `path` and check it, like
-[`hlock evals check`](cli.md#evals). Returns JSON with `name`, `version`, `domain`,
+[`hlock evals check`](cli.md#evals). With `run`, also try its graders on each task's
+fixtures and solution, like `--run`. `manifest` is the path of a `harness.toml` whose
+`[evals.judge]` counts as the judge model. Returns JSON with `name`, `version`, `domain`,
 `path`, `hash`, `tasks` (the task ids), and `issues`, each with `level` (`error` or
 `warn`), `task` (or `None`), and `message`.
 
 ```python
->>> r = json.loads(hl.check_eval_pack("evals"))
+>>> r = json.loads(hl.check_eval_pack("evals", run=True))
 >>> r["tasks"], [i["level"] for i in r["issues"]]
 (['hello_file', 'count_words', 'greet_people'], ['warn'])
+```
+
+### `grade_eval_task`
+
+```python
+grade_eval_task(path, task, workspace=None, manifest=None) -> str
+```
+
+Grade a copy of `workspace` as the output of `task` in the pack at `path`, like
+[`hlock evals grade`](cli.md#evals-grade); with no `workspace`, the task's solution.
+`manifest` is a `harness.toml` whose `[evals.judge]` scores judge graders. Returns JSON with
+`task`, `workspace`, `success`, `score` (the mean), and `grades`, each with `grader`,
+`success`, `score`, and `detail`.
+
+```python
+>>> r = json.loads(hl.grade_eval_task("evals", "greet_people", "run"))
+>>> r["success"], round(r["score"], 2), [(g["grader"], g["success"]) for g in r["grades"]]
+(False, 0.67, [('artifact:greetings.md', True), ('tests:greet_people/check.py', False)])
 ```
 
 ### Meta harness

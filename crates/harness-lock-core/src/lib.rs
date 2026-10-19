@@ -16,6 +16,7 @@ pub mod contract;
 pub mod launch;
 pub mod localize;
 pub mod error;
+pub mod graders;
 pub mod hash;
 pub mod lockfile;
 pub mod manifest;

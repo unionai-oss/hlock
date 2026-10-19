@@ -58,6 +58,7 @@ from harness_lock import (
 from harness_lock import check_eval_pack as _check_eval_pack
 from harness_lock import check_pin as _check_pin
 from harness_lock import evals as _evals
+from harness_lock import grade_eval_task as _grade_eval_task
 from harness_lock import jobs as _jobs
 from harness_lock import localize as _localize
 from harness_lock import pin as _pin
@@ -557,12 +558,16 @@ def evals_templates(as_json: bool) -> None:
 
 @evals.command("check")
 @click.argument("directory", default="./evals")
+@click.option("--run", is_flag=True,
+              help="Also run each task's graders, judges aside, on its fixtures alone (they should fail) and on "
+                   "its solution (they should pass). Runs the pack's test commands.")
 @click.option("--json", "as_json", is_flag=True, help="Print the result as JSON.")
-def evals_check(directory: str, as_json: bool) -> None:
-    """Check that an eval pack is ready: required fields, prompts, fixtures, and no
-    [key]TODO(hlock)[/] slots left. Exits 1 on errors; warnings don't fail."""
+def evals_check(directory: str, run: bool, as_json: bool) -> None:
+    """Check that an eval pack is ready: required fields, prompts, fixtures, graders, and
+    no [key]TODO(hlock)[/] slots left. Exits 1 on errors; warnings don't fail."""
+    manifest = _m() if Path(_m()).exists() else None
     with _friendly_errors():
-        result = json.loads(_check_eval_pack(directory))
+        result = json.loads(_check_eval_pack(directory, run=run, manifest=manifest))
     issues = result["issues"]
     errors = [i for i in issues if i["level"] == "error"]
     if as_json:
@@ -580,7 +585,39 @@ def evals_check(directory: str, as_json: bool) -> None:
         err_console.print(f"[fail]✗[/] {plural(len(errors), 'error')}, {plural(warns, 'warning')}")
         sys.exit(1)
     _ok(f"ready  [muted]({plural(warns, 'warning')})[/]" if warns else "ready")
-    _next("hlock resolve" if Path(_m()).exists() else f"hlock init --pack {directory}")
+    if not run:
+        _next(f"hlock evals check {directory} --run", "hlock resolve" if manifest else f"hlock init --pack {directory}")
+    else:
+        _next("hlock resolve" if manifest else f"hlock init --pack {directory}")
+
+
+@evals.command("grade")
+@click.argument("task")
+@click.argument("workspace", required=False)
+@click.option("--pack", "pack", default="./evals", show_default=True, help="The eval pack directory.")
+@click.option("--json", "as_json", is_flag=True, help="Print the result as JSON.")
+def evals_grade(task: str, workspace: str | None, pack: str, as_json: bool) -> None:
+    """Grade a directory as if a run of TASK left it, with every grader the task has,
+    judges included. With no WORKSPACE, grades the task's solution. Exits 1 if a grader
+    fails."""
+    manifest = _m() if Path(_m()).exists() else None
+    with _working(f"Grading {task}…"):
+        result = json.loads(_grade_eval_task(pack, task, workspace, manifest=manifest))
+    if as_json:
+        console.print_json(data=result)
+        sys.exit(0 if result["success"] else 1)
+    what = _show(workspace) if workspace else "its solution"
+    console.print(f"[bold]{escape(task)}[/]  [muted]{escape(what)} · score {result['score']:.2f}[/]")
+    for g in result["grades"]:
+        mark = "[ok]✓[/]" if g["success"] else "[fail]✗[/]"
+        console.print(f"  {mark} {escape(g['grader'])}  [muted]{g['score']:.2f}[/]", soft_wrap=True)
+        for line in g["detail"].splitlines():
+            console.print(f"      [muted]{escape(line)}[/]", soft_wrap=True)
+    if not result["success"]:
+        failed = sum(not g["success"] for g in result["grades"])
+        err_console.print(f"[fail]✗[/] {failed} of {len(result['grades'])} graders failed")
+        sys.exit(1)
+    _ok("passed")
 
 
 @main.command()

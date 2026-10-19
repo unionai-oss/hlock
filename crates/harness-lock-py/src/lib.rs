@@ -949,12 +949,31 @@ fn redact_text(text: String) -> String {
     core::capture::redact_text(&text)
 }
 
-/// Load the eval pack at `path` and check it (see `EvalPack::check`). Returns JSON
-/// with the pack's header, its task ids, and the issues found.
+/// `[evals.judge]` from the manifest at `path`, when there is one.
+fn manifest_judge(path: Option<&str>) -> PyResult<Option<core::tasks::JudgeConfig>> {
+    match path {
+        Some(p) if Path::new(p).is_file() => Ok(core::Manifest::load(Path::new(p)).map_err(py_err)?.judge()),
+        _ => Ok(None),
+    }
+}
+
+/// Load the eval pack at `path` and check it (see `EvalPack::check`). With `run`, also
+/// try its graders on each task's fixtures and solution (`EvalPack::check_graders`).
+/// `manifest` is a `harness.toml` whose `[evals.judge]` counts as the judge. Returns
+/// JSON with the pack's header, its task ids, and the issues found.
 #[pyfunction]
-fn check_eval_pack(path: String) -> PyResult<String> {
+#[pyo3(signature = (path, run=false, manifest=None))]
+fn check_eval_pack(path: String, run: bool, manifest: Option<String>) -> PyResult<String> {
     let pack = core::tasks::EvalPack::load(&path, None).map_err(py_err)?;
-    let issues = pack.check();
+    let judge = manifest_judge(manifest.as_deref())?;
+    let mut issues = pack.check_with(judge.as_ref());
+    if run {
+        if issues.iter().any(|i| i.level == "error") {
+            issues.push(core::tasks::PackIssue { level: "warn".into(), task: None, message: "the graders weren't run; fix the errors first".into() });
+        } else {
+            issues.extend(pack.check_graders());
+        }
+    }
     Ok(json_str(serde_json::json!({
         "name": pack.name,
         "version": pack.version,
@@ -963,6 +982,26 @@ fn check_eval_pack(path: String) -> PyResult<String> {
         "hash": pack.hash,
         "tasks": pack.tasks.iter().map(|t| &t.id).collect::<Vec<_>>(),
         "issues": issues,
+    })))
+}
+
+/// Grade a directory as the output of task `task` in the eval pack at `path` (see
+/// `EvalPack::grade_dir`); with no `workspace`, the task's solution. `manifest` is a
+/// `harness.toml` whose `[evals.judge]` scores judge graders. Returns JSON with the
+/// grades and the overall `success` and `score`.
+#[pyfunction]
+#[pyo3(signature = (path, task, workspace=None, manifest=None))]
+fn grade_eval_task(path: String, task: String, workspace: Option<String>, manifest: Option<String>) -> PyResult<String> {
+    let pack = core::tasks::EvalPack::load(&path, None).map_err(py_err)?;
+    let opts = core::tasks::GradeOptions { judge: manifest_judge(manifest.as_deref())?, ..Default::default() };
+    let grades = pack.grade_dir(&task, workspace.as_deref().map(Path::new), &opts).map_err(py_err)?;
+    let score = grades.iter().map(|g| g.score).sum::<f64>() / grades.len().max(1) as f64;
+    Ok(json_str(serde_json::json!({
+        "task": task,
+        "workspace": workspace,
+        "success": grades.iter().all(|g| g.success),
+        "score": score,
+        "grades": grades,
     })))
 }
 
@@ -1190,6 +1229,7 @@ fn _harness_lock(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(run_code_harness, m)?)?;
     m.add_function(wrap_pyfunction!(localize, m)?)?;
     m.add_function(wrap_pyfunction!(check_eval_pack, m)?)?;
+    m.add_function(wrap_pyfunction!(grade_eval_task, m)?)?;
     m.add_function(wrap_pyfunction!(redact_text, m)?)?;
     m.add_function(wrap_pyfunction!(agent_run, m)?)?;
     m.add_function(wrap_pyfunction!(meta_config, m)?)?;

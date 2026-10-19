@@ -147,10 +147,11 @@ impl Resolver {
                 trace: json!([]),
             }
         });
+        let opts = crate::tasks::GradeOptions { judge: self.manifest.judge(), ..Default::default() };
         let grades = self
             .pack_by_task
             .get(&task.id)
-            .map(|p| p.grade(task, &ws))
+            .map(|p| p.grade_with(task, &ws, &opts))
             .unwrap_or_default();
         let success = outcome.success && grades.iter().all(|g| g.success);
         let score = grades.iter().map(|g| g.score).sum::<f64>() / grades.len().max(1) as f64;
@@ -161,7 +162,7 @@ impl Resolver {
             "events": outcome.trace,
             "result": {"artifacts": task.expected_artifacts()},
             "metrics": {"steps": outcome.steps, "cost_usd": outcome.cost_usd, "latency_s": outcome.latency_s},
-            "grades": grades.iter().map(|g| json!({"success": g.success, "score": g.score})).collect::<Vec<_>>(),
+            "grades": grades,
         });
         let _ = self.store.put_value(&trace);
 
@@ -311,6 +312,7 @@ impl Resolver {
                 success_rate,
                 cost_usd_per_task: cost,
                 latency_s_per_task: latency,
+                judge: self.judge_model(),
                 ..Default::default()
             },
             verify: Verify::default(),
@@ -321,6 +323,20 @@ impl Resolver {
             },
             ..Default::default()
         }
+    }
+
+    /// The judge models that scored the packs' `judge` graders, if any have them.
+    fn judge_model(&self) -> Option<String> {
+        let mut models = std::collections::BTreeSet::new();
+        for pack in self.pack_by_task.values() {
+            let judged = pack.tasks.iter().any(|t| t.grader_list().iter().any(|g| matches!(g, Ok(crate::graders::Grader::Judge { .. }))));
+            if judged {
+                if let Some(j) = self.manifest.judge().or_else(|| pack.judge.clone()) {
+                    models.insert(j.model);
+                }
+            }
+        }
+        (!models.is_empty()).then(|| models.into_iter().collect::<Vec<_>>().join(","))
     }
 
     /// The `[harness]` table for the winner. A harness with a profile gets the

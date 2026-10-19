@@ -265,6 +265,26 @@ fn ask_openai(cfg: &AgentConfig, history: &[Msg]) -> Result<Reply> {
     })
 }
 
+/// One completion with no tools, as judge graders use: returns the reply's text and its
+/// input and output token counts.
+pub fn complete(cfg: &AgentConfig, system: &str, prompt: &str) -> Result<(String, u64, u64)> {
+    if cfg.provider == "anthropic" {
+        let body = json!({"model": cfg.model, "max_tokens": 2048, "system": system, "messages": [{"role": "user", "content": prompt}]});
+        let mut headers = vec![("anthropic-version", "2023-06-01".to_string())];
+        if let Some(k) = &cfg.api_key {
+            headers.push(("x-api-key", k.clone()));
+        }
+        let v = post(cfg, "messages", &headers, &body)?;
+        let text: String = v["content"].as_array().into_iter().flatten().filter_map(|b| b["text"].as_str()).collect();
+        return Ok((text, v["usage"]["input_tokens"].as_u64().unwrap_or(0), v["usage"]["output_tokens"].as_u64().unwrap_or(0)));
+    }
+    let body = json!({"model": cfg.model, "messages": [{"role": "system", "content": system}, {"role": "user", "content": prompt}]});
+    let headers: Vec<(&str, String)> = cfg.api_key.iter().map(|k| ("authorization", format!("Bearer {k}"))).collect();
+    let v = post(cfg, "chat/completions", &headers, &body)?;
+    let text = v["choices"][0]["message"]["content"].as_str().unwrap_or_default().to_string();
+    Ok((text, v["usage"]["prompt_tokens"].as_u64().unwrap_or(0), v["usage"]["completion_tokens"].as_u64().unwrap_or(0)))
+}
+
 /// A tool call a model wrote as text instead of a structured call, as small local models
 /// often do: `{"name": "write_file", "parameters": {...}}`, optionally in a code fence.
 fn text_call(text: &str) -> Option<Call> {

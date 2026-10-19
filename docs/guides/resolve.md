@@ -17,22 +17,24 @@ Write the hello-world pack:
 $ mkdir hlock-demo && cd hlock-demo
 $ hlock evals init
 ✓ wrote evals/pack.toml  (hello-world, 3 tasks)
-  6 files under evals
+  10 files under evals
 next → hlock evals check ./evals  ·  hlock init --pack ./evals
 ```
 
-It holds three small tasks, `hello_file`, `count_words`, and `greet_people`, each with a
-prompt and an expected output file. Check that it's ready:
+It holds three small tasks, `hello_file`, `count_words`, and `greet_people`. Each has a
+prompt, an expected output file, a [grader](eval-packs.md#grading) that checks what's in
+it, and a solution. Check that it's ready:
 
 ```console
 $ hlock evals check
 hlock-demo/evals 0.1.0  3 tasks · evals
   ! 3 tasks leaves 1 for the holdout split; add tasks until there are at least 10
 ✓ ready  (1 warning)
-next → hlock init --pack ./evals
+next → hlock evals check ./evals --run  ·  hlock init --pack ./evals
 ```
 
-The warning is expected for a demo. For your own work, start from a
+The warning is expected for a demo. `--run` would also run each task's graders on its
+solution, to show they pass on a correct result. For your own work, start from a
 [template](eval-packs.md#fill-in-a-template-with-your-agent) and have your agent fill it
 in.
 

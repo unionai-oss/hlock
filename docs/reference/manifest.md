@@ -59,6 +59,9 @@ target = "local"
 | `packs` | `[]` | Paths to [eval pack](../guides/eval-packs.md) directories |
 | `seeds` | `3` | Runs per task per candidate |
 | `splits.search` | `0.7` | Fraction of tasks in the search split. The rest is holdout. |
+| `judge.model` | the pack's `[pack.judge]` | The model that scores [`judge` graders](../guides/eval-packs.md#judges), as `"provider:model"` |
+| `judge.base-url` | the provider's API | An OpenAI-compatible endpoint, for other providers and local models |
+| `judge.key-env` | the provider's usual variable | The environment variable the judge's API key is read from |
 
 This section used to be called `[tasks]`, and that name still works.
 

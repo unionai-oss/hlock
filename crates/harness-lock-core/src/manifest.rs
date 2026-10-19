@@ -208,6 +208,14 @@ impl Manifest {
             .unwrap_or(3)
     }
 
+    /// `[evals.judge]`: the model that scores `judge` graders, over any pack's own.
+    pub fn judge(&self) -> Option<crate::graders::JudgeConfig> {
+        self.evals
+            .get("judge")
+            .and_then(|v| serde_json::from_value::<crate::graders::JudgeConfig>(v.clone()).ok())
+            .filter(|j| j.is_set())
+    }
+
     pub fn backend_target(&self) -> String {
         self.backend
             .get("target")

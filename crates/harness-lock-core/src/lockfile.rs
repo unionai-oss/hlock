@@ -247,6 +247,8 @@ pub struct Evidence {
     pub success_rate: BTreeMap<String, f64>,
     pub cost_usd_per_task: BTreeMap<String, f64>,
     pub latency_s_per_task: BTreeMap<String, f64>,
+    /// The model that scored `judge` graders, when the packs have any.
+    pub judge: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]

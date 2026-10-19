@@ -23,7 +23,9 @@ class Slot:
     kind: str  # id prefix and tag, e.g. "bug_fix"
     title: str  # what the slot asks for, shown in prompt.md
     guide: str  # how to pick and write a real task of this kind
-    artifact: str  # default expected artifact
+    artifact: str  # default expected artifact; "" when the agent changes files in place
+    check: str  # what the grader should look for
+    grader: str = "judge"  # "tests" (a check.py script) or "judge" (a rubric.md for a judge model)
     tools: tuple[str, ...] = ("filesystem",)
     fixtures: bool = True
     timeout: int = 600
@@ -61,22 +63,29 @@ TEMPLATES: dict[str, Template] = {
             (
                 Slot("bug_fix", "Fix a real bug",
                      "Pick a bug that was fixed recently. Put the code as it was *before* the fix in "
-                     "`workspace/`, describe the symptom the way the reporter did, and ask for the fix "
-                     "as a patch.", "fix.patch", _CODE_TOOLS, timeout=900),
+                     "`workspace/`, describe the symptom the way the reporter did, and ask for the fix. "
+                     "The fixed code is its solution.", "", "Run the tests that cover the bug, such as the test added with the fix.", "tests", _CODE_TOOLS, timeout=900),
                 Slot("feature", "Add a small feature",
                      "Pick a small feature that was merged recently. Snapshot the code before it landed, "
-                     "and write the request the way the issue or ticket put it.", "feature.patch",
+                     "and write the request the way the issue or ticket put it.", "",
+                     "Run tests for the new behavior, such as the ones merged with the feature.", "tests",
                      _CODE_TOOLS, timeout=900),
                 Slot("tests", "Write tests for existing code",
                      "Pick a module with thin test coverage. Ask for tests that pin its current "
-                     "behavior, written to a file the grader can find.", "test_added.py", _CODE_TOOLS),
+                     "behavior, written to a file the grader can find.", "test_added.py",
+                     "Run the new tests: they should pass on the code as it is. Keep a broken copy of the module "
+                     "next to this script and check the tests fail on it.", "tests", _CODE_TOOLS),
                 Slot("refactor", "Refactor without changing behavior",
                      "Pick code someone has complained about or marked with a TODO. Say what should "
-                     "change and what must stay the same.", "refactor.patch", _CODE_TOOLS, timeout=900),
+                     "change and what must stay the same.", "",
+                     "Run the existing tests (they must still pass) and check the change you asked for was made.",
+                     "tests", _CODE_TOOLS, timeout=900),
                 Slot("debug", "Find the root cause of a failure",
                      "Pick a failure with a known cause: a stack trace, a failing CI log, a wrong "
                      "output. Include the evidence in `workspace/` and ask for the root cause in "
-                     "writing.", "root_cause.md", _CODE_TOOLS),
+                     "writing.", "root_cause.md",
+                     "Name the actual root cause, and the evidence in the workspace that shows it.", "judge",
+                     _CODE_TOOLS),
             ),
         ),
         Template(
@@ -92,21 +101,29 @@ TEMPLATES: dict[str, Template] = {
                 Slot("clean", "Clean a messy dataset",
                      "Take a small, real sample of a dataset that needed cleaning (a few hundred rows "
                      "is plenty), with the problems it actually had. Remove anything sensitive.",
-                     "cleaned.csv", ("python", "filesystem")),
+                     "cleaned.csv",
+                     "Compare with a cleaned copy kept next to this script, or check the rules it must follow: "
+                     "no duplicate ids, one date format, no empty required fields.", "tests", ("python", "filesystem")),
                 Slot("analyze", "Answer a question from data",
                      "Pick a question someone asked of this data and that was answered. Include the "
                      "data and ask for the answer with the numbers behind it.", "analysis.md",
+                     "The numbers the answer must contain, and the conclusion it must reach.", "judge",
                      ("python", "filesystem")),
                 Slot("transform", "Reshape data for a downstream use",
                      "Pick a transformation the project does: a join, a pivot, an aggregation. Say "
-                     "the output schema exactly.", "output.csv", ("python", "filesystem")),
+                     "the output schema exactly.", "output.csv",
+                     "Check the columns, the row count, and a few rows you know the right values of.", "tests",
+                     ("python", "filesystem")),
                 Slot("query", "Write a query",
                      "Pick a query that was written for a real request. Include the schema (and a "
                      "small database file if you can) and ask for the SQL.", "query.sql",
-                     ("python", "filesystem")),
+                     "Run the query against the database in the workspace and compare its rows with the right "
+                     "answer.", "tests", ("python", "filesystem")),
                 Slot("chart", "Make a chart",
                      "Pick a chart that went into a report. Include the data and say what the chart "
-                     "must show.", "chart.png", ("python", "filesystem")),
+                     "must show.", "chart.png",
+                     "Check the PNG opens and has a sensible size; a judge can't see images.", "tests",
+                     ("python", "filesystem")),
             ),
         ),
         Template(
@@ -121,20 +138,25 @@ TEMPLATES: dict[str, Template] = {
             (
                 Slot("summarize", "Summarize a document",
                      "Pick a real document and the audience the summary was for. Say how long the "
-                     "summary should be.", "summary.md"),
+                     "summary should be.", "summary.md",
+                     "The points the summary must keep, what it must leave out, and its length."),
                 Slot("compare", "Compare options",
                      "Pick a decision that was made between a few options (tools, vendors, designs). "
                      "Include the material that was available and ask for a comparison.",
-                     "comparison.md"),
+                     "comparison.md",
+                     "The criteria the comparison must cover, and the facts it must get right about each option."),
                 Slot("answer", "Answer a question with sources",
                      "Pick a question that was answered from the documents in `workspace/`. Ask for "
-                     "an answer that cites which document each claim came from.", "answer.md"),
+                     "an answer that cites which document each claim came from.", "answer.md",
+                     "The answer, and which document each claim must cite."),
                 Slot("extract", "Extract structured facts",
                      "Pick documents that someone pulled facts out of (dates, amounts, names). Give "
-                     "the exact JSON shape to produce.", "extracted.json"),
+                     "the exact JSON shape to produce.", "extracted.json",
+                     "Load the JSON and compare each field with the right value.", "tests"),
                 Slot("memo", "Draft a memo or brief",
                      "Pick a memo that was written for a real reader. Include the inputs it drew on.",
-                     "memo.md"),
+                     "memo.md",
+                     "What the reader needed to learn or decide, and the facts the memo must get right."),
             ),
         ),
         Template(
@@ -150,19 +172,26 @@ TEMPLATES: dict[str, Template] = {
                 Slot("triage", "Triage a ticket",
                      "Pick a closed ticket. Include the customer's message, with names, emails and "
                      "account ids replaced. Give the exact fields to fill in (severity, category, team).",
-                     "triage.json"),
+                     "triage.json",
+                     "Load the JSON and compare severity, category, and team with how the ticket was triaged.",
+                     "tests"),
                 Slot("reply", "Draft a reply",
                      "Pick a ticket that got a good reply. Include the ticket and the help articles "
-                     "the reply relied on.", "reply.md"),
+                     "the reply relied on.", "reply.md",
+                     "What the reply must tell the customer, which article it should point to, and its tone."),
                 Slot("reproduce", "Reproduce a reported bug",
                      "Pick a report that was reproduced. Include what the customer sent and ask for "
-                     "minimal reproduction steps.", "repro.md", ("shell", "filesystem")),
+                     "minimal reproduction steps.", "repro.md",
+                     "The steps must reproduce the bug from a clean start, and stay minimal.",
+                     tools=("shell", "filesystem")),
                 Slot("escalate", "Write an escalation",
                      "Pick a ticket that went to engineering. Ask for the summary an engineer needs to "
-                     "act on it.", "escalation.md"),
+                     "act on it.", "escalation.md",
+                     "The facts an engineer needs: impact, reproduction, what was already tried."),
                 Slot("article", "Write a help article",
                      "Pick a question customers ask often. Include the tickets that asked it.",
-                     "article.md"),
+                     "article.md",
+                     "The question it must answer, the steps it must give, and what it must not promise."),
             ),
         ),
         Template(
@@ -176,7 +205,8 @@ TEMPLATES: dict[str, Template] = {
             (
                 Slot("task", "A task from your own work",
                      "Pick a task you or your team did recently and would hand to an agent. Include "
-                     "the inputs it needs and say what file it should produce.", "output.md"),
+                     "the inputs it needs and say what file it should produce.", "output.md",
+                     "What a good result must get right, the way you'd review it yourself."),
             ),
         ),
     ]
@@ -191,14 +221,48 @@ def _toml_list(items) -> str:
     return "[" + ", ".join(f'"{i}"' for i in items) + "]"
 
 
-def _header(name: str, domain: str, comment: str) -> str:
-    return f"""# {comment}
+JUDGE_MODEL = "anthropic:claude-sonnet-5-5"
+
+
+def _header(name: str, domain: str, comment: str, judge: bool = False) -> str:
+    head = f"""# {comment}
 # Format: https://docs.hlock.ai/guides/eval-packs/
 [pack]
 name = "{name}"
 version = "0.1.0"        # bump it whenever the tasks change
 domain = "{domain}"
 """
+    if judge:
+        head += f"""
+[pack.judge]             # the model that scores judge: graders (harness.toml [evals.judge] overrides it)
+model = "{JUDGE_MODEL}"
+"""
+    return head
+
+
+GREET_CHECK = '''"""Grader for greet_people: one `Hello, <name>!` line per name in names.csv, in order.
+
+hlock runs this in the task's workspace after the agent finishes. Exit 0 passes. The
+score written to $HLOCK_GRADE gives partial credit for the lines that are right.
+"""
+
+import csv
+import json
+import os
+import sys
+
+want = [f"Hello, {row['name']}!" for row in csv.DictReader(open("names.csv"))]
+try:
+    got = [line.strip() for line in open("greetings.md") if line.strip()]
+except FileNotFoundError:
+    sys.exit("greetings.md is missing")
+right = sum(a == b for a, b in zip(got, want))
+detail = "" if got == want else f"{right} of {len(want)} lines right: expected {want}, got {got}"
+if "HLOCK_GRADE" in os.environ:
+    with open(os.environ["HLOCK_GRADE"], "w") as f:
+        json.dump({"score": right / len(want), "detail": detail}, f)
+sys.exit(0 if got == want else 1)
+'''
 
 
 HELLO_TASKS = [
@@ -207,6 +271,8 @@ HELLO_TASKS = [
         "prompt": "# Say hello\n\nCreate a file named `hello.txt` containing exactly `Hello, world!`.\n",
         "fixtures": {},
         "artifact": "hello.txt",
+        "grader": '{ type = "artifact", path = "hello.txt", equals = "Hello, world!" }',
+        "solution": {"hello.txt": "Hello, world!\n"},
         "tags": ["warm-up"],
     },
     {
@@ -215,6 +281,8 @@ HELLO_TASKS = [
                   "number, and nothing else, to `count.txt`.\n",
         "fixtures": {"words.txt": "The quick brown fox jumps over the lazy dog.\n"},
         "artifact": "count.txt",
+        "grader": '{ type = "artifact", path = "count.txt", equals = "9" }',
+        "solution": {"count.txt": "9\n"},
         "tags": ["files"],
     },
     {
@@ -223,6 +291,9 @@ HELLO_TASKS = [
                   "with one line per person: `Hello, <name>!`, in the order they appear.\n",
         "fixtures": {"names.csv": "name\nAda\nGrace\nLinus\n"},
         "artifact": "greetings.md",
+        "grader": '"tests:greet_people/check.py"',
+        "files": {"check.py": GREET_CHECK},
+        "solution": {"greetings.md": "Hello, Ada!\nHello, Grace!\nHello, Linus!\n"},
         "tags": ["files"],
     },
 ]
@@ -235,12 +306,14 @@ def _hello_world(name: str) -> dict[str, str]:
         lines = [f'\n[[task]]\nid = "{t["id"]}"', f'prompt = "{t["id"]}/prompt.md"']
         if t["fixtures"]:
             lines.append(f'fixtures = "{t["id"]}/workspace/"')
-        lines += ['tools = ["filesystem"]', f'expected = {{ artifacts = ["{t["artifact"]}"] }}',
+        lines += [f'solution = "{t["id"]}/solution/"', 'tools = ["filesystem"]',
+                  f'expected = {{ artifacts = ["{t["artifact"]}"] }}', f"graders = [{t['grader']}]",
                   f"tags = {_toml_list(t['tags'])}", "timeout-seconds = 300"]
         blocks.append("\n".join(lines) + "\n")
         files[f"{t['id']}/prompt.md"] = t["prompt"]
-        for fname, text in t["fixtures"].items():
-            files[f"{t['id']}/workspace/{fname}"] = text
+        for sub, group in [("workspace/", t["fixtures"]), ("solution/", t["solution"]), ("", t.get("files", {}))]:
+            for fname, text in group.items():
+                files[f"{t['id']}/{sub}{fname}"] = text
     files["pack.toml"] = "".join(blocks)
     return files
 
@@ -252,24 +325,60 @@ def _slot_prompt(slot: Slot) -> str:
         if slot.fixtures
         else ""
     )
+    if slot.artifact:
+        end = (f"End by naming\nthe file a successful run leaves in the workspace, for example: \"Write the result to\n"
+               f"`{slot.artifact}`.\" Keep that name in sync with `expected` in pack.toml.")
+    else:
+        end = "Say what done\nlooks like, the way you would to a colleague; `check.py` tests exactly that."
     return f"""<!-- {PLACEHOLDER}: replace this whole file with a real task. -->
 # {PLACEHOLDER}: {slot.title}
 
 {slot.guide}
 
-{fixtures}Write the prompt the way you'd ask your agent for this, in your own words. End by naming
-the file a successful run leaves in the workspace, for example: "Write the result to
-`{slot.artifact}`." Keep that name in sync with `expected` in pack.toml.
+{fixtures}Write the prompt the way you'd ask your agent for this, in your own words. {end}
+"""
+
+
+def _slot_check(slot: Slot, tid: str) -> str:
+    """A check.py stub for a ``tests`` slot."""
+    return f'''"""Grader for {tid}. {PLACEHOLDER}: write the check, then remove this marker.
+
+{slot.check}
+
+hlock runs this script in the task's workspace after the agent finishes, with the files the
+run left there. Exit 0 when the task was done right; exit non-zero, with a message, when it
+wasn't. For partial credit, write {{"score": 0.5, "detail": "why"}} as JSON to the path in
+$HLOCK_GRADE. $HLOCK_PACK_DIR is the pack directory: keep reference data and tests the
+agent mustn't see next to this script, not in workspace/.
+"""
+
+import sys
+
+sys.exit("{PLACEHOLDER}: check the result")
+'''
+
+
+def _slot_rubric(slot: Slot, tid: str) -> str:
+    """A rubric.md stub for a ``judge`` slot."""
+    return f"""<!-- {PLACEHOLDER}: replace this whole file with the rubric for {tid}. -->
+# Rubric: {slot.title.lower()}
+
+A judge model reads the files the run leaves and scores them against this rubric from 0 to 1;
+0.7 passes. List what a good result must get right, one point per line, as specifically as
+you'd review it yourself: {slot.check.lower()}
+
+- {PLACEHOLDER}: the first thing a good result gets right
 """
 
 
 def _template_files(tpl: Template, name: str, n_tasks: int) -> dict[str, str]:
     files = {}
+    picked = [tpl.slots[i % len(tpl.slots)] for i in range(n_tasks)]
     blocks = [_header(name, tpl.domain, f"A `{tpl.name}` eval pack template written by `hlock evals init`.\n"
-                                         "# Fill in the marked slots, then run `hlock evals check`.")]
+                                         "# Fill in the marked slots, then run `hlock evals check --run`.",
+                      judge=any(slot.grader == "judge" for slot in picked))]
     counts: dict[str, int] = {}
-    for i in range(n_tasks):
-        slot = tpl.slots[i % len(tpl.slots)]
+    for slot in picked:
         counts[slot.kind] = counts.get(slot.kind, 0) + 1
         tid = f"{slot.kind}_{counts[slot.kind]}"
         lines = [
@@ -282,15 +391,25 @@ def _template_files(tpl: Template, name: str, n_tasks: int) -> dict[str, str]:
         if slot.fixtures:
             lines.append(f'fixtures = "{tid}/workspace/"')
             files[f"{tid}/workspace/.gitkeep"] = ""
+        grader_file = f"{tid}/check.py" if slot.grader == "tests" else f"{tid}/rubric.md"
+        what = ("the file a successful run leaves in the workspace, and the check in" if slot.artifact
+                else "the agent changes files in place; write the check in")
         lines += [
+            f'solution = "{tid}/solution/"',
             f"tools = {_toml_list(slot.tools)}",
-            f"# {PLACEHOLDER}: the file a successful run leaves in the workspace.",
-            f'expected = {{ artifacts = ["{slot.artifact}"] }}',
+            f"# {PLACEHOLDER}: {what} {grader_file}.",
+        ]
+        if slot.artifact:
+            lines.append(f'expected = {{ artifacts = ["{slot.artifact}"] }}')
+        lines += [
+            f'graders = ["{slot.grader}:{grader_file}"]',
             f'tags = ["{slot.kind.replace("_", "-")}"]',
             f"timeout-seconds = {slot.timeout}",
         ]
         blocks.append("\n".join(lines) + "\n")
         files[f"{tid}/prompt.md"] = _slot_prompt(slot)
+        files[f"{tid}/solution/.gitkeep"] = ""
+        files[grader_file] = _slot_check(slot, tid) if slot.grader == "tests" else _slot_rubric(slot, tid)
     files["pack.toml"] = "".join(blocks)
     return files
 
@@ -319,8 +438,17 @@ should look like the work this user actually hands to an agent. Your job is to r
   came from. Write them only after the user agrees.
 - Copy only the files a task needs into its `workspace/`. Never copy secrets, credentials,
   `.env` files, or personal data; replace names, emails, and ids with placeholders.
-- Every task must produce a file a program can check: its name goes in `expected.artifacts`
-  in `pack.toml` and at the end of `prompt.md`. The file must not already be in `workspace/`.
+- Every task must produce something that can be checked: a file named in `expected.artifacts`
+  in `pack.toml` and at the end of `prompt.md`, or (for code) changes its tests can check. An
+  expected file must not already be in `workspace/`.
+- Grade the result, not just that a file exists. Each slot has a grader to fill in:
+  `<task>/check.py`, a script run in the workspace after the agent that exits 0 when the work
+  is right, for anything a program can check (tests, values, schemas); or `<task>/rubric.md`,
+  a list of what a good result gets right that a judge model scores, for writing and
+  judgment. Switch a slot to the other kind when it fits better: edit its `graders` line.
+- Put a known-good result in `<task>/solution/`: the files a correct run leaves, such as the
+  code after the real fix or the reply that was actually sent. It shows the graders pass on
+  good work.
 - Keep each task id unique and in `snake_case`, and keep the task's directory named after it:
   rename the directory and the `prompt` and `fixtures` paths together.
 - Drop slots that don't fit this project and add tasks of other kinds when they do. Aim for
@@ -336,7 +464,10 @@ should look like the work this user actually hands to an agent. Your job is to r
 2. Look through the sources above and propose tasks to the user.
 3. For each agreed task: write `prompt.md`, fill `workspace/`, and update its `[[task]]` entry.
    Remove every `{PLACEHOLDER}` comment as you go.
-4. Run `hlock evals check {pack_dir}` and fix what it reports until it shows no errors.
+4. Run `hlock evals check {pack_dir} --run` and fix what it reports until it shows no
+   errors. It runs each task's graders on its fixtures alone (they must fail) and on its
+   solution (they must pass). `hlock evals grade <task> [dir]` shows each grader's result,
+   judges included.
 5. Tell the user the pack is ready, and that `hlock init --pack {pack_dir}` (or the `[evals]`
    section of an existing `harness.toml`) points hlock at it.
 """
@@ -486,6 +617,12 @@ these tasks, so each one must run on its own in an empty workspace and be checka
 - Every task must produce a file a program can check, named in `expected.artifacts` and at
   the end of `prompt.md`. The file must not already be in `workspace/`. Resolve each
   `{PLACEHOLDER}`.
+- Grade the result, not just that the file exists: add a `graders` entry to each task. Use
+  `"tests:<task>/check.py"`, a script run in the workspace after the agent that exits 0 when
+  the work is right, when a program can check it, and `"judge:<task>/rubric.md"`, a rubric a
+  judge model scores, for writing. Judges need `[pack.judge] model` in `pack.toml`.
+- Put the files a correct run leaves in `<task>/solution/` and set `solution` on the task,
+  such as what the session actually produced, once the user confirms it was right.
 - Keep ids unique and in `snake_case`, and keep each directory named after its id.
 - Aim for at least 10 tasks, so hlock can hold some back to check the winner.
 
@@ -495,7 +632,9 @@ these tasks, so each one must run on its own in an empty workspace and be checka
 2. Agree with the user on which tasks to keep.
 3. For each task: rewrite `prompt.md` to stand alone, fill `workspace/`, and check its
    `[[task]]` entry.
-4. Run `hlock evals check {pack_dir}` and fix what it reports until it shows no errors.
+4. Run `hlock evals check {pack_dir} --run` and fix what it reports until it shows no
+   errors. It runs each task's graders on its fixtures alone (they must fail) and on its
+   solution (they must pass).
 5. Tell the user the pack is ready, and that `hlock init --pack {pack_dir}` (or the `[evals]`
    section of an existing `harness.toml`) points hlock at it.
 """
