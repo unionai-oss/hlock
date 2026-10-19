@@ -312,7 +312,9 @@ impl HarnessAdapter for CommandAdapter {
                     crate::decide::lock_entry(u, m, &spec, "env", vec![], &self.ctx.cwd).ok()
                 })
                 .collect();
-            let path = inv.cwd.join(".hlock").join("deciders.lock");
+            // absolute: the harness runs in the workspace, so a relative path would miss
+            let ws = if inv.cwd.is_absolute() { inv.cwd.clone() } else { self.ctx.cwd.join(&inv.cwd) };
+            let path = ws.join(".hlock").join("deciders.lock");
             let lock = Lockfile { decider: entries, ..Default::default() };
             if lock.save(&path).is_ok() {
                 inv.env.insert("HLOCK_DECIDE_LOCK".into(), path.to_string_lossy().into_owned());

@@ -685,6 +685,10 @@ fn route_and_tool_questions() {
     assert_eq!(qs.iter().map(|q| q.id.as_str()).collect::<Vec<_>>(), ["t1", "t2"]);
     assert!(qs[1].instructions.ends_with("`b`"));
     assert!(decide::use_questions("route", None, &[]).is_empty());
+    // the project's policy reaches route and tool questions too
+    let qs = decide::use_questions("route", Some("Plan with the planner."), &["planner".into(), "executor".into()]);
+    assert!(qs[0].instructions.ends_with("Plan with the planner."));
+    assert!(decide::use_questions("tool", Some("No network."), &["a".into()])[0].instructions.ends_with("No network."));
     for u in ["approve", "stop", "route", "tool"] {
         assert!(decide::questions_digest(u).is_some(), "{u}");
     }
@@ -695,6 +699,8 @@ fn route_and_tool_questions() {
 fn thresholds_are_tried_and_the_winner_is_locked() {
     assert_eq!(decide::split_threshold("ollama:kev:4b@0.8"), ("ollama:kev:4b", Some(0.8)));
     assert_eq!(decide::split_threshold("ollama:kev:4b"), ("ollama:kev:4b", None));
+    // a version after `@` isn't a probability
+    assert_eq!(decide::split_threshold("vertex:kev@20250514"), ("vertex:kev@20250514", None));
     let spec: DeciderSpec = toml::from_str("model = \"ollama:kev:4b\"\nmin-probability = [0.6, 0.9]").unwrap();
     let spec = spec.validated("stop").unwrap();
     assert_eq!(spec.thresholds(), [Some(0.6), Some(0.9)]);

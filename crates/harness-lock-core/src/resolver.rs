@@ -158,19 +158,19 @@ impl Resolver {
                 eprintln!("warn: {harness} can't make {use_} decisions; [deciders.{use_}] is left out of its stacks");
                 continue;
             }
-            // each model, at each `min-probability` candidate
-            let models: Vec<String> = spec.model.iter().cloned().chain(spec.any_of.iter().cloned()).collect();
-            let options: Vec<String> = models
-                .iter()
-                .flat_map(|m| {
-                    spec.thresholds().into_iter().map(move |t| match t {
+            // each model, at each `min-probability` candidate, in the manifest's order
+            let mut options: Vec<String> = Vec::new();
+            for m in spec.model.iter().chain(spec.any_of.iter()) {
+                for t in spec.thresholds() {
+                    let o = match t {
                         Some(p) if m != "none" => format!("{m}@{p}"),
                         _ => m.clone(),
-                    })
-                })
-                .collect::<std::collections::BTreeSet<_>>()
-                .into_iter()
-                .collect();
+                    };
+                    if !options.contains(&o) {
+                        options.push(o);
+                    }
+                }
+            }
             combos = combos
                 .into_iter()
                 .flat_map(|c| {
@@ -187,6 +187,19 @@ impl Resolver {
         combos
     }
 
+    /// The manifest's `[deciders.*]` for a trial, with policy paths made absolute: the
+    /// trial's lock lives in its workspace, not next to the manifest.
+    fn trial_deciders(&self) -> BTreeMap<String, crate::decide::DeciderSpec> {
+        let root = self.manifest.root();
+        let mut specs = self.manifest.deciders().unwrap_or_default();
+        for s in specs.values_mut() {
+            if let Some(p) = &s.policy {
+                s.policy = Some(root.join(p).to_string_lossy().into_owned());
+            }
+        }
+        specs
+    }
+
     /// Run one trial (copying fixtures, running the harness, grading).
     pub fn run_trial(&self, stack: &Stack, task: &crate::tasks::Task, seed: u64, ws_root: &Path) -> TrialResult {
         let ws = ws_root.join(format!("{}_{}_{}", &stack.hash()[..10.min(stack.hash().len())], task.id, seed));
@@ -195,7 +208,7 @@ impl Resolver {
 
         let outcome = match self.code_harnesses.get(&stack.harness) {
             Some(p) => crate::contract::CommandAdapter::new(p.clone(), Ctx::from_process())
-                .with_deciders(self.manifest.deciders().unwrap_or_default())
+                .with_deciders(self.trial_deciders())
                 .run(stack, task, &ws, seed),
             None => self.adapter.run(stack, task, &ws, seed),
         };

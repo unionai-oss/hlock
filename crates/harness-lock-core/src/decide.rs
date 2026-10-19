@@ -69,7 +69,8 @@ fn provider(name: &str) -> Option<&'static (&'static str, &'static str, &'static
 /// trying a `min-probability`.
 pub fn split_threshold(reference: &str) -> (&str, Option<f64>) {
     match reference.rsplit_once('@') {
-        Some((r, p)) if p.parse::<f64>().is_ok() => (r, p.parse().ok()),
+        // a probability, so a model id with `@<version>` keeps it
+        Some((r, p)) if p.parse::<f64>().is_ok_and(|p| (0.0..=1.0).contains(&p)) => (r, p.parse().ok()),
         _ => (reference, None),
     }
 }
@@ -714,13 +715,17 @@ const TOOL: &str = "Given the conversation in the state, the agent's next step m
 /// `approve` and `stop`, one choice over `options` (model roles) for `route`, and one
 /// yes/no per tool in `options` for `tool`.
 pub fn use_questions(use_: &str, policy: Option<&str>, options: &[String]) -> Vec<Question> {
+    let with_policy = |base: String| match policy.map(str::trim).filter(|p| !p.is_empty()) {
+        Some(p) => format!("{base}\n\nThe project's policy:\n{p}"),
+        None => base,
+    };
     match use_ {
         "route" if !options.is_empty() => {
             let opts: Vec<(&str, String)> = options.iter().map(|o| (o.as_str(), format!("the {o} model"))).collect();
             let refs: Vec<(&str, &str)> = opts.iter().map(|(k, v)| (*k, v.as_str())).collect();
-            vec![Question::choice("route", ROUTE, &refs)]
+            vec![Question::choice("route", &with_policy(ROUTE.to_string()), &refs)]
         }
-        "tool" => options.iter().enumerate().map(|(i, t)| Question::noul(&format!("t{}", i + 1), &format!("{TOOL} `{t}`"))).collect(),
+        "tool" => options.iter().enumerate().map(|(i, t)| Question::noul(&format!("t{}", i + 1), &with_policy(format!("{TOOL} `{t}`")))).collect(),
         _ => use_question(use_, policy).into_iter().collect(),
     }
 }

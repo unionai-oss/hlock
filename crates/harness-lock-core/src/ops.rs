@@ -168,7 +168,9 @@ pub fn upgrade(manifest: Manifest, spec: &UpgradeSpec) -> Result<UpgradeOutcome>
 
     // ---- apply: derive a manifest targeting the upgraded planner and deciders ----
     let (decider_ups, llm_ups): (Vec<&serde_json::Value>, Vec<&serde_json::Value>) = upgradeable.iter().partition(|e| e.get("decider").is_some());
-    let target = llm_ups.first().and_then(|e| e.get("to")).and_then(serde_json::Value::as_str).map(str::to_string);
+    // the planner's own upgrade (roles sort by name, so another role may come first)
+    let planner_up = llm_ups.iter().find(|e| e["role"] == "planner").or(llm_ups.first());
+    let target = planner_up.and_then(|e| e.get("to")).and_then(serde_json::Value::as_str).map(str::to_string);
 
     if lock_path.exists() {
         std::fs::copy(&lock_path, &prev_path)?; // keep harness.lock.prev for --rollback

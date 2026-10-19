@@ -208,3 +208,46 @@ def test_code_harnesses_ask_their_deciders(project, tmp_path):
     # route: the fake picks the first option it's sent (options go out in name order),
     # at P=0.97; there's no stop decider in the lock: {}
     assert r.stdout.strip() == "('executor', {})"
+
+
+def test_resolve_gives_a_code_harness_its_trial_deciders(project, deny):
+    """During resolve, a code harness gets an absolute HLOCK_DECIDE_LOCK whose policy path
+    resolves, even with a relative --workdir."""
+    proj = project["project"]
+    assert invoke("evals", "init").exit_code == 0
+    Path("route.md").write_text("Plan with the planner.\n")
+    Path("probe.sh").write_text(
+        '#!/bin/sh\nprintf "%s\\n" "$HLOCK_DECIDE_LOCK" >> "$PROBE_OUT"\n'
+        'sed -n \'s/^path = "\\(.*\\)"$/\\1/p\' "$HLOCK_DECIDE_LOCK" >> "$PROBE_OUT"\n')
+    Path("harness.toml").write_text(f"""
+[project]
+name = "probe"
+
+[evals]
+packs = ["./evals"]
+seeds = 1
+
+[candidates.llm.planner]
+any_of = ["reference:qwen-7b"]
+
+[candidates]
+harness = ["probe"]
+
+[target]
+harness = "probe"
+
+[harnesses.probe]
+command = ["sh", "{proj / 'probe.sh'}"]
+env = {{ PROBE_OUT = "{proj / 'seen.txt'}" }}
+
+[deciders.route]
+any-of = ["system-one:kev-4b", "system-one:kev-0.8b"]
+base-url = "{deny.url}"
+policy = "route.md"
+""")
+    r = invoke("resolve", "--workdir", ".hl")
+    assert r.exit_code == 0, r.output
+    seen = Path("seen.txt").read_text().split()
+    locks, policies = seen[0::2], seen[1::2]
+    assert locks and all(Path(p).is_absolute() and p.endswith(".hlock/deciders.lock") for p in locks), seen
+    assert policies and all(Path(p).is_absolute() and Path(p).read_text() == "Plan with the planner.\n" for p in policies), seen

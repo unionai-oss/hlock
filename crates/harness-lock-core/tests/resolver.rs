@@ -273,6 +273,11 @@ fn thresholds_multiply_the_stacks_and_judging_costs_reach_the_evidence() {
     let stacks = resolver.enumerate_stacks();
     let tried: Vec<&String> = stacks.iter().map(|s| &s.deciders["stop"]).collect();
     assert_eq!(tried, ["system-one:kev-4b@0.6", "system-one:kev-4b@0.9"]);
+    // candidates keep the manifest's order (it decides which stacks a 200-stack cap keeps)
+    let mut m2 = m.clone();
+    m2.deciders.insert("stop".into(), serde_json::json!({"any-of": ["system-one:kev-9b", "none", "system-one:kev-4b"], "base-url": url}));
+    let order: Vec<String> = Resolver::new(m2, root.join(".harnesslock")).enumerate_stacks().iter().map(|s| s.deciders.get("stop").cloned().unwrap_or_else(|| "none".into())).collect();
+    assert_eq!(order, ["system-one:kev-9b", "none", "system-one:kev-4b"]);
 
     let mut resolver = Resolver::new(m, root.join(".harnesslock"));
     let lock = resolver.resolve_lock().unwrap();

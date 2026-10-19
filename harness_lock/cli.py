@@ -2570,12 +2570,18 @@ def meta_agent_cmd(prompt: str, meta_lock: str | None, headless: bool) -> None:
 
     notes: list[str] = []
 
+    def flush_notes() -> None:
+        while notes:
+            console.print(Text("  " + notes.pop(0), style="muted"), soft_wrap=True)
+
     def say(kind: str, text: str) -> bool:
         if kind == "note":
             notes.append(text)  # shown with the next question, or now
             if not interactive:
-                console.print(Text("  " + notes.pop(), style="muted"), soft_wrap=True)
-        elif kind == "text":
+                flush_notes()
+            return True
+        flush_notes()  # a note no question followed (the agent got another turn)
+        if kind == "text":
             console.print(Text(text))
         elif kind == "tool":
             console.print(Text.assemble(("→ ", "brand"), (text, "cmd")), soft_wrap=True)
@@ -2589,8 +2595,7 @@ def meta_agent_cmd(prompt: str, meta_lock: str | None, headless: bool) -> None:
 
     def ask(command: str) -> str:
         console.print(Text.assemble(("? ", "warn"), "the agent wants to run ", (command, "cmd")), soft_wrap=True)
-        while notes:
-            console.print(Text("  " + notes.pop(0), style="muted"), soft_wrap=True)
+        flush_notes()
         try:
             return click.prompt("  run it? (y)es, (n)o, (a)lways for this program", default="y",
                                 type=click.Choice(["y", "n", "a"]), show_choices=False)
