@@ -1,20 +1,18 @@
 ---
 title: hlock
-description: Make your agent harness pinnable, portable, and tunable. Pin your harness, model, MCP servers, skills, and config in a harness.lock, version it, and rehydrate it anywhere.
+description: Your agent harness made portable. Pin your harness, model, MCP servers, skills, and config in a harness.lock, version it, and rehydrate it anywhere.
 ---
 
 <p align="center">
   <img src="assets/logo-animated.svg" alt="hlock logo" width="120">
 </p>
 
-# hlock { style="text-align: center" }
+<h1 class="hl-tagline">Your agent harness<br><span class="hl-grad">made portable.</span></h1>
 
-<p class="hl-tagline">Make your agent harness pinnable, portable, and tunable.</p>
-
-Your agent is more than a model: it's a harness version, MCP servers, skills, plugins,
-instruction files, and config, set up by hand on one machine. `hlock` pins all of it in a
-`harness.lock` you commit to git, catches drift, and brings the same setup back on
-another laptop, in CI, or in a container.
+Your agent is more than a model. It's a harness, MCP servers, skills, and config,
+hand-tuned on one machine. `hlock` is the missing harness packaging layer:
+`harness.lock` tracks all of its dependencies, so you can commit it to git and restore
+it anywhere.
 { .hl-lead }
 
 <div class="hl-actions" markdown>
@@ -53,8 +51,15 @@ another laptop, in CI, or in a container.
 
 </div>
 
-<div class="hl-demo" markdown>
-![An hlock session: pin a Claude Code setup, check it, and sync it onto another machine](assets/quickstart.svg)
+<div class="hl-demo">
+  <div class="hl-term" id="hl-term" role="img" aria-label="An hlock session: pin a Claude Code setup into harness.lock and push it to git, then pull and sync it on another machine">
+    <div class="hl-term__bar">
+      <span class="hl-term__dots"><i></i><i></i><i></i></span>
+      <span class="hl-term__title">~/projects/my-app</span>
+    </div>
+    <pre class="hl-term__body" aria-hidden="true"></pre>
+    <div class="hl-term__caption" aria-hidden="true"></div>
+  </div>
 </div>
 
 ## Lock the harness you already have
