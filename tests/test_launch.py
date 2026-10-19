@@ -11,6 +11,7 @@ from pathlib import Path
 import pytest
 from click.testing import CliRunner
 
+from harness_lock import launch_prepare
 from harness_lock.cli import main
 
 REPO = Path(__file__).resolve().parent.parent
@@ -42,7 +43,7 @@ def pinned(tmp_path, monkeypatch, clean_env):
         d.mkdir()
     executable(bindir / "claude", "#!/bin/sh\n"
                'if [ "$1" = "--version" ]; then echo "${FAKE_CLAUDE_VERSION:-2.1.0} (Claude Code)"; exit 0; fi\n'
-               'echo "CONFIG=$CLAUDE_CONFIG_DIR ARGS=$*"\n')
+               'echo "CONFIG=$CLAUDE_CONFIG_DIR ARGS=$* TOKEN_LEN=${#HLOCK_SECRET_GITHUB_GITHUB_TOKEN}"\n')
     executable(bindir / "opencode", "#!/bin/sh\necho 1.18.0\n")
     executable(bindir / "npx", "#!/bin/sh\necho 10\n")
     monkeypatch.setenv("HOME", str(home))
@@ -67,10 +68,15 @@ def test_launch_same_harness_isolated(pinned):
     assert prep["argv"][0].endswith("/claude") and prep["argv"][-1] == "--resume"
     assert "--model" not in prep["argv"]  # a pinned lock restores the model through config
     state = json.loads((root / ".claude.json").read_text())
-    # on the machine that pinned it, the secret comes from the live config
-    assert state["mcpServers"]["github"]["env"]["GITHUB_TOKEN"] == GH_TOKEN
+    # the config holds a reference Claude Code expands, not the value...
+    assert state["mcpServers"]["github"]["env"]["GITHUB_TOKEN"] == "${HLOCK_SECRET_GITHUB_GITHUB_TOKEN}"
+    assert GH_TOKEN not in r.output and "secret_env" not in prep  # ...and --json never shows it
     assert (root / "skills/my-skill/SKILL.md").is_file() and (root / "CLAUDE.md").is_file()
     assert not prep["missing_secrets"]
+    # on the machine that pinned it, the value comes from the live config, for the environment
+    assert json.loads(launch_prepare())["secret_env"] == {"HLOCK_SECRET_GITHUB_GITHUB_TOKEN": GH_TOKEN}
+    assert GH_TOKEN not in "".join(f.read_text(errors="ignore") for f in Path(".hlock").rglob("*") if f.is_file())
+    assert (root.parent / ".gitignore").read_text().splitlines()[-1] == "*"  # not for version control
 
 
 def test_launch_execs_the_harness(pinned):
@@ -79,6 +85,7 @@ def test_launch_execs_the_harness(pinned):
                          capture_output=True, text=True, env=env, check=False)
     assert out.returncode == 0, out.stderr + out.stdout
     assert "CONFIG=" in out.stdout and ".hlock/env/claude-code/config" in out.stdout and "ARGS=-p hi" in out.stdout
+    assert f"TOKEN_LEN={len(GH_TOKEN)}" in out.stdout  # the secret reached the harness's environment
 
 
 def test_run_drives_the_locked_cli(pinned):
@@ -119,7 +126,9 @@ def test_launch_translates_into_another_harness(pinned):
     config = json.loads((root / "opencode.json").read_text())
     gh = config["mcp"]["github"]
     assert gh["type"] == "local" and gh["command"][:2] == ["npx", "-y"]
-    assert gh["environment"]["GITHUB_TOKEN"] == GH_TOKEN  # from Claude Code's live config
+    # OpenCode's own reference, with the value (from Claude Code's live config) in the environment
+    assert gh["environment"]["GITHUB_TOKEN"] == "{env:HLOCK_SECRET_GITHUB_GITHUB_TOKEN}"
+    assert json.loads(launch_prepare(harness="opencode"))["secret_env"]["HLOCK_SECRET_GITHUB_GITHUB_TOKEN"] == GH_TOKEN
     assert (root / "skills/my-skill/SKILL.md").is_file()
     assert (root / "AGENTS.md").read_text() == "be terse\n"  # user CLAUDE.md -> OpenCode's AGENTS.md
     assert prep["argv"][1:3] == ["--model", "anthropic/opus"]

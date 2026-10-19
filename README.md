@@ -61,7 +61,7 @@ and [more](https://docs.hlock.ai/guides/harnesses/)), then bring it back anywher
 hlock pin                       # lock your current setup into harness.lock
 git add harness.lock .hlock/    # version it (secrets are placeholders, never values)
 hlock check                     # see what changed since the pin; re-pin to lock it
-hlock sync                      # on another machine: rehydrate it (also --prefix DIR, --docker)
+hlock sync                      # on another machine: rehydrate it into .hlock/env (or --in-place, --docker)
 hlock launch                    # start a session on the locked setup, isolated from your config
 hlock run "summarize README.md"  # or run one prompt through it (claude -p, codex exec, …)
 ```

@@ -99,6 +99,16 @@ Set `model.format = "provider/model"` when the model value carries its provider 
 `pointers` (only the subtrees listed in `pointers`, for files that also hold unrelated state),
 or `record` (a digest only, for project files that are already in git).
 
+### Environment references
+
+`env-ref` says how the harness reads an environment variable inside a file, with `{name}`
+standing for the variable: `"${{name}}"` for Claude Code's `~/.claude.json`, and
+`"{env:{name}}"` for OpenCode's `opencode.json`. With it, [`hlock launch`](launch.md) writes a
+secret as `${HLOCK_SECRET_…}` (or `{env:HLOCK_SECRET_…}`) and passes the value in the
+harness's environment, instead of writing the value into the file. Set it only when the
+harness expands references everywhere hlock writes secrets in that file. See
+[Secrets](secrets.md#where-values-go).
+
 ### Field reference
 
 | Field | Meaning |
@@ -112,7 +122,7 @@ or `record` (a digest only, for project files that are already in git).
 | `active-env` | Variables whose presence means hlock runs inside this harness |
 | `config-root` | `env`, `suffix`, `default` |
 | `install` | Install methods, most preferred first: `method`, `package`, `command`, `path-hints` |
-| `files.<id>` | `path`, `isolated`, `format`, `restore`, `pointers` |
+| `files.<id>` | `path`, `isolated`, `format`, `restore`, `pointers`, `env-ref` |
 | `model` | `default`, `small`, `provider`, `base-url` sources; `format`; `default-provider` |
 | `providers` | `source`, plus pointers into each provider for `base-url` and `models` |
 | `mcp` | `sources`, `write`, `shape` (`standard`, `opencode`, `codex`, `goose`): how `launch` writes servers |

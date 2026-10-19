@@ -17,15 +17,18 @@ $ hlock launch
 1. checks that the installed harness is the version the lock pins, and stops if it isn't
    (`hlock sync --install` fixes that; `--allow-version-mismatch` overrides);
 2. restores the locked setup into an isolated config root under `.hlock/env/<harness>/`,
-   the same way [`hlock sync --prefix`](sync.md#into-an-isolated-directory) does, including
+   the same way [`hlock sync`](sync.md#the-isolated-directory) does, including
    plugin installs; this only does work the first time, or after the lock changes;
 3. starts the harness with its config-root variable pointing there (`CLAUDE_CONFIG_DIR`,
    `CODEX_HOME`, `PI_CODING_AGENT_DIR`, `HERMES_HOME`, `CURSOR_CONFIG_DIR`,
    `XDG_CONFIG_HOME`), replacing the `hlock` process.
 
-On the machine where you pinned, secrets come from your live config, so MCP servers and
-providers work without exporting anything. Elsewhere, set the `HLOCK_SECRET_*` variables
-first; `launch` warns about any that are missing. Sign-in state isn't copied, so the first
+Secrets come from the environment, your secrets file, or your keychain (see
+[Secrets](secrets.md)). On the machine where you pinned, they also come from your live
+config, so MCP servers and providers work without setting anything up. `launch` warns about
+any that are missing. For Claude Code and OpenCode, `launch` writes a reference such as
+`${HLOCK_SECRET_GITHUB_GITHUB_TOKEN}` into the config and passes the value in the
+harness's environment, so it never reaches the disk. Sign-in state isn't copied, so the first
 session in a new environment may ask you to log in.
 
 Arguments after the harness name go to the harness:

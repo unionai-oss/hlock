@@ -700,33 +700,37 @@ fn pin(harness: Option<String>, out: String, vendor: bool, force: bool, manifest
 }
 
 /// Re-capture the harness a pinned lock is for; returns a JSON list of drift lines.
+/// With `prefix`, re-capture the isolated root `hlock sync --prefix` writes instead.
 #[pyfunction]
-#[pyo3(signature = (path="harness.lock".to_string(), manifest=None))]
-fn check_pin(path: String, manifest: Option<String>) -> PyResult<String> {
+#[pyo3(signature = (path="harness.lock".to_string(), prefix=None, manifest=None))]
+fn check_pin(path: String, prefix: Option<String>, manifest: Option<String>) -> PyResult<String> {
     let (reg, ctx, _) = registry(manifest.as_deref(), Some(&lock_dir(&path)))?;
     let lock = core::Lockfile::load(Path::new(&path)).map_err(py_err)?;
-    let drift = core::capture::check_pin(&lock, &reg, &ctx).map_err(py_err)?;
+    let drift = core::capture::check_pin_at(&lock, &reg, &ctx, prefix.as_deref().map(Path::new)).map_err(py_err)?;
     Ok(json_str(serde_json::json!(drift)))
 }
 
-fn sync_options(prefix: Option<String>, docker: Option<String>, install: bool, pull: bool, all_models: bool, exact: bool) -> core::sync::SyncOptions {
+fn sync_options(prefix: Option<String>, in_place: bool, docker: Option<String>, install: bool, pull: bool, all_models: bool, exact: bool) -> core::sync::SyncOptions {
     core::sync::SyncOptions {
         prefix: prefix.map(PathBuf::from),
+        in_place,
         docker: docker.map(PathBuf::from),
         install,
         pull,
         all_models,
         exact,
+        inject: false,
     }
 }
 
-/// Build the `hlock sync` plan for a lock as JSON. Nothing is changed.
+/// Build the `hlock sync` plan for a lock as JSON. Nothing is changed. The plan writes
+/// into an isolated root (`prefix`, default `.hlock/env`) unless `in_place` or `docker`.
 #[pyfunction]
-#[pyo3(signature = (path="harness.lock".to_string(), prefix=None, docker=None, install=false, pull=false, all_models=false, exact=false, manifest=None))]
-fn sync_plan(path: String, prefix: Option<String>, docker: Option<String>, install: bool, pull: bool, all_models: bool, exact: bool, manifest: Option<String>) -> PyResult<String> {
+#[pyo3(signature = (path="harness.lock".to_string(), prefix=None, in_place=false, docker=None, install=false, pull=false, all_models=false, exact=false, manifest=None))]
+fn sync_plan(path: String, prefix: Option<String>, in_place: bool, docker: Option<String>, install: bool, pull: bool, all_models: bool, exact: bool, manifest: Option<String>) -> PyResult<String> {
     let (reg, ctx, _) = registry(manifest.as_deref(), Some(&lock_dir(&path)))?;
     let lock = core::Lockfile::load(Path::new(&path)).map_err(py_err)?;
-    let opts = sync_options(prefix, docker, install, pull, all_models, exact);
+    let opts = sync_options(prefix, in_place, docker, install, pull, all_models, exact);
     let plan = core::sync::plan(&lock, Path::new(&path), &reg, &ctx, &opts).map_err(py_err)?;
     Ok(json_str(serde_json::json!(plan)))
 }
@@ -736,6 +740,49 @@ fn sync_plan(path: String, prefix: Option<String>, docker: Option<String>, insta
 fn sync_run_step(step: &str) -> PyResult<String> {
     let step: core::sync::Step = serde_json::from_str(step).map_err(|e| PyValueError::new_err(e.to_string()))?;
     core::sync::run_step(&step, &core::profiles::Ctx::from_process()).map_err(py_err)
+}
+
+/// Mark a prefix-mode plan's isolated environment as not for version control
+/// (a `.gitignore` of `*`). Does nothing for other plans.
+#[pyfunction]
+fn sync_ignore_env(plan: &str) -> PyResult<()> {
+    let plan: core::sync::Plan = serde_json::from_str(plan).map_err(|e| PyValueError::new_err(e.to_string()))?;
+    match &plan.env {
+        Some(dir) => core::sync::ignore_env(dir).map_err(py_err),
+        None => Ok(()),
+    }
+}
+
+/// The secrets a lock's placeholders need, and where each would come from (no values):
+/// JSON `{"file": …, "keychain": …, "secrets": [{name, used_by, source}]}`.
+#[pyfunction]
+#[pyo3(signature = (path="harness.lock".to_string(), manifest=None))]
+fn secret_status(path: String, manifest: Option<String>) -> PyResult<String> {
+    let (_, ctx, _) = registry(manifest.as_deref(), Some(&lock_dir(&path)))?;
+    let lock = core::Lockfile::load(Path::new(&path)).map_err(py_err)?;
+    core::secrets::references(&ctx).map_err(py_err)?; // surface a malformed secrets file
+    let rows: Vec<_> = lock
+        .secret
+        .iter()
+        .map(|s| serde_json::json!({"name": s.name, "used_by": s.used_by, "source": core::secrets::locate(&s.name, &ctx)}))
+        .collect();
+    Ok(json_str(serde_json::json!({
+        "file": core::secrets::secrets_file(&ctx),
+        "keychain": core::secrets::keychain(&ctx).map(|(k, _)| k),
+        "secrets": rows,
+    })))
+}
+
+/// Store a secret in the OS keychain; returns its full `HLOCK_SECRET_…` name.
+#[pyfunction]
+fn secret_set(name: &str, value: &str) -> PyResult<String> {
+    core::secrets::keychain_set(name, value, &core::profiles::Ctx::from_process()).map_err(py_err)
+}
+
+/// Remove a secret from the OS keychain; false when it had none.
+#[pyfunction]
+fn secret_delete(name: &str) -> PyResult<bool> {
+    core::secrets::keychain_delete(name, &core::profiles::Ctx::from_process()).map_err(py_err)
 }
 
 /// The rehydrate Agent Skill (SKILL.md text) for a plan.
@@ -1083,6 +1130,10 @@ fn _harness_lock(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(sync_plan, m)?)?;
     m.add_function(wrap_pyfunction!(sync_run_step, m)?)?;
     m.add_function(wrap_pyfunction!(sync_skill, m)?)?;
+    m.add_function(wrap_pyfunction!(sync_ignore_env, m)?)?;
+    m.add_function(wrap_pyfunction!(secret_status, m)?)?;
+    m.add_function(wrap_pyfunction!(secret_set, m)?)?;
+    m.add_function(wrap_pyfunction!(secret_delete, m)?)?;
     m.add_function(wrap_pyfunction!(sync_dockerfile, m)?)?;
     m.add_function(wrap_pyfunction!(launch_prepare, m)?)?;
     m.add_function(wrap_pyfunction!(run_code_harness, m)?)?;

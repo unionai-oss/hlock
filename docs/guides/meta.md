@@ -125,7 +125,8 @@ headless run, and `result.json` with the command, exit code and verdict. hlock a
 
 Gives the agent the project lock's [sync plan](sync.md): every step that isn't done yet,
 why it's needed, a suggested command, and how to check it. The agent installs what's
-missing and finishes with `hlock sync --yes`. hlock then plans again. The job is verified
+missing and finishes with `hlock sync --yes`, which restores the config into the isolated
+root in `.hlock/env/`, not your own config. hlock then plans again. The job is verified
 when nothing is left but secrets, which are yours to set: it exits `3` and lists the
 variables. This automates the hand-off in
 [`hlock sync --skill`](sync.md#let-your-agent-do-the-manual-steps).

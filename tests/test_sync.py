@@ -2,7 +2,9 @@
 
 import json
 import os
+import shutil
 import stat
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -63,15 +65,60 @@ def machines(tmp_path, monkeypatch):
     return {"a": a, "b": b, "bin": bindir}
 
 
-def test_rehydrate_on_a_new_machine(machines, monkeypatch):
+ENV_ROOT = Path(".hlock/env/claude-code/config")
+
+
+def test_sync_is_isolated_by_default(machines, monkeypatch):
     b = machines["b"]
     r = invoke("sync", "--plan")
     assert r.exit_code == 0, r.output
-    assert "Write" in r.output and "Copy skill my-skill" in r.output
+    assert "Write" in r.output and "Copy skill my-skill" in r.output and ".hlock/env/claude-code/config" in r.output
 
     r = invoke("sync", "--yes")
     assert r.exit_code == MANUAL_EXIT, r.output
-    assert "export HLOCK_SECRET_GITHUB_GITHUB_TOKEN" in r.output
+    assert "hlock secret set GITHUB_GITHUB_TOKEN" in r.output
+    state = json.loads((ENV_ROOT / ".claude.json").read_text())
+    assert state["mcpServers"]["github"]["env"]["GITHUB_TOKEN"] == "${HLOCK_SECRET_GITHUB_GITHUB_TOKEN}"
+    assert (ENV_ROOT / "skills/my-skill/SKILL.md").is_file()
+    assert json.loads((ENV_ROOT / "settings.json").read_text())["model"] == "opus"
+    assert not any(b.iterdir())  # the global config is untouched
+    log = (machines["bin"] / "claude.log").read_text()
+    assert f"{ENV_ROOT.resolve()}|plugin install lsp@market" in log
+
+    monkeypatch.setenv("HLOCK_SECRET_GITHUB_GITHUB_TOKEN", GH_TOKEN)
+    r = invoke("sync", "--yes")
+    assert r.exit_code == 0, r.output
+    assert "CLAUDE_CONFIG_DIR=.hlock/env/claude-code/config claude" in r.output and "hlock sync --in-place" in r.output
+    assert json.loads((ENV_ROOT / ".claude.json").read_text())["mcpServers"]["github"]["env"]["GITHUB_TOKEN"] == GH_TOKEN
+    assert not any(b.iterdir())
+
+
+def test_isolated_env_is_kept_out_of_git(machines):
+    invoke("sync", "--plan")
+    assert not Path(".hlock/env").exists()  # planning writes nothing
+    invoke("sync", "--yes")
+    ignore = Path(".hlock/env/claude-code/.gitignore")
+    assert ignore.read_text().splitlines()[-1] == "*"
+    invoke("sync", "--prefix", "env", "--yes")
+    assert Path("env/claude-code/.gitignore").is_file()
+    assert not Path("env/.gitignore").exists()  # only the directory hlock owns
+    if shutil.which("git"):
+        subprocess.run(["git", "init", "-q"], check=True)
+        status = subprocess.run(["git", "status", "--porcelain", "--untracked-files=all"],
+                                capture_output=True, text=True, check=True).stdout
+        assert "harness.lock" in status and ".hlock/vendor/" in status  # these are committed
+        assert ".hlock/env" not in status and "env/claude-code" not in status, status
+    # a .gitignore you edited is left alone
+    ignore.write_text("!keep-me\n")
+    invoke("sync", "--yes")
+    assert ignore.read_text() == "!keep-me\n"
+
+
+def test_in_place_writes_your_config(machines, monkeypatch):
+    b = machines["b"]
+    r = invoke("sync", "--in-place", "--yes")
+    assert r.exit_code == MANUAL_EXIT, r.output
+    assert "re-run hlock sync --in-place" in r.output
     state = json.loads((b / ".claude.json").read_text())
     assert state["mcpServers"]["github"]["env"]["GITHUB_TOKEN"] == "${HLOCK_SECRET_GITHUB_GITHUB_TOKEN}"
     assert "oauthAccount" not in state
@@ -79,30 +126,47 @@ def test_rehydrate_on_a_new_machine(machines, monkeypatch):
     assert json.loads((b / ".claude/settings.json").read_text())["model"] == "opus"
     log = (machines["bin"] / "claude.log").read_text()
     assert "plugin marketplace add acme/market" in log and "plugin install lsp@market" in log
+    assert not Path(".hlock/env").exists() and not (b / ".claude/.gitignore").exists()
 
     monkeypatch.setenv("HLOCK_SECRET_GITHUB_GITHUB_TOKEN", GH_TOKEN)
-    r = invoke("sync", "--yes")
+    r = invoke("sync", "--in-place", "--yes")
     assert json.loads((b / ".claude.json").read_text())["mcpServers"]["github"]["env"]["GITHUB_TOKEN"] == GH_TOKEN
     # the fake claude doesn't really install plugins, so those steps stay automatic; everything else is in sync
-    plan = json.loads(invoke("sync", "--json").output)
+    plan = json.loads(invoke("sync", "--in-place", "--json").output)
     pending = {s["id"] for s in plan["steps"] if s["status"] != "satisfied"}
     assert pending == {"claude-code.plugin:lsp@market", "claude-code.marketplace:market"}, pending
+
+
+def test_in_place_is_exclusive(machines):
+    for other in (["--prefix", "env"], ["--docker"]):
+        r = invoke("sync", "--in-place", *other)
+        assert r.exit_code == 1 and "--in-place" in r.output, r.output
 
 
 def test_synced_config_is_not_drift(machines, monkeypatch):
     # sync reformats the JSON and fills in this machine's secret; neither is a change to the setup
     monkeypatch.setenv("HLOCK_SECRET_GITHUB_GITHUB_TOKEN", "ghp_another_machines_token_0123456789")
     invoke("sync", "--yes")
+    r = invoke("check", "--prefix", ".hlock/env")
+    assert "config" not in r.output and "mcp" not in r.output and "skill" not in r.output, r.output
+    # your own config wasn't synced, so it has drifted, and the hint restores it in place
+    r = invoke("check")
+    assert r.exit_code == 1 and "hlock sync --in-place" in r.output, r.output
+    invoke("sync", "--in-place", "--yes")
     r = invoke("check")
     assert "config" not in r.output and "mcp" not in r.output, r.output
 
 
 def test_sync_keeps_secrets_already_configured(machines, monkeypatch):
     monkeypatch.setenv("HOME", str(machines["a"]))
-    plan = json.loads(invoke("sync", "--json").output)
+    plan = json.loads(invoke("sync", "--in-place", "--json").output)
     assert {s["status"] for s in plan["steps"]} == {"satisfied"}
     secret = next(s for s in plan["steps"] if s["kind"] == "secret")
     assert "kept the value already configured" in secret["reason"]
+    # the isolated root takes the secret from your live config, without writing to it
+    invoke("sync", "--yes")
+    state = json.loads((ENV_ROOT / ".claude.json").read_text())
+    assert state["mcpServers"]["github"]["env"]["GITHUB_TOKEN"] == GH_TOKEN
 
 
 def test_missing_harness_is_a_manual_step(machines):
@@ -132,8 +196,12 @@ def test_skill_for_agent_guided_rehydration(machines):
     assert r.exit_code == 0, r.output
     text = Path(".agents/skills/hlock-rehydrate/SKILL.md").read_text()
     assert text.startswith("---\nname: hlock-rehydrate\n")
-    assert "Install Claude Code 2.1.0" in text and "Never print" in text and "hlock check" in text
+    assert "Install Claude Code 2.1.0" in text and "Never print" in text
+    assert "hlock check --prefix .hlock/env" in text and "isolated config root under `.hlock/env`" in text
     assert GH_TOKEN not in text
+    r = invoke("sync", "--in-place", "--skill")
+    text = Path(".agents/skills/hlock-rehydrate/SKILL.md").read_text()
+    assert "`hlock sync --in-place`" in text and "isolated" not in text
 
 
 def test_docker_context(machines):

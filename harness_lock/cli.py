@@ -45,7 +45,11 @@ from harness_lock import (
     meta_verify,
     run_code_harness,
     runtimes,
+    secret_delete,
+    secret_set,
+    secret_status,
     sync_dockerfile,
+    sync_ignore_env,
     sync_plan,
     sync_run_step,
     sync_skill,
@@ -682,6 +686,14 @@ def _rel(path: str) -> str:
         return path
 
 
+def _tilde(path: str) -> str:
+    """A path with the home directory shown as `~`."""
+    try:
+        return "~/" + str(Path(path).relative_to(Path.home()))
+    except ValueError:
+        return path
+
+
 def _manual_steps(plan: dict) -> list[dict]:
     return [st for st in plan["steps"] if st["status"] == "manual" and not st.get("optional")]
 
@@ -694,7 +706,8 @@ def _manual_steps(plan: dict) -> list[dict]:
 @click.option("--install", is_flag=True, help="Let hlock run package managers (npm, brew, uv, install scripts).")
 @click.option("--pull", is_flag=True, help="Let hlock download model weights through installed runtimes.")
 @click.option("--all-models", is_flag=True, help="Include models a provider lists but no locked role uses.")
-@click.option("--prefix", default=None, help="Materialize into an isolated config root under DIR, not your real one.")
+@click.option("--prefix", default=None, help="Where isolated config roots live.  [dim]\\[default: .hlock/env][/]")
+@click.option("--in-place", is_flag=True, help="Write into your own config (~/.claude, …) instead of an isolated root.")
 @click.option("--docker", "docker", is_flag=True, help="Write a Docker build context and Dockerfile to .hlock/docker/<harness>.")
 @click.option("--build", is_flag=True, help="With --docker: also run docker build.")
 @click.option("--skill", "skill", is_flag=True, help="Write an Agent Skill that guides an agent through the remaining steps.")
@@ -702,7 +715,8 @@ def _manual_steps(plan: dict) -> list[dict]:
 @click.option("--exact", is_flag=True, help="Also remove skills that aren't in the lock (moved aside, not deleted).")
 @click.option("-v", "--verbose", is_flag=True, help="List every step, including optional ones.")
 def sync(lock: str, plan_only: bool, as_json: bool, yes: bool, install: bool, pull: bool, all_models: bool,
-         prefix: str | None, docker: bool, build: bool, skill: bool, skill_dir: str, exact: bool, verbose: bool) -> None:
+         prefix: str | None, in_place: bool, docker: bool, build: bool, skill: bool, skill_dir: str, exact: bool,
+         verbose: bool) -> None:
     """Rehydrate the setup in [path]harness.lock[/] on this machine.
 
     Builds a plan in which each step is [ok]✓ satisfied[/], [brand]● automatic[/] (hlock does it), or
@@ -710,20 +724,25 @@ def sync(lock: str, plan_only: bool, as_json: bool, yes: bool, install: bool, pu
     and instruction files and install plugins through the harness's own CLI. Package
     installs need [cmd]--install[/] and model downloads need [cmd]--pull[/]. Exits 3 while manual
     steps remain, so it's safe to re-run until it's clean.
+
+    The setup goes into an isolated config root in [path].hlock/env/[/] (the one [cmd]hlock launch[/]
+    uses), so your own config isn't touched. Pass [cmd]--in-place[/] to write into it instead.
     """
     lock = lock or _l()
+    if in_place and (prefix or docker):
+        _fail("--in-place doesn't work with --prefix or --docker", "pick one place to write the setup")
     docker_dir = None
     if docker:
         with _friendly_errors():
             harness_id = Lockfile.load(lock).harness
         docker_dir = str(Path(".hlock/docker") / harness_id)
     with _working("Planning…"):
-        plan = json.loads(sync_plan(lock, prefix=prefix, docker=docker_dir, install=install, pull=pull,
+        plan = json.loads(sync_plan(lock, prefix=prefix, in_place=in_place, docker=docker_dir, install=install, pull=pull,
                                     all_models=all_models, exact=exact, manifest=_m()))
     if as_json:
         console.print_json(data=plan)
         return
-    where = {"home": "your config", "prefix": f"[path]{_rel(plan['root'])}[/]",
+    where = {"home": f"your config [path]{_tilde(plan['root'])}[/]", "prefix": f"[path]{_rel(plan['root'])}[/]",
              "docker": f"[path]{docker_dir}[/]"}[plan["mode"]]
     console.print(f"[bold]Sync plan[/] for {plan['harness_name']} {plan.get('version') or ''} → {where}")
     console.print(_plan_table(plan, verbose))
@@ -746,6 +765,7 @@ def sync(lock: str, plan_only: bool, as_json: bool, yes: bool, install: bool, pu
             _fail(f"{len(auto)} automatic steps to run", "pass [cmd]--yes[/] to run them, or [cmd]--plan[/] to just look")
         if not click.confirm(f"Run {len(auto)} automatic step{'s' if len(auto) != 1 else ''}?", default=True):
             sys.exit(1)
+    sync_ignore_env(json.dumps(plan))  # an isolated root is restored from the lock: keep it out of git
     failed = 0
     groups: dict[str, list[dict]] = {}
     for st in auto:
@@ -800,6 +820,7 @@ def sync(lock: str, plan_only: bool, as_json: bool, yes: bool, install: bool, pu
         sys.exit(1 if failed else 0)
 
     remaining = _manual_steps(plan)
+    again = "hlock sync --in-place" if in_place else "hlock sync"
     if remaining:
         secrets = [st for st in remaining if st["kind"] == "secret"]
         others = [st for st in remaining if st["kind"] != "secret"]
@@ -810,17 +831,19 @@ def sync(lock: str, plan_only: bool, as_json: bool, yes: bool, install: bool, pu
                 console.print(f"     [cmd]{st['command']}[/]")
         if secrets:
             n = len(others) + 1
-            console.print(f"  {n}. Set {len(secrets)} secret{'s' if len(secrets) != 1 else ''}, then re-run "
-                          "[cmd]hlock sync[/] [muted](values stay out of the lock)[/]")
+            console.print(f"  {n}. Store {len(secrets)} secret{'s' if len(secrets) != 1 else ''} in your keychain, then re-run "
+                          f"[cmd]{again}[/] [muted](values stay out of the lock)[/]")
             for st in secrets:
                 name, _, used = st["title"].partition(" (")
-                console.print(f"     [cmd]export {name}=…[/]  [muted]# {used.rstrip(')')}[/]")
+                short = name.removeprefix("HLOCK_SECRET_")
+                console.print(f"     [cmd]hlock secret set {short}[/]  [muted]# {used.rstrip(')')}[/]")
+            console.print("     [muted]or export each variable, or reference it in ~/.config/hlock/secrets.toml[/]")
         hints = []
         if any("--install" in (st.get("reason") or "") for st in remaining):
-            hints.append("hlock sync --install")
+            hints.append(f"{again} --install")
         if any("--pull" in (st.get("reason") or "") for st in remaining):
-            hints.append("hlock sync --pull")
-        hints.append("hlock sync --skill [muted](let your agent do it)[/]")
+            hints.append(f"{again} --pull")
+        hints.append(f"{again} --skill [muted](let your agent do it)[/]")
         _next(*hints)
     if failed:
         sys.exit(1)
@@ -828,8 +851,10 @@ def sync(lock: str, plan_only: bool, as_json: bool, yes: bool, install: bool, pu
         sys.exit(MANUAL_EXIT)
     if plan["mode"] == "prefix":
         env = " ".join(f"{k}={_rel(v)}" for k, v in plan["isolation"].items())
-        _ok(f"in sync at [path]{_rel(plan['root'])}[/]")
+        _ok(f"in sync at [path]{_rel(plan['root'])}[/]  [muted]your own config wasn't touched[/]")
         console.print(f"[muted]use it:[/] [cmd]{env} {plan.get('binary') or plan['harness']}[/]", soft_wrap=True)
+        if not prefix:
+            console.print("[muted]to restore into your own config instead:[/] [cmd]hlock sync --in-place[/]")
     else:
         _ok(f"in sync with [path]{_show(lock)}[/]")
 
@@ -847,7 +872,9 @@ def show(as_json: bool) -> None:
 
 
 @main.command()
-def check() -> None:
+@click.option("--prefix", default=None,
+              help="For a pinned lock: check the isolated root [cmd]hlock sync --prefix DIR[/] writes, not your own config.")
+def check(prefix: str | None) -> None:
     """Fail if your setup, or [path]harness.toml[/], has drifted from [path]harness.lock[/].
 
     For a pinned lock, re-capture the harness and fail if the setup changed.
@@ -859,14 +886,16 @@ def check() -> None:
         lf = Lockfile.load(_l())
     if lf.kind == "pin":
         with _working(f"Re-capturing {lf.harness}…"):
-            drift = json.loads(_check_pin(_l(), manifest=_m()))
+            drift = json.loads(_check_pin(_l(), prefix=prefix, manifest=_m()))
+        which = f"the {lf.harness} setup in [path]{prefix}[/]" if prefix else f"your {lf.harness} setup"
         if drift:
-            err_console.print(f"[fail]✗ drift:[/] your {lf.harness} setup changed since {_ld()} was pinned")
+            err_console.print(f"[fail]✗ drift:[/] {which} changed since {_ld()} was pinned")
             for line in drift:
                 err_console.print(f"  {line}")
-            err_console.print("  [muted]hint:[/] re-pin with [cmd]hlock pin[/], or restore it with [cmd]hlock sync[/]")
+            restore = f"hlock sync --prefix {prefix}" if prefix else "hlock sync --in-place"
+            err_console.print(f"  [muted]hint:[/] re-pin with [cmd]hlock pin[/], or restore it with [cmd]{restore}[/]")
             sys.exit(1)
-        _ok(f"your {lf.harness} setup matches [path]{_ld()}[/]")
+        _ok(f"{which} matches [path]{_ld()}[/]")
         return
     with _friendly_errors():
         m = Manifest.load(_m())
@@ -989,7 +1018,8 @@ def _harness_kind(name: str) -> str | None:
 def _run_cli_harness(prompt: str, as_json: bool) -> None:
     with _working("Preparing the locked environment…"):
         prep = json.loads(launch_prepare(_l(), prompt=prompt, manifest=_m()))
-    env = {**os.environ, **prep["env"]}
+    secret_env = prep.pop("secret_env", {})  # values for the config's references; never shown
+    env = {**os.environ, **prep["env"], **secret_env}
     if not as_json:
         _print_prep(prep)
         sys.stdout.flush()
@@ -1078,13 +1108,14 @@ def launch(args: tuple[str, ...], lock: str | None, prefix: str | None, in_place
         prep = json.loads(launch_prepare(lock or _l(), harness=harness, prefix=prefix,
                                          allow_version_mismatch=allow_version_mismatch,
                                          in_place=in_place, args=rest, manifest=_m()))
+    secret_env = prep.pop("secret_env", {})  # values for the config's references; never shown
     if as_json:
         console.print_json(data=prep)
         return
     _print_prep(prep)
     if dry_run:
         return
-    env = {**os.environ, **prep["env"]}
+    env = {**os.environ, **prep["env"], **secret_env}
     sys.stdout.flush()
     sys.stderr.flush()
     try:
@@ -1517,6 +1548,74 @@ def runtime_list(as_json: bool) -> None:
         installed = f"[bold]{p.get('version') or 'yes'}[/]" if p["installed"] else "[muted]—[/]"
         t.add_row(r["id"], installed, ", ".join(str(x) for x in r["ports"]), r.get("models_dir") or "")
     console.print(t)
+
+
+@main.group()
+def secret() -> None:
+    """Store and inspect the secrets a lock needs ([cmd]HLOCK_SECRET_*[/]).
+
+    A lock holds placeholders, never values. hlock fills one from the environment
+    variable of the same name, else from a reference in [path]~/.config/hlock/secrets.toml[/]
+    (a command, another variable, or a file), else from the OS keychain. Values are
+    never printed.
+    """
+
+
+@secret.command("list")
+@click.option("--json", "as_json", is_flag=True, help="Print the list as JSON.")
+def secret_list(as_json: bool) -> None:
+    """List the lock's secrets and where each value would come from."""
+    with _friendly_errors():
+        st = json.loads(secret_status(_l(), manifest=_m()))
+    if as_json:
+        console.print_json(data=st)
+        return
+    if not st["secrets"]:
+        console.print(f"[muted]{_ld()} needs no secrets[/]")
+        return
+    t = Table(box=None, header_style="bold", pad_edge=False)
+    t.add_column("secret", style="key")
+    t.add_column("from")
+    t.add_column("used by", style="muted")
+    for r in st["secrets"]:
+        t.add_row(r["name"], r["source"] or "[warn]not set[/]", r["used_by"])
+    console.print(t)
+    keychain = st["keychain"] or "none found"
+    console.print(f"[muted]secrets file[/] {_tilde(st['file'])}  [muted]· keychain[/] {keychain}")
+    if any(not r["source"] for r in st["secrets"]):
+        _next("hlock secret set NAME")
+
+
+@secret.command("set")
+@click.argument("name")
+def secret_set_cmd(name: str) -> None:
+    """Store a secret in the OS keychain (macOS Keychain, or libsecret on Linux).
+
+    NAME is the placeholder variable, with or without its [cmd]HLOCK_SECRET_[/] prefix. The value
+    is read without echo, or from stdin when it isn't a terminal:
+    [cmd]op read op://Work/GitHub/token | hlock secret set GITHUB_GITHUB_TOKEN[/]
+    """
+    if sys.stdin.isatty():
+        value = click.prompt(f"value for {name}", hide_input=True)
+    else:
+        value = sys.stdin.read().strip()
+    if not value:
+        _fail("no value given")
+    with _friendly_errors():
+        full = secret_set(name, value)
+    _ok(f"stored [key]{full}[/] in the keychain")
+
+
+@secret.command("rm")
+@click.argument("name")
+def secret_rm(name: str) -> None:
+    """Remove a secret from the OS keychain."""
+    with _friendly_errors():
+        removed = secret_delete(name)
+    if removed:
+        _ok(f"removed [key]{name}[/] from the keychain")
+    else:
+        console.print(f"[muted]the keychain has no {name}[/]")
 
 
 def _manifest_target() -> str | None:
@@ -1979,6 +2078,7 @@ def meta_run_cmd(job: str, instructions: tuple[str, ...], headless: bool | None,
                                        count=count, instructions=" ".join(instructions),
                                        guide=str(guide) if guide else None, headless=headless,
                                        allow_version_mismatch=allow_version_mismatch, dry_run=dry_run))
+    secret_env = prep.pop("secret_env", {})  # values for the config's references; never shown
     prompt_file = run_dir / "prompt.md"
     prompt_file.write_text(prep["prompt"])
     if dry_run and as_json:
@@ -1998,7 +2098,7 @@ def meta_run_cmd(job: str, instructions: tuple[str, ...], headless: bool | None,
         console.print(f"[warn]![/] {prep['harness_name']} can't take a first message; when it starts, tell it:")
         console.print(f"  [cmd]Read {_show(prompt_file)} and do the job it describes.[/]", soft_wrap=True)
 
-    env = {**os.environ, **prep["env"]}
+    env = {**os.environ, **prep["env"], **secret_env}
     # the agent runs `hlock meta verify`: make it the same hlock, however this one was installed
     exe = Path(sys.argv[0])
     dirs = [str(exe.resolve().parent)] if exe.name in ("hlock", "harness-lock") and exe.is_file() else []

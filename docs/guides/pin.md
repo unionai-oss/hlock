@@ -63,7 +63,9 @@ GITHUB_TOKEN = "${HLOCK_SECRET_GITHUB_GITHUB_TOKEN}"
 ```
 
 Values that are already environment references (`${GITHUB_TOKEN}`, `{env:KEY}`) are kept as
-they are. The lock's `[[secret]]` entries list every placeholder and what uses it.
+they are. The lock's `[[secret]]` entries list every placeholder and what uses it. When
+you restore the setup, each value comes from the environment, your OS keychain
+(`hlock secret set`), or a password-manager reference. See [Secrets](secrets.md).
 
 ## Vendoring
 
@@ -83,7 +85,7 @@ $ hlock check
 ✗ drift: your claude-code setup changed since harness.lock was pinned
   ~ llm default: anthropic:opus → anthropic:sonnet
   ~ config {root}/settings.json: 016233bf39 → d5aaa91f9e
-  hint: re-pin with hlock pin, or restore it with hlock sync
+  hint: re-pin with hlock pin, or restore it with hlock sync --in-place
 ```
 
 A config file's digest covers what `sync` restores from it, parsed and with secrets
@@ -102,5 +104,6 @@ measures a search space against your tasks. `pin` won't overwrite a resolved loc
 
 ## Next: rehydrate it
 
-[`hlock sync`](sync.md) restores a pinned setup on another machine, in an isolated directory,
-or in a Docker image.
+[`hlock sync`](sync.md) restores a pinned setup on another machine: into an isolated
+directory (`.hlock/env/`, the default), into your own config (`--in-place`), or into a
+Docker image.

@@ -54,7 +54,8 @@ fn subst(s: &str, vars: &[(&str, &str)]) -> String {
     vars.iter().fold(s.to_string(), |acc, (k, v)| acc.replace(&format!("{{{k}}}"), v))
 }
 
-/// Replace `${VAR}` placeholders in a string with environment values, when set.
+/// Replace `${VAR}` placeholders in a string with environment values, when set;
+/// `${HLOCK_SECRET_…}` also comes from the user's secret sources ([`crate::secrets`]).
 fn fill_env(s: &str, ctx: &Ctx) -> String {
     let mut out = s.to_string();
     let mut start = 0;
@@ -62,9 +63,13 @@ fn fill_env(s: &str, ctx: &Ctx) -> String {
         let i = start + i;
         let Some(j) = out[i..].find('}') else { break };
         let name = out[i + 2..i + j].to_string();
-        match ctx.var(&name) {
+        let found = match ctx.var(&name) {
+            Some(v) => Some(v.to_string()),
+            None if name.starts_with(crate::secrets::PREFIX) => crate::secrets::lookup(&name, ctx).map(|f| f.value),
+            None => None,
+        };
+        match found {
             Some(v) => {
-                let v = v.to_string();
                 out.replace_range(i..i + j + 1, &v);
                 start = i + v.len();
             }
