@@ -181,9 +181,13 @@ harness's do.
   (inside the project only); `run` (a shell command in the project, with a timeout and
   output truncated for the model).
 - **Permissions.** `[agent] allow` lists command prefixes that run without asking
-  (default: `hlock`, `git log`, `git show`, `git diff`, `git status`). A command matches
+  (default: `@hlock`, `git log`, `git show`, `git diff`, `git status`). A command matches
   only when it's plain words (no pipes, redirects, `;`, `&&`, `$(…)` or backticks) that
-  start with an allowed prefix's words. Interactive runs put every other command to the
+  start with an allowed prefix's words. A `!` entry refuses commands that start with its
+  words and carry all of its flags. `@hlock` is the hlock commands the jobs need that
+  don't run code from the project or install software (not `resolve`, `run`,
+  `evals check --run`, `evals grade`, or `sync --install`): the
+  agent can write files in the project, so those would let it run anything. Interactive runs put every other command to the
   user (`y`, `n`, or `a` to allow that program for the rest of the run); headless runs
   refuse it and tell the model why.
 - **Limits.** `[agent] max-steps` (default 60 model turns) and `timeout-seconds` (default

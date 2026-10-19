@@ -18,8 +18,25 @@ use serde_json::{json, Value};
 
 use crate::error::{Error, Result};
 
-/// Commands a headless run may execute without asking: hlock itself and read-only git.
-pub const DEFAULT_ALLOW: &[&str] = &["hlock", "git log", "git show", "git diff", "git status"];
+/// Commands a headless run may execute without asking: hlock's safe commands and read-only git.
+pub const DEFAULT_ALLOW: &[&str] = &["@hlock", "git log", "git show", "git diff", "git status"];
+
+/// What `@hlock` in an allowlist stands for: the hlock commands the built-in jobs use that
+/// read and check, or write where hlock writes by default (the project, `.hlock/`), and
+/// that don't run code from the project (test graders, code harnesses) or install
+/// software. A `!` entry refuses a command that starts like it and has all of its `-` flags.
+pub const HLOCK_SAFE: &[&str] = &[
+    "hlock check", "hlock show", "hlock tree", "hlock harness list", "hlock harness show",
+    "hlock runtime list", "hlock backend status",
+    "hlock evals init", "!hlock evals init --skill-dir", "hlock evals templates",
+    "hlock evals check", "!hlock evals check --run",
+    "hlock meta check", "hlock meta show", "hlock meta jobs",
+    // a custom job's check runs a command from harness.meta.toml, but hlock runs it after the job anyway
+    "hlock meta verify",
+    // the install job's last step, without package installs, model downloads, builds, or the user's own config
+    "hlock sync", "!hlock sync --install", "!hlock sync --pull", "!hlock sync --build", "!hlock sync --in-place",
+    "!hlock sync --prefix",
+];
 pub const DEFAULT_MAX_STEPS: u32 = 60;
 pub const DEFAULT_TIMEOUT_SECONDS: u64 = 300;
 /// The most a tool result sends back to the model, in bytes.
@@ -421,15 +438,29 @@ pub fn command_words(cmd: &str) -> Option<Vec<String>> {
 }
 
 /// Whether `cmd` is on the allowlist: plain words (no shell syntax) starting with an
-/// allowed prefix's words. A program may be named by path (`/usr/bin/git log`).
+/// allowed prefix's words. A program may be named by path (`/usr/bin/git log`). `@hlock`
+/// stands for [`HLOCK_SAFE`], and an entry starting with `!` refuses a command that
+/// starts with its words and has all of its flags (`!hlock sync --install`).
 pub fn allowed(cmd: &str, allow: &[String]) -> bool {
-    let Some(words) = command_words(cmd) else { return false };
+    let Some(mut words) = command_words(cmd) else { return false };
     let Some(first) = words.first() else { return false };
-    let prog = Path::new(first).file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_default();
-    allow.iter().any(|a| {
-        let want: Vec<&str> = a.split_whitespace().collect();
-        !want.is_empty() && want.len() <= words.len() && want[0] == prog && want[1..].iter().zip(&words[1..]).all(|(w, x)| w == x)
-    })
+    words[0] = Path::new(first).file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_default();
+    let starts = |want: &[&str]| !want.is_empty() && want.len() <= words.len() && want.iter().zip(&words).all(|(w, x)| w == x);
+    let denies = |entry: &str| {
+        let want: Vec<&str> = entry.split_whitespace().collect();
+        let n = want.iter().position(|w| w.starts_with('-')).unwrap_or(want.len());
+        starts(&want[..n]) && want[n..].iter().all(|f| words[n..].iter().any(|x| x == f || x.starts_with(&format!("{f}="))))
+    };
+    let allows = |entries: &mut dyn Iterator<Item = &str>| {
+        let (deny, ok): (Vec<&str>, Vec<&str>) = entries.partition(|e| e.starts_with('!'));
+        !deny.iter().any(|d| denies(&d[1..])) && ok.iter().any(|a| starts(&a.split_whitespace().collect::<Vec<_>>()))
+    };
+    let (deny, ok): (Vec<&String>, Vec<&String>) = allow.iter().partition(|e| e.starts_with('!'));
+    !deny.iter().any(|d| denies(&d[1..]))
+        && ok.iter().any(|a| match a.as_str() {
+            "@hlock" => allows(&mut HLOCK_SAFE.iter().copied()),
+            a => allows(&mut std::iter::once(a)),
+        })
 }
 
 /// The prefix "always" approves: the program, plus its subcommand when it has one.
@@ -687,6 +718,20 @@ mod tests {
     fn allowlist_matching() {
         let a = allow(DEFAULT_ALLOW);
         assert!(allowed("hlock meta verify install", &a));
+        assert!(allowed("hlock evals check ./evals", &a));
+        assert!(allowed("hlock sync --yes", &a));
+        // commands that run project code or install software aren't in @hlock
+        for cmd in ["hlock evals check ./evals --run", "hlock evals grade t", "hlock resolve", "hlock run hi",
+                    "hlock sync --yes --install", "hlock sync --docker --build", "hlock sync --yes --prefix=/tmp/x",
+                    "hlock evals init --skill-dir /home/u/.claude/skills/x",
+                    "hlock -m other.toml evals check", "hlock"] {
+            assert!(!allowed(cmd, &a), "{cmd}");
+        }
+        // plain "hlock" still allows everything, and a ! entry takes something back
+        assert!(allowed("hlock resolve", &allow(&["hlock"])));
+        assert!(!allowed("hlock resolve --backend local", &allow(&["hlock", "!hlock resolve"])));
+        assert!(!allowed("npm install --global=true x", &allow(&["npm install", "!npm install --global"])));
+        assert!(allowed("npm install x", &allow(&["npm install", "!npm install --global"])));
         assert!(allowed("git log -5 --oneline", &a));
         assert!(allowed("/usr/bin/git show HEAD", &a));
         assert!(!allowed("git push", &a));
