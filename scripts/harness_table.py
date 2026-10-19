@@ -81,6 +81,17 @@ def localize_cell(p: dict) -> str:
     return YES if p.get("open-source") else "with `--harness`"
 
 
+def deciders_cell(p: dict) -> str:
+    """The decision-model uses a harness takes, and how: `approve, stop (hooks)`."""
+    deciders = p.get("deciders") or {}
+    hooked = [u for u, w in deciders.items() if w.get("hook")]
+    read = [u for u, w in deciders.items() if w.get("native") and not w.get("hook")]
+    fmt = {(w.get("hook") or {}).get("format") for w in deciders.values()}
+    how = "plugin" if fmt & {"amp", "opencode", "pi"} else "hooks"
+    cells = ([f"{', '.join(hooked)} ({how})"] if hooked else []) + ([f"{', '.join(read)} (recorded)"] if read else [])
+    return "; ".join(cells) or NO
+
+
 def render(harnesses: list[dict], runtimes: list[dict]) -> dict[str, str]:
     clis = [p for p in harnesses if p["kind"] == "cli"]
     frameworks = [p for p in harnesses if p["kind"] == "framework"]
@@ -93,11 +104,11 @@ def render(harnesses: list[dict], runtimes: list[dict]) -> dict[str, str]:
              for p in clis],
         ),
         "capture": table(
-            ["Harness", "Model", "Providers", "MCP servers", "Skills", "Plugins", "Instructions", "`localize`"],
+            ["Harness", "Model", "Providers", "MCP servers", "Skills", "Plugins", "Instructions", "`localize`", "Deciders"],
             [[p["name"], mark(p["model"]["default"]), mark((p.get("providers") or {}).get("source")),
               mark(p["mcp"]["sources"]), mark(p["skills"]["dirs"]),
               ", ".join(dict.fromkeys(b["kind"] + "s" for b in p.get("bundles") or [])) or NO,
-              code(project_instructions(p)), localize_cell(p)]
+              code(project_instructions(p)), localize_cell(p), deciders_cell(p)]
              for p in clis],
         ),
         "frameworks": table(

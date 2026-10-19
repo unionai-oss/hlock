@@ -278,6 +278,32 @@ def test_update_job_reports_and_repins(project, monkeypatch):
     assert invoke("check").exit_code == 0
 
 
+def test_install_and_update_verify_ask_a_decider(project, monkeypatch):
+    from fake_models import Fake, systemone
+
+    home = project["home"]
+    (home / ".claude/skills/my-skill").mkdir(parents=True)
+    (home / ".claude/skills/my-skill/SKILL.md").write_text("---\nname: my-skill\ndescription: d\n---\nbody\n")
+    (home / ".claude/settings.json").write_text(json.dumps({"model": "opus"}))
+    assert invoke("pin", "--harness", "claude").exit_code == 0
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "k")
+    assert invoke("meta", "init", "--harness", "pi").exit_code == 0
+    fake = Fake(lambda path, body: systemone(body, noul=0.8, choice="the network", p=0.7))
+    try:
+        meta = project["project"] / "harness.meta.toml"
+        meta.write_text(meta.read_text() + f'\n[deciders.default]\nmodel = "system-one:kev-4b"\nbase-url = "{fake.url}"\n')
+        # install: the skill isn't in the isolated root yet; whose move is it?
+        details = json.loads(invoke("meta", "verify", "install", "--json").output)["details"]
+        assert any("my-skill" in d and d.endswith("— needs the network (P=0.70)") for d in details), details
+        # update: a change since the pin, read as risky
+        (home / ".claude/skills/new-skill").mkdir(parents=True)
+        (home / ".claude/skills/new-skill/SKILL.md").write_text("---\nname: new-skill\ndescription: d\n---\n")
+        details = json.loads(invoke("meta", "verify", "update", "--json").output)["details"]
+        assert "warning: may break something: + skill new-skill (user) (P=0.80)" in details, details
+    finally:
+        fake.close()
+
+
 def test_update_needs_a_pinned_lock(project, monkeypatch):
     (project["project"] / "harness.lock").write_text(
         "lock-version = 1\ngenerated-by = \"x\"\ngenerated-at = \"\"\n[harness]\nname = \"reference\"\n[evidence]\ntrials = 2\n")

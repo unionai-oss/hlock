@@ -186,7 +186,8 @@ strategy = "grid"
 | `[context]` | Context `isolation` and `compaction` settings |
 | `[[tool]]`, `[[skill]]`, `[[instructions]]` | MCP servers, skills, and instruction files, each with a source or digest. A pinned lock fills these in; see below. |
 | `[[decider]]` | One per [decision model](../guides/deciders.md) the stack uses (see below) |
-| `[evidence]` | The eval pack and split measured, the trial count, and success-rate, cost, and latency statistics. `[evidence.judge]` records the judge of [`judge` and `trace` graders](../guides/eval-packs.md#judges): its `model`, the model that `answered`, its `protocol`, a `fallback`, and the share of `uncertain-grades`. |
+| `[evidence]` | The eval pack and split measured, the trial count, and success-rate, cost, and latency statistics. `[evidence.judge]` records the judge of [`judge` and `trace` graders](../guides/eval-packs.md#judges): its `model`, the model that `answered`, its `protocol`, a `fallback`, the share of `uncertain-grades`, and `cost-usd-per-task` when
+the provider publishes a price. |
 | `[verify]` | Runtime verification thresholds: `canary-tasks`, `min-success-rate`, `fingerprint-tolerance` |
 | `[provenance]` | The backend that produced the lock, and the search settings |
 

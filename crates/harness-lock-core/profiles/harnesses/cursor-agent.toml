@@ -46,6 +46,11 @@ dirs = ["{root}/skills", ".cursor/skills", "~/.agents/skills", ".agents/skills"]
 write = "{root}/skills"
 builtin-dirs = ["{root}/skills-cursor"]
 
+# How hlock wires decision models in: hooks in {root}/hooks.json (preToolUse answers
+# allow, ask or deny). Cursor's docs don't say whether cursor-agent runs them.
+[deciders.approve]
+hook = { path = "{root}/hooks.json", events = ["preToolUse"], format = "cursor" }
+
 [launch]
 model-flag = "--model"
 prompt = ["-p", "{prompt}"]  # `hlock run`: one prompt, non-interactively

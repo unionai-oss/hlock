@@ -20,6 +20,18 @@ plan: 1 upgrade(s) available — rerun with --apply to perform.
 next → hlock upgrade --all --apply
 ```
 
+A locked [decision model](deciders.md) with a newer version is listed too, and `--apply`
+re-resolves with it:
+
+```console
+$ hlock upgrade --all
+component       locked                  available
+planner         qwen-7b              →  qwen-32b
+decider · stop  typesafe:jev-1.13.0  →  typesafe:jev-1.14.0
+plan: 2 upgrade(s) available — rerun with --apply to perform.
+next → hlock upgrade --all --apply
+```
+
 Upgrade one target instead of everything with `--to`:
 
 ```bash

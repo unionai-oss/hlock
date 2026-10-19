@@ -1095,7 +1095,8 @@ fn decide(py: Python<'_>, state: String, questions: String, model: Option<String
 /// for `use_` in the lock at `lock`. Returns JSON `{stdout, exit, note}`; it never
 /// raises, since a hook that fails must defer.
 #[pyfunction]
-fn decide_hook(py: Python<'_>, use_: String, format: String, input: String, lock: String) -> String {
+#[pyo3(signature = (use_, format, input, lock, event=None))]
+fn decide_hook(py: Python<'_>, use_: String, format: String, input: String, lock: String, event: Option<String>) -> String {
     // no GIL while it waits on the network, so other Python threads keep running
     py.allow_threads(move || {
         let lock_path = Path::new(&lock);
@@ -1104,7 +1105,7 @@ fn decide_hook(py: Python<'_>, use_: String, format: String, input: String, lock
                 let input: serde_json::Value = serde_json::from_str(&input).unwrap_or_default();
                 let root = lock_path.parent().filter(|p| !p.as_os_str().is_empty()).map(Path::to_path_buf).unwrap_or_else(|| PathBuf::from("."));
                 let var = |k: &str| std::env::var(k).ok();
-                core::decide::hook(&use_, &format, &input, &l, &root, &var)
+                core::decide::hook(&use_, &format, event.as_deref(), &input, &l, &root, &var)
             }
             Err(e) => core::decide::HookOutput { stdout: String::new(), exit: 0, note: format!("can't read the lock: {e}") },
         };
@@ -1284,7 +1285,12 @@ fn agent_run(
     let lock = core::Lockfile::load(Path::new(&meta_lock)).map_err(py_err)?;
     let project = project.map(PathBuf::from).unwrap_or_else(|| lock_dir(&meta_lock));
     let ctx = core::profiles::Ctx::from_process();
-    let cfg = core::agent::config_from_lock(&lock, &project, interactive, &ctx.env).map_err(py_err)?;
+    let mut cfg = core::agent::config_from_lock(&lock, &project, interactive, &ctx.env).map_err(py_err)?;
+    // harness.meta.toml's [deciders.default], next to the meta lock (or HLOCK_META_MANIFEST)
+    let manifest = std::env::var("HLOCK_META_MANIFEST").map(PathBuf::from).unwrap_or_else(|_| lock_dir(&meta_lock).join(core::meta::META_MANIFEST_PATH));
+    if manifest.is_file() {
+        cfg.decider = core::meta::MetaManifest::load(&manifest).map_err(py_err)?.default_decider().map_err(py_err)?;
+    }
     // release the GIL while the agent waits on the model and on commands; take it back
     // only to call the callbacks, which also gives Ctrl-C a chance to stop the run
     let out = py.allow_threads(|| {

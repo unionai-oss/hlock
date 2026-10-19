@@ -42,6 +42,16 @@ write = "settings#/mcpServers"
 dirs = ["{root}/skills", ".gemini/skills", "~/.agents/skills", ".agents/skills"]
 write = "{root}/skills"
 
+# How hlock wires decision models in (`[deciders.<use>]` in harness.toml): hooks in
+# settings.json. BeforeTool can allow or deny, AfterAgent sends the agent back to work,
+# and BeforeToolSelection narrows the tools a request offers.
+[deciders.approve]
+hook = { file = "settings", events = ["BeforeTool"], format = "gemini" }
+[deciders.stop]
+hook = { file = "settings", events = ["AfterAgent"], format = "gemini" }
+[deciders.tool]
+hook = { file = "settings", events = ["BeforeToolSelection"], format = "gemini" }
+
 [launch]
 model-flag = "--model"
 prompt = ["-p", "{prompt}"]  # `hlock run`: one prompt, non-interactively

@@ -21,6 +21,7 @@
 | `HLOCK_JUDGE_AUTO` | on | `0` stops hlock from picking a judge (Kev on a local Ollama or Ollaya, or Jev with `TYPESAFE_API_KEY`) when none is set |
 | `HLOCK_BIN` | the `hlock` on `PATH` | The command the hooks `sync` writes for [decision models](../guides/deciders.md) run |
 | `HLOCK_DECIDE_VERBOSE` | unset | `1` makes `hlock decide hook` say what it decided on stderr |
+| `HLOCK_DECIDE_LOCK` | set for code harnesses | The lock whose deciders `ctx.decide` and `hlock decide hook --format plugin` ask |
 | `TYPESAFE_API_KEY`, `TYPESAFE_BASE_URL` | unset | TypeSafe's key and endpoint, for `typesafe:` deciders |
 | `OLLAYA_HOST`, `OLLAYA_API_KEY` | `127.0.0.1:11435` | Where Ollaya serves `ollaya:` deciders, and its key if it has one |
 | `HLOCK_META_RESTORE` | set by `hlock meta run` | Inside a meta harness session: the config variables isolation changed, with their original values. `hlock` commands put them back. Don't set it yourself. |

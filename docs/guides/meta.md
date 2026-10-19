@@ -255,9 +255,19 @@ Give the meta harness a [decision model](deciders.md) for its checks in
 model = "ollama:kev:4b"
 ```
 
-`bootstrap-evals` uses it to review the tasks it verifies. Without one there, it uses the
-project's `[deciders.default]` from `harness.toml`, if set. A decision model never decides
-what the built-in agent may run: only `[agent] allow` and you do.
+Without one there, the project's `[deciders.default]` from `harness.toml` is used, if set.
+It's asked, and only warns:
+
+| Where | It asks | You see |
+|---|---|---|
+| `bootstrap-evals` verify | Does each task's prompt stand alone, do its graders check what it asks, does its solution do it? | a warning per doubtful task |
+| `install` verify | For each step still missing: does it need an agent, the network, permissions, or you? | `— needs the network (P=0.70)` after the step |
+| `update` verify | For each change since the pin: could it break something that works? | `warning: may break something: …` |
+| the built-in agent | When it says it's done: is the job done? | at most two more turns, with the reason |
+| the built-in agent | When you're asked about a command: could it delete data or reach outside the project? | a risk note with the question |
+
+A decision model never decides what the built-in agent may run: only `[agent] allow` and
+you do.
 
 ## Use an installed harness instead
 

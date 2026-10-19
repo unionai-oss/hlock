@@ -30,6 +30,17 @@ const PRICES: &[(&str, f64)] = &[("typesafe", 0.042), ("openai-decisions", 0.10)
 /// (`ollama:kev:4b` is a decider, `ollama:qwen3:8b` an LLM).
 pub const DECIDER_FAMILIES: &[&str] = &["jev", "kev", "clef", "span-0", "decider", "laya", "winnow", "decima", "arbiter", "nimble", "luna-decisions", "gpt-6-luna"];
 
+/// Known model versions per provider, oldest first, for `hlock upgrade`. Aliases
+/// (`jev-latest`) aren't versions.
+pub const DECIDER_VERSIONS: &[(&str, &[&str])] = &[("typesafe", &["jev-1.13.0", "jev-1.14.0"]), ("openrouter", &["typesafe/jev-1.13", "typesafe/jev-1.14"])];
+
+/// A newer version of `provider:model`, when hlock knows one.
+pub fn newer_version(provider: &str, model: &str) -> Option<String> {
+    let (_, versions) = DECIDER_VERSIONS.iter().find(|(p, _)| *p == provider)?;
+    let i = versions.iter().position(|v| *v == model)?;
+    versions.get(i + 1..)?.last().map(|v| v.to_string())
+}
+
 /// The most questions one request may carry, per protocol (Clef's 64 is the tightest
 /// System One limit we know of; Decisions allows 200).
 const MAX_QUESTIONS: &[(&str, usize)] = &[("systemone", 64), ("decisions", 200)];
@@ -52,6 +63,15 @@ pub struct DeciderConfig {
 
 fn provider(name: &str) -> Option<&'static (&'static str, &'static str, &'static str, &'static str, &'static str)> {
     PROVIDERS.iter().find(|p| p.0 == name)
+}
+
+/// A stack's decider is `provider:model`, or `provider:model@0.8` when `resolve` is
+/// trying a `min-probability`.
+pub fn split_threshold(reference: &str) -> (&str, Option<f64>) {
+    match reference.rsplit_once('@') {
+        Some((r, p)) if p.parse::<f64>().is_ok() => (r, p.parse().ok()),
+        _ => (reference, None),
+    }
 }
 
 /// Split `provider:model`.
@@ -465,14 +485,26 @@ impl DeciderSpec {
         }
         match &self.min_probability {
             None => {}
+            // candidates for `resolve` to choose between
+            Some(Value::Array(a)) if !a.is_empty() && a.iter().all(|v| v.as_f64().is_some_and(|p| (0.0..=1.0).contains(&p))) => {}
             Some(Value::Number(n)) if n.as_f64().is_some_and(|p| (0.0..=1.0).contains(&p)) => {}
             Some(Value::Object(m)) if use_ == "approve" && m.iter().all(|(k, v)| ["allow", "ask", "deny"].contains(&k.as_str()) && v.as_f64().is_some_and(|p| (0.0..=1.0).contains(&p))) => {}
-            Some(_) => return Err(format!("[deciders.{use_}]: `min-probability` is a number from 0 to 1{}", if use_ == "approve" { ", or a table of allow, ask, deny" } else { "" })),
+            Some(_) => return Err(format!("[deciders.{use_}]: `min-probability` is a number from 0 to 1, a list of them for resolve to choose between{}", if use_ == "approve" { ", or a table of allow, ask, deny" } else { "" })),
         }
         Ok(self)
     }
 
+    /// The `min-probability` candidates `resolve` tries: each of a list, else just the
+    /// setting (`None`).
+    pub fn thresholds(&self) -> Vec<Option<f64>> {
+        match &self.min_probability {
+            Some(Value::Array(a)) => a.iter().map(Value::as_f64).collect(),
+            _ => vec![None],
+        }
+    }
+
     pub fn config(&self, model: &str) -> DeciderConfig {
+        let (model, _) = split_threshold(model);
         DeciderConfig {
             model: model.into(),
             protocol: self.protocol.clone(),
@@ -491,6 +523,9 @@ pub fn min_probability(use_: &str, setting: &Value, answer: &str) -> f64 {
         ("approve", "allow") => 0.9,
         ("approve", "ask") => 0.5,
         ("approve", _) => 0.8,
+        // a tool is dropped only when it's clearly not needed
+        ("tool", _) => 0.3,
+        ("route", _) => 0.6,
         _ => 0.9,
     };
     match setting {
@@ -518,7 +553,7 @@ pub fn wiring(use_: &str, harness: &str, profile: Option<&crate::profiles::Harne
     }
     // a native setting is read by `pin`, never written: only hooks are wired in
     let h = p.deciders.get(use_)?.hook.as_ref()?;
-    Some(("hook".into(), h.events.iter().map(|e| Wiring { file: h.file.clone(), event: e.clone() }).collect()))
+    Some(("hook".into(), h.events.iter().map(|e| Wiring { file: h.target(), event: e.clone() }).collect()))
 }
 
 /// The `[[decider]]` entry for `use_` answered by `reference`, wired as `via`/`wiring`.
@@ -531,9 +566,16 @@ pub fn lock_entry(
     mut wiring: Vec<crate::lockfile::Wiring>,
     root: &std::path::Path,
 ) -> Result<crate::lockfile::Decider, String> {
+    let (reference, threshold) = split_threshold(reference);
     let (prov, model) = split_ref(reference).ok_or_else(|| format!("{reference:?} isn't written provider:model"))?;
     let known = provider(prov);
     let protocol = spec.protocol.clone().or_else(|| known.map(|p| p.1.to_string())).unwrap_or_else(|| "systemone".into());
+    // a tried threshold, else the setting (the first of a list, outside `resolve`)
+    let min_probability = match (threshold, &spec.min_probability) {
+        (Some(p), _) => json!(p),
+        (None, Some(Value::Array(a))) => a.first().cloned().unwrap_or(Value::Null),
+        (None, m) => m.clone().unwrap_or(Value::Null),
+    };
     if !spec.hooks.is_empty() && via == "hook" {
         let file = wiring.first().map(|w| w.file.clone()).unwrap_or_default();
         wiring = spec.hooks.iter().map(|e| crate::lockfile::Wiring { file: file.clone(), event: e.clone() }).collect();
@@ -557,7 +599,7 @@ pub fn lock_entry(
         via: via.into(),
         wiring,
         may: spec.may.clone(),
-        min_probability: spec.min_probability.clone().unwrap_or(Value::Null),
+        min_probability,
         timeout_ms: spec.timeout_ms,
         questions: questions_digest(use_),
         policy,
@@ -665,6 +707,24 @@ const APPROVE_OPTIONS: &[(&str, &str)] = &[
 const STOP: &str = "An AI agent is about to stop. Given the user's request and the agent's last message in the \
     state, has the agent done what the user asked?";
 
+const ROUTE: &str = "An AI agent is about to take its next step. Given the state, which of its models should take it?";
+const TOOL: &str = "Given the conversation in the state, the agent's next step may need this tool:";
+
+/// The questions hlock asks for `use_`, with the project's `policy` added: one for
+/// `approve` and `stop`, one choice over `options` (model roles) for `route`, and one
+/// yes/no per tool in `options` for `tool`.
+pub fn use_questions(use_: &str, policy: Option<&str>, options: &[String]) -> Vec<Question> {
+    match use_ {
+        "route" if !options.is_empty() => {
+            let opts: Vec<(&str, String)> = options.iter().map(|o| (o.as_str(), format!("the {o} model"))).collect();
+            let refs: Vec<(&str, &str)> = opts.iter().map(|(k, v)| (*k, v.as_str())).collect();
+            vec![Question::choice("route", ROUTE, &refs)]
+        }
+        "tool" => options.iter().enumerate().map(|(i, t)| Question::noul(&format!("t{}", i + 1), &format!("{TOOL} `{t}`"))).collect(),
+        _ => use_question(use_, policy).into_iter().collect(),
+    }
+}
+
 /// The question hlock asks for `use_`, with the project's `policy` added to it.
 pub fn use_question(use_: &str, policy: Option<&str>) -> Option<Question> {
     let with_policy = |base: &str| match policy.map(str::trim).filter(|p| !p.is_empty()) {
@@ -686,7 +746,12 @@ pub fn use_question(use_: &str, policy: Option<&str>) -> Option<Question> {
 /// A digest of the questions hlock asks for a use (without the policy), locked so
 /// that a change in hlock's questions shows up as drift.
 pub fn questions_digest(use_: &str) -> Option<String> {
-    use_question(use_, None).map(|q| crate::hash::sha256_text(&serde_json::to_string(&q).unwrap_or_default()))
+    let text = match use_ {
+        "route" => ROUTE.to_string(),
+        "tool" => TOOL.to_string(),
+        _ => serde_json::to_string(&use_question(use_, None)?).unwrap_or_default(),
+    };
+    Some(crate::hash::sha256_text(&text))
 }
 
 #[cfg(test)]
@@ -797,47 +862,76 @@ impl HookOutput {
 /// Marks hook commands hlock owns, so `sync` can replace them and `pin` can ignore them.
 pub const HOOK_MARK: &str = "decide hook";
 
-/// The hook command `sync` writes for `use_`.
-pub fn hook_command(bin: &str, use_: &str, format: &str, lock: &std::path::Path) -> String {
-    let q = |s: &str| if s.chars().any(|c| c.is_whitespace() || "'\"$`\\".contains(c)) { format!("'{}'", s.replace('\'', "'\\''")) } else { s.to_string() };
-    format!("{} {HOOK_MARK} {use_} --format {format} --lock {}", q(bin), q(&lock.to_string_lossy()))
+/// The hook formats `hlock decide hook` answers in: the harnesses' own, and `plugin`,
+/// which the plugins hlock writes for Amp, OpenCode and Pi read.
+pub const HOOK_FORMATS: &[&str] = &["claude-code", "codex", "gemini", "cursor", "copilot", "plugin"];
+
+fn shell_quote(s: &str) -> String {
+    if s.chars().any(|c| c.is_whitespace() || "'\"$`\\".contains(c)) { format!("'{}'", s.replace('\'', "'\\''")) } else { s.to_string() }
 }
 
-/// The `{event: [groups]}` hook entries for a lock's hook-wired deciders, in the
-/// Claude Code and Codex layout.
+/// The hook command `sync` writes for `use_` on `event`.
+pub fn hook_command(bin: &str, use_: &str, format: &str, event: Option<&str>, lock: &std::path::Path) -> String {
+    let event = event.map(|e| format!(" --event {e}")).unwrap_or_default();
+    format!("{} {HOOK_MARK} {use_} --format {format}{event} --lock {}", shell_quote(bin), shell_quote(&lock.to_string_lossy()))
+}
+
+/// The `{event: [entries]}` hooks for a lock's hook-wired deciders in `file`, laid out
+/// the way `format`'s harness reads them.
 pub fn hook_entries(lock: &crate::lockfile::Lockfile, file: &str, format: &str, bin: &str, lock_path: &std::path::Path) -> Map<String, Value> {
     let mut events = Map::new();
     for d in lock.decider.iter().filter(|d| d.via == "hook") {
         for w in d.wiring.iter().filter(|w| w.file == file) {
-            let timeout = d.timeout_ms.unwrap_or(DEFAULT_TIMEOUT_MS).div_ceil(1000) + 1;
-            let handler = json!({"type": "command", "command": hook_command(bin, &d.use_, format, lock_path), "timeout": timeout});
-            let group = if w.event == "Stop" { json!({"hooks": [handler]}) } else { json!({"matcher": "*", "hooks": [handler]}) };
-            events.entry(w.event.clone()).or_insert_with(|| json!([])).as_array_mut().unwrap().push(group);
+            let ms = d.timeout_ms.unwrap_or(DEFAULT_TIMEOUT_MS);
+            let secs = ms.div_ceil(1000) + 1;
+            let cmd = hook_command(bin, &d.use_, format, Some(&w.event), lock_path);
+            let entry = match format {
+                // Gemini CLI: a regex matcher for tool events, none for the others; ms
+                "gemini" => {
+                    let handler = json!({"type": "command", "name": format!("hlock {}", d.use_), "command": cmd, "timeout": ms + 1000});
+                    if w.event == "BeforeTool" { json!({"matcher": ".*", "hooks": [handler]}) } else { json!({"hooks": [handler]}) }
+                }
+                "cursor" => json!({"command": cmd, "timeout": secs}),
+                "copilot" => json!({"type": "command", "bash": cmd, "powershell": cmd, "timeoutSec": secs}),
+                // Claude Code and Codex
+                _ => {
+                    let handler = json!({"type": "command", "command": cmd, "timeout": secs});
+                    if w.event == "Stop" { json!({"hooks": [handler]}) } else { json!({"matcher": "*", "hooks": [handler]}) }
+                }
+            };
+            events.entry(w.event.clone()).or_insert_with(|| json!([])).as_array_mut().unwrap().push(entry);
         }
     }
     events
 }
 
-/// Remove hlock's own hook handlers from a config document (any `hooks` object laid
-/// out as event → groups → handlers), dropping groups and events left empty.
+fn is_ours(entry: &Value) -> bool {
+    ["command", "bash"].iter().any(|k| entry[*k].as_str().is_some_and(|c| c.contains(HOOK_MARK)))
+}
+
+/// Remove hlock's own hook entries from a config document: any `hooks` object laid out
+/// as event → groups → handlers (Claude Code, Codex, Gemini CLI) or event → entries
+/// (Cursor, Copilot), dropping groups and events left empty.
 pub fn strip_hooks(doc: &mut Value) -> bool {
     let mut changed = false;
     match doc {
         Value::Object(m) => {
             if let Some(Value::Object(events)) = m.get_mut("hooks") {
-                for groups in events.values_mut() {
-                    if let Value::Array(gs) = groups {
-                        for g in gs.iter_mut() {
+                for entries in events.values_mut() {
+                    if let Value::Array(es) = entries {
+                        for g in es.iter_mut() {
                             if let Some(Value::Array(hs)) = g.get_mut("hooks") {
                                 let before = hs.len();
-                                hs.retain(|h| !h["command"].as_str().is_some_and(|c| c.contains(HOOK_MARK)));
+                                hs.retain(|h| !is_ours(h));
                                 changed |= hs.len() != before;
                             }
                         }
-                        gs.retain(|g| !g.get("hooks").and_then(Value::as_array).is_some_and(|hs| hs.is_empty()));
+                        let before = es.len();
+                        es.retain(|g| !is_ours(g) && !g.get("hooks").and_then(Value::as_array).is_some_and(|hs| hs.is_empty()));
+                        changed |= es.len() != before;
                     }
                 }
-                events.retain(|_, gs| !gs.as_array().is_some_and(|a| a.is_empty()));
+                events.retain(|_, es| !es.as_array().is_some_and(|a| a.is_empty()));
                 if events.is_empty() && changed {
                     m.remove("hooks");
                 }
@@ -857,11 +951,14 @@ pub fn strip_hooks(doc: &mut Value) -> bool {
 }
 
 /// Merge `entries` into `doc` at `pointer` (default `/hooks`), after removing hlock's
-/// old handlers.
+/// old entries. Cursor's file also needs `"version": 1`.
 pub fn merge_hooks(doc: &mut Value, pointer: &str, entries: &Map<String, Value>) {
     strip_hooks(doc);
     if !doc.is_object() {
         *doc = json!({});
+    }
+    if entries.is_empty() {
+        return;
     }
     let mut cur = &mut *doc;
     for part in pointer.trim_start_matches('/').split('/').filter(|p| !p.is_empty()) {
@@ -879,6 +976,122 @@ pub fn merge_hooks(doc: &mut Value, pointer: &str, entries: &Map<String, Value>)
     }
 }
 
+/// The whole file hlock owns for a harness whose hooks live in a file of their own
+/// (Copilot's `.github/hooks/hlock.json`) or in a plugin (Amp, OpenCode, Pi), or
+/// `None` when the lock wires nothing into it.
+pub fn owned_hook_file(lock_file: &crate::lockfile::Lockfile, file: &str, format: &str, bin: &str, lock_path: &std::path::Path) -> Option<String> {
+    let uses: Vec<String> = lock_file.decider.iter().filter(|d| d.via == "hook" && d.wiring.iter().any(|w| w.file == file)).map(|d| d.use_.clone()).collect();
+    if uses.is_empty() {
+        return None;
+    }
+    let lock = lock_path.to_string_lossy();
+    let template = match format {
+        "copilot" => {
+            let entries = hook_entries(lock_file, file, format, bin, lock_path);
+            return Some(serde_json::to_string_pretty(&json!({"version": 1, "hooks": entries})).unwrap_or_default() + "\n");
+        }
+        "amp" => AMP_PLUGIN,
+        "opencode" => OPENCODE_PLUGIN,
+        "pi" => PI_EXTENSION,
+        _ => return None,
+    };
+    Some(
+        template
+            .replace("__BIN__", &serde_json::to_string(bin).unwrap_or_default())
+            .replace("__LOCK__", &serde_json::to_string(&lock).unwrap_or_default())
+            .replace("__USES__", &serde_json::to_string(&uses).unwrap_or_default()),
+    )
+}
+
+/// A hook event, whatever harness sent it.
+#[derive(Debug, Default)]
+struct HookEvent {
+    /// `tool` (a call about to run), `stop` (the agent is about to stop), or `tools`
+    /// (the tools the next request offers).
+    kind: &'static str,
+    tool: Value,
+    input: Value,
+    cwd: Value,
+    request: String,
+    last_message: String,
+    /// The agent is already continuing because of a stop hook.
+    continuing: bool,
+    tools: Vec<String>,
+    messages: Value,
+    /// `route`: the model roles to choose between, and the state to choose on.
+    options: Vec<String>,
+    state: Value,
+}
+
+fn text_of(v: &Value) -> String {
+    match v {
+        Value::String(s) => s.clone(),
+        Value::Array(a) => a.iter().filter_map(|b| b["text"].as_str().or_else(|| b.as_str())).collect::<Vec<_>>().join("\n"),
+        _ => String::new(),
+    }
+}
+
+/// Read a hook's input into a [`HookEvent`]. `event` is the harness event the hook was
+/// registered for (the command's `--event`), else the input's `hook_event_name`.
+fn read_event(format: &str, event: Option<&str>, input: &Value) -> Option<HookEvent> {
+    let name = event.map(str::to_string).or_else(|| input["hook_event_name"].as_str().map(str::to_string)).unwrap_or_default();
+    let tool = |tool: &Value, inp: &Value| HookEvent { kind: "tool", tool: tool.clone(), input: inp.clone(), cwd: input["cwd"].clone(), ..Default::default() };
+    match (format, name.as_str()) {
+        ("plugin", _) => match input["event"].as_str() {
+            Some("tool") => Some(tool(&input["tool"], &input["input"])),
+            Some("stop") => Some(HookEvent { kind: "stop", request: text_of(&input["request"]), last_message: text_of(&input["last_message"]), ..Default::default() }),
+            Some("route") => Some(HookEvent {
+                kind: "route",
+                options: input["options"].as_array().into_iter().flatten().filter_map(|o| o.as_str().map(str::to_string)).collect(),
+                state: input["state"].clone(),
+                ..Default::default()
+            }),
+            Some("tools") => Some(HookEvent {
+                kind: "tools",
+                tools: input["tools"].as_array().into_iter().flatten().filter_map(|o| o.as_str().map(str::to_string)).collect(),
+                messages: input["state"].clone(),
+                ..Default::default()
+            }),
+            _ => None,
+        },
+        ("claude-code" | "codex", "PreToolUse" | "PermissionRequest") | ("gemini", "BeforeTool") | ("cursor", "preToolUse") => {
+            Some(tool(&input["tool_name"], &input["tool_input"]))
+        }
+        ("cursor", "beforeShellExecution") => Some(tool(&json!("Shell"), &json!({"command": input["command"]}))),
+        ("copilot", "preToolUse") => {
+            let args = input["toolArgs"].as_str().and_then(|s| serde_json::from_str(s).ok()).unwrap_or_else(|| input["toolArgs"].clone());
+            Some(tool(&input["toolName"], &args))
+        }
+        ("claude-code" | "codex", "Stop") => Some(HookEvent {
+            kind: "stop",
+            request: input["transcript_path"].as_str().and_then(first_user_message).unwrap_or_default(),
+            last_message: text_of(&input["last_assistant_message"]),
+            continuing: input["stop_hook_active"].as_bool() == Some(true),
+            ..Default::default()
+        }),
+        ("gemini", "AfterAgent") => Some(HookEvent {
+            kind: "stop",
+            request: text_of(&input["prompt"]),
+            last_message: text_of(&input["prompt_response"]),
+            continuing: input["stop_hook_active"].as_bool() == Some(true),
+            ..Default::default()
+        }),
+        ("gemini", "BeforeToolSelection") => {
+            let req = &input["llm_request"];
+            let tools: Vec<String> = req["config"]["tools"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .flat_map(|t| t["functionDeclarations"].as_array().cloned().unwrap_or_default())
+                .filter_map(|f| f["name"].as_str().map(str::to_string))
+                .collect();
+            let messages = req["messages"].as_array().map(|m| json!(m[m.len().saturating_sub(6)..].to_vec())).unwrap_or(Value::Null);
+            Some(HookEvent { kind: "tools", tools, messages, ..Default::default() })
+        }
+        _ => None,
+    }
+}
+
 /// The text of the first user message in a JSONL transcript (Claude Code, Codex).
 fn first_user_message(path: &str) -> Option<String> {
     let text = std::fs::read_to_string(path).ok()?;
@@ -889,12 +1102,7 @@ fn first_user_message(path: &str) -> Option<String> {
         if role != Some("user") {
             continue;
         }
-        let content = &msg["content"];
-        let s = match content {
-            Value::String(s) => s.clone(),
-            Value::Array(a) => a.iter().filter_map(|b| b["text"].as_str()).collect::<Vec<_>>().join("\n"),
-            _ => continue,
-        };
+        let s = text_of(&msg["content"]);
         if !s.trim().is_empty() {
             return Some(s);
         }
@@ -905,36 +1113,49 @@ fn first_user_message(path: &str) -> Option<String> {
 /// Answer one hook event for the locked decider of `use_`: ask it, and print the
 /// harness's own answer when it's sure enough, else defer. Never fails: an error,
 /// a timeout or a low probability defers.
-pub fn hook(use_: &str, format: &str, input: &Value, lock: &crate::lockfile::Lockfile, root: &std::path::Path, var: &dyn Fn(&str) -> Option<String>) -> HookOutput {
+pub fn hook(use_: &str, format: &str, event: Option<&str>, input: &Value, lock: &crate::lockfile::Lockfile, root: &std::path::Path, var: &dyn Fn(&str) -> Option<String>) -> HookOutput {
     let Some(d) = lock.decider.iter().find(|d| d.use_ == use_) else {
         return HookOutput::defer(format!("no {use_} decider in the lock"));
     };
-    let event = input["hook_event_name"].as_str().unwrap_or_default();
-    if event == "Stop" && input["stop_hook_active"].as_bool() == Some(true) {
+    let Some(ev) = read_event(format, event, input) else {
+        return HookOutput::defer(format!("not an event a {use_} decider answers"));
+    };
+    let wanted = match use_ {
+        "approve" => "tool",
+        "stop" => "stop",
+        "tool" => "tools",
+        "route" => "route",
+        _ => "",
+    };
+    if ev.kind != wanted {
+        return HookOutput::defer(format!("a {use_} decider doesn't answer {} events", ev.kind));
+    }
+    if ev.continuing {
         return HookOutput::defer("already continuing after a stop hook");
     }
+    if (ev.kind == "tools" && ev.tools.len() < 2) || (ev.kind == "route" && ev.options.len() < 2) {
+        return HookOutput::defer("nothing to choose between");
+    }
     let policy = d.policy.as_ref().and_then(|p| std::fs::read_to_string(root.join(&p.path)).ok());
-    let Some(question) = use_question(use_, policy.as_deref()) else {
-        return HookOutput::defer(format!("hooks can't make {use_} decisions"));
-    };
-    let state = match use_ {
-        "approve" => json!({"tool": input["tool_name"], "input": input["tool_input"], "cwd": input["cwd"]}),
-        _ => {
-            let request = input["transcript_path"].as_str().and_then(first_user_message).unwrap_or_default();
-            json!({"request": request, "last_message": input["last_assistant_message"]})
-        }
+    let options = if ev.kind == "route" { &ev.options } else { &ev.tools };
+    let questions = use_questions(use_, policy.as_deref(), options);
+    let state = match ev.kind {
+        "tool" => json!({"tool": ev.tool, "input": ev.input, "cwd": ev.cwd}),
+        "stop" => json!({"request": ev.request, "last_message": ev.last_message}),
+        "route" => ev.state.clone(),
+        _ => json!({"tools": ev.tools, "recent_messages": ev.messages}),
     };
     let mut cfg = entry_config(d);
     cfg.timeout_seconds = Some(d.timeout_ms.unwrap_or(DEFAULT_TIMEOUT_MS).div_ceil(1000));
-    let decided = match cfg.endpoint(var).and_then(|ep| decide(&ep, &state, std::slice::from_ref(&question))) {
+    let decided = match cfg.endpoint(var).and_then(|ep| decide(&ep, &state, &questions)) {
         Ok(x) => x,
         Err(e) => return HookOutput::defer(format!("decider unavailable: {e}")),
     };
-    let Some(a) = decided.answers.first() else { return HookOutput::defer("no answer") };
     let who = format!("hlock {use_} decider ({}:{})", d.provider, decided.model);
     let out = |v: Value, note: String| HookOutput { stdout: v.to_string(), exit: 0, note };
     match use_ {
         "approve" => {
+            let Some(a) = decided.answers.first() else { return HookOutput::defer("no answer") };
             let choice = a.value.as_str().unwrap_or_default().to_string();
             let p = a.probability();
             let need = min_probability("approve", &d.min_probability, &choice);
@@ -942,29 +1163,164 @@ pub fn hook(use_: &str, format: &str, input: &Value, lock: &crate::lockfile::Loc
                 return HookOutput::defer(format!("{choice} at P={p:.2}: not allowed or below {need}"));
             }
             let reason = format!("{who}: {choice} at P={p:.2}");
-            match (event, choice.as_str()) {
-                ("PermissionRequest", "ask") => HookOutput::defer(format!("{reason}; the user is asked anyway")),
-                ("PermissionRequest", c) => {
+            match (format, event.or_else(|| input["hook_event_name"].as_str()).unwrap_or_default(), choice.as_str()) {
+                ("claude-code" | "codex", "PermissionRequest", "ask") => HookOutput::defer(format!("{reason}; the user is asked anyway")),
+                ("claude-code" | "codex", "PermissionRequest", c) => {
                     let mut decision = json!({"behavior": c});
                     if c == "deny" {
                         decision["message"] = json!(reason);
                     }
                     out(json!({"hookSpecificOutput": {"hookEventName": "PermissionRequest", "decision": decision}}), reason)
                 }
-                ("PreToolUse", "ask") if format == "codex" => HookOutput::defer(format!("{reason}; Codex's PreToolUse can't ask")),
-                ("PreToolUse", c) => out(json!({"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": c, "permissionDecisionReason": reason}}), reason),
-                _ => HookOutput::defer(format!("{event} isn't an approval event")),
+                ("codex", _, "ask") => HookOutput::defer(format!("{reason}; Codex's PreToolUse can't ask")),
+                ("claude-code" | "codex", _, c) => out(json!({"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": c, "permissionDecisionReason": reason}}), reason),
+                ("gemini", _, "ask") => HookOutput::defer(format!("{reason}; Gemini CLI's BeforeTool can't ask")),
+                ("gemini", _, c) => out(json!({"decision": c, "reason": reason}), reason),
+                ("cursor", _, c) => out(json!({"permission": c, "user_message": reason, "agent_message": reason}), reason),
+                ("copilot", _, "deny") => out(json!({"permissionDecision": "deny", "permissionDecisionReason": reason}), reason),
+                ("copilot", _, _) => HookOutput::defer(format!("{reason}; Copilot's preToolUse can only deny")),
+                (_, _, c) => out(json!({"answer": c, "reason": reason}), reason),
             }
         }
-        "stop" if event == "Stop" => {
+        "stop" => {
+            let Some(a) = decided.answers.first() else { return HookOutput::defer("no answer") };
             let p = a.probability();
             let need = min_probability("stop", &d.min_probability, "done");
             if p >= need {
                 return HookOutput::defer(format!("done at P={p:.2}"));
             }
             let reason = format!("{who} isn't sure the request is done (P={p:.2}). Check each part of what the user asked for, finish what's missing, and verify it before stopping.");
-            out(json!({"decision": "block", "reason": reason}), format!("continue at P(done)={p:.2}"))
+            let note = format!("continue at P(done)={p:.2}");
+            match format {
+                "gemini" => out(json!({"decision": "deny", "reason": reason}), note),
+                "plugin" => out(json!({"answer": "continue", "reason": reason}), note),
+                _ => out(json!({"decision": "block", "reason": reason}), note),
+            }
         }
-        _ => HookOutput::defer(format!("{event} isn't a {use_} event")),
+        "route" => {
+            let Some(a) = decided.answers.first() else { return HookOutput::defer("no answer") };
+            let choice = a.value.as_str().unwrap_or_default().to_string();
+            let p = a.probability();
+            let need = min_probability("route", &d.min_probability, &choice);
+            if p < need {
+                return HookOutput::defer(format!("{choice} at P={p:.2}: below {need}"));
+            }
+            let reason = format!("{who}: {choice} at P={p:.2}");
+            out(json!({"answer": choice, "reason": reason}), reason)
+        }
+        _ => {
+            // tool: keep the tools the next step may need
+            let need = min_probability("tool", &d.min_probability, "keep");
+            let keep: Vec<&String> = ev.tools.iter().enumerate().filter(|(i, _)| decided.get(&format!("t{}", i + 1)).is_none_or(|a| a.probability() >= need)).map(|(_, t)| t).collect();
+            if keep.is_empty() || keep.len() == ev.tools.len() {
+                return HookOutput::defer(format!("keeps {} of {} tools", keep.len(), ev.tools.len()));
+            }
+            let note = format!("offers {} of {} tools", keep.len(), ev.tools.len());
+            if format == "plugin" {
+                return out(json!({"answer": keep, "reason": format!("{who}: {note}")}), note);
+            }
+            out(json!({"hookSpecificOutput": {"hookEventName": "BeforeToolSelection", "toolConfig": {"allowedFunctionNames": keep}}}), note)
+        }
     }
 }
+
+// --------------------------------------------------------------------------- //
+// Plugins: for harnesses whose hooks are code (Amp, OpenCode, Pi)
+// --------------------------------------------------------------------------- //
+
+/// Amp (`~/.config/amp/plugins/hlock-deciders.ts`, run by Bun): `tool.call` for
+/// `approve`, `agent.end` for `stop`.
+pub const AMP_PLUGIN: &str = r#"// Written by `hlock sync` for the decision models in harness.lock; hlock rewrites or
+// removes it. It asks `hlock decide hook`, which says nothing when it isn't sure.
+const BIN = __BIN__, LOCK = __LOCK__, USES = __USES__;
+
+async function ask(amp, use, payload) {
+  try {
+    const r = await amp.$`${BIN} decide hook ${use} --format plugin --lock ${LOCK} --input ${JSON.stringify(payload)}`;
+    const out = String(r?.stdout ?? "").trim();
+    return out ? JSON.parse(out) : {};
+  } catch {
+    return {};
+  }
+}
+
+function lastText(messages) {
+  for (const m of [...(messages ?? [])].reverse()) {
+    if (m?.role !== "assistant") continue;
+    if (typeof m.content === "string") return m.content;
+    if (Array.isArray(m.content)) return m.content.map((b) => b?.text ?? "").join("\n");
+  }
+  return "";
+}
+
+export default function (amp) {
+  if (USES.includes("approve")) {
+    amp.on("tool.call", async (event) => {
+      const d = await ask(amp, "approve", { event: "tool", tool: event?.tool, input: event?.input });
+      if (d.answer === "deny") return { action: "reject-and-continue", message: d.reason ?? "refused by hlock" };
+      if (d.answer === "allow") return { action: "allow" };
+      return undefined;
+    });
+  }
+  if (USES.includes("stop")) {
+    amp.on("agent.end", async (event) => {
+      if (event?.status !== "done") return undefined;
+      const d = await ask(amp, "stop", { event: "stop", request: event?.message ?? "", last_message: lastText(event?.messages) });
+      if (d.answer === "continue") return { action: "continue", userMessage: d.reason, maxContinuations: 1 };
+      return undefined;
+    });
+  }
+}
+"#;
+
+/// OpenCode (`~/.config/opencode/plugins/hlock-deciders.js`, run by Bun):
+/// `tool.execute.before` for `approve`, which can only refuse a call.
+pub const OPENCODE_PLUGIN: &str = r#"// Written by `hlock sync` for the decision models in harness.lock; hlock rewrites or
+// removes it. It asks `hlock decide hook`, which says nothing when it isn't sure.
+const BIN = __BIN__, LOCK = __LOCK__, USES = __USES__;
+
+async function ask($, use, payload) {
+  try {
+    const out = (await $`${BIN} decide hook ${use} --format plugin --lock ${LOCK} --input ${JSON.stringify(payload)}`.quiet().nothrow().text()).trim();
+    return out ? JSON.parse(out) : {};
+  } catch {
+    return {};
+  }
+}
+
+export const HlockDeciders = async ({ $ }) => ({
+  "tool.execute.before": async (input, output) => {
+    if (!USES.includes("approve")) return;
+    const d = await ask($, "approve", { event: "tool", tool: input?.tool, input: output?.args });
+    if (d.answer === "deny") throw new Error(d.reason ?? "refused by hlock");
+  },
+});
+"#;
+
+/// Pi (`~/.pi/agent/extensions/hlock-deciders.ts`, run by Node): `tool_call` for
+/// `approve`, which can only refuse a call.
+pub const PI_EXTENSION: &str = r#"// Written by `hlock sync` for the decision models in harness.lock; hlock rewrites or
+// removes it. It asks `hlock decide hook`, which says nothing when it isn't sure.
+import { spawnSync } from "node:child_process";
+
+const BIN = __BIN__, LOCK = __LOCK__, USES = __USES__;
+
+function ask(use, payload) {
+  try {
+    const r = spawnSync(BIN, ["decide", "hook", use, "--format", "plugin", "--lock", LOCK, "--input", JSON.stringify(payload)], { encoding: "utf8", timeout: 10000 });
+    const out = (r.stdout ?? "").trim();
+    return out ? JSON.parse(out) : {};
+  } catch {
+    return {};
+  }
+}
+
+export default function (pi) {
+  if (!USES.includes("approve")) return;
+  pi.on("tool_call", async (event) => {
+    const d = ask("approve", { event: "tool", tool: event?.toolName ?? event?.tool ?? event?.name, input: event?.input ?? event?.args });
+    if (d.answer === "deny") return { block: true, reason: d.reason ?? "refused by hlock" };
+    return undefined;
+  });
+}
+"#;

@@ -34,15 +34,35 @@ Changed from the design below:
   a decision model through it.
 - Drafting skips requests whose result clearly can't be checked; there's no `--strict`.
 
-Not built yet:
+Built in the second round (`feat/deciders-2`):
 
-- Hooks for Gemini CLI, Cursor, Copilot, Amp, OpenCode and Pi; questions for `route` and
-  `tool` (they're simulated on the reference harness and passed to code harnesses only).
-- Pi's classifier models in `pin`.
-- The meta jobs' other uses (§9: `install`, `update`, `stop` and risk notes for the
-  built-in agent) and `meta init` offering a decider.
-- `upgrade` across decider versions, decider cost in the evidence, tuning thresholds, and
-  the Python shim's `hlock.decide(use, state)`.
+- Hooks for Gemini CLI (`approve` on `BeforeTool`, `stop` on `AfterAgent`, `tool` on
+  `BeforeToolSelection`), Cursor (`approve` on `preToolUse`), and Copilot CLI (`approve`,
+  deny only, in the repository's `.github/hooks/hlock.json`, the only place Copilot reads
+  hooks). Hooks name their event (`--event`).
+- Plugins hlock writes and owns for Amp (`tool.call`, `agent.end`), OpenCode
+  (`tool.execute.before`, refuse only) and Pi (`tool_call`, refuse only). They run `hlock
+  decide hook --format plugin` and are tested by loading them in Node with a stand-in for
+  each plugin API, not inside the harnesses.
+- Questions for `route` (a choice over model roles) and `tool` (a yes/no per tool); code
+  harnesses ask through `ctx.decide` in the entry shim, with `HLOCK_DECIDE_LOCK` and
+  `HLOCK_BIN` (a lock of just the trial's deciders during `resolve`).
+- The meta harness's other uses (§9): `install` verify says whose move each missing step
+  is, `update` verify flags changes that may break something, and the built-in agent gets
+  a `stop` check (at most two more turns) and a risk note when you're asked about a
+  command.
+- `upgrade` across decider versions (a table of known versions), judge cost in
+  `[evidence.judge]`, and `min-probability` lists that `resolve` searches.
+
+Not built, and why:
+
+- Pi's classifier models in `pin`: they're built-in providers Pi reaches with your keys,
+  not configuration, so there's nothing to record.
+- `stop` for Cursor (its `stop` event carries no message to judge), Copilot and OpenCode
+  (no event that can continue the agent), and Pi (its continuation API isn't documented).
+- Goose: no hook a decider can answer.
+- Decider cost for the agent's own deciders in the evidence: hooks run inside the
+  harness, outside the trial's accounting.
 
 ## 1. Summary
 

@@ -769,14 +769,18 @@ def decide_ask(state: str, nouls, choices, scores, model: str | None, use_: str 
 
 
 @decide.command("hook")
-@click.argument("use_", metavar="USE", type=click.Choice(["approve", "stop"]))
-@click.option("--format", "fmt", required=True, type=click.Choice(["claude-code", "codex"]), help="The harness's hook format.")
+@click.argument("use_", metavar="USE", type=click.Choice(["approve", "stop", "route", "tool"]))
+@click.option("--format", "fmt", required=True,
+              type=click.Choice(["claude-code", "codex", "gemini", "cursor", "copilot", "plugin"]),
+              help="The harness's hook format; [key]plugin[/] for the plugins hlock writes.")
+@click.option("--event", default=None, help="The harness event the hook is registered for.  [dim]\\[default: the input's hook_event_name][/]")
+@click.option("--input", "input_", default=None, metavar="JSON", help="The event, instead of reading it from stdin.")
 @click.option("--verbose", "-v", is_flag=True, help="Say what happened on stderr.")
-def decide_hook(use_: str, fmt: str, verbose: bool) -> None:
-    """Answer one harness hook event on stdin with the lock's decider for USE (the lock
-    is the global [cmd]--lock[/], which [cmd]hlock sync[/] writes into the hook). It
-    defers, printing nothing, when it's unsure, slow, or can't reach the model."""
-    out = json.loads(_decide_hook(use_, fmt, sys.stdin.read(), _l()))
+def decide_hook(use_: str, fmt: str, event: str | None, input_: str | None, verbose: bool) -> None:
+    """Answer one harness hook event with the lock's decider for USE (the lock is the
+    global [cmd]--lock[/], which [cmd]hlock sync[/] writes into the hook). It defers,
+    printing nothing, when it's unsure, slow, or can't reach the model."""
+    out = json.loads(_decide_hook(use_, fmt, input_ if input_ is not None else sys.stdin.read(), _l(), event=event))
     if verbose or os.environ.get("HLOCK_DECIDE_VERBOSE"):
         print(f"hlock decide hook {use_}: {out['note']}", file=sys.stderr)
     if out["stdout"]:
@@ -2564,8 +2568,14 @@ def meta_agent_cmd(prompt: str, meta_lock: str | None, headless: bool) -> None:
     """Run hlock's built-in agent on PROMPT (what [cmd]hlock meta run[/] starts)."""
     interactive = not headless and sys.stdin.isatty()
 
+    notes: list[str] = []
+
     def say(kind: str, text: str) -> bool:
-        if kind == "text":
+        if kind == "note":
+            notes.append(text)  # shown with the next question, or now
+            if not interactive:
+                console.print(Text("  " + notes.pop(), style="muted"), soft_wrap=True)
+        elif kind == "text":
             console.print(Text(text))
         elif kind == "tool":
             console.print(Text.assemble(("→ ", "brand"), (text, "cmd")), soft_wrap=True)
@@ -2579,6 +2589,8 @@ def meta_agent_cmd(prompt: str, meta_lock: str | None, headless: bool) -> None:
 
     def ask(command: str) -> str:
         console.print(Text.assemble(("? ", "warn"), "the agent wants to run ", (command, "cmd")), soft_wrap=True)
+        while notes:
+            console.print(Text("  " + notes.pop(0), style="muted"), soft_wrap=True)
         try:
             return click.prompt("  run it? (y)es, (n)o, (a)lways for this program", default="y",
                                 type=click.Choice(["y", "n", "a"]), show_choices=False)

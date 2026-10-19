@@ -195,16 +195,22 @@ hlock decide ask STATE [--noul TEXT]... [--choice "Q=A,B"]... [--score "Q=L0|L1|
 
 ### `decide hook`
 
-Answer one harness hook event on stdin with the lock's decider for `USE` (`approve` or
-`stop`), in the harness's format (`claude-code` or `codex`). [`sync`](#sync) writes this
-command into the harness's config, with the lock as the global `--lock`. It prints the
-harness's own answer when the decider is sure enough and `may` allows it, and otherwise
-prints nothing, so the harness does what it would have done. It always exits `0`.
-`-v` (or `HLOCK_DECIDE_VERBOSE=1`) says what happened on stderr.
+Answer one harness hook event with the lock's decider for `USE` (`approve`, `stop`,
+`route` or `tool`), in the harness's format. [`sync`](#sync) writes this command into the
+harness's config (or a plugin that runs it), with the lock as the global `--lock`. It
+prints the harness's own answer when the decider is sure enough and `may` allows it, and
+otherwise prints nothing, so the harness does what it would have done. It always exits `0`.
 
 ```bash
-hlock decide hook USE --format claude-code|codex [--lock PATH] [-v]
+hlock decide hook USE --format FORMAT [--event EVENT] [--input JSON] [--lock PATH] [-v]
 ```
+
+| Option | Description |
+|---|---|
+| `--format` | `claude-code`, `codex`, `gemini`, `cursor`, `copilot`, or `plugin`: `{"answer": …, "reason": …}`, which the Amp, OpenCode and Pi plugins and code harnesses read |
+| `--event` | The harness event the hook is registered for. Default: the input's `hook_event_name`. |
+| `--input` | The event as JSON, instead of on stdin |
+| `-v` | Say what happened on stderr (also `HLOCK_DECIDE_VERBOSE=1`) |
 
 ## `resolve`
 

@@ -137,7 +137,7 @@ harness expands references everywhere hlock writes secrets in that file. See
 | `packages` | Packages to pin for code harnesses, e.g. `pypi:pydantic-ai` |
 | `framework` | For `custom` harnesses: a framework profile to inherit packages from |
 | `run` | For code harnesses: `entrypoint`, `command`, `python`, `env` |
-| `deciders.<use>` | How a [decision model](deciders.md) for `approve` or `stop` reaches the harness: `hook = { file, events, format, pointer }` (a hook hlock writes into the profile file `file`, under `pointer`, default `/hooks`, in the `claude-code` or `codex` format), or `native = { file, pointer, provider-key, model-key, base-url-key }` (a setting of the harness's own that `pin` records) |
+| `deciders.<use>` | How a [decision model](deciders.md) for `approve`, `stop`, `route` or `tool` reaches the harness. `hook = { file, events, format, pointer }`: hooks merged into the profile file `file`, under `pointer` (default `/hooks`). `hook = { path, events, format }`: a file at `path` instead, merged into (`cursor`) or written whole and owned by hlock (`copilot`, and the plugin formats `amp`, `opencode`, `pi`). Formats: `claude-code`, `codex`, `gemini`, `cursor`, `copilot`, `amp`, `opencode`, `pi`. `native = { file, pointer, provider-key, model-key, base-url-key }`: a setting of the harness's own that `pin` records |
 | `decider-env` | Frameworks: pairs of variables their own decision-model support reads a System One endpoint and key from, e.g. `[["SYSTEM_ONE_BASE_URL", "SYSTEM_ONE_API_KEY"]]` |
 
 ## A runtime profile

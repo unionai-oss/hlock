@@ -49,19 +49,23 @@ preferred first. A lock records which one the installed copy came from, and
 
 ### What hlock captures
 
+**Deciders** are the [decision-model](../guides/deciders.md) uses hlock can wire into the
+harness: through hooks in its config, a plugin hlock writes, or, when recorded, a setting
+of the harness's own that `pin` reads.
+
 <!-- generated:capture -->
-| Harness | Model | Providers | MCP servers | Skills | Plugins | Instructions | `localize` |
-|---|---|---|---|---|---|---|---|
-| Claude Code | ✓ | — | ✓ | ✓ | plugins | `CLAUDE.md`, `.claude/CLAUDE.md` | with `--harness` |
-| Codex CLI | ✓ | ✓ | ✓ | ✓ | — | `AGENTS.md`, `AGENTS.override.md` | ✓ |
-| Pi | ✓ | ✓ | ✓ | ✓ | packages | `AGENTS.md`, `CLAUDE.md` | ✓ |
-| OpenCode | ✓ | ✓ | ✓ | ✓ | plugins | `AGENTS.md`, `CLAUDE.md` | ✓ |
-| Hermes Agent | ✓ | — | ✓ | ✓ | — | `AGENTS.md`, `.hermes.md` | ✓ |
-| Cursor Agent | ✓ | — | ✓ | ✓ | — | `AGENTS.md`, `CLAUDE.md`, `.cursorrules` | — |
-| Gemini CLI | ✓ | — | ✓ | ✓ | — | `GEMINI.md`, `AGENTS.md` | — |
-| GitHub Copilot CLI | ✓ | — | ✓ | ✓ | — | `AGENTS.md`, `.github/copilot-instructions.md` | — |
-| Goose | ✓ | — | ✓ | ✓ | — | `.goosehints`, `AGENTS.md` | ✓ |
-| Amp | — | — | ✓ | ✓ | — | `AGENTS.md` | — |
+| Harness | Model | Providers | MCP servers | Skills | Plugins | Instructions | `localize` | Deciders |
+|---|---|---|---|---|---|---|---|---|
+| Claude Code | ✓ | — | ✓ | ✓ | plugins | `CLAUDE.md`, `.claude/CLAUDE.md` | with `--harness` | approve, stop (hooks) |
+| Codex CLI | ✓ | ✓ | ✓ | ✓ | — | `AGENTS.md`, `AGENTS.override.md` | ✓ | approve, stop (hooks) |
+| Pi | ✓ | ✓ | ✓ | ✓ | packages | `AGENTS.md`, `CLAUDE.md` | ✓ | approve (plugin) |
+| OpenCode | ✓ | ✓ | ✓ | ✓ | plugins | `AGENTS.md`, `CLAUDE.md` | ✓ | approve (plugin) |
+| Hermes Agent | ✓ | — | ✓ | ✓ | — | `AGENTS.md`, `.hermes.md` | ✓ | approve (recorded) |
+| Cursor Agent | ✓ | — | ✓ | ✓ | — | `AGENTS.md`, `CLAUDE.md`, `.cursorrules` | — | approve (hooks) |
+| Gemini CLI | ✓ | — | ✓ | ✓ | — | `GEMINI.md`, `AGENTS.md` | — | approve, stop, tool (hooks) |
+| GitHub Copilot CLI | ✓ | — | ✓ | ✓ | — | `AGENTS.md`, `.github/copilot-instructions.md` | — | approve (hooks) |
+| Goose | ✓ | — | ✓ | ✓ | — | `.goosehints`, `AGENTS.md` | ✓ | — |
+| Amp | — | — | ✓ | ✓ | — | `AGENTS.md` | — | approve, stop (plugin) |
 <!-- /generated:capture -->
 
 - **Model**: the configured model, which `pin` records and `launch` passes to the harness.

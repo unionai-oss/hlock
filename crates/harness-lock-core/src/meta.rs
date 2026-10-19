@@ -898,6 +898,55 @@ impl Verdict {
     }
 }
 
+/// The decision model the meta harness's checks ask: `[deciders.default]` in
+/// `harness.meta.toml`, else the project's.
+fn meta_decider(meta: Option<&MetaManifest>, input: &JobInput) -> Result<Option<crate::decide::DeciderConfig>> {
+    if let Some(d) = meta.map(MetaManifest::default_decider).transpose()?.flatten() {
+        return Ok(Some(d));
+    }
+    Ok(input.manifest.as_ref().and_then(|m| m.deciders().ok()).and_then(|d| d.get("default").and_then(|s| s.model.clone().map(|m| s.config(&m)))))
+}
+
+/// Whose move a missing install step is, as a decision model reads it.
+fn whose_move(cfg: &crate::decide::DeciderConfig, step: &sync::Step) -> Option<String> {
+    let var = |k: &str| std::env::var(k).ok();
+    let ep = cfg.endpoint(&var).ok()?;
+    let q = crate::decide::Question::choice(
+        "whose",
+        "This setup step is still missing on this machine. What does it take to finish it?",
+        &[
+            ("an agent", "a command an agent can run: install a package, start a service"),
+            ("the network", "a download or a connection that didn't work"),
+            ("permissions", "elevated permissions: sudo, an administrator"),
+            ("you", "a person: a login, a secret, a license, or a choice"),
+        ],
+    );
+    let state = json!({"step": step.title, "why": step.reason, "suggested_command": step.command});
+    let d = crate::decide::decide(&ep, &state, &[q]).ok()?;
+    let a = d.answers.first()?;
+    Some(format!("needs {} (P={:.2})", a.value.as_str()?, a.probability()))
+}
+
+/// Which changes since a pinned lock a decision model reads as risky to a working setup.
+fn risky_changes(cfg: &crate::decide::DeciderConfig, diff: &[String]) -> Vec<String> {
+    let var = |k: &str| std::env::var(k).ok();
+    let Ok(ep) = cfg.endpoint(&var) else { return vec![] };
+    let qs: Vec<crate::decide::Question> = diff
+        .iter()
+        .enumerate()
+        .map(|(i, _)| crate::decide::Question::noul(&format!("c{i}"), "This change to an agent's setup could break something that works: a new major version, a removed or renamed component, or a changed default."))
+        .collect();
+    let mut out = Vec::new();
+    // one question per change, each about its own line
+    for (i, line) in diff.iter().enumerate() {
+        let Ok(d) = crate::decide::decide(&ep, &json!({"change": line}), std::slice::from_ref(&qs[i])) else { break };
+        if let Some(p) = d.answers.first().map(|a| a.probability()).filter(|p| *p >= 0.5) {
+            out.push(format!("warning: may break something: {} (P={p:.2})", line.trim()));
+        }
+    }
+    out
+}
+
 /// Ask a decision model about each task: does its prompt stand alone, do its graders
 /// check what it asks, and does its solution do it. Advisory: warnings, never errors.
 fn review_tasks(pack: &EvalPack, cfg: &crate::decide::DeciderConfig) -> Vec<String> {
@@ -957,6 +1006,13 @@ pub fn verify(job: &str, input: &JobInput, meta: Option<&MetaManifest>, reg: &Re
             let mut v = if !steps.is_empty() {
                 let mut v = Verdict::new(job, "failed", format!("{} step{} still missing", steps.len(), if steps.len() == 1 { "" } else { "s" }));
                 v.details = steps.iter().map(|st| format!("{}{}", st.title, if st.reason.is_empty() { String::new() } else { format!(" ({})", st.reason) })).collect();
+                if let Some(cfg) = meta_decider(meta, input)? {
+                    for (line, st) in v.details.iter_mut().zip(&steps) {
+                        if let Some(whose) = whose_move(&cfg, st) {
+                            line.push_str(&format!(" — {whose}"));
+                        }
+                    }
+                }
                 v
             } else if !secrets.is_empty() {
                 Verdict::new(job, "needs-you", format!("installed; {} secret{} left for you to set", secrets.len(), if secrets.len() == 1 { "" } else { "s" }))
@@ -989,11 +1045,7 @@ pub fn verify(job: &str, input: &JobInput, meta: Option<&MetaManifest>, reg: &Re
                 v
             };
             v.details.extend(issues.iter().filter(|i| i.level != "error").map(line));
-            let decider = match meta.map(MetaManifest::default_decider).transpose()?.flatten() {
-                Some(d) => Some(d),
-                None => input.manifest.as_ref().and_then(|m| m.deciders().ok()).and_then(|d| d.get("default").and_then(|s| s.model.clone().map(|m| s.config(&m)))),
-            };
-            if let Some(cfg) = decider {
+            if let Some(cfg) = meta_decider(meta, input)? {
                 v.details.extend(review_tasks(&pack, &cfg));
             }
             if input.count > 0 && n < input.count && v.status == "verified" {
@@ -1012,6 +1064,9 @@ pub fn verify(job: &str, input: &JobInput, meta: Option<&MetaManifest>, reg: &Re
             } else {
                 Verdict::new(job, "verified", format!("{} change{} since {}", diff.len(), if diff.len() == 1 { "" } else { "s" }, input.show(&input.lock_path)))
             };
+            if let (false, Some(cfg)) = (diff.is_empty(), meta_decider(meta, input)?) {
+                v.details.extend(risky_changes(&cfg, &diff));
+            }
             v.diff = diff;
             Ok(v)
         }

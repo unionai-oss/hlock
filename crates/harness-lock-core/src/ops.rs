@@ -99,6 +99,17 @@ pub fn plan_upgrade(lock: Option<&Lockfile>, manifest: &Manifest, spec: &Upgrade
             entries.push(serde_json::json!({"role": role, "from": model, "to": t}));
         }
     }
+    // deciders: a newer version of the same model
+    for d in lock.map(|l| l.decider.as_slice()).unwrap_or_default() {
+        if let Some(t) = crate::decide::newer_version(&d.provider, &d.model) {
+            entries.push(serde_json::json!({
+                "role": format!("decider · {}", d.use_),
+                "decider": d.use_,
+                "from": format!("{}:{}", d.provider, d.model),
+                "to": format!("{}:{t}", d.provider),
+            }));
+        }
+    }
     serde_json::json!({"upgradeable": entries})
 }
 
@@ -155,23 +166,37 @@ pub fn upgrade(manifest: Manifest, spec: &UpgradeSpec) -> Result<UpgradeOutcome>
         return Ok(outcome);
     }
 
-    // ---- apply: derive a manifest targeting the upgraded planner ----
-    let target = upgradeable[0].get("to").and_then(serde_json::Value::as_str).unwrap_or(latest_model()).to_string();
-    let spec_str = "reference:".to_string() + &target;
+    // ---- apply: derive a manifest targeting the upgraded planner and deciders ----
+    let (decider_ups, llm_ups): (Vec<&serde_json::Value>, Vec<&serde_json::Value>) = upgradeable.iter().partition(|e| e.get("decider").is_some());
+    let target = llm_ups.first().and_then(|e| e.get("to")).and_then(serde_json::Value::as_str).map(str::to_string);
+
     if lock_path.exists() {
         std::fs::copy(&lock_path, &prev_path)?; // keep harness.lock.prev for --rollback
     }
     let mut derived = manifest.clone();
     let mut cand = crate::manifest::Candidates::default();
     cand.llm = manifest.candidates.llm.clone();
-    cand.llm
-        .entry("planner".to_string())
-        .and_modify(|c| c.any_of = vec![spec_str.clone()])
-        .or_insert(crate::manifest::LLMCandidate { any_of: vec![spec_str.clone()] });
+    if let Some(t) = &target {
+        // only a planner upgrade changes the planner; a decider-only upgrade keeps it
+        let spec_str = format!("reference:{t}");
+        cand.llm
+            .entry("planner".to_string())
+            .and_modify(|c| c.any_of = vec![spec_str.clone()])
+            .or_insert(crate::manifest::LLMCandidate { any_of: vec![spec_str] });
+    }
     cand.decision = manifest.candidates.decision.clone();
     cand.harness = manifest.candidates.harness.clone();
     cand.policy = manifest.candidates.policy.clone();
     derived.candidates = cand;
+    for e in &decider_ups {
+        let (Some(use_), Some(to)) = (e["decider"].as_str(), e["to"].as_str()) else { continue };
+        let mut spec = derived.deciders.get(use_).cloned().unwrap_or_else(|| serde_json::json!({}));
+        if let Some(m) = spec.as_object_mut() {
+            m.remove("any-of");
+            m.insert("model".into(), serde_json::json!(to));
+        }
+        derived.deciders.insert(use_.to_string(), spec);
+    }
 
     let mut resolver = Resolver::new(derived, &spec.workdir);
     let new_lock = resolver.resolve_lock()?;
@@ -194,8 +219,10 @@ pub fn upgrade(manifest: Manifest, spec: &UpgradeSpec) -> Result<UpgradeOutcome>
         return Ok(outcome);
     }
     outcome.applied = true;
+    let what: Vec<String> = target.iter().map(|t| format!("planner to {t}")).chain(decider_ups.iter().map(|e| format!("the {} decider to {}", e["decider"].as_str().unwrap_or("?"), e["to"].as_str().unwrap_or("?")))).collect();
     outcome.message = format!(
-        "upgraded planner to {target}: success-rate {:.2} -> {:.2}. previous lock kept at harness.lock.prev.",
+        "upgraded {}: success-rate {:.2} -> {:.2}. previous lock kept at harness.lock.prev.",
+        what.join(" and "),
         before.unwrap_or(0.0),
         after
     );

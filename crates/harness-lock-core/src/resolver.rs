@@ -41,6 +41,9 @@ struct JudgeTally {
     answered: std::collections::BTreeSet<String>,
     grades: usize,
     uncertain: usize,
+    /// Trials with judge grades, and what their judging cost (`None` once a price is unknown).
+    trials: usize,
+    cost: Option<f64>,
 }
 
 impl Resolver {
@@ -155,7 +158,19 @@ impl Resolver {
                 eprintln!("warn: {harness} can't make {use_} decisions; [deciders.{use_}] is left out of its stacks");
                 continue;
             }
-            let options: Vec<String> = spec.model.iter().cloned().chain(spec.any_of.iter().cloned()).collect();
+            // each model, at each `min-probability` candidate
+            let models: Vec<String> = spec.model.iter().cloned().chain(spec.any_of.iter().cloned()).collect();
+            let options: Vec<String> = models
+                .iter()
+                .flat_map(|m| {
+                    spec.thresholds().into_iter().map(move |t| match t {
+                        Some(p) if m != "none" => format!("{m}@{p}"),
+                        _ => m.clone(),
+                    })
+                })
+                .collect::<std::collections::BTreeSet<_>>()
+                .into_iter()
+                .collect();
             combos = combos
                 .into_iter()
                 .flat_map(|c| {
@@ -209,6 +224,11 @@ impl Resolver {
                 if let Some(j) = pack.and_then(|p| p.judge_for(&opts)) {
                     tally.configured.insert(j.model);
                 }
+            }
+            if !judged.is_empty() {
+                let cost = judged.iter().map(|g| g.cost_usd).sum::<Option<f64>>();
+                tally.cost = if tally.trials == 0 { cost } else { tally.cost.zip(cost).map(|(a, b)| a + b) };
+                tally.trials += 1;
             }
             tally.grades += judged.len();
             tally.uncertain += judged.iter().filter(|g| g.uncertain).count();
@@ -405,6 +425,7 @@ impl Resolver {
             protocol,
             fallback: self.manifest.judge().and_then(|j| j.fallback),
             uncertain_grades: decider.then(|| roundf(t.uncertain as f64 / t.grades as f64)),
+            cost_usd_per_task: t.cost.filter(|_| t.trials > 0).map(|c| (c / t.trials as f64 * 1e8).round() / 1e8),
         })
     }
 
