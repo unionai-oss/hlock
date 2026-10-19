@@ -36,10 +36,8 @@ sets in the processes it spawns. `source` is how the installed copy was installe
 what a lock pins. `full` profiles are covered by tests for every harness-aware command;
 `basic` ones cover detection, version, MCP servers and skills.
 
-| Kind | Harnesses |
-|---|---|
-| Agent CLIs | `claude-code` (`claude`), `codex`, `pi`, `opencode`, `hermes`, `cursor-agent` (`cursor`), `gemini-cli`, `copilot-cli`, `goose`, `amp` |
-| Frameworks | `pydantic-ai`, `deepagents`, `langgraph`, `openai-agents`, `claude-agent-sdk`, `google-adk`, `smolagents`, `crewai` |
+[Supported harnesses](../reference/harnesses.md) lists every built-in harness, framework
+and runtime, and what hlock captures from each.
 
 `hlock harness show <name>` prints a profile and the exact paths it resolves to here:
 
@@ -192,4 +190,5 @@ directory is on `PYTHONPATH`.
 
 ## Add a harness hlock doesn't know
 
-Write a profile. See [Harness profiles](harness-profiles.md).
+Write a profile. See [Harness profiles](harness-profiles.md), and
+[Add a harness](../reference/harnesses.md#add-a-harness) for how to try it and contribute it.

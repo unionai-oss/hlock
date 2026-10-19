@@ -174,4 +174,5 @@ Agents you write yourself don't need a profile file: declare them under
 They accept every harness-profile field, plus `entrypoint`, `command`, `python` and `env` at
 the top level of the table.
 
-If you write a profile for a harness others use, please contribute it.
+If you write a profile for a harness others use, please contribute it; see
+[Add a harness](../reference/harnesses.md#add-a-harness).

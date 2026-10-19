@@ -54,6 +54,7 @@ nav = [
   ] },
   { "Reference" = [
     "reference/cli.md",
+    "reference/harnesses.md",
     "reference/python-api.md",
     "reference/rust-api.md",
     "reference/manifest.md",

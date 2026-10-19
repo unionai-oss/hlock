@@ -45,6 +45,9 @@ $ hlock --version
 hlock, version 0.1.2
 ```
 
+hlock works with Claude Code, Codex, Pi, OpenCode, Cursor, Gemini CLI and more; see
+[Supported harnesses](../reference/harnesses.md).
+
 !!! info "`harness-lock` is an alias for `hlock`"
 
     [`harness-lock`](https://pypi.org/project/harness-lock/) is published as an alias:

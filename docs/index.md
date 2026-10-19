@@ -81,7 +81,7 @@ If you've used `uv`, `cargo`, or `npm`, you already know the shape of `hlock`:
     ---
 
     The harness version, models, MCP servers, skills, plugins, instruction files, and
-    config, each with a digest. [Claude Code, Codex, Pi, OpenCode, and more](guides/harnesses.md).
+    config, each with a digest. [Claude Code, Codex, Pi, OpenCode, and more](reference/harnesses.md).
 
 -   :lucide-key-round:{ .lg .middle } **Secrets stay out**
 
@@ -106,10 +106,32 @@ If you've used `uv`, `cargo`, or `npm`, you already know the shape of `hlock`:
 
 </div>
 
+## Go local
+
+[`hlock localize`](guides/localize.md) turns any lock into an equivalent on an open-source
+harness and models served by a local runtime like Ollama or LM Studio. It's like
+cross-compiling: your MCP servers, skills, and instructions come along. Give it an
+[eval pack](guides/eval-packs.md), and it measures the local candidates against your tasks.
+
+## Let an agent do the busywork
+
+Some jobs need judgment, not a script. [`hlock meta`](guides/meta.md) hands them to an
+agent, the **meta harness**, and checks every result:
+
+- **`install`**: installs what the sync plan leaves to you, then runs `hlock sync --yes`.
+- **`bootstrap-evals`**: fills your eval packs with real tasks from your repo.
+- **`update`**: moves skills, MCP servers, and plugins to their latest releases. `--pin`
+  records it in the lock.
+
+Use the agent built into hlock, or a harness you already have (Pi, Codex, Goose, OpenCode,
+Hermes), on your API key or, with `--local`, open-weight models. It asks before every
+command, or runs `--headless` against an allowlist.
+
 ## Then make it better
 
-Once your harness is locked, you have a baseline to improve on, with tools you'll also
-recognize:
+A locked harness is a baseline. Once your setup is reproducible, you can measure it: every
+lock `hlock resolve` writes records its success rate, cost, and latency on your own tasks.
+The tools will look familiar:
 
 | You know this from | In `hlock` |
 |---|---|
@@ -118,38 +140,24 @@ recognize:
 | `uv lock` | **[`hlock resolve`](guides/resolve.md)**: measure every combination on your evals, and lock the winner with its evidence |
 | `uv lock --upgrade` | **[`hlock upgrade`](guides/upgrade.md)**: try newer models, and keep them only if they hold up |
 | profile-guided optimization | **[`hlock tune`](guides/tune.md)**: tune prompts, hyperparameters, and small models on your evals |
-| cross-compiling | **[`hlock localize`](guides/localize.md)**: the same harness setup, on an open-source harness and local models |
 
 <div class="grid cards" markdown>
 
--   :lucide-flask-conical:{ .lg .middle } **Optimize your harness**
+-   :lucide-flask-conical:{ .lg .middle } **Find the best stack for your tasks**
 
     ---
 
-    Draft an [eval pack](guides/eval-packs.md) from your agent's past sessions, and review
-    it with your agent.
-    [`hlock resolve`](guides/resolve.md) finds the best combination of models, decision
-    models, and harnesses for it, and [`hlock tune`](guides/tune.md) tunes
-    prompts, hyperparameters, and small models. Every lock records its success rate,
-    cost, and latency.
+    Draft an [eval pack](guides/eval-packs.md) from the sessions your agent already
+    logged, list the models and harnesses to try in `harness.toml`, and
+    [`hlock resolve`](guides/resolve.md) locks the winner with its evidence.
 
--   :lucide-house:{ .lg .middle } **Go local**
+-   :lucide-sliders-horizontal:{ .lg .middle } **Tune what's inside**
 
     ---
 
-    [`hlock localize`](guides/localize.md) moves your lock off proprietary harnesses and
-    API models onto an open-source harness and models that run on your machine, keeping
-    your MCP servers, skills, and instructions. Give it an eval pack, and it measures the
-    local candidates against your tasks.
-
--   :lucide-bot:{ .lg .middle } **Delegate the busywork**
-
-    ---
-
-    [`hlock meta`](guides/meta.md) hands work that needs judgment to an agent built into
-    hlock: installing what a lock needs on a new machine, filling in an eval pack,
-    updating skills and MCP servers. It runs on your API key or a local model, and hlock
-    checks every result.
+    [`hlock tune`](guides/tune.md) goes past model choice into prompts, hyperparameters,
+    and fine-tuned small models, on your evals. Run it locally, on a devbox, or lift
+    trials to a Flyte cluster for GPUs with the [`cluster` backend](guides/backends.md).
 
 </div>
 
