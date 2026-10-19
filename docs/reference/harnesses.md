@@ -106,7 +106,8 @@ An agent written from scratch, with no framework, works too: give the project ha
 
 [`hlock localize`](../guides/localize.md) serves local models with these runtimes, and
 [`hlock pin`](../guides/pin.md) recognizes a model provider whose base URL points at one of
-their ports. `hlock runtime list` shows which are installed.
+their ports. `hlock runtime list` shows which are installed. Ollaya serves only
+[decision models](../guides/deciders.md); Ollama serves those (Kev) as well as LLMs.
 
 <!-- generated:runtimes -->
 | Runtime | Name in hlock | Default port |
@@ -120,6 +121,7 @@ their ports. `hlock runtime list` shows which are installed.
 | LocalAI | `localai` (`local-ai`) | `8080` |
 | Docker Model Runner | `docker-model-runner` (`docker-model`, `dmr`) | `12434` |
 | Jan | `jan` | `1337` |
+| Ollaya | `ollaya` | `11435` |
 <!-- /generated:runtimes -->
 
 ## Add a harness

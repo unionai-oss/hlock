@@ -18,6 +18,11 @@
 | `HLOCK_GITLAB_URL` | `https://gitlab.com` | Base URL `gitlab:` sources fetch from (for a self-hosted GitLab) |
 | `HLOCK_META_MANIFEST` | `harness.meta.toml` next to the lock | The [meta harness](../guides/meta.md)'s manifest |
 | `HLOCK_META_LOCK` | `harness.meta.lock` next to the lock | The meta harness's lock |
+| `HLOCK_JUDGE_AUTO` | on | `0` stops hlock from picking a judge (Kev on a local Ollama or Ollaya, or Jev with `TYPESAFE_API_KEY`) when none is set |
+| `HLOCK_BIN` | the `hlock` on `PATH` | The command the hooks `sync` writes for [decision models](../guides/deciders.md) run |
+| `HLOCK_DECIDE_VERBOSE` | unset | `1` makes `hlock decide hook` say what it decided on stderr |
+| `TYPESAFE_API_KEY`, `TYPESAFE_BASE_URL` | unset | TypeSafe's key and endpoint, for `typesafe:` deciders |
+| `OLLAYA_HOST`, `OLLAYA_API_KEY` | `127.0.0.1:11435` | Where Ollaya serves `ollaya:` deciders, and its key if it has one |
 | `HLOCK_META_RESTORE` | set by `hlock meta run` | Inside a meta harness session: the config variables isolation changed, with their original values. `hlock` commands put them back. Don't set it yourself. |
 
 The variables below are used by the worker (the `devbox` and `cluster`

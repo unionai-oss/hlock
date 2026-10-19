@@ -13,6 +13,7 @@ pub mod adapters;
 pub mod agent;
 pub mod capture;
 pub mod contract;
+pub mod decide;
 pub mod launch;
 pub mod localize;
 pub mod error;

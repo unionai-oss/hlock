@@ -29,6 +29,18 @@ pub struct Resolver {
     pub harness_override: Option<String>,
     /// Code harnesses (`[harnesses.<id>]`) that trials run through their entrypoint.
     code_harnesses: BTreeMap<String, crate::profiles::HarnessProfile>,
+    /// Profiles of the candidate harnesses, for how each reaches a decider.
+    profiles: BTreeMap<String, crate::profiles::HarnessProfile>,
+    /// What judged the trials: answered models, and how many grades were uncertain.
+    judging: std::cell::RefCell<JudgeTally>,
+}
+
+#[derive(Default)]
+struct JudgeTally {
+    configured: std::collections::BTreeSet<String>,
+    answered: std::collections::BTreeSet<String>,
+    grades: usize,
+    uncertain: usize,
 }
 
 impl Resolver {
@@ -58,6 +70,8 @@ impl Resolver {
             holdout: Vec::new(),
             harness_override: None,
             code_harnesses: BTreeMap::new(),
+            profiles: BTreeMap::new(),
+            judging: Default::default(),
         }
     }
 
@@ -100,11 +114,13 @@ impl Resolver {
             c.decision.clone()
         };
         let harnesses = harness_combos(&c.harness);
+        let specs = self.manifest.deciders().unwrap_or_default();
 
         let mut stacks = Vec::new();
         for llm in &llm_combos {
             for decision in &decisions {
                 for (harness, pattern) in &harnesses {
+                  for deciders in self.decider_combos(&specs, harness) {
                     stacks.push(Stack {
                         llm: llm.clone(),
                         harness: harness.clone(),
@@ -118,7 +134,9 @@ impl Resolver {
                         retries: policy_axis(&self.manifest.candidates.policy, "retries", 0),
                         temperature: policy_axis_float(&self.manifest.candidates.policy, "temperature"),
                         tool_timeout_seconds: None,
+                        deciders,
                     });
+                  }
                 }
             }
         }
@@ -128,6 +146,32 @@ impl Resolver {
         stacks
     }
 
+    /// Every combination of the agent-side deciders `harness` can use: a fixed `model`,
+    /// or each of `any-of` (`none` leaves the use out).
+    fn decider_combos(&self, specs: &BTreeMap<String, crate::decide::DeciderSpec>, harness: &str) -> Vec<BTreeMap<String, String>> {
+        let mut combos = vec![BTreeMap::new()];
+        for (use_, spec) in specs.iter().filter(|(u, _)| crate::decide::AGENT_USES.contains(&u.as_str())) {
+            if crate::decide::wiring(use_, harness, self.profiles.get(harness)).is_none() {
+                eprintln!("warn: {harness} can't make {use_} decisions; [deciders.{use_}] is left out of its stacks");
+                continue;
+            }
+            let options: Vec<String> = spec.model.iter().cloned().chain(spec.any_of.iter().cloned()).collect();
+            combos = combos
+                .into_iter()
+                .flat_map(|c| {
+                    options.iter().map(move |o| {
+                        let mut c = c.clone();
+                        if o != "none" {
+                            c.insert(use_.clone(), o.clone());
+                        }
+                        c
+                    })
+                })
+                .collect();
+        }
+        combos
+    }
+
     /// Run one trial (copying fixtures, running the harness, grading).
     pub fn run_trial(&self, stack: &Stack, task: &crate::tasks::Task, seed: u64, ws_root: &Path) -> TrialResult {
         let ws = ws_root.join(format!("{}_{}_{}", &stack.hash()[..10.min(stack.hash().len())], task.id, seed));
@@ -135,7 +179,9 @@ impl Resolver {
         let _ = std::fs::create_dir_all(&ws);
 
         let outcome = match self.code_harnesses.get(&stack.harness) {
-            Some(p) => crate::contract::CommandAdapter::new(p.clone(), Ctx::from_process()).run(stack, task, &ws, seed),
+            Some(p) => crate::contract::CommandAdapter::new(p.clone(), Ctx::from_process())
+                .with_deciders(self.manifest.deciders().unwrap_or_default())
+                .run(stack, task, &ws, seed),
             None => self.adapter.run(stack, task, &ws, seed),
         };
         let outcome = outcome.unwrap_or_else(|_| {
@@ -147,12 +193,27 @@ impl Resolver {
                 trace: json!([]),
             }
         });
-        let opts = crate::tasks::GradeOptions { judge: self.manifest.judge(), ..Default::default() };
-        let grades = self
-            .pack_by_task
-            .get(&task.id)
-            .map(|p| p.grade_with(task, &ws, &opts))
-            .unwrap_or_default();
+        let opts = crate::tasks::GradeOptions {
+            judge: self.manifest.judge(),
+            default_judge: self.manifest.default_judge(),
+            auto: true,
+            trace: Some(json!({"events": outcome.trace})),
+            ..Default::default()
+        };
+        let pack = self.pack_by_task.get(&task.id);
+        let grades = pack.map(|p| p.grade_with(task, &ws, &opts)).unwrap_or_default();
+        {
+            let mut tally = self.judging.borrow_mut();
+            let judged: Vec<&crate::tasks::Grade> = grades.iter().filter(|g| g.grader.starts_with("judge:") || g.grader.starts_with("trace:")).collect();
+            if !judged.is_empty() {
+                if let Some(j) = pack.and_then(|p| p.judge_for(&opts)) {
+                    tally.configured.insert(j.model);
+                }
+            }
+            tally.grades += judged.len();
+            tally.uncertain += judged.iter().filter(|g| g.uncertain).count();
+            tally.answered.extend(judged.iter().filter_map(|g| g.judged_by.clone()));
+        }
         let success = outcome.success && grades.iter().all(|g| g.success);
         let score = grades.iter().map(|g| g.score).sum::<f64>() / grades.len().max(1) as f64;
 
@@ -195,6 +256,7 @@ impl Resolver {
             .filter(|h| h.kind == "custom" && (h.run.entrypoint.is_some() || !h.run.command.is_empty()))
             .map(|h| (h.id.clone(), h.clone()))
             .collect();
+        self.profiles = self.manifest.candidates.harness.iter().filter_map(|h| registry.harness(&h.name).map(|p| (h.name.clone(), p.clone()))).collect();
         let search_tasks = self.load_packs();
         let stacks = self.enumerate_stacks();
         let seeds = self.manifest.seeds();
@@ -294,6 +356,7 @@ impl Resolver {
                 decisions: if s.decision == "none" { vec![] } else { vec!["retry".into(), "stop".into()] },
                 ..Default::default()
             },
+            decider: self.lock_deciders(s),
             harness: self.pin_harness(&s.harness, &s.pattern),
             tool: s.tools.iter().map(|t| Tool { name: t.clone(), kind: "builtin".into(), ..Default::default() }).collect(),
             skill: s.skills.iter().map(|sk| Skill { name: sk.clone(), origin: "first-party".into(), editable: true, evidence_digest: Some(String::new()), ..Default::default() }).collect(),
@@ -325,18 +388,44 @@ impl Resolver {
         }
     }
 
-    /// The judge models that scored the packs' `judge` graders, if any have them.
-    fn judge_model(&self) -> Option<String> {
-        let mut models = std::collections::BTreeSet::new();
-        for pack in self.pack_by_task.values() {
-            let judged = pack.tasks.iter().any(|t| t.grader_list().iter().any(|g| matches!(g, Ok(crate::graders::Grader::Judge { .. }))));
-            if judged {
-                if let Some(j) = self.manifest.judge().or_else(|| pack.judge.clone()) {
-                    models.insert(j.model);
-                }
-            }
+    /// The judge that scored the trials' `judge` and `trace` graders, if any ran.
+    fn judge_model(&self) -> Option<crate::lockfile::EvidenceJudge> {
+        let t = self.judging.borrow();
+        if t.grades == 0 {
+            return None;
         }
-        (!models.is_empty()).then(|| models.into_iter().collect::<Vec<_>>().join(","))
+        let model = t.configured.iter().cloned().collect::<Vec<_>>().join(",");
+        let decider = t.configured.iter().all(|m| crate::decide::is_decider(m, None));
+        let protocol = t.configured.iter().next().and_then(|m| crate::decide::split_ref(m)).map(|(p, _)| {
+            crate::decide::PROVIDERS.iter().find(|x| x.0 == p).map(|x| x.1.to_string()).unwrap_or_else(|| if decider { "systemone".into() } else { "chat".into() })
+        });
+        Some(crate::lockfile::EvidenceJudge {
+            model,
+            answered: (!t.answered.is_empty()).then(|| t.answered.iter().cloned().collect::<Vec<_>>().join(",")),
+            protocol,
+            fallback: self.manifest.judge().and_then(|j| j.fallback),
+            uncertain_grades: decider.then(|| roundf(t.uncertain as f64 / t.grades as f64)),
+        })
+    }
+
+    /// The winner's `[[decider]]` entries.
+    fn lock_deciders(&self, s: &Stack) -> Vec<crate::lockfile::Decider> {
+        let specs = self.manifest.deciders().unwrap_or_default();
+        let root = self.manifest.root();
+        s.deciders
+            .iter()
+            .filter_map(|(use_, reference)| {
+                let spec = specs.get(use_)?;
+                let (via, wiring) = crate::decide::wiring(use_, &s.harness, self.profiles.get(&s.harness))?;
+                match crate::decide::lock_entry(use_, reference, spec, &via, wiring, &root) {
+                    Ok(d) => Some(d),
+                    Err(e) => {
+                        eprintln!("warn: {e}");
+                        None
+                    }
+                }
+            })
+            .collect()
     }
 
     /// The `[harness]` table for the winner. A harness with a profile gets the

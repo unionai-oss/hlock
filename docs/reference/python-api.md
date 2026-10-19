@@ -129,15 +129,16 @@ or is in the wrong state.
 ### `check_eval_pack`
 
 ```python
-check_eval_pack(path, run=False, manifest=None) -> str
+check_eval_pack(path, run=False, manifest=None, judges=False) -> str
 ```
 
 Load the [eval pack](../guides/eval-packs.md) at `path` and check it, like
 [`hlock evals check`](cli.md#evals). With `run`, also try its graders on each task's
-fixtures and solution, like `--run`. `manifest` is the path of a `harness.toml` whose
-`[evals.judge]` counts as the judge model. Returns JSON with `name`, `version`, `domain`,
-`path`, `hash`, `tasks` (the task ids), and `issues`, each with `level` (`error` or
-`warn`), `task` (or `None`), and `message`.
+fixtures and solution, like `--run` (decision-model judges included, and LLM judges with
+`judges`). `manifest` is the path of a `harness.toml` whose judge settings apply. Returns
+JSON with `name`, `version`, `domain`, `path`, `hash`, `tasks` (the task ids), `judge`
+(its `model` and whether it's a `decider`, or `None`), and `issues`, each with `level`
+(`error` or `warn`), `task` (or `None`), and `message`.
 
 ```python
 >>> r = json.loads(hl.check_eval_pack("evals", run=True))
@@ -153,14 +154,42 @@ grade_eval_task(path, task, workspace=None, manifest=None) -> str
 
 Grade a copy of `workspace` as the output of `task` in the pack at `path`, like
 [`hlock evals grade`](cli.md#evals-grade); with no `workspace`, the task's solution.
-`manifest` is a `harness.toml` whose `[evals.judge]` scores judge graders. Returns JSON with
-`task`, `workspace`, `success`, `score` (the mean), and `grades`, each with `grader`,
-`success`, `score`, and `detail`.
+`manifest` is a `harness.toml` whose judge settings apply. Returns JSON with `task`,
+`workspace`, `judge`, `success`, `score` (the mean), and `grades`, each with `grader`,
+`success`, `score`, and `detail`, and for judges `parts` (each criterion's `label` and
+`value`), `uncertain`, and `judged_by` (the model that answered).
 
 ```python
 >>> r = json.loads(hl.grade_eval_task("evals", "greet_people", "run"))
 >>> r["success"], round(r["score"], 2), [(g["grader"], g["success"]) for g in r["grades"]]
 (False, 0.67, [('artifact:greetings.md', True), ('tests:greet_people/check.py', False)])
+```
+
+### `calibrate_eval_pack`
+
+```python
+calibrate_eval_pack(path, against, model=None, manifest=None, against_base_url=None) -> str
+```
+
+Compare the pack's judge (or `model`) with `against`, like
+[`hlock evals calibrate`](cli.md#evals-calibrate). Returns JSON with `a`, `b`, `rows`
+(each with `task`, `run`, `grader`, `criterion`, `a`, `b`, and `agree`), and `agreement`.
+
+### Decision models
+
+The functions behind [`hlock decide`](cli.md#decide). Each returns JSON, except
+`decider_drift`.
+
+| Function | Does |
+|---|---|
+| `decide(state, questions, model=None, use_=None, manifest=None)` | Ask `questions` (JSON: a list of `{id, type, instructions, criteria}`, `type` being `noul`, `choice` or `score`) about `state` (JSON, or text). Returns `provider` and `decided`: the `model` that answered, `answers` (each with `id`, `type`, `value`, `probabilities`, `confidence`), `input_tokens`, and `cost_usd`. |
+| `decide_hook(use_, format, input, lock)` | Answer a hook event (JSON) with the lock's decider for `use_`. Returns `stdout`, `exit`, and `note`; it never raises. |
+| `decider_drift(lock)` | A list of what changed in the lock's deciders: hlock's questions, policy files |
+
+```python
+questions = json.dumps([{"id": "urgent", "type": "noul", "instructions": "Is it urgent?"}])
+r = json.loads(hl.decide("My payouts failed for three days.", questions, model="ollama:kev:4b"))
+r["decided"]["answers"][0]["value"]   # P(urgent)
 ```
 
 ### Meta harness
@@ -229,6 +258,7 @@ Budget(max_spend_usd=None, max_trials=None, strategy="grid", random_seed=0)
 | `.backend` | Configured backend target |
 | `.manifest_hash()` | `"sha256:…"` hash, as recorded in the lock |
 | `.eval_packs()` | List of eval pack paths (`.task_packs()` is the old name) |
+| `.decider(use)` | The model `[deciders.<use>]` names, else `[deciders.default]`'s, or `None` |
 | `.to_json()` | The manifest as JSON |
 
 ### `Lockfile`

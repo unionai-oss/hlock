@@ -207,6 +207,34 @@ def test_bootstrap_evals_verify_uses_the_manifest_judge(project, monkeypatch):
     assert r.exit_code == 0 and "judge graders need a model" not in r.output, r.output
 
 
+def test_bootstrap_evals_verify_asks_a_decider_about_each_task(project, monkeypatch):
+    from fake_models import Fake, systemone
+
+    # the prompt is fine; the graders and the solution aren't
+    fake = Fake(lambda path, body: systemone(body, noul=lambda qid, q, b: 0.9 if qid == "alone" else 0.2))
+    try:
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "k")
+        assert invoke("meta", "init", "--harness", "pi").exit_code == 0
+        meta = project["project"] / "harness.meta.toml"
+        meta.write_text(meta.read_text() + f'\n[deciders.default]\nmodel = "system-one:kev-4b"\nbase-url = "{fake.url}"\n')
+        pack = project["project"] / "evals"
+        (pack / "one/solution").mkdir(parents=True)
+        (pack / "one/prompt.md").write_text("Write out.md with the answer.\n")
+        (pack / "one/solution/out.md").write_text("42\n")
+        (pack / "pack.toml").write_text(PACK + 'solution = "one/solution/"\n')
+        r = invoke("meta", "verify", "bootstrap-evals", "--json")
+        assert r.exit_code == 0, r.output
+        details = json.loads(r.output)["details"]
+        assert "warning: one: its graders may not check what the prompt asks for (kev-4b-q8 P=0.20)" in details
+        assert "warning: one: its solution may not do what the prompt asks (kev-4b-q8 P=0.20)" in details
+        assert not any("lean on context" in d for d in details)
+        assert fake.requests[0][1]["state"]["solution"] == {"out.md": "42\n"}
+    finally:
+        fake.close()
+    meta.write_text(meta.read_text() + '\n[deciders.approve]\nmodel = "ollama:kev:4b"\n')
+    assert "the meta harness takes [deciders.default]" in invoke("meta", "verify", "bootstrap-evals").output
+
+
 def test_install_job(project, monkeypatch):
     home = project["home"]
     (home / ".claude/skills/my-skill").mkdir(parents=True)

@@ -185,7 +185,8 @@ strategy = "grid"
 | `[policy]` | `retries`, `max-steps`, `human-approval`, `risky-actions`, `tool-allowlist`, `sandbox` |
 | `[context]` | Context `isolation` and `compaction` settings |
 | `[[tool]]`, `[[skill]]`, `[[instructions]]` | MCP servers, skills, and instruction files, each with a source or digest. A pinned lock fills these in; see below. |
-| `[evidence]` | The eval pack and split measured, the trial count, success-rate, cost, and latency statistics, and the `judge` model when the packs have [`judge` graders](../guides/eval-packs.md#judges) |
+| `[[decider]]` | One per [decision model](../guides/deciders.md) the stack uses (see below) |
+| `[evidence]` | The eval pack and split measured, the trial count, and success-rate, cost, and latency statistics. `[evidence.judge]` records the judge of [`judge` and `trace` graders](../guides/eval-packs.md#judges): its `model`, the model that `answered`, its `protocol`, a `fallback`, and the share of `uncertain-grades`. |
 | `[verify]` | Runtime verification thresholds: `canary-tasks`, `min-success-rate`, `fingerprint-tolerance` |
 | `[provenance]` | The backend that produced the lock, and the search settings |
 
@@ -229,3 +230,19 @@ records.
 
 [`hlock upgrade --apply`](../guides/upgrade.md) saves the previous lock here so
 `hlock upgrade --rollback` can restore it. You can commit it or ignore it.
+
+## `[[decider]]`
+
+| Key | Description |
+|---|---|
+| `use` | What it decides: `approve`, `stop`, `route`, `tool` |
+| `provider`, `model` | The decision model, as the provider names it |
+| `protocol` | `systemone` or `decisions` |
+| `endpoint`, `key-env` | Where it's reached, and the variable its API key is read from |
+| `runtime` | The local runtime serving it (`ollama`, `ollaya`) |
+| `resolved-from` | The `harness.toml` reference it came from, or the harness setting `pin` read |
+| `via` | `hook` (hlock wires it in), `native` (a setting of the harness's own), `env` (code harnesses), `simulated` (the reference harness) |
+| `[[decider.wiring]]` | Where it's wired: the profile's `file` and the harness `event` |
+| `may`, `min-probability`, `timeout-ms` | What it may answer, how sure it must be, how long a hook waits |
+| `questions` | A digest of hlock's questions for the use; a newer hlock with other questions is drift |
+| `[decider.policy]` | The policy file's `path` and `digest` |

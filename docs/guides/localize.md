@@ -42,6 +42,11 @@ smallest capable model. `--models a,b` replaces the catalog with your own list.
 Self-hosted runtimes on your network count as non-local and are replaced, unless you pass
 `--allow-network`.
 
+**Decision models.** A hosted [decider](deciders.md) (`typesafe:`, `openai-decisions:`, …)
+moves to Kev on the local runtime, when its catalog has Kev (Ollama's does): the 9B with
+16 GB or more to spare, else the 4B. The localize report notes that its scores may move;
+re-resolve to measure.
+
 **What carries over:** MCP servers (written in the new harness's config shape), skills, and
 instruction files. Remote MCP servers still need the network, so `localize` flags them;
 `--strict` drops them. The old harness's plugins and settings don't carry over, and `localize`

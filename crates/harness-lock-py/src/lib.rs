@@ -70,6 +70,13 @@ impl PyManifest {
         self.inner.target_harness()
     }
 
+    /// The model `[deciders.<use>]` names, else `[deciders.default]`'s; raises on an
+    /// invalid `[deciders]` table.
+    fn decider(&self, use_: &str) -> PyResult<Option<String>> {
+        let specs = self.inner.deciders().map_err(py_err)?;
+        Ok(specs.get(use_).or_else(|| specs.get("default")).and_then(|s| s.model.clone()))
+    }
+
     fn to_json(&self) -> String {
         serde_json::to_string(&self.inner.evals).unwrap_or_default()
     }
@@ -772,12 +779,15 @@ fn sync_options(prefix: Option<String>, in_place: bool, docker: Option<String>, 
 /// into an isolated root (`prefix`, default `.hlock/env`) unless `in_place` or `docker`.
 #[pyfunction]
 #[pyo3(signature = (path="harness.lock".to_string(), prefix=None, in_place=false, docker=None, install=false, pull=false, all_models=false, exact=false, manifest=None))]
-fn sync_plan(path: String, prefix: Option<String>, in_place: bool, docker: Option<String>, install: bool, pull: bool, all_models: bool, exact: bool, manifest: Option<String>) -> PyResult<String> {
-    let (reg, ctx, _) = registry(manifest.as_deref(), Some(&lock_dir(&path)))?;
-    let lock = core::Lockfile::load(Path::new(&path)).map_err(py_err)?;
-    let opts = sync_options(prefix, in_place, docker, install, pull, all_models, exact);
-    let plan = core::sync::plan(&lock, Path::new(&path), &reg, &ctx, &opts).map_err(py_err)?;
-    Ok(json_str(serde_json::json!(plan)))
+fn sync_plan(py: Python<'_>, path: String, prefix: Option<String>, in_place: bool, docker: Option<String>, install: bool, pull: bool, all_models: bool, exact: bool, manifest: Option<String>) -> PyResult<String> {
+    // no GIL while it waits on the network (deciders), so other Python threads keep running
+    py.allow_threads(move || {
+        let (reg, ctx, _) = registry(manifest.as_deref(), Some(&lock_dir(&path)))?;
+        let lock = core::Lockfile::load(Path::new(&path)).map_err(py_err)?;
+        let opts = sync_options(prefix, in_place, docker, install, pull, all_models, exact);
+        let plan = core::sync::plan(&lock, Path::new(&path), &reg, &ctx, &opts).map_err(py_err)?;
+        Ok(json_str(serde_json::json!(plan)))
+    })
 }
 
 /// Perform one `auto` step from a plan (its JSON); returns a message.
@@ -949,60 +959,167 @@ fn redact_text(text: String) -> String {
     core::capture::redact_text(&text)
 }
 
-/// `[evals.judge]` from the manifest at `path`, when there is one.
-fn manifest_judge(path: Option<&str>) -> PyResult<Option<core::tasks::JudgeConfig>> {
+/// The manifest at `path`, when there is one.
+fn load_manifest(path: Option<&str>) -> PyResult<Option<core::Manifest>> {
     match path {
-        Some(p) if Path::new(p).is_file() => Ok(core::Manifest::load(Path::new(p)).map_err(py_err)?.judge()),
+        Some(p) if Path::new(p).is_file() => Ok(Some(core::Manifest::load(Path::new(p)).map_err(py_err)?)),
         _ => Ok(None),
     }
 }
 
+/// Grading options from the manifest at `path`: `[evals.judge]`, `[deciders.judge]` or
+/// `[deciders.default]`, and, with `auto`, a judge hlock finds.
+fn grade_options(manifest: Option<&str>, auto: bool) -> PyResult<core::tasks::GradeOptions> {
+    let m = load_manifest(manifest)?;
+    Ok(core::tasks::GradeOptions {
+        judge: m.as_ref().and_then(core::Manifest::judge),
+        default_judge: m.as_ref().and_then(core::Manifest::default_judge),
+        auto,
+        ..Default::default()
+    })
+}
+
 /// Load the eval pack at `path` and check it (see `EvalPack::check`). With `run`, also
-/// try its graders on each task's fixtures and solution (`EvalPack::check_graders`).
-/// `manifest` is a `harness.toml` whose `[evals.judge]` counts as the judge. Returns
-/// JSON with the pack's header, its task ids, and the issues found.
+/// try its graders on each task's fixtures and solution (`EvalPack::check_graders`):
+/// tests and decision-model judges, and LLM judges too with `judges`. `manifest` is a
+/// `harness.toml` whose judge settings apply. Returns JSON with the pack's header, its
+/// task ids, the judge, and the issues found.
 #[pyfunction]
-#[pyo3(signature = (path, run=false, manifest=None))]
-fn check_eval_pack(path: String, run: bool, manifest: Option<String>) -> PyResult<String> {
-    let pack = core::tasks::EvalPack::load(&path, None).map_err(py_err)?;
-    let judge = manifest_judge(manifest.as_deref())?;
-    let mut issues = pack.check_with(judge.as_ref());
-    if run {
-        if issues.iter().any(|i| i.level == "error") {
-            issues.push(core::tasks::PackIssue { level: "warn".into(), task: None, message: "the graders weren't run; fix the errors first".into() });
-        } else {
-            issues.extend(pack.check_graders());
+#[pyo3(signature = (path, run=false, manifest=None, judges=false))]
+fn check_eval_pack(py: Python<'_>, path: String, run: bool, manifest: Option<String>, judges: bool) -> PyResult<String> {
+    // no GIL while it waits on the network, so other Python threads keep running
+    py.allow_threads(move || {
+        let pack = core::tasks::EvalPack::load(&path, None).map_err(py_err)?;
+        let mut opts = grade_options(manifest.as_deref(), run)?;
+        opts.judges = if judges { core::tasks::Judges::All } else { core::tasks::Judges::Deciders };
+        let judge = pack.judge_for(&opts);
+        let mut issues = pack.check_with(judge.as_ref());
+        if run {
+            if issues.iter().any(|i| i.level == "error") {
+                issues.push(core::tasks::PackIssue { level: "warn".into(), task: None, message: "the graders weren't run; fix the errors first".into() });
+            } else {
+                issues.extend(pack.check_graders(&opts));
+            }
         }
-    }
-    Ok(json_str(serde_json::json!({
-        "name": pack.name,
-        "version": pack.version,
-        "domain": pack.domain,
-        "path": pack.path,
-        "hash": pack.hash,
-        "tasks": pack.tasks.iter().map(|t| &t.id).collect::<Vec<_>>(),
-        "issues": issues,
-    })))
+        Ok(json_str(serde_json::json!({
+            "name": pack.name,
+            "version": pack.version,
+            "domain": pack.domain,
+            "path": pack.path,
+            "hash": pack.hash,
+            "tasks": pack.tasks.iter().map(|t| &t.id).collect::<Vec<_>>(),
+            "judge": judge.map(|j| serde_json::json!({"model": j.model, "decider": j.is_decider()})),
+            "issues": issues,
+        })))
+    })
 }
 
 /// Grade a directory as the output of task `task` in the eval pack at `path` (see
 /// `EvalPack::grade_dir`); with no `workspace`, the task's solution. `manifest` is a
-/// `harness.toml` whose `[evals.judge]` scores judge graders. Returns JSON with the
-/// grades and the overall `success` and `score`.
+/// `harness.toml` whose judge settings apply. Returns JSON with the grades and the
+/// overall `success` and `score`.
 #[pyfunction]
 #[pyo3(signature = (path, task, workspace=None, manifest=None))]
-fn grade_eval_task(path: String, task: String, workspace: Option<String>, manifest: Option<String>) -> PyResult<String> {
-    let pack = core::tasks::EvalPack::load(&path, None).map_err(py_err)?;
-    let opts = core::tasks::GradeOptions { judge: manifest_judge(manifest.as_deref())?, ..Default::default() };
-    let grades = pack.grade_dir(&task, workspace.as_deref().map(Path::new), &opts).map_err(py_err)?;
-    let score = grades.iter().map(|g| g.score).sum::<f64>() / grades.len().max(1) as f64;
-    Ok(json_str(serde_json::json!({
-        "task": task,
-        "workspace": workspace,
-        "success": grades.iter().all(|g| g.success),
-        "score": score,
-        "grades": grades,
-    })))
+fn grade_eval_task(py: Python<'_>, path: String, task: String, workspace: Option<String>, manifest: Option<String>) -> PyResult<String> {
+    // no GIL while it waits on the network, so other Python threads keep running
+    py.allow_threads(move || {
+        let pack = core::tasks::EvalPack::load(&path, None).map_err(py_err)?;
+        let opts = grade_options(manifest.as_deref(), true)?;
+        let grades = pack.grade_dir(&task, workspace.as_deref().map(Path::new), &opts).map_err(py_err)?;
+        let score = grades.iter().map(|g| g.score).sum::<f64>() / grades.len().max(1) as f64;
+        Ok(json_str(serde_json::json!({
+            "task": task,
+            "workspace": workspace,
+            "judge": pack.judge_for(&opts).map(|j| j.model),
+            "success": grades.iter().all(|g| g.success),
+            "score": score,
+            "grades": grades,
+        })))
+    })
+}
+
+/// Compare two judges on the pack at `path` (see `EvalPack::calibrate`): `against`
+/// is the second judge's model; the first is the pack's judge (or `model`). Returns
+/// JSON rows and the agreement rate.
+#[pyfunction]
+#[pyo3(signature = (path, against, model=None, manifest=None, against_base_url=None))]
+fn calibrate_eval_pack(py: Python<'_>, path: String, against: String, model: Option<String>, manifest: Option<String>, against_base_url: Option<String>) -> PyResult<String> {
+    // no GIL while it waits on the network, so other Python threads keep running
+    py.allow_threads(move || {
+        let pack = core::tasks::EvalPack::load(&path, None).map_err(py_err)?;
+        let opts = grade_options(manifest.as_deref(), true)?;
+        let a = match model {
+            Some(m) => core::tasks::JudgeConfig::new(&m),
+            None => pack.judge_for(&opts).ok_or_else(|| py_err(core::Error::EvalPack("no judge to calibrate: set [pack.judge], [evals.judge], or pass --model".into())))?,
+        };
+        let b = core::tasks::JudgeConfig { base_url: against_base_url, ..core::tasks::JudgeConfig::new(&against) };
+        let rows = pack.calibrate(&a, &b);
+        let agree = rows.iter().filter(|r| r.agree).count();
+        Ok(json_str(serde_json::json!({
+            "a": a.model,
+            "b": b.model,
+            "rows": rows,
+            "agreement": if rows.is_empty() { serde_json::Value::Null } else { serde_json::json!(agree as f64 / rows.len() as f64) },
+        })))
+    })
+}
+
+/// Ask a decision model `questions` (JSON: a list of `{id, type, instructions,
+/// criteria}`) about `state` (JSON). `model` is `provider:model`; without one, the
+/// manifest's `[deciders.<use_>]`, then `[deciders.default]`, then one hlock finds.
+#[pyfunction]
+#[pyo3(signature = (state, questions, model=None, use_=None, manifest=None))]
+fn decide(py: Python<'_>, state: String, questions: String, model: Option<String>, use_: Option<String>, manifest: Option<String>) -> PyResult<String> {
+    // no GIL while it waits on the network, so other Python threads keep running
+    py.allow_threads(move || {
+        let state: serde_json::Value = serde_json::from_str(&state).unwrap_or(serde_json::Value::String(state));
+        let questions: Vec<core::decide::Question> = serde_json::from_str(&questions).map_err(|e| py_err(core::Error::Manifest(format!("questions: {e}"))))?;
+        let m = load_manifest(manifest.as_deref())?;
+        let specs = m.as_ref().map(|m| m.deciders()).transpose().map_err(py_err)?.unwrap_or_default();
+        let spec = use_.as_deref().and_then(|u| specs.get(u)).or_else(|| specs.get("default"));
+        let cfg = match (model, spec) {
+            (Some(mdl), s) => s.map(|s| s.config(&mdl)).unwrap_or(core::decide::DeciderConfig { model: mdl, ..Default::default() }),
+            (None, Some(s)) if s.model.is_some() => s.config(s.model.as_deref().unwrap()),
+            _ => core::graders::auto_judge().map(|j| core::decide::DeciderConfig { model: j.model, ..Default::default() }).ok_or_else(|| {
+                py_err(core::Error::Manifest("no decision model: pass --model, set [deciders.default] in harness.toml, run Kev on Ollama or Ollaya, or set TYPESAFE_API_KEY".into()))
+            })?,
+        };
+        let var = |k: &str| std::env::var(k).ok();
+        let ep = cfg.endpoint(&var).map_err(|e| py_err(core::Error::Profile(e)))?;
+        let decided = core::decide::decide(&ep, &state, &questions).map_err(|e| py_err(core::Error::Profile(e)))?;
+        Ok(json_str(serde_json::json!({"provider": ep.provider, "decided": decided})))
+    })
+}
+
+/// Answer one harness hook event (JSON on the hook's stdin) with the locked decider
+/// for `use_` in the lock at `lock`. Returns JSON `{stdout, exit, note}`; it never
+/// raises, since a hook that fails must defer.
+#[pyfunction]
+fn decide_hook(py: Python<'_>, use_: String, format: String, input: String, lock: String) -> String {
+    // no GIL while it waits on the network, so other Python threads keep running
+    py.allow_threads(move || {
+        let lock_path = Path::new(&lock);
+        let out = match core::Lockfile::load(lock_path) {
+            Ok(l) => {
+                let input: serde_json::Value = serde_json::from_str(&input).unwrap_or_default();
+                let root = lock_path.parent().filter(|p| !p.as_os_str().is_empty()).map(Path::to_path_buf).unwrap_or_else(|| PathBuf::from("."));
+                let var = |k: &str| std::env::var(k).ok();
+                core::decide::hook(&use_, &format, &input, &l, &root, &var)
+            }
+            Err(e) => core::decide::HookOutput { stdout: String::new(), exit: 0, note: format!("can't read the lock: {e}") },
+        };
+        json_str(serde_json::json!(out))
+    })
+}
+
+/// What changed in the lock's deciders that the lock alone can tell (see
+/// `decide::drift`): hlock's questions, and policy files.
+#[pyfunction]
+fn decider_drift(lock: String) -> PyResult<Vec<String>> {
+    let lock_path = Path::new(&lock);
+    let l = core::Lockfile::load(lock_path).map_err(py_err)?;
+    let root = lock_path.parent().filter(|p| !p.as_os_str().is_empty()).map(Path::to_path_buf).unwrap_or_else(|| PathBuf::from("."));
+    Ok(core::decide::drift(&l, &root))
 }
 
 // --------------------------------------------------------------------------- //
@@ -1139,11 +1256,14 @@ fn meta_prepare(
 /// hlock's own check of a meta job's result. Returns JSON (see `meta::Verdict`).
 #[pyfunction]
 #[pyo3(signature = (job, lock="harness.lock".to_string(), meta_lock="harness.meta.lock".to_string(), meta_manifest=None, manifest=None, out=None, count=0))]
-fn meta_verify(job: String, lock: String, meta_lock: String, meta_manifest: Option<String>, manifest: Option<String>, out: Option<String>, count: usize) -> PyResult<String> {
-    let meta = self::meta_manifest(meta_manifest.as_deref())?;
-    let (input, reg, ctx) = meta_input(&lock, &meta_lock, manifest.as_deref(), out, count, String::new(), None)?;
-    let v = core::meta::verify(&job, &input, meta.as_ref(), &reg, &ctx).map_err(py_err)?;
-    Ok(json_str(serde_json::json!(v)))
+fn meta_verify(py: Python<'_>, job: String, lock: String, meta_lock: String, meta_manifest: Option<String>, manifest: Option<String>, out: Option<String>, count: usize) -> PyResult<String> {
+    // no GIL while it waits on the network (deciders), so other Python threads keep running
+    py.allow_threads(move || {
+        let meta = self::meta_manifest(meta_manifest.as_deref())?;
+        let (input, reg, ctx) = meta_input(&lock, &meta_lock, manifest.as_deref(), out, count, String::new(), None)?;
+        let v = core::meta::verify(&job, &input, meta.as_ref(), &reg, &ctx).map_err(py_err)?;
+        Ok(json_str(serde_json::json!(v)))
+    })
 }
 
 /// Run the built-in agent pinned in `meta_lock` on `prompt`, in `project` (default: the
@@ -1230,6 +1350,10 @@ fn _harness_lock(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(localize, m)?)?;
     m.add_function(wrap_pyfunction!(check_eval_pack, m)?)?;
     m.add_function(wrap_pyfunction!(grade_eval_task, m)?)?;
+    m.add_function(wrap_pyfunction!(calibrate_eval_pack, m)?)?;
+    m.add_function(wrap_pyfunction!(decide, m)?)?;
+    m.add_function(wrap_pyfunction!(decide_hook, m)?)?;
+    m.add_function(wrap_pyfunction!(decider_drift, m)?)?;
     m.add_function(wrap_pyfunction!(redact_text, m)?)?;
     m.add_function(wrap_pyfunction!(agent_run, m)?)?;
     m.add_function(wrap_pyfunction!(meta_config, m)?)?;

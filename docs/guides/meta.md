@@ -157,6 +157,10 @@ $ hlock meta verify bootstrap-evals
   warning: 3 tasks leaves 1 for the holdout split; add tasks until there are at least 10
 ```
 
+With a [decision model](#decision-models), it also reviews each task, and warns when its
+prompt may lean on context it doesn't give, its graders may not check what it asks, or its
+solution may not do it. These are warnings, never errors.
+
 ### `update`
 
 For a [pinned lock](pin.md), gives the agent every skill, MCP server and plugin in the
@@ -240,6 +244,20 @@ timeout-seconds = 300         # per command
 The agent runs with your environment, so commands you approve act on your real setup.
 `hlock meta pin` records its version (hlock's), its model and these settings in the lock,
 so a wider allowlist shows up in review.
+
+## Decision models
+
+Give the meta harness a [decision model](deciders.md) for its checks in
+`harness.meta.toml`:
+
+```toml title="harness.meta.toml"
+[deciders.default]
+model = "ollama:kev:4b"
+```
+
+`bootstrap-evals` uses it to review the tasks it verifies. Without one there, it uses the
+project's `[deciders.default]` from `harness.toml`, if set. A decision model never decides
+what the built-in agent may run: only `[agent] allow` and you do.
 
 ## Use an installed harness instead
 

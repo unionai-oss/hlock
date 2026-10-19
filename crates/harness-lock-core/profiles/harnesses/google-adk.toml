@@ -6,3 +6,6 @@ aliases = ["adk"]
 vendor = "Google"
 homepage = "https://google.github.io/adk-docs/"
 packages = ["pypi:google-adk"]
+
+# a decider's System One endpoint, for the framework's own decision-model support
+decider-env = [["TYPESAFE_BASE_URL", "TYPESAFE_API_KEY"]]

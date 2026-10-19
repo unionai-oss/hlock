@@ -74,6 +74,8 @@ pub enum Action {
     Run { argv: Vec<String>, env: BTreeMap<String, String> },
     /// Move a path aside to `<path>.hlock-bak`.
     Remove { path: PathBuf },
+    /// Replace hlock's decider hooks in a config file with `entries` (event → groups).
+    WriteHooks { path: PathBuf, format: String, pointer: String, entries: Value },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -587,7 +589,11 @@ pub fn plan(lock: &Lockfile, lock_path: &Path, reg: &Registry, ctx: &Ctx, opts: 
         let Desired { doc: desired, missing, .. } = desired_config(&vendored, &c.format, &c.pointers, &target, fallback.as_deref(), &resolve, env_ref.as_deref())?;
         collect_placeholders(&read_config(&vendored, if c.pointers.is_empty() && c.format != "jsonc" { &c.format } else { "json" })?.unwrap_or_default(), &mut all_secrets);
         missing_secrets.extend(missing.iter().cloned());
-        let actual = read_config(&target, &c.format).ok().flatten();
+        // hlock's decider hooks are written by their own step, so they aren't drift here
+        let actual = read_config(&target, &c.format).ok().flatten().map(|mut a| {
+            crate::decide::strip_hooks(&mut a);
+            a
+        });
         let same = match (&actual, c.pointers.is_empty()) {
             (Some(a), true) => a == &desired,
             (Some(a), false) => c.pointers.iter().all(|p| a.pointer(p) == desired.pointer(p)),
@@ -721,6 +727,9 @@ pub fn plan(lock: &Lockfile, lock_path: &Path, reg: &Registry, ctx: &Ctx, opts: 
         steps.extend(runtime_steps(rt, &used, reg, ctx, opts, docker));
     }
 
+    // ---- deciders: hooks, keys, local models ----
+    steps.extend(decider_steps(lock, lock_path, profile, &t, ctx, opts, &sync_cmd));
+
     // ---- secrets ----
     for r in &lock.secret {
         if !all_secrets.contains(&r.name) {
@@ -760,6 +769,98 @@ pub fn plan(lock: &Lockfile, lock_path: &Path, reg: &Registry, ctx: &Ctx, opts: 
         env,
         steps,
     })
+}
+
+/// Steps for a lock's deciders: write the hooks hlock wires them in with (and remove
+/// stale ones), and check each one's API key or local model.
+fn decider_steps(lock: &Lockfile, lock_path: &Path, profile: &HarnessProfile, t: &Ctx, ctx: &Ctx, opts: &SyncOptions, sync_cmd: &str) -> Vec<Step> {
+    let mut steps = Vec::new();
+    let bin = ctx.var("HLOCK_BIN").unwrap_or("hlock").to_string();
+    let lock_abs = if lock_path.is_absolute() { lock_path.to_path_buf() } else { ctx.cwd.join(lock_path) };
+    let mut files: BTreeMap<String, (String, String)> = BTreeMap::new();
+    for w in profile.deciders.values() {
+        if let Some(h) = &w.hook {
+            files.insert(h.file.clone(), (h.format.clone(), h.pointer.clone().unwrap_or_else(|| "/hooks".into())));
+        }
+    }
+    for (file, (hook_format, pointer)) in files {
+        let Some(path) = profile.file_path(&file, t) else { continue };
+        let fmt = profile.files.get(&file).map(|f| if f.format == "jsonc" { "json".to_string() } else { f.format.clone() }).unwrap_or_else(|| "json".into());
+        let entries = crate::decide::hook_entries(lock, &file, &hook_format, &bin, &lock_abs);
+        let actual = read_config(&path, &fmt).ok().flatten();
+        let has_ours = actual.as_ref().is_some_and(|a| {
+            let mut c = a.clone();
+            crate::decide::strip_hooks(&mut c)
+        });
+        if entries.is_empty() && !has_ours {
+            continue;
+        }
+        let mut desired = actual.clone().unwrap_or_else(|| json!({}));
+        crate::decide::merge_hooks(&mut desired, &pointer, &entries);
+        let same = actual.as_ref() == Some(&desired);
+        let uses: BTreeSet<&str> = lock.decider.iter().filter(|d| d.via == "hook" && d.wiring.iter().any(|w| w.file == file)).map(|d| d.use_.as_str()).collect();
+        let shown = pretty(&path, ctx);
+        let title = if entries.is_empty() {
+            format!("Remove hlock's decider hooks from {shown}")
+        } else {
+            format!("Wire deciders ({}) into {shown}", uses.into_iter().collect::<Vec<_>>().join(", "))
+        };
+        steps.push(Step {
+            id: format!("decider:{file}"),
+            kind: "decider".into(),
+            title,
+            status: if same { "satisfied" } else { "auto" }.into(),
+            reason: if same { "hooks match the lock".into() } else { String::new() },
+            action: (!same).then(|| Action::WriteHooks { path: path.clone(), format: fmt.clone(), pointer: pointer.clone(), entries: Value::Object(entries.clone()) }),
+            ..Default::default()
+        });
+    }
+    let var = |k: &str| ctx.var(k).map(str::to_string);
+    // the API key each hosted decider needs, once per variable
+    let mut keys: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for d in lock.decider.iter().filter(|d| d.runtime.is_none() && crate::decide::needs_key(&d.provider)) {
+        if let Some(k) = &d.key_env {
+            keys.entry(k.clone()).or_default().push(format!("{} ({}:{})", d.use_, d.provider, d.model));
+        }
+    }
+    for (k, users) in keys {
+        let set = ctx.var(&k).is_some_and(|v| !v.is_empty());
+        steps.push(Step {
+            id: format!("decider-key:{k}"),
+            kind: "decider".into(),
+            title: format!("{k} for the {} decider{}", users.join(", "), if users.len() == 1 { "" } else { "s" }),
+            status: if set { "satisfied" } else { "manual" }.into(),
+            reason: if set { "set".into() } else { "not set; the hooks defer to the harness until it is".into() },
+            command: (!set).then(|| format!("export {k}=…   # then re-run {sync_cmd}")),
+            ..Default::default()
+        });
+    }
+    for d in &lock.decider {
+        if let Some(rt) = &d.runtime {
+            let cfg = crate::decide::entry_config(d);
+            let present = cfg.endpoint(&var).ok().is_some_and(|ep| {
+                let url = format!("{}/api/tags", ep.base_url.trim_end_matches('/'));
+                let agent: ureq::Agent = ureq::Agent::config_builder().timeout_global(Some(Duration::from_millis(500))).build().into();
+                agent.get(&url).call().ok().and_then(|mut r| r.body_mut().read_to_string().ok()).is_some_and(|t| {
+                    serde_json::from_str::<Value>(&t).ok().is_some_and(|v| {
+                        v["models"].as_array().into_iter().flatten().any(|m| m["name"].as_str().is_some_and(|n| n == d.model || n.trim_end_matches(":latest") == d.model))
+                    })
+                })
+            });
+            let argv = vec![rt.clone(), "pull".to_string(), d.model.clone()];
+            steps.push(Step {
+                id: format!("decider-model:{}", d.use_),
+                kind: "model".into(),
+                title: format!("{} on {rt} (the {} decider)", d.model, d.use_),
+                status: if present { "satisfied" } else if opts.pull { "auto" } else { "manual" }.into(),
+                reason: if present { "pulled and served".into() } else { format!("not served by a running {rt}") },
+                action: (!present && opts.pull).then(|| Action::Run { argv: argv.clone(), env: BTreeMap::new() }),
+                command: (!present).then(|| argv.join(" ")),
+                ..Default::default()
+            });
+        }
+    }
+    steps
 }
 
 /// Isolated by default: without `in_place` or `docker`, a plan writes under the
@@ -1080,6 +1181,17 @@ pub fn run_step(step: &Step, ctx: &Ctx) -> Result<String> {
                 let tail: Vec<&str> = text.lines().rev().take(8).collect::<Vec<_>>().into_iter().rev().collect();
                 Err(Error::Profile(format!("`{}` exited with {}:\n{}", shell_join(argv), out.status, tail.join("\n"))))
             }
+        }
+        Action::WriteHooks { path, format, pointer, entries } => {
+            let mut doc = read_config(path, format)?.unwrap_or_else(|| json!({}));
+            let entries = entries.as_object().cloned().unwrap_or_default();
+            crate::decide::merge_hooks(&mut doc, pointer, &entries);
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            std::fs::write(path, render_config(&doc, format).map_err(Error::Profile)?)?;
+            let n: usize = entries.values().filter_map(Value::as_array).map(Vec::len).sum();
+            Ok(if n == 0 { format!("removed hlock's hooks from {}", path.display()) } else { format!("wrote {n} hook{} into {}", if n == 1 { "" } else { "s" }, path.display()) })
         }
         Action::Remove { path } => {
             let bak = backup(path)?;

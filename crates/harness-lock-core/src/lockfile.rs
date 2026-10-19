@@ -44,6 +44,110 @@ impl Default for LLM {
     }
 }
 
+/// A decision model the stack uses, by what it decides (`[[decider]]`,
+/// `specs/decision-models.md` §6.3).
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+#[serde(default, rename_all = "kebab-case")]
+pub struct Decider {
+    /// `approve`, `stop`, `route` or `tool`.
+    #[serde(rename = "use")]
+    pub use_: String,
+    pub provider: String,
+    /// The model, as the provider names it.
+    pub model: String,
+    /// `systemone` or `decisions`.
+    pub protocol: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub endpoint: Option<String>,
+    /// The variable its API key is read from, when it needs one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub key_env: Option<String>,
+    /// The local runtime serving it, matching a `[[runtime]]` name.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub runtime: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resolved_from: Option<String>,
+    /// How the harness reaches it: `hook` (hlock writes a hook), `native` (a setting of
+    /// the harness's own), `env` (code harnesses), or `simulated` (the reference harness).
+    pub via: String,
+    /// Where it's wired: the profile's file id and the harness event.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub wiring: Vec<Wiring>,
+    /// `approve`: which of allow, ask, deny it may answer.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub may: Vec<String>,
+    #[serde(skip_serializing_if = "serde_json::Value::is_null")]
+    pub min_probability: serde_json::Value,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub timeout_ms: Option<u64>,
+    /// Digest of hlock's question set for this use.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub questions: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub policy: Option<PolicyRef>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+#[serde(default)]
+pub struct Wiring {
+    pub file: String,
+    pub event: String,
+}
+
+/// A decider's policy file, relative to the project, and its digest.
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+#[serde(default)]
+pub struct PolicyRef {
+    pub path: String,
+    pub digest: String,
+}
+
+/// The judge that scored the evidence's `judge` and `trace` graders.
+#[derive(Debug, Clone, Serialize, Default, PartialEq)]
+#[serde(rename_all = "kebab-case")]
+pub struct EvidenceJudge {
+    /// As configured: `typesafe:jev-1.13.0`.
+    pub model: String,
+    /// What answered, as the provider named it (`jev-1.13.0` for `jev-latest`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub answered: Option<String>,
+    /// `systemone`, `decisions`, or `chat` (an LLM).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub protocol: Option<String>,
+    /// The LLM that re-judged uncertain grades.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fallback: Option<String>,
+    /// The share of judge grades that were uncertain.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub uncertain_grades: Option<f64>,
+}
+
+impl<'de> Deserialize<'de> for EvidenceJudge {
+    // a string (what locks before [evidence.judge] wrote), or the table
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> std::result::Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(default, rename_all = "kebab-case")]
+        #[derive(Default)]
+        struct T {
+            model: String,
+            answered: Option<String>,
+            protocol: Option<String>,
+            fallback: Option<String>,
+            uncertain_grades: Option<f64>,
+        }
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum E {
+            S(String),
+            T(T),
+        }
+        Ok(match E::deserialize(d)? {
+            E::S(model) => EvidenceJudge { model, ..Default::default() },
+            E::T(t) => EvidenceJudge { model: t.model, answered: t.answered, protocol: t.protocol, fallback: t.fallback, uncertain_grades: t.uncertain_grades },
+        })
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(default)]
 pub struct Decision {
@@ -247,8 +351,8 @@ pub struct Evidence {
     pub success_rate: BTreeMap<String, f64>,
     pub cost_usd_per_task: BTreeMap<String, f64>,
     pub latency_s_per_task: BTreeMap<String, f64>,
-    /// The model that scored `judge` graders, when the packs have any.
-    pub judge: Option<String>,
+    /// The judge that scored `judge` and `trace` graders, when the packs have any.
+    pub judge: Option<EvidenceJudge>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -281,6 +385,9 @@ pub struct Lockfile {
     pub llm: Vec<LLM>,
     #[serde(default)]
     pub decision: Decision,
+    /// Decision models the stack uses, one per use.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub decider: Vec<Decider>,
     #[serde(default)]
     pub harness: Harness,
     #[serde(default)]
@@ -333,6 +440,7 @@ impl Default for Lockfile {
             stack: BTreeMap::new(),
             llm: Vec::new(),
             decision: Decision::default(),
+            decider: Vec::new(),
             harness: Harness::default(),
             tool: Vec::new(),
             skill: Vec::new(),

@@ -53,6 +53,7 @@ const BUILTIN_RUNTIMES: &[(&str, &str)] = &[
     ("localai", include_str!("../profiles/runtimes/localai.toml")),
     ("docker-model-runner", include_str!("../profiles/runtimes/docker-model-runner.toml")),
     ("jan", include_str!("../profiles/runtimes/jan.toml")),
+    ("ollaya", include_str!("../profiles/runtimes/ollaya.toml")),
 ];
 
 // --------------------------------------------------------------------------- //
@@ -300,6 +301,37 @@ pub struct RunSpec {
     pub env: BTreeMap<String, String>,
 }
 
+/// How a harness reaches a decider for one use (`[deciders.<use>]` in a profile).
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+#[serde(default, rename_all = "kebab-case")]
+pub struct DeciderWiringSpec {
+    /// A hook hlock writes: into the profile file `file`, under `pointer` (default
+    /// `/hooks`), for `events`, with output in `format` (`claude-code`).
+    pub hook: Option<HookSpec>,
+    /// A setting of the harness's own that names the model (`config#/auxiliary/approval`),
+    /// with the keys it uses for provider, model and base URL.
+    pub native: Option<NativeDeciderSpec>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+#[serde(default, rename_all = "kebab-case")]
+pub struct HookSpec {
+    pub file: String,
+    pub pointer: Option<String>,
+    pub events: Vec<String>,
+    pub format: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+#[serde(default, rename_all = "kebab-case")]
+pub struct NativeDeciderSpec {
+    pub file: String,
+    pub pointer: String,
+    pub provider_key: Option<String>,
+    pub model_key: String,
+    pub base_url_key: Option<String>,
+}
+
 /// A declarative description of one agent harness.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(default, rename_all = "kebab-case")]
@@ -345,6 +377,11 @@ pub struct HarnessProfile {
     pub skills: SkillsSpec,
     pub bundles: Vec<BundleSpec>,
     pub launch: LaunchSpec,
+    /// How each decider use is wired into this harness (`approve`, `stop`, …).
+    pub deciders: BTreeMap<String, DeciderWiringSpec>,
+    /// Environment variables a framework reads a System One endpoint from
+    /// (`SYSTEM_ONE_BASE_URL`, `TYPESAFE_BASE_URL`): base-URL and key variable pairs.
+    pub decider_env: Vec<(String, String)>,
     /// Where the profile came from: `builtin` or a file path.
     #[serde(skip_deserializing)]
     pub origin: String,
@@ -614,6 +651,9 @@ impl Registry {
                 }
                 if p.homepage.is_none() {
                     p.homepage = base.homepage.clone();
+                }
+                if p.decider_env.is_empty() {
+                    p.decider_env = base.decider_env.clone();
                 }
             }
             if p.kind == "custom" && p.run.entrypoint.is_none() && p.run.command.is_empty() {

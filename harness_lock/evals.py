@@ -221,7 +221,9 @@ def _toml_list(items) -> str:
     return "[" + ", ".join(f'"{i}"' for i in items) + "]"
 
 
-JUDGE_MODEL = "anthropic:claude-sonnet-5-5"
+# A decision model: it answers each criterion as a yes/no question, cheaply. A local Kev
+# (`ollama:kev:4b`) or an LLM works too.
+JUDGE_MODEL = "typesafe:jev-1.13.0"
 
 
 def _header(name: str, domain: str, comment: str, judge: bool = False) -> str:
@@ -234,7 +236,7 @@ domain = "{domain}"
 """
     if judge:
         head += f"""
-[pack.judge]             # the model that scores judge: graders (harness.toml [evals.judge] overrides it)
+[pack.judge]             # scores judge: graders; reads TYPESAFE_API_KEY (harness.toml [evals.judge] overrides it)
 model = "{JUDGE_MODEL}"
 """
     return head
@@ -363,9 +365,12 @@ def _slot_rubric(slot: Slot, tid: str) -> str:
     return f"""<!-- {PLACEHOLDER}: replace this whole file with the rubric for {tid}. -->
 # Rubric: {slot.title.lower()}
 
-A judge model reads the files the run leaves and scores them against this rubric from 0 to 1;
-0.7 passes. List what a good result must get right, one point per line, as specifically as
-you'd review it yourself: {slot.check.lower()}
+A judge reads the files the run leaves and checks each `- ` item below; a decision model
+answers each one as a yes/no question, and the score is the share met (0.7 passes). Write
+one concrete point per item, as you'd review it yourself: {slot.check.lower()}
+
+To also place the result on a scale, add a `## Levels` section with a numbered list,
+worst first (`0. …`, `1. …`).
 
 - {PLACEHOLDER}: the first thing a good result gets right
 """
@@ -444,8 +449,9 @@ should look like the work this user actually hands to an agent. Your job is to r
 - Grade the result, not just that a file exists. Each slot has a grader to fill in:
   `<task>/check.py`, a script run in the workspace after the agent that exits 0 when the work
   is right, for anything a program can check (tests, values, schemas); or `<task>/rubric.md`,
-  a list of what a good result gets right that a judge model scores, for writing and
-  judgment. Switch a slot to the other kind when it fits better: edit its `graders` line.
+  a list of criteria (`- ` items) a judge checks, for writing and judgment. The pack's judge
+  is a decision model that answers each criterion as a yes/no question, so make each one
+  concrete and checkable on its own. Switch a slot to the other kind when it fits better: edit its `graders` line.
 - Put a known-good result in `<task>/solution/`: the files a correct run leaves, such as the
   code after the real fix or the reply that was actually sent. It shows the graders pass on
   good work.
@@ -538,12 +544,49 @@ def _toml_str(s: str) -> str:
     return json.dumps(s)  # a JSON string is a valid TOML basic string
 
 
+# What a decision model asks about each request when drafting (`review` below).
+DRAFT_KINDS = {
+    "code": "Changing or debugging code in a repository",
+    "data": "Cleaning, analyzing or transforming data",
+    "writing": "Writing or summarizing: a report, a reply, a memo",
+    "other": "Something else",
+}
+
+
+def review_requests(prompts: list[str], decide) -> list[dict]:
+    """Ask a decision model about each drafted request: does it stand alone, is its
+    result checkable, what kind of work is it, and does it hold a secret. ``decide`` is
+    called as ``decide(state, questions_json)`` and returns the JSON
+    ``harness_lock.decide`` does."""
+    questions = json.dumps([
+        {"id": "alone", "type": "noul", "instructions": "This request stands on its own: it doesn't refer to "
+         "an earlier conversation (\"like before\", \"fix it\")."},
+        {"id": "checkable", "type": "noul", "instructions": "A program or a short rubric could check whether "
+         "the result of this request is right."},
+        {"id": "kind", "type": "choice", "instructions": "What kind of work is this request?", "criteria": DRAFT_KINDS},
+        {"id": "secret", "type": "noul", "instructions": "The request contains a credential, a token, or "
+         "personal data about someone."},
+    ])
+    out = []
+    for p in prompts:
+        answers = {a["id"]: a for a in json.loads(decide(p, questions))["decided"]["answers"]}
+        out.append({
+            "alone": answers["alone"]["value"],
+            "checkable": answers["checkable"]["value"],
+            "kind": answers["kind"]["value"],
+            "secret": answers["secret"]["value"],
+        })
+    return out
+
+
 def draft_from_traces(dest: str | Path, sessions, name: str | None = None, n_tasks: int = 10,
-                      project: Path | None = None, force: bool = False) -> tuple[list[Path], int]:
+                      project: Path | None = None, force: bool = False, decide=None) -> tuple[list[Path], int]:
     """Write a draft eval pack to ``dest`` from trace sessions, newest first, one task per
     distinct request. Prompts are redacted. A task whose session created files expects
-    them as artifacts; the rest get a ``TODO(hlock)`` to fill in. Returns the files
-    written (``pack.toml`` first) and the number of tasks."""
+    them as artifacts; the rest get a ``TODO(hlock)`` to fill in. With ``decide`` (see
+    `review_requests`), a decision model skips requests whose result can't be checked,
+    marks ones that lean on earlier context or may hold a secret, and picks each task's
+    grader stub. Returns the files written (``pack.toml`` first) and the number of tasks."""
     from harness_lock import redact_text
 
     dest, project = Path(dest), (project or Path.cwd()).resolve()
@@ -555,11 +598,20 @@ def draft_from_traces(dest: str | Path, sessions, name: str | None = None, n_tas
         if key not in seen:
             seen.add(key)
             picked.append(s)
+    home = str(Path.home())
+    reviews: dict[int, dict] = {}
+    if decide is not None:
+        prompts = [redact_text(s.prompt).replace(home, "~")[:4000] for s in picked]
+        kept = []
+        for s, r in zip(picked, review_requests(prompts, decide)):
+            if r["checkable"] >= 0.3:  # drop only the clear cases
+                reviews[id(s)] = r
+                kept.append(s)
+        picked = kept
     picked = picked[:n_tasks]
     if not picked:
         raise ValueError("no requests found in the traces")
     name = name or f"{project.name}/{dest.resolve().name}"
-    home = str(Path.home())
     files: dict[str, str] = {}
     blocks = [_header(name, "from-traces", "An eval pack drafted from agent traces by `hlock evals init --from-traces`.\n"
                                            "# Review every task and its marked slots, then run `hlock evals check`.")]
@@ -576,10 +628,26 @@ def draft_from_traces(dest: str | Path, sessions, name: str | None = None, n_tas
         else:
             lines += [f"# {PLACEHOLDER}: the file a successful run leaves in the workspace (the session created none).",
                       'expected = { artifacts = ["result.md"] }']
-        lines += [f'tags = ["from-traces", "{s.harness}"]', "timeout-seconds = 900"]
+        review = reviews.get(id(s))
+        tags = ["from-traces", s.harness]
+        notes = []
+        if review is not None:
+            tags.append(review["kind"])
+            stub = f"{tid}/check.py" if review["kind"] in ("code", "data") else f"{tid}/rubric.md"
+            lines.append(f"# {PLACEHOLDER}: write {stub} so the grader checks the result, not just the file.")
+            lines.append(f'graders = ["{"tests" if stub.endswith(".py") else "judge"}:{stub}"]')
+            slot = Slot("task", "the drafted task", "", arts[0] if arts else "result.md",
+                        "What a good result must get right.", "tests" if stub.endswith(".py") else "judge")
+            files[stub] = _slot_check(slot, tid) if stub.endswith(".py") else _slot_rubric(slot, tid)
+            if review["alone"] < 0.5:
+                notes.append(f"{PLACEHOLDER}: this request may lean on earlier context; make it stand alone.")
+            if review["secret"] >= 0.5:
+                notes.append(f"{PLACEHOLDER}: this request may hold a secret or personal data that redaction missed.")
+        lines += [f"tags = {_toml_list(tags)}", "timeout-seconds = 900"]
         blocks.append("\n".join(lines) + "\n")
+        note = "".join(f"<!-- {n} -->\n" for n in notes)
         files[f"{tid}/prompt.md"] = (
-            f"<!-- drafted from a {s.harness} session ({when}); secrets redacted. Review before use. -->\n{prompt}\n")
+            f"<!-- drafted from a {s.harness} session ({when}); secrets redacted. Review before use. -->\n{note}{prompt}\n")
         files[f"{tid}/workspace/.gitkeep"] = ""
     files["pack.toml"] = "".join(blocks)
     written = []

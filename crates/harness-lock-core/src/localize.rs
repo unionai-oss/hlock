@@ -167,7 +167,8 @@ fn candidates(rt: &RuntimeProfile, opts: &LocalizeOptions, usable_gb: Option<f64
         }
         return out;
     }
-    for c in rt.catalog.iter().filter(|c| fits(c.min_memory_gb)) {
+    // decision models (Kev, …) answer typed questions; they're never a chat model
+    for c in rt.catalog.iter().filter(|c| fits(c.min_memory_gb) && !c.roles.iter().any(|r| r == "decider")) {
         let CatalogModel { id, params_b, min_memory_gb, tier, tools, roles } = c.clone();
         let present = locate_model(rt, &id, ctx).present;
         out.push(Candidate { id, tier, params_b, min_memory_gb, present, tools, roles, from: "catalog" });
@@ -198,6 +199,14 @@ fn rank_default(c: &[Candidate]) -> Vec<Candidate> {
         b.tier.cmp(&a.tier).then(b.present.cmp(&a.present)).then(b.params_b.unwrap_or(0.0).partial_cmp(&a.params_b.unwrap_or(0.0)).unwrap_or(std::cmp::Ordering::Equal))
     });
     v
+}
+
+/// The Kev model a runtime serves for deciders: the 9B with 16 GB or more to spare,
+/// else the 4B. `None` when its catalog has no decider models.
+fn local_decider_pick(rt: &RuntimeProfile, usable_gb: Option<f64>) -> Option<String> {
+    let deciders: Vec<&CatalogModel> = rt.catalog.iter().filter(|c| c.roles.iter().any(|r| r == "decider")).collect();
+    let want = if usable_gb.is_some_and(|u| u >= 16.0) { "kev:9b" } else { "kev:4b" };
+    deciders.iter().find(|c| c.id == want).or_else(|| deciders.iter().find(|c| c.id.starts_with("kev"))).map(|c| c.id.clone())
 }
 
 /// Smallest capable model for the small and decision roles.
@@ -433,6 +442,19 @@ pub fn localize(source: &Lockfile, source_path: &Path, reg: &Registry, ctx: &Ctx
                 lock.decision.model = Some(format!("{}:{}", runtime.id, s.id));
                 used_models.insert(s.id.clone());
             }
+        }
+    }
+
+    // deciders on an API provider → Kev on the local runtime, when it serves Kev
+    if let Some(kev) = local_decider_pick(runtime, usable) {
+        for d in lock.decider.iter_mut().filter(|d| d.runtime.is_none()) {
+            replaced.push(format!("decider {} {}:{} → {}:{} (scores may move; re-resolve to measure)", d.use_, d.provider, d.model, runtime.id, kev));
+            d.provider = runtime.id.clone();
+            d.model = kev.clone();
+            d.protocol = "systemone".into();
+            d.endpoint = None;
+            d.key_env = None;
+            d.runtime = Some(runtime.id.clone());
         }
     }
 

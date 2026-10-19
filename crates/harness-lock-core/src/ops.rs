@@ -395,6 +395,7 @@ pub fn tune(manifest: Manifest, spec: &TuneSpec) -> Result<TuneOutcome> {
             retries,
             temperature: Some(temp),
             tool_timeout_seconds: tto,
+            deciders: BTreeMap::new(),
         };
         let mut ok = 0u64;
         let mut n = 0u64;
@@ -451,6 +452,7 @@ pub fn tune(manifest: Manifest, spec: &TuneSpec) -> Result<TuneOutcome> {
         retries: br,
         temperature: Some(btemp),
         tool_timeout_seconds: btto,
+        deciders: BTreeMap::new(),
     };
 
     // ---- stage 4: fine-tune (depth >= ft) ----

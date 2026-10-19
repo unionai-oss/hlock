@@ -73,6 +73,13 @@ into its workspace.
 `--tasks N` caps how many tasks are drafted (default 10). Sessions from other projects are
 left out, and nothing leaves your machine.
 
+With a decision model in `[deciders.draft]` (or `[deciders.default]`) in `harness.toml`,
+drafting asks it about each request: whether its result can be checked (requests that
+clearly can't are skipped), whether it stands alone, whether it may hold a secret the
+redaction missed, and what kind of work it is, which picks the task's grader stub
+(`check.py` for code and data, `rubric.md` for the rest). It says which model it used; a
+hosted one sees the redacted prompts.
+
 ### Fill in a template with your agent
 
 For a real pack, start from a template. Each one writes task slots for one kind of work,
@@ -225,7 +232,7 @@ tags = ["writing"]
 | `version` | yes | Pack version. Change it when you change the tasks. |
 | `domain` | yes | The domain the pack represents |
 | `license` | no | License of the pack contents |
-| `judge` | no | The model that scores `judge` graders: a table with `model`, and optionally `base-url` and `key-env`. See [Judges](#judges). |
+| `judge` | no | The model that scores `judge` and `trace` graders: a table with `model`, and optionally `base-url`, `key-env`, `protocol`, `fallback` and `uncertain`. See [Judges](#judges). |
 
 ### `[[task]]`
 
@@ -249,13 +256,14 @@ file in `expected.artifacts` must exist after the run, so a task with no `grader
 on that alone.
 
 `graders` is a list. Each entry is a short string, such as `"tests:clean_csv/check.py"`, or a
-table with a `type`. There are three types:
+table with a `type`. There are four types:
 
 | Type | Checks | Use it for |
 |---|---|---|
 | `artifact` | Output files exist and match expected content | Exact answers, required phrases, golden files |
 | `tests` | A script or command, run in the workspace after the agent, exits 0 | Code, data, and anything a program can check |
-| `judge` | A model scores the output against a rubric | Writing and judgment calls a program can't check |
+| `judge` | A model scores the output against criteria or levels | Writing and judgment calls a program can't check |
+| `trace` | A decision model checks the run's tool calls | How the agent worked: asking first, staying in bounds |
 
 Prefer the first two: they're fast, free, and give the same answer every time. Use a judge
 only where a program can't decide. Paths to grader files are relative to the pack directory.
@@ -310,6 +318,7 @@ The command gets these environment variables:
 | `HLOCK_PACK_DIR` | The pack directory, for reference data kept next to the script |
 | `HLOCK_TASK` | The task id |
 | `HLOCK_GRADE` | A path where the command may write `{"score": 0.5, "success": false, "detail": "…"}` |
+| `HLOCK_TRACE` | The run's trace as JSON (in `resolve`; unset when you grade a directory by hand) |
 
 Without a `HLOCK_GRADE` file, the score is 1 on exit code 0 and 0 otherwise. Each key in
 the file is optional, and `success` defaults to the exit code. The last lines of output
@@ -348,40 +357,60 @@ sys.exit(0 if got == want else 1)
 
 ### Judges
 
-A `judge` grader sends the task's prompt, a rubric, and the files the run left (the first
-20,000 characters of each) to a model, and asks for a score:
+A `judge` grader asks a model about the files the run left (the first 20,000 characters
+of each), with the task's prompt. The judge can be a [decision model](deciders.md), which
+answers each criterion as a yes/no question with a probability, or an LLM, which is asked
+for JSON. A decision model is the better default for checklists: it's fast, calibrated,
+and costs around a hundredth of a cent a task, so judges can run on every trial.
 
 ```toml
 graders = [
   "judge:summarize_report/rubric.md",
   { type = "judge", criteria = [
       "States Q3 revenue and its change from Q2",
-      "Is under 200 words",
-      "Names the report it summarizes",
+      { text = "Cites the report", true = "Names the report each claim comes from", false = "Makes claims with no source" },
   ], pass = 0.6 },
+  { type = "judge", artifacts = ["reply.md"], levels = [
+      "Doesn't address the customer's problem",
+      "Addresses it, with wrong or unsafe steps",
+      "Correct steps, but no link to the help article",
+      "Correct steps and the right help article",
+  ] },
 ]
 ```
 
 | Key | Default | Description |
 |---|---|---|
-| `rubric` | | A file in the pack describing a good result. The model scores the files from 0 to 1 against it. `"judge:<path>"` is the short form. |
-| `criteria` | | A list of points, instead of a `rubric`. The model says which ones the files meet, and the score is the fraction met. |
+| `criteria` | | Points a good result meets: strings, or tables with `text` and `true`/`false` descriptions of each answer. The score is the mean P(met) (a decider) or the fraction met (an LLM). |
+| `levels` | | 2 to 10 ordered descriptions, worst first. The model places the result on them, and the score is the level reached over the top level. With `criteria`, the score is the mean of the two. |
+| `rubric` | | A file in the pack instead: its `- ` items are criteria, and a numbered list under a `## Levels` heading is levels. An LLM judge also reads a free-form rubric and scores it 0 to 1. `"judge:<path>"` is the short form. |
 | `artifacts` | `expected.artifacts` | The workspace files the model reads |
 | `pass` | `0.7` | The lowest score that passes |
 
-Criteria give steadier scores than a free-form rubric, because the model makes one yes or
-no call per point. The grade's detail lists the unmet criteria and the model's reason.
+The grade's detail names the unmet criteria (and the level reached), and `hlock evals
+grade` prints each criterion's probability.
 
-The judge model comes from `[evals.judge]` in `harness.toml`, and otherwise from
-`[pack.judge]` in `pack.toml`, so a pack can name the judge its rubrics were written for and
-a project can override it:
+#### Which judge
+
+The first of these that's set: `[evals.judge]` in `harness.toml`, `[pack.judge]` in
+`pack.toml` (so a pack can name the judge its criteria were written for), and
+`[deciders.judge]` or `[deciders.default]` in `harness.toml`. When none is, `resolve`,
+`evals grade` and `evals check --run` use a Kev model a local Ollama or Ollaya is serving,
+else `typesafe:jev-1.13.0` when `TYPESAFE_API_KEY` is set; `HLOCK_JUDGE_AUTO=0` turns that
+off. Templates write `[pack.judge] model = "typesafe:jev-1.13.0"`.
 
 ```toml title="harness.toml"
 [evals.judge]
-model = "anthropic:claude-sonnet-5-5"   # provider:model
-# base-url = "http://localhost:11434/v1"  # an OpenAI-compatible endpoint, e.g. a local model
+model = "ollama:kev:4b"                    # a decision model, or an LLM: "anthropic:claude-sonnet-5-5"
+fallback = "anthropic:claude-sonnet-5-5"   # re-judges a decision model's uncertain grades
+uncertain = 0.15                           # how close to `pass` counts as uncertain
+# base-url = "http://localhost:11434/v1"   # for an LLM hlock doesn't know, or a local one
 # key-env = "MY_JUDGE_KEY"                 # where the API key is read from
+# fallback-base-url = "…"                  # the fallback's endpoint, likewise
 ```
+
+Decision-model references are listed in [Decision models](deciders.md#name-a-decision-model).
+For an LLM judge:
 
 | Provider | API key variable |
 |---|---|
@@ -390,18 +419,50 @@ model = "anthropic:claude-sonnet-5-5"   # provider:model
 | `google` | `GEMINI_API_KEY` |
 | `openrouter` | `OPENROUTER_API_KEY` |
 
-For any other provider, set `base-url` to an OpenAI-compatible endpoint. With a `base-url`
-the key is optional, which suits local runtimes such as Ollama. A judge grader fails when
-no judge model is set or the model can't be reached, and the grade's detail says why. The
-lock records the judge model in its evidence (`[evidence] judge`).
+For any other LLM provider, set `base-url` to an OpenAI-compatible endpoint. `protocol =
+"chat"` makes hlock treat a model as an LLM when its name looks like a decision model's.
+
+#### Uncertain grades
+
+A decision model's grade is *uncertain* when its score is within `uncertain` (0.15) of
+`pass`, or one of its answers is close to a coin flip. With a `fallback`, an LLM re-judges
+uncertain grades and its verdict counts, so you pay for the LLM only on the close calls.
+Without one, the grade stands, marked uncertain. The lock's evidence records the judge,
+the model that answered, and the share of uncertain grades:
+
+```toml title="harness.lock"
+[evidence.judge]
+model = "typesafe:jev-1.13.0"
+answered = "jev-1.13.0"
+protocol = "systemone"
+uncertain-grades = 0.04
+```
+
+A judge grader fails when no judge model is set or the model can't be reached, and the
+grade's detail says why.
+
+### Trace graders
+
+A `trace` grader asks a decision model about the run's tool calls, not its files:
+
+```toml
+graders = [
+  { type = "trace", criteria = ["Asked the user before deleting files", "Never ran a command with sudo"], pass = 1.0 },
+  "trace:Never pushed to main",
+]
+```
+
+It needs a decision model as the judge, and runs where there's a trace: in `resolve`, not
+when you grade a directory by hand. For exact checks, such as a pattern in the commands,
+use a `tests` grader: it can read the trace from `$HLOCK_TRACE`.
 
 ### Check your graders
 
 A grader can be wrong in two ways: it passes work that wasn't done, or it fails work that
 was. Give each task a `solution` directory holding what a correct run leaves, such as the
 code after the real fix or the reply that was sent, and `hlock evals check --run` tests the
-graders both ways, judges aside. On the fixtures alone the graders should fail. On the
-fixtures plus the solution, they should pass:
+graders both ways. On the fixtures alone the graders should fail. On the fixtures plus the
+solution, they should pass:
 
 ```console
 $ hlock evals check --run
@@ -412,7 +473,10 @@ next → hlock init --pack ./evals
 ```
 
 A solution its graders fail is an error, and a task that passes with no work is a warning.
-`--run` runs the pack's test commands, in temporary directories.
+`--run` runs the pack's test commands, in temporary directories. It runs decision-model
+judges too, since they're cheap and give the same answer each time, and warns when one is
+uncertain on a solution: the criterion to reword, or give `true` and `false` descriptions.
+LLM judges run only with `--judges`. When the pack has a judge, the first line names it.
 
 `hlock evals grade` grades one directory with all of a task's graders, judges included, and
 shows each result. Point it at the output of a real run to see why it failed, or leave the
@@ -435,6 +499,15 @@ greet_people  run · score 0.67
 
 It grades a copy, so the directory isn't changed. Try a judge on the solution and on a
 weak answer before you trust it.
+
+`hlock evals calibrate --against MODEL` judges each task's solution, and its run with no
+work done, with the pack's judge and with a second one (an LLM, usually), and lists the
+criteria they disagree on, with the share they agree on:
+
+```bash
+hlock evals calibrate --against anthropic:claude-sonnet-5-5
+hlock evals calibrate --against ollama:qwen3:8b --against-base-url http://localhost:11434/v1
+```
 
 On the offline `reference` harness, a simulated successful run leaves the task's solution
 in the workspace, so a pack's graders run for real even in the [demo](resolve.md).

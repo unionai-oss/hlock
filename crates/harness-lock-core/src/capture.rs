@@ -1228,6 +1228,9 @@ pub fn capture(profile: &HarnessProfile, reg: &Registry, ctx: &Ctx, project: Opt
                     } else {
                         (std::mem::take(&mut v), if spec.format == "jsonc" { "json" } else { spec.format.as_str() })
                     };
+                    // hooks hlock writes for its deciders come from the lock's [[decider]]
+                    // entries at sync, not from the vendored config
+                    crate::decide::strip_hooks(&mut body);
                     secrets.scrub_value(&mut vec![profile.id.clone(), id.clone()], &mut body, false);
                     // digest what's restored, redacted and parsed, so a sync that reformats the
                     // file or fills in a different secret value isn't drift
@@ -1247,6 +1250,47 @@ pub fn capture(profile: &HarnessProfile, reg: &Registry, ctx: &Ctx, project: Opt
         }
         configs.push(cf);
     }
+    // ---- deciders: a native setting the harness has, and [deciders.*] in harness.toml ----
+    let mut deciders = Vec::new();
+    for (use_, w) in &profile.deciders {
+        let Some(n) = &w.native else { continue };
+        let Some(Value::Object(m)) = src.get(&format!("{}#{}", n.file, n.pointer)) else { continue };
+        let Some(model) = m.get(&n.model_key).and_then(Value::as_str) else { continue };
+        deciders.push(crate::lockfile::Decider {
+            use_: use_.clone(),
+            provider: n.provider_key.as_ref().and_then(|k| m.get(k)).and_then(Value::as_str).unwrap_or_default().to_string(),
+            model: model.to_string(),
+            protocol: "systemone".into(),
+            endpoint: n.base_url_key.as_ref().and_then(|k| m.get(k)).and_then(Value::as_str).map(str::to_string),
+            resolved_from: Some(format!("{}#{}", n.file, n.pointer)),
+            via: "native".into(),
+            ..Default::default()
+        });
+    }
+    if let Some(mpath) = crate::manifest::find_manifest(&ctx.cwd) {
+        match crate::manifest::Manifest::load(&mpath).and_then(|m| Ok((m.deciders()?, m.root()))) {
+            Ok((specs, mroot)) => {
+                for (use_, spec) in specs.iter().filter(|(u, _)| crate::decide::AGENT_USES.contains(&u.as_str())) {
+                    let Some(model) = spec.model.as_deref().filter(|m| *m != "none") else {
+                        warnings.push(format!("[deciders.{use_}] has any-of candidates; pin locks a fixed `model` (hlock resolve searches any-of)"));
+                        continue;
+                    };
+                    if deciders.iter().any(|d: &crate::lockfile::Decider| d.use_ == *use_) {
+                        continue; // the harness's own setting wins
+                    }
+                    let Some((via, wiring)) = crate::decide::wiring(use_, &profile.id, Some(profile)) else {
+                        warnings.push(format!("{} can't make {use_} decisions; [deciders.{use_}] isn't locked", profile.name));
+                        continue;
+                    };
+                    match crate::decide::lock_entry(use_, model, spec, &via, wiring, &mroot) {
+                        Ok(d) => deciders.push(d),
+                        Err(e) => warnings.push(e),
+                    }
+                }
+            }
+            Err(e) => warnings.push(format!("{}: {e}", mpath.display())),
+        }
+    }
     warnings.extend(src.warnings.borrow().iter().cloned());
 
     // ---- assemble ----
@@ -1260,6 +1304,7 @@ pub fn capture(profile: &HarnessProfile, reg: &Registry, ctx: &Ctx, project: Opt
         stack,
         llm: llms,
         decision: Decision { kind: "none".into(), ..Default::default() },
+        decider: deciders,
         harness: Harness {
             name: profile.id.clone(),
             version: probe.version.clone(),
@@ -1339,6 +1384,13 @@ pub fn diff_locks(old: &Lockfile, new: &Lockfile) -> Vec<String> {
     }
     let llm_sig = |l: &&LLM| format!("{}:{}{}", l.provider, l.model, l.endpoint.as_deref().map(|e| format!(" @ {e}")).unwrap_or_default());
     diff_maps(&mut out, "llm", index(&old.llm, |l| l.role.clone()), index(&new.llm, |l| l.role.clone()), llm_sig);
+    let decider_sig = |d: &&crate::lockfile::Decider| {
+        let events: Vec<&str> = d.wiring.iter().map(|w| w.event.as_str()).collect();
+        // a changed policy file is reported by `decide::drift`, with its name
+        let may = if d.may.is_empty() { String::new() } else { format!(" may {}", d.may.join(",")) };
+        format!("{}:{} via {} {}{may}", d.provider, d.model, d.via, events.join(","))
+    };
+    diff_maps(&mut out, "decider", index(&old.decider, |d| d.use_.clone()), index(&new.decider, |d| d.use_.clone()), decider_sig);
     let tool_sig = |t: &&Tool| {
         let env: Vec<&String> = t.env.keys().collect();
         format!("{} {} {} {} env={env:?} enabled={:?}", t.transport.as_deref().unwrap_or(""), t.command.as_deref().unwrap_or(""), t.args.join(" "), t.url.as_deref().unwrap_or(""), t.enabled)

@@ -137,6 +137,8 @@ harness expands references everywhere hlock writes secrets in that file. See
 | `packages` | Packages to pin for code harnesses, e.g. `pypi:pydantic-ai` |
 | `framework` | For `custom` harnesses: a framework profile to inherit packages from |
 | `run` | For code harnesses: `entrypoint`, `command`, `python`, `env` |
+| `deciders.<use>` | How a [decision model](deciders.md) for `approve` or `stop` reaches the harness: `hook = { file, events, format, pointer }` (a hook hlock writes into the profile file `file`, under `pointer`, default `/hooks`, in the `claude-code` or `codex` format), or `native = { file, pointer, provider-key, model-key, base-url-key }` (a setting of the harness's own that `pin` records) |
+| `decider-env` | Frameworks: pairs of variables their own decision-model support reads a System One endpoint and key from, e.g. `[["SYSTEM_ONE_BASE_URL", "SYSTEM_ONE_API_KEY"]]` |
 
 ## A runtime profile
 
@@ -165,6 +167,7 @@ min-memory-gb = 24                      # weights plus a working context
 tier = 3                                # 3 strong agentic coder, 2 capable, 1 small/fast
 tools = true                            # reliable tool calling
 roles = []                              # e.g. ["small", "decision"]; empty means any
+                                        # "decider": a decision model, never picked as a chat model
 ```
 
 ## Project harnesses

@@ -1,0 +1,35 @@
+# Runtime profile: Ollaya, a local runtime for decision models only (https://ollaya.dev).
+# It speaks TypeSafe's /v1/systemone and OpenAI's /v1/decisions. Young and fast-moving:
+# models can need a recent Ollaya.
+id = "ollaya"
+name = "Ollaya"
+homepage = "https://ollaya.dev"
+binaries = ["ollaya"]
+version = { args = ["--version"] }
+ports = [11435]
+provider-names = ["ollaya"]
+pull = "ollaya pull {model}"
+serve = "ollaya serve"
+
+[[install]]
+method = "script"
+command = "curl -fsSL https://ollaya.dev/install.sh | sh"
+
+# Decision models, served at /v1/systemone. Never picked as a chat model.
+[[catalog]]
+id = "kev:4b"
+params-b = 4
+min-memory-gb = 5
+tier = 0
+roles = ["decider"]
+[[catalog]]
+id = "kev:9b"
+params-b = 9
+min-memory-gb = 10
+tier = 0
+roles = ["decider"]
+[[catalog]]
+id = "clef"
+min-memory-gb = 8
+tier = 0
+roles = ["decider"]
