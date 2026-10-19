@@ -70,16 +70,21 @@
 }
 
 /* Home page hero: tagline, lead, call-to-action buttons, compact install command. */
-/* Size the tagline from the content column (container query units), so it stays on one
-   line on wide screens; on narrow screens it wraps normally. */
+/* Size the tagline from the content column (container query units), so it scales with
+   the column; the second line carries the logo's violet → pink gradient. */
 .md-content__inner {
   container-type: inline-size;
 }
 .md-typeset .hl-tagline {
-  margin: -.4em 0 .6em;
+  margin: -.2em 0 .6em;
   text-align: center;
-  font-size: 1.05rem;
-  font-weight: 700;
+  font-size: 1.6rem;
+  font-weight: 800;
+  line-height: 1.05;
+  letter-spacing: -.03em;
+  color: var(--md-default-fg-color);
+}
+.md-typeset .hl-tagline .hl-grad {
   background: linear-gradient(90deg, #a78bfa, #f472b6);
   -webkit-background-clip: text;
   background-clip: text;
@@ -87,8 +92,7 @@
 }
 @container (min-width: 32rem) {
   .md-typeset .hl-tagline {
-    font-size: min(1.15rem, 3.2cqi);
-    white-space: nowrap;
+    font-size: min(2.6rem, 8cqi);
   }
 }
 .md-typeset .hl-lead {
@@ -157,9 +161,132 @@
 .md-typeset .hl-install {
   margin: 0 0 1.6em;
 }
-.md-typeset .hl-demo img {
-  display: block;
-  width: 100%;
+/* Home page demo terminal, played by javascripts/terminal.js. Dark in both color schemes,
+   matching the hero terminal on hlock.ai. Between machines the window swipes left. */
+.md-typeset .hl-demo {
+  overflow-x: clip;
+}
+.md-typeset .hl-term {
+  transition: transform .45s cubic-bezier(.6, 0, .4, 1), opacity .45s ease;
+  position: relative;
+  border-radius: 14px;
+  background: linear-gradient(180deg, rgba(23, 19, 36, .97), rgba(12, 10, 20, .99));
+  border: 1px solid rgba(255, 255, 255, .14);
+  box-shadow: 0 30px 80px -30px rgba(0, 0, 0, .8), inset 0 1px 0 rgba(255, 255, 255, .05);
+  overflow: hidden;
+  container-type: inline-size;
+}
+.md-typeset .hl-term.is-leaving {
+  transform: translateX(-105%);
+  opacity: 0;
+}
+.md-typeset .hl-term.is-entering {
+  transform: translateX(105%);
+  opacity: 0;
+  transition: none;
+}
+.md-typeset .hl-term::before {
+  content: "";
+  position: absolute;
+  inset: -1px;
+  border-radius: inherit;
+  padding: 1px;
+  pointer-events: none;
+  background: linear-gradient(140deg, rgba(167, 139, 250, .7), transparent 35%, transparent 65%, rgba(244, 114, 182, .6));
+  -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+  -webkit-mask-composite: xor;
+  mask-composite: exclude;
+}
+.md-typeset .hl-term__bar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  height: 40px;
+  padding: 0 14px;
+  border-bottom: 1px solid rgba(255, 255, 255, .08);
+  background: rgba(255, 255, 255, .02);
+}
+.md-typeset .hl-term__dots {
+  display: flex;
+  gap: 7px;
+}
+.md-typeset .hl-term__dots i {
+  width: 11px;
+  height: 11px;
+  border-radius: 50%;
+}
+.md-typeset .hl-term__dots i:nth-child(1) { background: #ff5f57; }
+.md-typeset .hl-term__dots i:nth-child(2) { background: #febc2e; }
+.md-typeset .hl-term__dots i:nth-child(3) { background: #28c840; }
+.md-typeset .hl-term__title {
+  flex: 1;
+  margin-right: 46px;
+  text-align: center;
+  font: 12px var(--md-code-font-family);
+  color: #6f6886;
+}
+.md-typeset .hl-term__body {
+  margin: 0;
+  padding: 18px 20px 22px;
+  box-sizing: content-box;
+  height: calc(22 * 1.6em);
+  font-family: var(--md-code-font-family);
+  font-size: clamp(8px, (100cqi - 42px) / (var(--cols, 60) * .6), 13px);
+  line-height: 1.6;
+  color: #d9d4e8;
+  background: none;
+  white-space: pre;
+  overflow-x: auto;
+  overflow-y: hidden;
+}
+.md-typeset .hl-term__caption {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 16px;
+  border-top: 1px solid rgba(255, 255, 255, .08);
+  background: rgba(255, 255, 255, .03);
+  font-size: .7rem;
+  line-height: 1.4;
+  color: #d9d4e8;
+}
+.md-typeset .hl-term__step {
+  flex: none;
+  padding: 1px 8px;
+  border-radius: 999px;
+  background: linear-gradient(90deg, #7c3aed, #ec4899);
+  font: 600 .6rem var(--md-code-font-family);
+  color: #fff;
+}
+.md-typeset .hl-term.is-static .hl-term__body {
+  height: auto;
+}
+@media (max-width: 560px) {
+  .md-typeset .hl-term__body {
+    font-size: clamp(7px, (100cqi - 30px) / (var(--cols, 60) * .6), 11px);
+    padding: 14px;
+  }
+}
+.hl-term .t-pr, .hl-term .t-arrow { color: #f472b6; }
+.hl-term .t-cmd { color: #fff; }
+.hl-term .t-ok { color: #4ade80; }
+.hl-term .t-warn { color: #fbbf24; }
+.hl-term .t-auto { color: #a78bfa; }
+.hl-term .t-dim { color: #6f6886; }
+.hl-term .t-mut { color: #a39db8; }
+.hl-term .t-key { color: #67e8f9; }
+.hl-term .t-hi { color: #fff; font-weight: 600; }
+.hl-term .t-box { color: #6d5fa3; }
+.hl-term .cursor {
+  display: inline-block;
+  width: .6em;
+  height: 1.15em;
+  vertical-align: -.2em;
+  background: #a78bfa;
+  animation: hl-blink 1s steps(1) infinite;
+}
+@keyframes hl-blink {
+  50% { opacity: 0; }
 }
 @media (prefers-reduced-motion: reduce) {
   .md-typeset .md-button.hl-btn,

@@ -5,7 +5,7 @@
 
 [project]
 site_name = "hlock"
-site_description = "Make your agent harness pinnable, portable, and tunable. Pin your harness, models, MCP servers, skills, and config in a harness.lock, version it, and rehydrate it anywhere."
+site_description = "Your agent harness made portable. Pin your harness, models, MCP servers, skills, and config in a harness.lock, version it, and rehydrate it anywhere."
 site_url = "https://docs.hlock.ai/"
 site_author = "Union.ai"
 repo_url = "https://github.com/unionai-oss/hlock"
@@ -13,6 +13,7 @@ repo_name = "unionai-oss/hlock"
 edit_uri = "edit/main/docs/"
 copyright = "Copyright &copy; 2026 Union.ai · Apache-2.0"
 extra_css = ["stylesheets/extra.css"]
+extra_javascript = ["javascripts/terminal.js"]
 
 nav = [
   { "Home" = "index.md" },

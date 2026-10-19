@@ -4,7 +4,7 @@
 
 # hlock
 
-### Make your agent harness pinnable, portable, and tunable.
+### Your agent harness<br>made portable.
 
 **Pin your harness, models, MCP servers, skills, and config in a `harness.lock`, version it, and rehydrate it anywhere.**
 
@@ -24,11 +24,11 @@
 
 ---
 
-Your agent is more than a model: it's a harness version, MCP servers, skills, plugins,
-instruction files, and config, set up by hand on one machine. `hlock` pins all of it in a
-`harness.lock` you commit to git, catches drift, and brings the same setup back on
-another laptop, in CI, or in a container. When you're ready, it measures your stack
-against your own tasks and finds a better one.
+Your agent is more than a model. It's a harness, MCP servers, skills, and config,
+hand-tuned on one machine. `hlock` is the missing harness packaging layer:
+`harness.lock` tracks all of its dependencies, so you can commit it to git and restore
+it anywhere. When you're ready, it measures your stack against your own tasks and finds a
+better one.
 
 | You know this from package managers | In `hlock` |
 |---|---|
