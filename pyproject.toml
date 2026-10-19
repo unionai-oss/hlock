@@ -44,6 +44,7 @@ flyte = [
 # `uv sync` installs `dev` by default; add `--group docs` for the docs toolchain.
 dev = [
     "maturin>=1.5,<2.0",
+    "prek>=0.5.5",
     "pytest>=7.0",
     "ruff",
 ]

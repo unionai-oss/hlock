@@ -17,6 +17,7 @@ bindings, the `hlock` CLI, and a worker for heavy stages. See
 uv sync                                              # build the extension, install dev tools
 uv run pytest                                        # Python bindings, CLI, worker
 uv run ruff check harness_lock hlock tests
+uv run prek run --all-files                          # commit hooks in prek.toml
 cargo test -p harness-lock-core                      # Rust core
 uv run --group docs zensical build --clean           # docs, if you touched docs/
 ```
