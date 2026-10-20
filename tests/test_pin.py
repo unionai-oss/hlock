@@ -2,6 +2,7 @@
 
 import json
 import os
+import re
 import shutil
 import stat
 from pathlib import Path
@@ -66,6 +67,12 @@ def home(tmp_path, monkeypatch):
     manifest.parent.mkdir(parents=True)
     manifest.write_text(json.dumps({"config": {"size": 10}, "layers": [{"size": 5000}, {"size": 90}]}))
     return home
+
+
+def plain(output: str) -> str:
+    """CLI output as one line of words: no colors (rich-click forces them on GitHub Actions),
+    no box borders, and no line wrapping."""
+    return " ".join(re.sub(r"\x1b\[[0-9;]*m", "", output).replace("│", " ").split())
 
 
 def all_text(root: Path) -> str:
@@ -210,7 +217,7 @@ def test_include_user_scope_picks_matching_items(home):
     assert {c["id"] for c in lock["config"]} == {"state", "project-mcp", "project-settings"}
 
     r = invoke("pin", "--user", "-i", "skills", "--harness", "claude")
-    assert r.exit_code == 2 and "--user already pins everything" in r.output
+    assert r.exit_code == 2 and "--user already pins everything" in plain(r.output), r.output
 
 
 def test_locks_from_before_scopes_check_everything(home):
