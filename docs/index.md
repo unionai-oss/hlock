@@ -107,12 +107,14 @@ If you've used `uv`, `cargo`, or `npm`, you already know the shape of `hlock`:
 
 </div>
 
-## Manage your team's agents
+## Manage your repo's or team's agents
 
-Contributors to one repository rarely share an agent setup: one uses Claude Code with
-hand-written skills, another uses Codex with a different model. Each person can commit their own
-lock to `.hlock/locks/harness.<handle>.lock`, next to the code it was used on. Anyone with a clone
-can then try a teammate's setup in isolation with `hlock launch --lock`, or
+A repository can version the agent it's built with, the way it versions its dependencies:
+commit a `harness.lock` at the root for the setup the project recommends. Contributors rarely
+share one setup, though: one uses Claude Code with hand-written skills, another uses Codex
+with a different model. Each person can commit their own lock to
+`.hlock/locks/harness.<handle>.lock`, next to the code it was used on. Anyone with a clone can
+then try a teammate's setup in isolation with `hlock launch --lock`, or
 [`hlock pull`](guides/pull.md) it from outside the repository. Add the
 [hlock badge](project/badge.md) to your README to point readers at the locks. See
 [Team repositories](guides/teams.md) for the layout and the commands.
