@@ -31,7 +31,8 @@ SECRET = "HLOCK_SECRET_GITHUB_GITHUB_TOKEN"
 SESSION = [
     ("on your laptop", "laptop", ["pin", "--user"]),
     (None, "laptop", ["check"]),
-    ("on another machine, after git clone", "fresh", ["sync", "--yes"]),
+    ("on another machine, after git clone", "fresh", ["trust", "--yes"]),
+    (None, "fresh", ["sync", "--yes"]),
 ]
 
 

@@ -70,6 +70,7 @@ hlock launch                    # start a session on the locked setup, isolated 
 hlock run "summarize README.md"  # or run one prompt through it (claude -p, codex exec, …)
 hlock pull github:alice/agents  # get someone else's pinned setup; then hlock launch --lock alice
 hlock add skill github:anthropics/skills/skills/pdf   # declare a dependency, pin it, install it
+hlock audit                     # integrity, hidden characters, what it runs, policy, secrets
 ```
 
 Plain `hlock pin` records only the project's own skills, MCP servers and config, so your
@@ -251,7 +252,9 @@ Want to help? See the [contributing guide](https://docs.hlock.ai/project/contrib
 
 What works today: `pin`, `check`, `sync`, and `launch` for the
 [supported harnesses](https://docs.hlock.ai/guides/harnesses/), declared dependencies
-(`add`, `remove`, `outdated`, APM packages and `apm.lock.yaml` export), `localize`, manifest and
+(`add`, `remove`, `outdated`, APM packages and `apm.lock.yaml` export), audit and trust
+(hidden-Unicode scanning, executable approval, `hlock-policy.toml`, SARIF, CycloneDX and SPDX
+SBOMs), `localize`, manifest and
 lockfile schema v1, a content-addressed store, eval packs (`hlock evals`) with graders, the
 reference provider and harness, grid search with Pareto selection, `upgrade`
 (plan/apply/rollback), `tune` across the `local`, `devbox`, and `cluster` backends, and the

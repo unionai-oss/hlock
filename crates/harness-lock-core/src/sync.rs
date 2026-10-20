@@ -49,6 +49,11 @@ pub struct SyncOptions {
     /// More harnesses to install the lock's portable declared dependencies (skills, MCP
     /// servers, instruction files) into: `[target] also` in `harness.toml`.
     pub also: Vec<String>,
+    /// Files whose hidden characters are let through (`--allow-hidden FILE`).
+    pub allow_hidden: Vec<String>,
+    /// Treat every executable the lock would run as approved (`--trust`): the caller has
+    /// reviewed the lock some other way, and records the approvals.
+    pub trust: bool,
 }
 
 /// One concrete thing an `auto` step does.
@@ -74,7 +79,7 @@ pub enum Action {
     /// Copy a file (an instruction file) into place.
     CopyFile { from: PathBuf, to: PathBuf },
     /// Fetch a skill from git at a commit.
-    GitSkill { url: String, commit: String, subpath: String, to: PathBuf },
+    GitSkill { url: String, commit: String, subpath: String, to: PathBuf, name: String, scripts: Option<Vec<String>> },
     /// Run a command.
     Run { argv: Vec<String>, env: BTreeMap<String, String> },
     /// Move a path aside to `<path>.hlock-bak`.
@@ -93,7 +98,17 @@ pub enum Action {
     WriteFile { path: PathBuf, content: String },
     /// Fetch a declared dependency at its locked commit (through the shared git cache and
     /// the project's store), check its digest, and put it in place.
-    FetchDep { entry: Box<crate::deps::Entry>, to: PathBuf, project: PathBuf },
+    FetchDep {
+        entry: Box<crate::deps::Entry>,
+        to: PathBuf,
+        project: PathBuf,
+        /// Files whose hidden characters are let through when it's fetched.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        allow_hidden: Vec<String>,
+        /// The lock let its hidden characters through (`scan = "allowed:critical"`).
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        allowed: bool,
+    },
     /// Set one MCP server in a harness's config.
     WriteMcp { dest: crate::deps::McpDest, name: String, entry: Value },
 }
@@ -160,6 +175,9 @@ pub struct Plan {
     /// Things to know about the plan that aren't steps (what `[target] also` leaves out).
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub notes: Vec<String>,
+    /// What the lock would run here, each with its trust status (`specs/audit.md` §4).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub executables: Vec<crate::trust::Executable>,
 }
 
 impl Plan {
@@ -442,6 +460,24 @@ fn expand(p: &str, root: &Path, t: &Ctx) -> PathBuf {
     t.expand(p, Some(root))
 }
 
+/// Why content can't be placed: critical hidden characters the lock didn't let through
+/// (`scan = "allowed:critical"`) and `--allow-hidden` doesn't cover.
+fn hidden(path: &Path, label: &str, scan: Option<&str>, opts: &SyncOptions) -> Option<String> {
+    if crate::audit::allowed(scan) {
+        return None;
+    }
+    let f = crate::scan::scan_path(path, label);
+    let bad: Vec<&crate::scan::Finding> = f.iter().filter(|x| x.severity == crate::scan::Severity::Critical && !crate::audit::allows(&opts.allow_hidden, x)).collect();
+    let first = bad.first()?;
+    Some(format!(
+        "it has {} character{} that hide text from a reviewer ({}); refusing to place it. Clean it with `hlock audit --strip`, or pass --allow-hidden {}",
+        bad.len(),
+        if bad.len() == 1 { "" } else { "s" },
+        first.label(),
+        fsutil::shell_quote(&first.file)
+    ))
+}
+
 /// A step hlock won't do automatically because the lock asks for something unsafe: a
 /// manual step saying why. A lock may come from someone else (`hlock pull`).
 fn refused(id: String, kind: &str, title: String, why: String) -> Step {
@@ -676,6 +712,20 @@ pub fn plan(lock: &Lockfile, lock_path: &Path, reg: &Registry, ctx: &Ctx, opts: 
             steps.push(refused(format!("config:{}", c.id), "config", format!("Restore {}", c.path), format!("its vendored copy {vend:?} isn't a path inside the lock's directory")));
             continue;
         };
+        // a file the profile restores by pointer is only written at those pointers: a lock
+        // can't widen that to the whole file, or to keys the profile doesn't name
+        if let Some(spec) = profile.files.get(&c.id).filter(|f| f.restore == "pointers") {
+            let stray: Vec<&String> = c.pointers.iter().filter(|p| !spec.pointers.iter().any(|q| p == &q || p.starts_with(&format!("{q}/")))).collect();
+            if c.pointers.is_empty() || !stray.is_empty() {
+                let what = if c.pointers.is_empty() { "the whole file".to_string() } else { stray.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", ") };
+                steps.push(refused(format!("config:{}", c.id), "config", format!("Restore {}", c.path), format!("the lock restores {what}, but {} restores only {} of this file", profile.name, spec.pointers.join(", "))));
+                continue;
+            }
+        }
+        if let Some(why) = hidden(&vendored, vend, c.scan.as_deref(), opts) {
+            steps.push(Step { id: format!("config:{}", c.id), kind: "config".into(), title: format!("Restore {}", c.path), status: "manual".into(), reason: why, ..Default::default() });
+            continue;
+        }
         let fallback = (mode == "prefix").then(|| profile.file_path(&c.id, ctx)).flatten();
         let env_ref = opts.inject.then(|| profile.files.get(&c.id).and_then(|f| f.env_ref.clone())).flatten();
         let resolve = resolver(ctx);
@@ -738,9 +788,15 @@ pub fn plan(lock: &Lockfile, lock_path: &Path, reg: &Registry, ctx: &Ctx, opts: 
             step.reason = "matches the lock".into();
         } else if s.dep.declared && s.dep.commit.is_some() {
             // a declared dependency is fetched at its commit, never vendored
-            step = fetch_dep_step(step, crate::deps::Entry::Skill(s.clone()), dest, &lock_dir, lock, ctx);
+            step = fetch_dep_step(step, crate::deps::Entry::Skill(s.clone()), dest, &lock_dir, lock, ctx, opts);
         } else if let Some(v) = &s.vendored {
+            let refuse = |from: &Path| hidden(from, v, s.scan.as_deref(), opts).or_else(|| crate::trust::unlisted_scripts(&s.name, s.scripts.as_ref(), from));
             match vendored_path(&lock_dir, v) {
+                Some(from) if refuse(&from).is_some() => {
+                    step.status = "manual".into();
+                    step.title = format!("Copy skill {} → {shown}", s.name);
+                    step.reason = refuse(&from).unwrap_or_default();
+                }
                 Some(from) => {
                     step.status = "auto".into();
                     step.title = format!("Copy skill {} → {shown}", s.name);
@@ -765,7 +821,7 @@ pub fn plan(lock: &Lockfile, lock_path: &Path, reg: &Registry, ctx: &Ctx, opts: 
                 None => {
                     step.status = if has_git { "auto" } else { "manual" }.into();
                     step.reason = if has_git { String::new() } else { "needs git".into() };
-                    step.action = has_git.then(|| Action::GitSkill { url: url.into(), commit: commit.into(), subpath: sub.into(), to: dest });
+                    step.action = has_git.then(|| Action::GitSkill { url: url.into(), commit: commit.into(), subpath: sub.into(), to: dest, name: s.name.clone(), scripts: s.scripts.clone() });
                 }
             }
         } else {
@@ -811,9 +867,14 @@ pub fn plan(lock: &Lockfile, lock_path: &Path, reg: &Registry, ctx: &Ctx, opts: 
         if ok {
             step.reason = "matches the lock".into();
         } else if i.dep.declared && i.dep.commit.is_some() {
-            step = fetch_dep_step(step, crate::deps::Entry::Instructions(i.clone()), dest, &lock_dir, lock, ctx);
+            step = fetch_dep_step(step, crate::deps::Entry::Instructions(i.clone()), dest, &lock_dir, lock, ctx, opts);
         } else if let Some(v) = &i.vendored {
             match vendored_path(&lock_dir, v) {
+                Some(from) if hidden(&from, v, i.scan.as_deref(), opts).is_some() => {
+                    step.status = "manual".into();
+                    step.title = format!("Write {}", pretty(&dest, ctx));
+                    step.reason = hidden(&from, v, i.scan.as_deref(), opts).unwrap_or_default();
+                }
                 Some(from) => {
                     step.status = "auto".into();
                     step.title = format!("Write {}", pretty(&dest, ctx));
@@ -888,11 +949,19 @@ pub fn plan(lock: &Lockfile, lock_path: &Path, reg: &Registry, ctx: &Ctx, opts: 
                     if ok {
                         step.reason = "matches the lock".into();
                     } else if s.dep.commit.is_some() || s.vendored.is_none() {
-                        step = fetch_dep_step(step, crate::deps::Entry::Skill(s.clone()), dest, &lock_dir, lock, ctx);
+                        step = fetch_dep_step(step, crate::deps::Entry::Skill(s.clone()), dest, &lock_dir, lock, ctx, opts);
                         step.title = format!("{tag}{}", step.title);
-                    } else if let Some(from) = s.vendored.as_deref().and_then(|v| vendored_path(&lock_dir, v)) {
-                        step.status = "auto".into();
-                        step.action = Some(Action::CopyDir { from, to: dest });
+                    } else if let Some((v, from)) = s.vendored.as_deref().and_then(|v| Some((v, vendored_path(&lock_dir, v)?))) {
+                        match hidden(&from, v, s.scan.as_deref(), opts).or_else(|| crate::trust::unlisted_scripts(&s.name, s.scripts.as_ref(), &from)) {
+                            Some(why) => {
+                                step.status = "manual".into();
+                                step.reason = why;
+                            }
+                            None => {
+                                step.status = "auto".into();
+                                step.action = Some(Action::CopyDir { from, to: dest });
+                            }
+                        }
                     }
                     steps.push(step);
                 }
@@ -911,7 +980,7 @@ pub fn plan(lock: &Lockfile, lock_path: &Path, reg: &Registry, ctx: &Ctx, opts: 
                         step.status = "manual".into();
                         step.reason = format!("{} reads instructions only from this file, which already exists", op.name);
                     } else {
-                        step = fetch_dep_step(step, crate::deps::Entry::Instructions(i.clone()), dest, &lock_dir, lock, ctx);
+                        step = fetch_dep_step(step, crate::deps::Entry::Instructions(i.clone()), dest, &lock_dir, lock, ctx, opts);
                         step.title = format!("{tag}{}", step.title);
                     }
                     steps.push(step);
@@ -968,6 +1037,34 @@ pub fn plan(lock: &Lockfile, lock_path: &Path, reg: &Registry, ctx: &Ctx, opts: 
         });
     }
 
+    // ---- policy: a denied source, server, provider or harness stops the sync ----
+    let policy = crate::policy::Policy::for_lock(lock_path, ctx)?;
+    notes.extend(policy.enforce(policy.check_lock(lock), &pretty(lock_path, ctx))?);
+
+    // ---- executables: nothing that runs is installed until it's trusted here ----
+    let store = crate::trust::TrustStore::load(ctx)?;
+    let mut executables = crate::trust::assess(lock, &lock_dir, Some(profile), ctx, &policy, &store);
+    if opts.trust {
+        for e in executables.iter_mut().filter(|e| e.status == "untrusted") {
+            e.status = "trusted".into();
+        }
+    }
+    let blocked = crate::trust::blocked_steps(&executables);
+    for st in steps.iter_mut() {
+        // `also:HARNESS:skill:x` installs what `skill:x` does, in another harness
+        let base = st.id.strip_prefix("also:").and_then(|r| r.split_once(':')).map(|(_, b)| b).unwrap_or(&st.id);
+        let Some(es) = blocked.get(base) else { continue };
+        // only what would run is gated; a step refused for another reason keeps that reason
+        if st.status != "auto" {
+            continue;
+        }
+        let denied = es.iter().any(|e| e.status == "denied");
+        let what: Vec<String> = es.iter().map(|e| format!("{} {}{}", e.kind, e.name, e.via.as_deref().map(|v| format!(" (via {v})")).unwrap_or_default())).collect();
+        st.status = "manual".into();
+        st.action = None;
+        st.reason = if denied { format!("you denied {} on this machine (hlock trust to change that)", what.join(", ")) } else { format!("⚑ runs {}, not yet trusted: approve with hlock trust, or sync --trust", what.join(", ")) };
+    }
+
     Ok(Plan {
         harness: profile.id.clone(),
         harness_name: profile.name.clone(),
@@ -980,12 +1077,13 @@ pub fn plan(lock: &Lockfile, lock_path: &Path, reg: &Registry, ctx: &Ctx, opts: 
         env,
         steps,
         notes,
+        executables,
     })
 }
 
 /// A step that fetches a declared dependency at its commit into `dest`. A lock pulled
 /// from someone else may only name an http(s), ssh or git remote.
-fn fetch_dep_step(mut step: Step, entry: crate::deps::Entry, dest: PathBuf, lock_dir: &Path, lock: &Lockfile, ctx: &Ctx) -> Step {
+fn fetch_dep_step(mut step: Step, entry: crate::deps::Entry, dest: PathBuf, lock_dir: &Path, lock: &Lockfile, ctx: &Ctx, opts: &SyncOptions) -> Step {
     let kind = if entry.kind() == crate::deps::Kind::Instructions { crate::deps::Kind::Instructions } else { crate::deps::Kind::Skill };
     let src = entry.source().map(|s| crate::deps::parse(s, kind));
     let commit = entry.dep().commit.clone().unwrap_or_default();
@@ -1005,7 +1103,18 @@ fn fetch_dep_step(mut step: Step, entry: crate::deps::Entry, dest: PathBuf, lock
                     return step;
                 }
             }
-            let stored = entry.digest().and_then(|d| crate::deps::stored(lock_dir, d)).is_some();
+            let stored = entry.digest().and_then(|d| crate::deps::stored(lock_dir, d));
+            let scan = match &entry {
+                crate::deps::Entry::Skill(s) => s.scan.clone(),
+                crate::deps::Entry::Instructions(i) => i.scan.clone(),
+                _ => None,
+            };
+            if let Some(why) = stored.as_ref().and_then(|p| hidden(p, &pretty(&dest, ctx), scan.as_deref(), opts)) {
+                step.status = "manual".into();
+                step.reason = why;
+                return step;
+            }
+            let stored = stored.is_some();
             if !stored && ctx.which("git").is_none() {
                 step.status = "manual".into();
                 step.reason = "needs git".into();
@@ -1013,7 +1122,8 @@ fn fetch_dep_step(mut step: Step, entry: crate::deps::Entry, dest: PathBuf, lock
             }
             step.status = "auto".into();
             step.reason = if stored { "from the store".into() } else { format!("at {}", entry.dep().resolved_tag.clone().unwrap_or_else(|| fsutil::prefix_chars(&commit, 10).to_string())) };
-            step.action = Some(Action::FetchDep { entry: Box::new(entry), to: dest, project: lock_dir.to_path_buf() });
+            let allowed = crate::audit::allowed(scan.as_deref());
+            step.action = Some(Action::FetchDep { entry: Box::new(entry), to: dest, project: lock_dir.to_path_buf(), allow_hidden: opts.allow_hidden.clone(), allowed });
         }
         Some(Ok(_)) => {
             step.status = "manual".into();
@@ -1036,13 +1146,7 @@ fn mcp_dep_step(tool: &crate::lockfile::Tool, profile: &HarnessProfile, t: &Ctx,
     let id = format!("mcp-dep:{}", tool.name);
     let scope = tool.scope.as_deref().unwrap_or("project");
     let mut step = Step { id, kind: "mcp".into(), title: format!("{tag}MCP server {}", tool.name), ..Default::default() };
-    if let Some(pkg) = tool.dep.required_by.last() {
-        // it starts a process, from a file the project didn't write
-        step.status = "manual".into();
-        step.optional = true;
-        step.reason = format!("{pkg} brings it; hlock doesn't configure servers a package brings. If you trust it, configure it yourself");
-        return step;
-    }
+    // a server a package brings is gated like any executable (see `plan`): approve it, and it's configured
     if tool.command.is_none() && tool.url.is_none() {
         step.status = "manual".into();
         step.reason = format!("{} names a server hlock can't configure by itself; add it by hand", tool.source.as_deref().unwrap_or("its source"));
@@ -1569,7 +1673,7 @@ pub fn run_step(step: &Step, ctx: &Ctx) -> Result<String> {
             fsutil::write_atomic(to, data)?;
             Ok(format!("wrote {}", to.display()))
         }
-        Action::GitSkill { url, commit, subpath, to } => {
+        Action::GitSkill { url, commit, subpath, to, name, scripts } => {
             if let Some(why) = git_source_problem(url, commit, subpath) {
                 return Err(Error::Lockfile(why));
             }
@@ -1590,6 +1694,9 @@ pub fn run_step(step: &Step, ctx: &Ctx) -> Result<String> {
             let is_dir = std::fs::symlink_metadata(&src).is_ok_and(|m| m.is_dir());
             if !is_dir || !fsutil::within(&clone, &src) || !std::fs::symlink_metadata(src.join("SKILL.md")).is_ok_and(|m| m.is_file()) {
                 return Err(Error::Profile(format!("{url}@{commit} has no skill at {subpath}")));
+            }
+            if let Some(why) = crate::trust::unlisted_scripts(name, scripts.as_ref(), &src) {
+                return Err(Error::Audit(why));
             }
             backup(to)?;
             copy_tree(&src, to)?;
@@ -1632,8 +1739,19 @@ pub fn run_step(step: &Step, ctx: &Ctx) -> Result<String> {
             let bak = backup(path)?;
             Ok(format!("moved {} aside to {}", path.display(), bak.map(|b| b.display().to_string()).unwrap_or_default()))
         }
-        Action::FetchDep { entry, to, project } => {
+        Action::FetchDep { entry, to, project, allow_hidden, allowed } => {
             let content = crate::deps::fetch_locked(entry, project, ctx)?;
+            if let crate::deps::Entry::Skill(s) = entry.as_ref() {
+                if let Some(why) = crate::trust::unlisted_scripts(&s.name, s.scripts.as_ref(), &content) {
+                    return Err(Error::Audit(why));
+                }
+            }
+            // what was fetched is scanned before it's placed (an exception the lock records
+            // is approved here by digest, and fetch_locked checks the digest)
+            if !allowed {
+                let f = crate::scan::scan_path(&content, &pretty(to, ctx));
+                crate::audit::blocking(&f, allow_hidden, &format!("{} {}", entry.kind(), entry.name()))?;
+            }
             // what's there is set aside under .hlock/bak, where the harness doesn't read it
             let bak = if std::fs::symlink_metadata(to).is_ok() { Some(crate::deps::set_aside(to, project)?) } else { None };
             if content.is_dir() {
@@ -1730,7 +1848,11 @@ pub fn dockerfile(plan: &Plan, lock: &Lockfile, profile: &HarnessProfile) -> (St
     let install = install_command(&method, package.as_deref(), version, script.as_deref())
         .filter(|a| a[0] != "brew")
         .or_else(|| profile.install.iter().find_map(|m| install_command(&m.method, m.package.as_deref(), version, m.command.as_deref()).filter(|a| a[0] != "brew")));
+    // nothing that isn't trusted here goes into the image either
+    let gated = |id: &str| plan.executables.iter().any(|e| matches!(e.status.as_str(), "untrusted" | "denied") && e.steps.iter().any(|s| s == id));
+    let install = install.filter(|_| !gated("harness"));
     match install {
+        Some(_) | None if gated("harness") => d.push_str(&format!("# {} isn't installed: its install source isn't trusted on the machine that wrote this (hlock trust)\n", plan.harness_name)),
         Some(a) if a[0] == "sh" => d.push_str(&format!("RUN {}\n", one_line(&a[2]))),
         Some(a) => d.push_str(&format!("RUN {}\n", shell_join(&a.iter().map(|x| if x == "python3" { "uv".to_string() } else { x.clone() }).collect::<Vec<_>>()).replace("uv -m pip install", "uv pip install --system"))),
         None => d.push_str(&format!("# TODO: install {} here; hlock has no scriptable Linux install for it\n", plan.harness_name)),
@@ -1744,7 +1866,7 @@ pub fn dockerfile(plan: &Plan, lock: &Lockfile, profile: &HarnessProfile) -> (St
             d.push_str(&format!("RUN {} || echo {}\n", one_line(&cmd), fsutil::shell_quote(&format!("warning: {} failed", one_line(&st.id)))));
         }
     }
-    for st in plan.steps.iter().filter(|s| s.kind == "package") {
+    for st in plan.steps.iter().filter(|s| s.kind == "package" && s.status != "satisfied" && !gated(&s.id)) {
         if let Some(c) = &st.command {
             d.push_str(&format!("RUN {}\n", one_line(&c.replace("uv pip install", "uv pip install --system").replace("python3 -m pip install", "uv pip install --system"))));
         }
@@ -1962,8 +2084,13 @@ mod tests {
         let mut lock = Lockfile { harness: Harness { name: "claude-code".into(), ..Default::default() }, native: vec![plugin], ..Default::default() };
         let reg = Registry::builtin();
         let id = "claude-code.plugin:helper@market";
-        let plan_with = |lock: &Lockfile, install: bool| plan(lock, &ctx.cwd.join("harness.lock"), &reg, &ctx, &SyncOptions { install, ..Default::default() }).unwrap();
-        // the user's own lock: installed automatically, as before
+        // trust follows the plugin's digest, not whose lock it is: nothing approved it here yet
+        let untrusted = plan(&lock, &ctx.cwd.join("harness.lock"), &reg, &ctx, &SyncOptions::default()).unwrap();
+        let s = step(&untrusted, id);
+        assert!(s.status == "manual" && s.action.is_none() && s.reason.contains("not yet trusted"), "{s:?}");
+        assert!(untrusted.executables.iter().any(|e| e.kind == "plugin" && e.status == "untrusted"));
+        let plan_with = |lock: &Lockfile, install: bool| plan(lock, &ctx.cwd.join("harness.lock"), &reg, &ctx, &SyncOptions { install, trust: true, ..Default::default() }).unwrap();
+        // approved (--trust): the user's own lock installs it
         assert_eq!(step(&plan_with(&lock, false), id).status, "auto");
         // someone else's: only with --install
         lock.pulled = Some(serde_json::json!({"from": "git:https://example.com/r"}));
@@ -1971,6 +2098,32 @@ mod tests {
         let s = step(&p, id);
         assert!(s.status == "manual" && s.action.is_none() && s.reason.contains("--install"), "{s:?}");
         assert_eq!(step(&plan_with(&lock, true), id).status, "auto");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn skill_scripts_are_gated_in_every_harness() {
+        let (dir, ctx) = sandbox("also-scripts");
+        vendor(&ctx, ".hlock/vendor/s/SKILL.md", "---\nname: s\n---\nx\n");
+        vendor(&ctx, ".hlock/vendor/s/scripts/run.sh", "echo hi\n");
+        let digest = tree_digest(&ctx.cwd.join(".hlock/vendor/s"));
+        let skill = Skill { name: "s".into(), origin: "third-party".into(), path: Some("{root}/skills/s".into()), vendored: Some(".hlock/vendor/s".into()), digest: Some(digest), scripts: Some(vec!["run.sh".into()]), enabled: true, dep: crate::lockfile::Declared { declared: true, ..Default::default() }, ..Default::default() };
+        let mut lock = Lockfile { harness: Harness { name: "claude-code".into(), ..Default::default() }, skill: vec![skill], ..Default::default() };
+        let reg = Registry::builtin();
+        let opts = SyncOptions { also: vec!["codex".into()], ..Default::default() };
+        let p = plan(&lock, &ctx.cwd.join("harness.lock"), &reg, &ctx, &opts).unwrap();
+        for id in ["skill:s", "also:codex:skill:s"] {
+            let s = step(&p, id);
+            assert!(s.status == "manual" && s.action.is_none() && s.reason.contains("script s"), "{id}: {s:?}");
+        }
+        let trusted = plan(&lock, &ctx.cwd.join("harness.lock"), &reg, &ctx, &SyncOptions { trust: true, ..opts.clone() }).unwrap();
+        assert_eq!(step(&trusted, "also:codex:skill:s").status, "auto");
+        // a lock that lists no scripts for a skill that carries them doesn't match what it pins
+        lock.skill[0].scripts = Some(vec![]);
+        let p = plan(&lock, &ctx.cwd.join("harness.lock"), &reg, &ctx, &SyncOptions { trust: true, ..opts }).unwrap();
+        for id in ["skill:s", "also:codex:skill:s"] {
+            assert!(step(&p, id).reason.contains("doesn't list (run.sh)"), "{id}: {:?}", step(&p, id));
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -2004,9 +2157,9 @@ mod tests {
         assert!(run(&["sh", "-c", "exit 3"], &ctx).unwrap_err().to_string().contains("exited with 3"));
         // a git source that's an option is refused before git runs
         let to = dir.join("skill");
-        let st = Step { action: Some(Action::GitSkill { url: "--upload-pack=touch X".into(), commit: "abc".into(), subpath: String::new(), to }), ..Default::default() };
+        let st = Step { action: Some(Action::GitSkill { url: "--upload-pack=touch X".into(), commit: "abc".into(), subpath: String::new(), to, name: "s".into(), scripts: None }), ..Default::default() };
         assert!(run_step(&st, &ctx).is_err() && !ctx.cwd.join("X").exists());
-        let st = Step { action: Some(Action::GitSkill { url: "https://h.example/r".into(), commit: "abc".into(), subpath: "/etc".into(), to: dir.join("s2") }), ..Default::default() };
+        let st = Step { action: Some(Action::GitSkill { url: "https://h.example/r".into(), commit: "abc".into(), subpath: "/etc".into(), to: dir.join("s2"), name: "s".into(), scripts: None }), ..Default::default() };
         assert!(run_step(&st, &ctx).unwrap_err().to_string().contains("isn't relative"));
     }
 

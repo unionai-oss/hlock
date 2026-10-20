@@ -207,6 +207,20 @@ print(json.loads(hl.deps_check()))              # []
 | `deps_upgrade(name, …)` | Prepare a declared dependency at the newest it allows (`upgrade dep:NAME`), for `deps_commit` |
 | `export_apm_lock(lock=…, out=None, force=False, manifest=…)` | `apm.lock.yaml` from the lock: written to `out`, or only returned (`text`) |
 
+### Audit and trust
+
+The functions behind [`hlock audit`, `trust` and the SBOM export](../guides/audit.md). Each
+takes a `lock` path (default `harness.lock`) and returns JSON, except `trust_approve`.
+
+| Function | Does |
+|---|---|
+| `audit(lock=…, ci=False, strip=False, verbose=False, format="json")` | The audit report; `format="sarif"` for SARIF 2.1.0 |
+| `scan_lock(lock=…)` | Hidden characters in what the lock places, and whether each entry allowed them |
+| `trust_list(lock=…)` | What the lock would run here, with each one's digest and status |
+| `trust_approve(lock=…, only=None, deny=False)` | Approve (or deny) those in `only` (names or digests), else every one not yet trusted; returns how many changed |
+| `policy_check(lock=…)` | The project policy's `enforcement`, `files` and `violations` for the lock |
+| `export_sbom(lock=…, format="cyclonedx")` | The lock as CycloneDX 1.6 or (`"spdx"`) SPDX 2.3 JSON |
+
 ### Decision models
 
 The functions behind [`hlock decide`](cli.md#decide). Each returns JSON, except
@@ -346,6 +360,7 @@ kind:
 | `WorkerError` | The Python worker failed |
 | `PullError` | A [`pull`](../guides/pull.md) source hlock can't read or won't fetch, or `git` failed |
 | `DependencyError` | A [declared dependency](../guides/dependencies.md) hlock can't read, resolve, fetch or install |
+| `AuditError` | [Hidden characters](../guides/audit.md#hidden-characters), a [policy](../guides/audit.md#policy) violation, or a bad trust store stopped a step |
 
 Messages keep their prefix (`manifest error:`, `lockfile error:`, …). A file hlock can't
 read or write raises the matching `OSError` (`FileNotFoundError`, `PermissionError`, …),

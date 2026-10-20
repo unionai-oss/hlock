@@ -38,6 +38,10 @@ pub struct LaunchOptions {
     pub workspace: Option<PathBuf>,
     /// Run this prompt non-interactively with the profile's `[launch] prompt` arguments.
     pub prompt: Option<String>,
+    /// Treat the lock's executables as approved (`--trust`).
+    pub trust: bool,
+    /// Files whose hidden characters are let through (`--allow-hidden FILE`).
+    pub allow_hidden: Vec<String>,
 }
 
 /// What to `exec`, and what happened while preparing it.
@@ -222,12 +226,13 @@ fn write_pointer(path: &Path, format: &str, ptr: &str, value: Value, private: bo
 }
 
 /// Translate a lock's portable components into `target`'s isolated root.
-fn translate(lock: &Lockfile, lock_path: &Path, source: Option<&HarnessProfile>, target: &HarnessProfile, t: &Ctx, root: &Path, ctx: &Ctx, prep: &mut LaunchPrep) -> Result<()> {
+#[allow(clippy::too_many_arguments)]
+fn translate(lock: &Lockfile, lock_path: &Path, source: Option<&HarnessProfile>, target: &HarnessProfile, t: &Ctx, root: &Path, ctx: &Ctx, prep: &mut LaunchPrep, gate: &Gate) -> Result<()> {
     let lock_dir = lock_dir_of(lock_path, ctx);
     let source_root = source.map(|s| s.config_root(ctx));
 
-    // MCP servers
-    let tools: Vec<&Tool> = lock.tool.iter().filter(|x| x.kind == "mcp").collect();
+    // MCP servers (what isn't trusted here is left out)
+    let tools: Vec<&Tool> = lock.tool.iter().filter(|x| x.kind == "mcp").filter(|x| gate.lets("mcp", &x.name, prep)).collect();
     if !tools.is_empty() {
         match target.mcp.write.as_deref().and_then(|w| w.split_once('#')) {
             Some((file, ptr)) => {
@@ -275,6 +280,9 @@ fn translate(lock: &Lockfile, lock_path: &Path, source: Option<&HarnessProfile>,
                 prep.notes.push(format!("skill {} has no local copy; run hlock sync first", s.name));
                 continue;
             };
+            if !gate.lets("script", &s.name, prep) || !gate.lets("hidden", &format!("skill {}", s.name), prep) || !gate.clean(&src, &format!("skill {}", s.name), s.scan.as_deref(), prep) {
+                continue;
+            }
             let dest = dir.join(&s.name);
             if dest.join("SKILL.md").is_file() && Some(tree_digest(&dest)) == s.digest {
                 continue;
@@ -298,6 +306,10 @@ fn translate(lock: &Lockfile, lock_path: &Path, source: Option<&HarnessProfile>,
     let names: Vec<String> = user_ins.iter().map(|i| i.name.clone()).collect();
     for (ins, dest_tpl) in user_ins.iter().zip(user_instruction_targets(target, &names)) {
         let src = ins.vendored.as_ref().map(|v| lock_dir.join(v)).or_else(|| Some(ctx.expand(&ins.name, source_root.as_deref()))).filter(|p| p.is_file());
+        let what = format!("instructions {}", ins.name);
+        if src.as_ref().is_some_and(|p| !gate.lets("hidden", &what, prep) || !gate.clean(p, &what, ins.scan.as_deref(), prep)) {
+            continue;
+        }
         match (dest_tpl, src) {
             (Some(tpl), Some(src)) => {
                 let dest = t.expand(tpl, Some(root));
@@ -376,6 +388,67 @@ pub fn env_prefix(lock_path: &Path, ctx: &Ctx) -> PathBuf {
 
 /// Prepare a launch: verify, materialize, and build the command to `exec`.
 /// `args` are passed through to the harness (or, for a code harness, joined into the prompt).
+/// What a launch may place outside `sync`'s plan (translating into another harness, or a
+/// code harness's MCP config and skills): the lock's executables that aren't trusted here
+/// are left out, and content with hidden characters isn't copied.
+struct Gate {
+    blocked: Vec<crate::trust::Executable>,
+    allow_hidden: Vec<String>,
+}
+
+impl Gate {
+    fn new(lock: &Lockfile, lock_path: &Path, source: Option<&HarnessProfile>, ctx: &Ctx, opts: &LaunchOptions) -> Result<Gate> {
+        let policy = crate::policy::Policy::for_lock(lock_path, ctx)?;
+        policy.enforce(policy.check_lock(lock), &pretty(lock_path, ctx))?;
+        let store = crate::trust::TrustStore::load(ctx)?;
+        let es = crate::trust::assess(lock, &lock_dir_of(lock_path, ctx), source, ctx, &policy, &store);
+        let blocked = if opts.trust { Vec::new() } else { es.into_iter().filter(|e| e.kind != "policy" && matches!(e.status.as_str(), "untrusted" | "denied")).collect() };
+        Ok(Gate { blocked, allow_hidden: opts.allow_hidden.clone() })
+    }
+
+    /// Whether the `kind` executable `name` may be placed; a note says why not.
+    fn lets(&self, kind: &str, name: &str, prep: &mut LaunchPrep) -> bool {
+        let Some(e) = self.blocked.iter().find(|e| e.kind == kind && e.name == name) else { return true };
+        let why = if e.status == "denied" { "you denied it on this machine" } else { "not yet trusted: approve with hlock trust, or launch --trust" };
+        prep.notes.push(format!("left out {kind} {name}: {why}"));
+        false
+    }
+
+    /// Whether the content at `path` is free of critical hidden characters (or allowed).
+    fn clean(&self, path: &Path, what: &str, scan: Option<&str>, prep: &mut LaunchPrep) -> bool {
+        if crate::audit::allowed(scan) {
+            return true; // and approved: `lets("hidden", …)` checked it
+        }
+        let f = crate::scan::scan_path(path, what);
+        match f.iter().find(|x| x.severity == crate::scan::Severity::Critical && !crate::audit::allows(&self.allow_hidden, x)) {
+            Some(x) => {
+                prep.notes.push(format!("left out {what}: it has characters that hide text from a reviewer ({})", x.label()));
+                false
+            }
+            None => true,
+        }
+    }
+
+    /// An error naming what isn't trusted, if anything.
+    fn require_all(&self, lock_path: &Path, ctx: &Ctx) -> Result<()> {
+        if self.blocked.is_empty() {
+            return Ok(());
+        }
+        Err(Error::Audit(format!("{} runs {}, not yet trusted on this machine: approve with hlock trust, or pass --trust", pretty(lock_path, ctx), self.names())))
+    }
+
+    fn names(&self) -> String {
+        self.blocked.iter().map(|e| format!("{} {}", e.kind, e.name)).collect::<Vec<_>>().join(", ")
+    }
+}
+
+/// Fails unless everything `lock` runs is trusted here (or `trust`): for running a code
+/// harness, which gets the lock's MCP servers and skills as they are.
+pub fn require_trusted(lock: &Lockfile, lock_path: &Path, reg: &Registry, ctx: &Ctx, trust: bool) -> Result<()> {
+    let opts = LaunchOptions { trust, ..Default::default() };
+    Gate::new(lock, lock_path, reg.harness(&lock.harness.name), ctx, &opts)?.require_all(lock_path, ctx)
+}
+
 pub fn prepare(lock: &Lockfile, lock_path: &Path, reg: &Registry, ctx: &Ctx, opts: &LaunchOptions, args: &[String]) -> Result<LaunchPrep> {
     let source = reg.harness(&lock.harness.name);
     let target_name = opts.target.clone().unwrap_or_else(|| lock.harness.name.clone());
@@ -384,6 +457,9 @@ pub fn prepare(lock: &Lockfile, lock_path: &Path, reg: &Registry, ctx: &Ctx, opt
     let mut prep = LaunchPrep { harness: target.id.clone(), harness_name: target.name.clone(), kind: target.kind.clone(), translated: !same, ..Default::default() };
 
     if target.kind != "cli" {
+        // a code harness gets the lock's MCP servers and skills as they are: all of them
+        // must be trusted here
+        Gate::new(lock, lock_path, source, ctx, opts)?.require_all(lock_path, ctx)?;
         let workspace = opts.workspace.clone().unwrap_or_else(|| ctx.cwd.clone());
         let prompt = args.join(" ");
         let inv = crate::contract::invocation(target, Some(lock), Some(lock_path), None, &prompt, &workspace, 0, ctx)?;
@@ -437,7 +513,7 @@ pub fn prepare(lock: &Lockfile, lock_path: &Path, reg: &Registry, ctx: &Ctx, opt
         };
         sync::ignore_env(&sync::env_dir(target, &prefix, ctx))?;
         // secrets go in the harness's environment where its config can reference them
-        let sopts = SyncOptions { prefix: Some(prefix), inject: true, ..Default::default() };
+        let sopts = SyncOptions { prefix: Some(prefix), inject: true, trust: opts.trust, allow_hidden: opts.allow_hidden.clone(), ..Default::default() };
         let (t, _, iso) = sync::target_ctx(target, ctx, &sopts);
         let root = target.config_root(&t);
         std::fs::create_dir_all(&root)?;
@@ -449,6 +525,10 @@ pub fn prepare(lock: &Lockfile, lock_path: &Path, reg: &Registry, ctx: &Ctx, opt
                     Err(e) => prep.notes.push(format!("{}: {e}", st.title)),
                 }
             }
+            // what isn't trusted (or has hidden characters) was left out; say so rather than start without it silently
+            for st in plan.steps.iter().filter(|s| s.status == "manual" && (s.reason.starts_with('⚑') || s.reason.starts_with("you denied") || s.reason.contains("hide text"))) {
+                prep.notes.push(format!("left out {}: {}", st.title, st.reason));
+            }
             for st in plan.steps.iter().filter(|s| s.kind == "secret" && s.status == "manual") {
                 prep.missing_secrets.push(st.id.trim_start_matches("secret:").to_string());
             }
@@ -456,7 +536,8 @@ pub fn prepare(lock: &Lockfile, lock_path: &Path, reg: &Registry, ctx: &Ctx, opt
             prep.secret_env.extend(values);
             prep.missing_secrets.extend(missing);
         } else {
-            translate(lock, lock_path, source, target, &t, &root, ctx, &mut prep)?;
+            let gate = Gate::new(lock, lock_path, source, ctx, opts)?;
+            translate(lock, lock_path, source, target, &t, &root, ctx, &mut prep, &gate)?;
         }
         prep.env = iso;
         prep.root = Some(root);
@@ -562,7 +643,7 @@ mod tests {
         let lock = Lockfile { skill: vec![skill("../../keep"), skill("ok")], ..Default::default() };
         let root = d.join("root");
         let mut prep = LaunchPrep::default();
-        translate(&lock, &d.join("harness.lock"), None, target, &ctx, &root, &ctx, &mut prep).unwrap();
+        translate(&lock, &d.join("harness.lock"), None, target, &ctx, &root, &ctx, &mut prep, &Gate { blocked: Vec::new(), allow_hidden: Vec::new() }).unwrap();
         assert!(d.join("keep").is_dir(), "a path-named skill must not replace anything");
         assert!(prep.notes.iter().any(|n| n.contains("\"../../keep\" wasn't copied")), "{:?}", prep.notes);
         assert!(prep.done.iter().any(|n| n.starts_with("copied 1 skill")), "{:?}", prep.done);

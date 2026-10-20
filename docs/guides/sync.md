@@ -82,7 +82,13 @@ By default `sync` only does things that are local and reversible: it writes conf
 into the isolated root (keeping the old one as `<file>.hlock-bak`), copies skills and
 instruction files, fetches [declared dependencies](dependencies.md#sync-on-another-machine)
 at their locked commits (checking each digest), and runs the harness's own plugin commands
-against that root. These
+against that root. It won't place a file with
+[characters that hide text](audit.md#hidden-characters), and it won't install an MCP server,
+plugin, hook, other setting that runs a command, or skill script you haven't
+[approved on this machine](audit.md#executables), in its harness or in the ones
+`[target] also` names: `--yes` doesn't approve them; `hlock trust` or `--trust` does. With
+`--plan` or `--json`, `--trust` shows the plan as if they were approved, recording nothing. A
+`--docker` image leaves out what isn't trusted too. These
 steps need you to opt in:
 
 | Flag | Lets hlock… | Otherwise the step is manual, with |

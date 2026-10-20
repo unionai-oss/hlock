@@ -352,6 +352,14 @@ impl EvalPack {
                 self.tasks.len(), holdout.len()
             )));
         }
+        // prompts, judge rubrics and fixtures are an agent's input too
+        for f in crate::scan::scan_path(&self.path, "") {
+            match f.severity {
+                crate::scan::Severity::Critical => issues.push(PackIssue::error(None, format!("{}: a character that hides text from a reviewer", f.label()))),
+                crate::scan::Severity::Warning => issues.push(PackIssue::warn(None, format!("{}: an invisible character", f.label()))),
+                crate::scan::Severity::Info => {}
+            }
+        }
         issues
     }
 

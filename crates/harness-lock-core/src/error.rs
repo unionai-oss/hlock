@@ -31,6 +31,10 @@ pub enum Error {
     /// resolved, fetched or installed.
     #[error("{0}")]
     Dependency(String),
+    /// Something `specs/audit.md` refuses: hidden characters, an executable not yet
+    /// trusted, a policy violation.
+    #[error("{0}")]
+    Audit(String),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;

@@ -212,6 +212,21 @@ MCP servers carry `transport`, `command`, `args`, `url`, `env`, `headers`, `scop
 | `[[config]]` | Harness config files: `id`, `path`, `format`, `restore` (`whole`, `pointers`, `record`), `pointers`, `digest`, `vendored` |
 | `[[secret]]` | Placeholders that replaced secrets: `name` (the environment variable that supplies it) and `used-by` |
 
+## Scans
+
+Each `[[skill]]`, `[[instructions]]` and `[[config]]` entry has a `scan` key: the
+[hidden-character scan](../guides/audit.md#hidden-characters) of what it places. `clean`;
+`warnings:N` (invisible characters such as zero-width spaces); `critical:N` (characters that
+hide text, which `sync` won't place); or `allowed:critical`, when they were let through on
+purpose with `--allow-hidden` (and are placed only once they're approved on the machine, by
+`hlock trust`). A lock without `scan` keys was written by an older hlock, and `hlock check`
+scans it.
+
+A `[[skill]]` entry also has `scripts`: the files in the skill's `scripts/` directory, which
+run. `hlock trust` approves them by the skill's digest, and `sync` won't place a skill that
+carries scripts its entry doesn't list. A lock without `scripts` was written by an older hlock:
+a skill of it that isn't fetched yet is asked about, since what it runs can't be listed.
+
 ## Declared dependencies
 
 A `[[skill]]`, `[[tool]]`, `[[instructions]]` or `[[native]]` entry that

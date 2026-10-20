@@ -40,6 +40,13 @@ hlock launch --in-place               # your own config, no isolation (version s
 hlock launch --dry-run                # prepare everything and print the command
 ```
 
+Before it starts the harness, `launch` asks you to approve what the lock would run that
+isn't [trusted on this machine](audit.md#executables) yet (on a terminal; without one, pass
+`--trust`), and leaves out any file with [characters that hide text](audit.md#hidden-characters).
+The same goes when it translates a lock into another harness: MCP servers, skills and
+instruction files that aren't trusted, or hide text, aren't carried over, and the notes say
+which.
+
 ## Launch a different harness
 
 Name another harness to run the lock's **portable** parts in it:

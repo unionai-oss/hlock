@@ -12,6 +12,7 @@
 pub mod adapters;
 pub mod agent;
 pub mod apm;
+pub mod audit;
 pub mod capture;
 pub mod contract;
 pub mod decide;
@@ -26,16 +27,20 @@ pub mod lockfile;
 pub mod manifest;
 pub mod meta;
 pub mod ops;
+pub mod policy;
 pub mod process;
 pub mod profiles;
 pub mod providers;
 pub mod pull;
 pub mod resolver;
+pub mod sbom;
+pub mod scan;
 pub mod search;
 pub mod secrets;
 pub mod store;
 pub mod sync;
 pub mod tasks;
+pub mod trust;
 pub mod worker;
 
 #[cfg(feature = "flyte")]

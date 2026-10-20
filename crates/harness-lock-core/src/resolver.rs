@@ -310,7 +310,30 @@ impl Resolver {
         self.prepare_trials()?;
         // problems in the objective or the deciders stop the resolve before any trial runs
         crate::search::parse_constraints(&self.manifest.objective.constraints)?;
-        let stacks = self.enumerate_stacks()?;
+        let mut stacks = self.enumerate_stacks()?;
+        // stacks the project's policy denies (a provider, a model, a harness) aren't measured
+        let policy = crate::policy::Policy::for_dir(&self.manifest.root())?;
+        let mut dropped: Vec<String> = Vec::new();
+        if !policy.is_empty() {
+            stacks.retain(|s| {
+                let mut v: Vec<crate::policy::Violation> = s.llm.values().filter_map(|spec| spec.split_once(':')).flat_map(|(p, m)| policy.check_model(p, m)).collect();
+                v.extend(s.deciders.values().filter_map(|spec| spec.split('@').next()?.split_once(':')).flat_map(|(p, m)| policy.check_model(p, m)));
+                if s.harness != "reference" {
+                    v.extend(policy.check_harness(&s.harness, None).into_iter().filter(|x| !x.message.contains("version isn't known")));
+                }
+                if let Some(first) = v.first() {
+                    dropped.push(format!("{}: {}", s.label(), first.message));
+                    return false;
+                }
+                true
+            });
+            for d in &dropped {
+                eprintln!("warn: policy dropped {d}");
+            }
+            if stacks.is_empty() {
+                return Err(Error::Tuning(format!("the project's policy denies every candidate stack ({} dropped)", dropped.len())));
+            }
+        }
         let search_tasks = self.load_packs();
         if search_tasks.is_empty() {
             return Err(Error::EvalPack(format!(
@@ -363,7 +386,10 @@ impl Resolver {
             &self.manifest.objective.select,
         )?;
 
-        let lock = self.build_resolve(&winner, &scores)?;
+        let mut lock = self.build_resolve(&winner, &scores)?;
+        if !dropped.is_empty() {
+            lock.provenance.search.insert("dropped-by-policy".into(), serde_json::json!(dropped));
+        }
         let _ = self.write_report(&lock, &scores);
         Ok(lock)
     }

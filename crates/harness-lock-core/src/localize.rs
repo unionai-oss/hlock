@@ -599,6 +599,7 @@ pub fn localize(source: &Lockfile, source_path: &Path, reg: &Registry, ctx: &Ctx
             pointers: sets.keys().cloned().collect(),
             digest: Some(crate::hash::content_hash(&check)),
             vendored: Some(rel),
+            scan: None,
         });
     }
 

@@ -45,6 +45,38 @@ hlock sync --frozen --yes
 hlock check
 ```
 
+## Audit the lock
+
+`hlock audit --ci` checks the lock's integrity, scans what it places for hidden characters,
+and enforces the project's [policy](audit.md#policy), failing on warnings too.
+`--format sarif` writes SARIF 2.1.0 for GitHub code scanning:
+
+```yaml title=".github/workflows/agent-audit.yml"
+name: agent-audit
+
+on:
+  pull_request:
+    paths: ["harness.lock", ".hlock/vendor/**", "hlock-policy.toml"]
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    permissions:
+      security-events: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - run: uvx hlock audit --ci --format sarif -o hlock.sarif
+      - if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: hlock.sarif
+```
+
+A CI runner has approved no executables, so `audit` lists them without failing. A job that
+syncs the lock passes `hlock sync --trust`, a statement that the lock was reviewed on the PR
+that changed it.
+
 ## GitHub Actions
 
 ```yaml title=".github/workflows/agent-lock.yml"

@@ -1,4 +1,4 @@
-<svg class="rich-terminal" viewBox="0 0 994 1001.5999999999999" xmlns="http://www.w3.org/2000/svg">
+<svg class="rich-terminal" viewBox="0 0 994 1196.8" xmlns="http://www.w3.org/2000/svg">
     <!-- Generated with Rich https://www.textualize.io -->
     <style>
 
@@ -19,199 +19,232 @@
         font-weight: 700;
     }
 
-    .terminal-2789230094-matrix {
+    .terminal-3567180846-matrix {
         font-family: Fira Code, monospace;
         font-size: 20px;
         line-height: 24.4px;
         font-variant-east-asian: full-width;
     }
 
-    .terminal-2789230094-title {
+    .terminal-3567180846-title {
         font-size: 18px;
         font-weight: bold;
         font-family: arial;
     }
 
-    .terminal-2789230094-r1 { fill: #878787 }
-.terminal-2789230094-r2 { fill: #d9d9d9 }
-.terminal-2789230094-r3 { fill: #98e024;font-weight: bold }
-.terminal-2789230094-r4 { fill: #d9d9d9;font-weight: bold }
-.terminal-2789230094-r5 { fill: #9d65ff;font-weight: bold }
-.terminal-2789230094-r6 { fill: #f4005f }
-.terminal-2789230094-r7 { fill: #f4005f;font-weight: bold }
-.terminal-2789230094-r8 { fill: #58d1eb }
-.terminal-2789230094-r9 { fill: #58d1eb;font-weight: bold }
+    .terminal-3567180846-r1 { fill: #878787 }
+.terminal-3567180846-r2 { fill: #d9d9d9 }
+.terminal-3567180846-r3 { fill: #98e024;font-weight: bold }
+.terminal-3567180846-r4 { fill: #d9d9d9;font-weight: bold }
+.terminal-3567180846-r5 { fill: #9d65ff;font-weight: bold }
+.terminal-3567180846-r6 { fill: #f4005f }
+.terminal-3567180846-r7 { fill: #f4005f;font-weight: bold }
+.terminal-3567180846-r8 { fill: #58d1eb }
+.terminal-3567180846-r9 { fill: #58d1eb;font-weight: bold }
+.terminal-3567180846-r10 { fill: #fd971f;font-weight: bold }
     </style>
 
     <defs>
-    <clipPath id="terminal-2789230094-clip-terminal">
-      <rect x="0" y="0" width="975.0" height="950.5999999999999" />
+    <clipPath id="terminal-3567180846-clip-terminal">
+      <rect x="0" y="0" width="975.0" height="1145.8" />
     </clipPath>
-    <clipPath id="terminal-2789230094-line-0">
+    <clipPath id="terminal-3567180846-line-0">
     <rect x="0" y="1.5" width="976" height="24.65"/>
             </clipPath>
-<clipPath id="terminal-2789230094-line-1">
+<clipPath id="terminal-3567180846-line-1">
     <rect x="0" y="25.9" width="976" height="24.65"/>
             </clipPath>
-<clipPath id="terminal-2789230094-line-2">
+<clipPath id="terminal-3567180846-line-2">
     <rect x="0" y="50.3" width="976" height="24.65"/>
             </clipPath>
-<clipPath id="terminal-2789230094-line-3">
+<clipPath id="terminal-3567180846-line-3">
     <rect x="0" y="74.7" width="976" height="24.65"/>
             </clipPath>
-<clipPath id="terminal-2789230094-line-4">
+<clipPath id="terminal-3567180846-line-4">
     <rect x="0" y="99.1" width="976" height="24.65"/>
             </clipPath>
-<clipPath id="terminal-2789230094-line-5">
+<clipPath id="terminal-3567180846-line-5">
     <rect x="0" y="123.5" width="976" height="24.65"/>
             </clipPath>
-<clipPath id="terminal-2789230094-line-6">
+<clipPath id="terminal-3567180846-line-6">
     <rect x="0" y="147.9" width="976" height="24.65"/>
             </clipPath>
-<clipPath id="terminal-2789230094-line-7">
+<clipPath id="terminal-3567180846-line-7">
     <rect x="0" y="172.3" width="976" height="24.65"/>
             </clipPath>
-<clipPath id="terminal-2789230094-line-8">
+<clipPath id="terminal-3567180846-line-8">
     <rect x="0" y="196.7" width="976" height="24.65"/>
             </clipPath>
-<clipPath id="terminal-2789230094-line-9">
+<clipPath id="terminal-3567180846-line-9">
     <rect x="0" y="221.1" width="976" height="24.65"/>
             </clipPath>
-<clipPath id="terminal-2789230094-line-10">
+<clipPath id="terminal-3567180846-line-10">
     <rect x="0" y="245.5" width="976" height="24.65"/>
             </clipPath>
-<clipPath id="terminal-2789230094-line-11">
+<clipPath id="terminal-3567180846-line-11">
     <rect x="0" y="269.9" width="976" height="24.65"/>
             </clipPath>
-<clipPath id="terminal-2789230094-line-12">
+<clipPath id="terminal-3567180846-line-12">
     <rect x="0" y="294.3" width="976" height="24.65"/>
             </clipPath>
-<clipPath id="terminal-2789230094-line-13">
+<clipPath id="terminal-3567180846-line-13">
     <rect x="0" y="318.7" width="976" height="24.65"/>
             </clipPath>
-<clipPath id="terminal-2789230094-line-14">
+<clipPath id="terminal-3567180846-line-14">
     <rect x="0" y="343.1" width="976" height="24.65"/>
             </clipPath>
-<clipPath id="terminal-2789230094-line-15">
+<clipPath id="terminal-3567180846-line-15">
     <rect x="0" y="367.5" width="976" height="24.65"/>
             </clipPath>
-<clipPath id="terminal-2789230094-line-16">
+<clipPath id="terminal-3567180846-line-16">
     <rect x="0" y="391.9" width="976" height="24.65"/>
             </clipPath>
-<clipPath id="terminal-2789230094-line-17">
+<clipPath id="terminal-3567180846-line-17">
     <rect x="0" y="416.3" width="976" height="24.65"/>
             </clipPath>
-<clipPath id="terminal-2789230094-line-18">
+<clipPath id="terminal-3567180846-line-18">
     <rect x="0" y="440.7" width="976" height="24.65"/>
             </clipPath>
-<clipPath id="terminal-2789230094-line-19">
+<clipPath id="terminal-3567180846-line-19">
     <rect x="0" y="465.1" width="976" height="24.65"/>
             </clipPath>
-<clipPath id="terminal-2789230094-line-20">
+<clipPath id="terminal-3567180846-line-20">
     <rect x="0" y="489.5" width="976" height="24.65"/>
             </clipPath>
-<clipPath id="terminal-2789230094-line-21">
+<clipPath id="terminal-3567180846-line-21">
     <rect x="0" y="513.9" width="976" height="24.65"/>
             </clipPath>
-<clipPath id="terminal-2789230094-line-22">
+<clipPath id="terminal-3567180846-line-22">
     <rect x="0" y="538.3" width="976" height="24.65"/>
             </clipPath>
-<clipPath id="terminal-2789230094-line-23">
+<clipPath id="terminal-3567180846-line-23">
     <rect x="0" y="562.7" width="976" height="24.65"/>
             </clipPath>
-<clipPath id="terminal-2789230094-line-24">
+<clipPath id="terminal-3567180846-line-24">
     <rect x="0" y="587.1" width="976" height="24.65"/>
             </clipPath>
-<clipPath id="terminal-2789230094-line-25">
+<clipPath id="terminal-3567180846-line-25">
     <rect x="0" y="611.5" width="976" height="24.65"/>
             </clipPath>
-<clipPath id="terminal-2789230094-line-26">
+<clipPath id="terminal-3567180846-line-26">
     <rect x="0" y="635.9" width="976" height="24.65"/>
             </clipPath>
-<clipPath id="terminal-2789230094-line-27">
+<clipPath id="terminal-3567180846-line-27">
     <rect x="0" y="660.3" width="976" height="24.65"/>
             </clipPath>
-<clipPath id="terminal-2789230094-line-28">
+<clipPath id="terminal-3567180846-line-28">
     <rect x="0" y="684.7" width="976" height="24.65"/>
             </clipPath>
-<clipPath id="terminal-2789230094-line-29">
+<clipPath id="terminal-3567180846-line-29">
     <rect x="0" y="709.1" width="976" height="24.65"/>
             </clipPath>
-<clipPath id="terminal-2789230094-line-30">
+<clipPath id="terminal-3567180846-line-30">
     <rect x="0" y="733.5" width="976" height="24.65"/>
             </clipPath>
-<clipPath id="terminal-2789230094-line-31">
+<clipPath id="terminal-3567180846-line-31">
     <rect x="0" y="757.9" width="976" height="24.65"/>
             </clipPath>
-<clipPath id="terminal-2789230094-line-32">
+<clipPath id="terminal-3567180846-line-32">
     <rect x="0" y="782.3" width="976" height="24.65"/>
             </clipPath>
-<clipPath id="terminal-2789230094-line-33">
+<clipPath id="terminal-3567180846-line-33">
     <rect x="0" y="806.7" width="976" height="24.65"/>
             </clipPath>
-<clipPath id="terminal-2789230094-line-34">
+<clipPath id="terminal-3567180846-line-34">
     <rect x="0" y="831.1" width="976" height="24.65"/>
             </clipPath>
-<clipPath id="terminal-2789230094-line-35">
+<clipPath id="terminal-3567180846-line-35">
     <rect x="0" y="855.5" width="976" height="24.65"/>
             </clipPath>
-<clipPath id="terminal-2789230094-line-36">
+<clipPath id="terminal-3567180846-line-36">
     <rect x="0" y="879.9" width="976" height="24.65"/>
             </clipPath>
-<clipPath id="terminal-2789230094-line-37">
+<clipPath id="terminal-3567180846-line-37">
     <rect x="0" y="904.3" width="976" height="24.65"/>
+            </clipPath>
+<clipPath id="terminal-3567180846-line-38">
+    <rect x="0" y="928.7" width="976" height="24.65"/>
+            </clipPath>
+<clipPath id="terminal-3567180846-line-39">
+    <rect x="0" y="953.1" width="976" height="24.65"/>
+            </clipPath>
+<clipPath id="terminal-3567180846-line-40">
+    <rect x="0" y="977.5" width="976" height="24.65"/>
+            </clipPath>
+<clipPath id="terminal-3567180846-line-41">
+    <rect x="0" y="1001.9" width="976" height="24.65"/>
+            </clipPath>
+<clipPath id="terminal-3567180846-line-42">
+    <rect x="0" y="1026.3" width="976" height="24.65"/>
+            </clipPath>
+<clipPath id="terminal-3567180846-line-43">
+    <rect x="0" y="1050.7" width="976" height="24.65"/>
+            </clipPath>
+<clipPath id="terminal-3567180846-line-44">
+    <rect x="0" y="1075.1" width="976" height="24.65"/>
+            </clipPath>
+<clipPath id="terminal-3567180846-line-45">
+    <rect x="0" y="1099.5" width="976" height="24.65"/>
             </clipPath>
     </defs>
 
-    <rect fill="#0c0c0c" stroke="rgba(255,255,255,0.35)" stroke-width="1" x="1" y="1" width="992" height="999.6" rx="8"/><text class="terminal-2789230094-title" fill="#d9d9d9" text-anchor="middle" x="496" y="27">hlock</text>
+    <rect fill="#0c0c0c" stroke="rgba(255,255,255,0.35)" stroke-width="1" x="1" y="1" width="992" height="1194.8" rx="8"/><text class="terminal-3567180846-title" fill="#d9d9d9" text-anchor="middle" x="496" y="27">hlock</text>
             <g transform="translate(26,22)">
             <circle cx="0" cy="0" r="7" fill="#ff5f57"/>
             <circle cx="22" cy="0" r="7" fill="#febc2e"/>
             <circle cx="44" cy="0" r="7" fill="#28c840"/>
             </g>
         
-    <g transform="translate(9, 41)" clip-path="url(#terminal-2789230094-clip-terminal)">
+    <g transform="translate(9, 41)" clip-path="url(#terminal-3567180846-clip-terminal)">
     
-    <g class="terminal-2789230094-matrix">
-    <text class="terminal-2789230094-r1" x="0" y="20" textLength="195.2" clip-path="url(#terminal-2789230094-line-0)">#&#160;on&#160;your&#160;laptop</text><text class="terminal-2789230094-r2" x="976" y="20" textLength="12.2" clip-path="url(#terminal-2789230094-line-0)">
-</text><text class="terminal-2789230094-r3" x="0" y="44.4" textLength="12.2" clip-path="url(#terminal-2789230094-line-1)">$</text><text class="terminal-2789230094-r4" x="24.4" y="44.4" textLength="195.2" clip-path="url(#terminal-2789230094-line-1)">hlock&#160;pin&#160;--user</text><text class="terminal-2789230094-r2" x="976" y="44.4" textLength="12.2" clip-path="url(#terminal-2789230094-line-1)">
-</text><text class="terminal-2789230094-r3" x="0" y="68.8" textLength="12.2" clip-path="url(#terminal-2789230094-line-2)">✓</text><text class="terminal-2789230094-r2" x="12.2" y="68.8" textLength="97.6" clip-path="url(#terminal-2789230094-line-2)">&#160;pinned&#160;</text><text class="terminal-2789230094-r4" x="109.8" y="68.8" textLength="134.2" clip-path="url(#terminal-2789230094-line-2)">claude-code</text><text class="terminal-2789230094-r2" x="244" y="68.8" textLength="109.8" clip-path="url(#terminal-2789230094-line-2)">&#160;2.1.0&#160;→&#160;</text><text class="terminal-2789230094-r5" x="353.8" y="68.8" textLength="146.4" clip-path="url(#terminal-2789230094-line-2)">harness.lock</text><text class="terminal-2789230094-r1" x="524.6" y="68.8" textLength="341.6" clip-path="url(#terminal-2789230094-line-2)">(the&#160;only&#160;installed&#160;harness)</text><text class="terminal-2789230094-r2" x="976" y="68.8" textLength="12.2" clip-path="url(#terminal-2789230094-line-2)">
-</text><text class="terminal-2789230094-r6" x="0" y="93.2" textLength="24.4" clip-path="url(#terminal-2789230094-line-3)">╭─</text><text class="terminal-2789230094-r7" x="36.6" y="93.2" textLength="280.6" clip-path="url(#terminal-2789230094-line-3)">📌&#160;harness.lock&#160;·&#160;pinned</text><text class="terminal-2789230094-r6" x="341.6" y="93.2" textLength="536.8" clip-path="url(#terminal-2789230094-line-3)">────────────────────────────────────────────</text><text class="terminal-2789230094-r6" x="878.4" y="93.2" textLength="24.4" clip-path="url(#terminal-2789230094-line-3)">─╮</text><text class="terminal-2789230094-r2" x="976" y="93.2" textLength="12.2" clip-path="url(#terminal-2789230094-line-3)">
-</text><text class="terminal-2789230094-r6" x="0" y="117.6" textLength="12.2" clip-path="url(#terminal-2789230094-line-4)">│</text><text class="terminal-2789230094-r6" x="890.6" y="117.6" textLength="12.2" clip-path="url(#terminal-2789230094-line-4)">│</text><text class="terminal-2789230094-r2" x="976" y="117.6" textLength="12.2" clip-path="url(#terminal-2789230094-line-4)">
-</text><text class="terminal-2789230094-r6" x="0" y="142" textLength="12.2" clip-path="url(#terminal-2789230094-line-5)">│</text><text class="terminal-2789230094-r8" x="36.6" y="142" textLength="158.6" clip-path="url(#terminal-2789230094-line-5)">harness&#160;&#160;&#160;&#160;&#160;&#160;</text><text class="terminal-2789230094-r4" x="219.6" y="142" textLength="134.2" clip-path="url(#terminal-2789230094-line-5)">claude-code</text><text class="terminal-2789230094-r2" x="353.8" y="142" textLength="97.6" clip-path="url(#terminal-2789230094-line-5)">&#160;2.1.0&#160;&#160;</text><text class="terminal-2789230094-r6" x="890.6" y="142" textLength="12.2" clip-path="url(#terminal-2789230094-line-5)">│</text><text class="terminal-2789230094-r2" x="976" y="142" textLength="12.2" clip-path="url(#terminal-2789230094-line-5)">
-</text><text class="terminal-2789230094-r6" x="0" y="166.4" textLength="12.2" clip-path="url(#terminal-2789230094-line-6)">│</text><text class="terminal-2789230094-r8" x="36.6" y="166.4" textLength="158.6" clip-path="url(#terminal-2789230094-line-6)">scope&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;</text><text class="terminal-2789230094-r2" x="219.6" y="166.4" textLength="646.6" clip-path="url(#terminal-2789230094-line-6)">project&#160;+&#160;user&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;</text><text class="terminal-2789230094-r6" x="890.6" y="166.4" textLength="12.2" clip-path="url(#terminal-2789230094-line-6)">│</text><text class="terminal-2789230094-r2" x="976" y="166.4" textLength="12.2" clip-path="url(#terminal-2789230094-line-6)">
-</text><text class="terminal-2789230094-r6" x="0" y="190.8" textLength="12.2" clip-path="url(#terminal-2789230094-line-7)">│</text><text class="terminal-2789230094-r8" x="36.6" y="190.8" textLength="158.6" clip-path="url(#terminal-2789230094-line-7)">llm&#160;·&#160;default</text><text class="terminal-2789230094-r4" x="219.6" y="190.8" textLength="170.8" clip-path="url(#terminal-2789230094-line-7)">anthropic:opus</text><text class="terminal-2789230094-r6" x="890.6" y="190.8" textLength="12.2" clip-path="url(#terminal-2789230094-line-7)">│</text><text class="terminal-2789230094-r2" x="976" y="190.8" textLength="12.2" clip-path="url(#terminal-2789230094-line-7)">
-</text><text class="terminal-2789230094-r6" x="0" y="215.2" textLength="12.2" clip-path="url(#terminal-2789230094-line-8)">│</text><text class="terminal-2789230094-r8" x="36.6" y="215.2" textLength="158.6" clip-path="url(#terminal-2789230094-line-8)">mcp&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;</text><text class="terminal-2789230094-r2" x="219.6" y="215.2" textLength="85.4" clip-path="url(#terminal-2789230094-line-8)">github&#160;</text><text class="terminal-2789230094-r1" x="305" y="215.2" textLength="85.4" clip-path="url(#terminal-2789230094-line-8)">(stdio)</text><text class="terminal-2789230094-r6" x="890.6" y="215.2" textLength="12.2" clip-path="url(#terminal-2789230094-line-8)">│</text><text class="terminal-2789230094-r2" x="976" y="215.2" textLength="12.2" clip-path="url(#terminal-2789230094-line-8)">
-</text><text class="terminal-2789230094-r6" x="0" y="239.6" textLength="12.2" clip-path="url(#terminal-2789230094-line-9)">│</text><text class="terminal-2789230094-r8" x="36.6" y="239.6" textLength="158.6" clip-path="url(#terminal-2789230094-line-9)">skills&#160;&#160;&#160;&#160;&#160;&#160;&#160;</text><text class="terminal-2789230094-r2" x="219.6" y="239.6" textLength="36.6" clip-path="url(#terminal-2789230094-line-9)">1&#160;&#160;</text><text class="terminal-2789230094-r1" x="256.2" y="239.6" textLength="109.8" clip-path="url(#terminal-2789230094-line-9)">(1&#160;local)</text><text class="terminal-2789230094-r6" x="890.6" y="239.6" textLength="12.2" clip-path="url(#terminal-2789230094-line-9)">│</text><text class="terminal-2789230094-r2" x="976" y="239.6" textLength="12.2" clip-path="url(#terminal-2789230094-line-9)">
-</text><text class="terminal-2789230094-r6" x="0" y="264" textLength="12.2" clip-path="url(#terminal-2789230094-line-10)">│</text><text class="terminal-2789230094-r8" x="36.6" y="264" textLength="158.6" clip-path="url(#terminal-2789230094-line-10)">instructions&#160;</text><text class="terminal-2789230094-r2" x="219.6" y="264" textLength="646.6" clip-path="url(#terminal-2789230094-line-10)">{root}/CLAUDE.md&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;</text><text class="terminal-2789230094-r6" x="890.6" y="264" textLength="12.2" clip-path="url(#terminal-2789230094-line-10)">│</text><text class="terminal-2789230094-r2" x="976" y="264" textLength="12.2" clip-path="url(#terminal-2789230094-line-10)">
-</text><text class="terminal-2789230094-r6" x="0" y="288.4" textLength="12.2" clip-path="url(#terminal-2789230094-line-11)">│</text><text class="terminal-2789230094-r8" x="36.6" y="288.4" textLength="158.6" clip-path="url(#terminal-2789230094-line-11)">config&#160;&#160;&#160;&#160;&#160;&#160;&#160;</text><text class="terminal-2789230094-r2" x="219.6" y="288.4" textLength="451.4" clip-path="url(#terminal-2789230094-line-11)">{root}/settings.json,&#160;~/.claude.json&#160;</text><text class="terminal-2789230094-r1" x="671" y="288.4" textLength="134.2" clip-path="url(#terminal-2789230094-line-11)">/mcpServers</text><text class="terminal-2789230094-r6" x="890.6" y="288.4" textLength="12.2" clip-path="url(#terminal-2789230094-line-11)">│</text><text class="terminal-2789230094-r2" x="976" y="288.4" textLength="12.2" clip-path="url(#terminal-2789230094-line-11)">
-</text><text class="terminal-2789230094-r6" x="0" y="312.8" textLength="12.2" clip-path="url(#terminal-2789230094-line-12)">│</text><text class="terminal-2789230094-r8" x="36.6" y="312.8" textLength="158.6" clip-path="url(#terminal-2789230094-line-12)">secrets&#160;&#160;&#160;&#160;&#160;&#160;</text><text class="terminal-2789230094-r2" x="219.6" y="312.8" textLength="146.4" clip-path="url(#terminal-2789230094-line-12)">1&#160;redacted&#160;&#160;</text><text class="terminal-2789230094-r1" x="366" y="312.8" textLength="500.2" clip-path="url(#terminal-2789230094-line-12)">(supplied&#160;as&#160;HLOCK_SECRET_*&#160;when&#160;syncing)</text><text class="terminal-2789230094-r6" x="890.6" y="312.8" textLength="12.2" clip-path="url(#terminal-2789230094-line-12)">│</text><text class="terminal-2789230094-r2" x="976" y="312.8" textLength="12.2" clip-path="url(#terminal-2789230094-line-12)">
-</text><text class="terminal-2789230094-r6" x="0" y="337.2" textLength="12.2" clip-path="url(#terminal-2789230094-line-13)">│</text><text class="terminal-2789230094-r6" x="890.6" y="337.2" textLength="12.2" clip-path="url(#terminal-2789230094-line-13)">│</text><text class="terminal-2789230094-r2" x="976" y="337.2" textLength="12.2" clip-path="url(#terminal-2789230094-line-13)">
-</text><text class="terminal-2789230094-r6" x="0" y="361.6" textLength="902.8" clip-path="url(#terminal-2789230094-line-14)">╰────────────────────────────────────────────────────────────────────────╯</text><text class="terminal-2789230094-r2" x="976" y="361.6" textLength="12.2" clip-path="url(#terminal-2789230094-line-14)">
-</text><text class="terminal-2789230094-r1" x="0" y="386" textLength="256.2" clip-path="url(#terminal-2789230094-line-15)">vendored&#160;4&#160;files&#160;into</text><text class="terminal-2789230094-r5" x="268.4" y="386" textLength="317.2" clip-path="url(#terminal-2789230094-line-15)">.hlock/vendor/claude-code/</text><text class="terminal-2789230094-r1" x="610" y="386" textLength="317.2" clip-path="url(#terminal-2789230094-line-15)">·&#160;review&#160;before&#160;committing</text><text class="terminal-2789230094-r2" x="976" y="386" textLength="12.2" clip-path="url(#terminal-2789230094-line-15)">
-</text><text class="terminal-2789230094-r1" x="0" y="410.4" textLength="73.2" clip-path="url(#terminal-2789230094-line-16)">next&#160;→</text><text class="terminal-2789230094-r9" x="85.4" y="410.4" textLength="134.2" clip-path="url(#terminal-2789230094-line-16)">hlock&#160;check</text><text class="terminal-2789230094-r1" x="219.6" y="410.4" textLength="61" clip-path="url(#terminal-2789230094-line-16)">&#160;&#160;·&#160;&#160;</text><text class="terminal-2789230094-r9" x="280.6" y="410.4" textLength="122" clip-path="url(#terminal-2789230094-line-16)">hlock&#160;sync</text><text class="terminal-2789230094-r2" x="976" y="410.4" textLength="12.2" clip-path="url(#terminal-2789230094-line-16)">
-</text><text class="terminal-2789230094-r2" x="976" y="434.8" textLength="12.2" clip-path="url(#terminal-2789230094-line-17)">
-</text><text class="terminal-2789230094-r3" x="0" y="459.2" textLength="12.2" clip-path="url(#terminal-2789230094-line-18)">$</text><text class="terminal-2789230094-r4" x="24.4" y="459.2" textLength="134.2" clip-path="url(#terminal-2789230094-line-18)">hlock&#160;check</text><text class="terminal-2789230094-r2" x="976" y="459.2" textLength="12.2" clip-path="url(#terminal-2789230094-line-18)">
-</text><text class="terminal-2789230094-r3" x="0" y="483.6" textLength="12.2" clip-path="url(#terminal-2789230094-line-19)">✓</text><text class="terminal-2789230094-r2" x="12.2" y="483.6" textLength="390.4" clip-path="url(#terminal-2789230094-line-19)">&#160;your&#160;claude-code&#160;setup&#160;matches&#160;</text><text class="terminal-2789230094-r5" x="402.6" y="483.6" textLength="146.4" clip-path="url(#terminal-2789230094-line-19)">harness.lock</text><text class="terminal-2789230094-r2" x="976" y="483.6" textLength="12.2" clip-path="url(#terminal-2789230094-line-19)">
-</text><text class="terminal-2789230094-r2" x="976" y="508" textLength="12.2" clip-path="url(#terminal-2789230094-line-20)">
-</text><text class="terminal-2789230094-r1" x="0" y="532.4" textLength="451.4" clip-path="url(#terminal-2789230094-line-21)">#&#160;on&#160;another&#160;machine,&#160;after&#160;git&#160;clone</text><text class="terminal-2789230094-r2" x="976" y="532.4" textLength="12.2" clip-path="url(#terminal-2789230094-line-21)">
-</text><text class="terminal-2789230094-r3" x="0" y="556.8" textLength="12.2" clip-path="url(#terminal-2789230094-line-22)">$</text><text class="terminal-2789230094-r4" x="24.4" y="556.8" textLength="195.2" clip-path="url(#terminal-2789230094-line-22)">hlock&#160;sync&#160;--yes</text><text class="terminal-2789230094-r2" x="976" y="556.8" textLength="12.2" clip-path="url(#terminal-2789230094-line-22)">
-</text><text class="terminal-2789230094-r4" x="0" y="581.2" textLength="109.8" clip-path="url(#terminal-2789230094-line-23)">Sync&#160;plan</text><text class="terminal-2789230094-r2" x="109.8" y="581.2" textLength="305" clip-path="url(#terminal-2789230094-line-23)">&#160;for&#160;Claude&#160;Code&#160;2.1.0&#160;→&#160;</text><text class="terminal-2789230094-r5" x="414.8" y="581.2" textLength="353.8" clip-path="url(#terminal-2789230094-line-23)">.hlock/env/claude-code/config</text><text class="terminal-2789230094-r2" x="976" y="581.2" textLength="12.2" clip-path="url(#terminal-2789230094-line-23)">
-</text><text class="terminal-2789230094-r3" x="0" y="605.6" textLength="12.2" clip-path="url(#terminal-2789230094-line-24)">✓</text><text class="terminal-2789230094-r8" x="36.6" y="605.6" textLength="146.4" clip-path="url(#terminal-2789230094-line-24)">harness&#160;&#160;&#160;&#160;&#160;</text><text class="terminal-2789230094-r2" x="207.4" y="605.6" textLength="768.6" clip-path="url(#terminal-2789230094-line-24)">Claude&#160;Code&#160;2.1.0&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;</text><text class="terminal-2789230094-r2" x="976" y="605.6" textLength="12.2" clip-path="url(#terminal-2789230094-line-24)">
-</text><text class="terminal-2789230094-r3" x="0" y="630" textLength="12.2" clip-path="url(#terminal-2789230094-line-25)">✓</text><text class="terminal-2789230094-r8" x="36.6" y="630" textLength="146.4" clip-path="url(#terminal-2789230094-line-25)">mcp&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;</text><text class="terminal-2789230094-r2" x="207.4" y="630" textLength="768.6" clip-path="url(#terminal-2789230094-line-25)">`npx`&#160;for&#160;MCP&#160;servers:&#160;github&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;</text><text class="terminal-2789230094-r2" x="976" y="630" textLength="12.2" clip-path="url(#terminal-2789230094-line-25)">
-</text><text class="terminal-2789230094-r3" x="0" y="654.4" textLength="12.2" clip-path="url(#terminal-2789230094-line-26)">✓</text><text class="terminal-2789230094-r8" x="36.6" y="654.4" textLength="146.4" clip-path="url(#terminal-2789230094-line-26)">secret&#160;&#160;&#160;&#160;&#160;&#160;</text><text class="terminal-2789230094-r2" x="207.4" y="654.4" textLength="768.6" clip-path="url(#terminal-2789230094-line-26)">HLOCK_SECRET_GITHUB_GITHUB_TOKEN&#160;(mcp&#160;github&#160;GITHUB_TOKEN)&#160;&#160;&#160;&#160;&#160;</text><text class="terminal-2789230094-r2" x="976" y="654.4" textLength="12.2" clip-path="url(#terminal-2789230094-line-26)">
-</text><text class="terminal-2789230094-r7" x="0" y="678.8" textLength="12.2" clip-path="url(#terminal-2789230094-line-27)">●</text><text class="terminal-2789230094-r8" x="36.6" y="678.8" textLength="146.4" clip-path="url(#terminal-2789230094-line-27)">config&#160;&#160;&#160;&#160;&#160;&#160;</text><text class="terminal-2789230094-r2" x="207.4" y="678.8" textLength="768.6" clip-path="url(#terminal-2789230094-line-27)">Write&#160;.hlock/env/claude-code/config/settings.json&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;</text><text class="terminal-2789230094-r2" x="976" y="678.8" textLength="12.2" clip-path="url(#terminal-2789230094-line-27)">
-</text><text class="terminal-2789230094-r7" x="0" y="703.2" textLength="12.2" clip-path="url(#terminal-2789230094-line-28)">●</text><text class="terminal-2789230094-r8" x="36.6" y="703.2" textLength="146.4" clip-path="url(#terminal-2789230094-line-28)">config&#160;&#160;&#160;&#160;&#160;&#160;</text><text class="terminal-2789230094-r2" x="207.4" y="703.2" textLength="768.6" clip-path="url(#terminal-2789230094-line-28)">Write&#160;.hlock/env/claude-code/config/.claude.json&#160;/mcpServers&#160;&#160;&#160;</text><text class="terminal-2789230094-r2" x="976" y="703.2" textLength="12.2" clip-path="url(#terminal-2789230094-line-28)">
-</text><text class="terminal-2789230094-r7" x="0" y="727.6" textLength="12.2" clip-path="url(#terminal-2789230094-line-29)">●</text><text class="terminal-2789230094-r8" x="36.6" y="727.6" textLength="146.4" clip-path="url(#terminal-2789230094-line-29)">skill&#160;&#160;&#160;&#160;&#160;&#160;&#160;</text><text class="terminal-2789230094-r2" x="207.4" y="727.6" textLength="768.6" clip-path="url(#terminal-2789230094-line-29)">Copy&#160;skill&#160;review-pr&#160;→&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;</text><text class="terminal-2789230094-r2" x="976" y="727.6" textLength="12.2" clip-path="url(#terminal-2789230094-line-29)">
-</text><text class="terminal-2789230094-r2" x="207.4" y="752" textLength="768.6" clip-path="url(#terminal-2789230094-line-30)">.hlock/env/claude-code/config/skills/review-pr&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;</text><text class="terminal-2789230094-r2" x="976" y="752" textLength="12.2" clip-path="url(#terminal-2789230094-line-30)">
-</text><text class="terminal-2789230094-r7" x="0" y="776.4" textLength="12.2" clip-path="url(#terminal-2789230094-line-31)">●</text><text class="terminal-2789230094-r8" x="36.6" y="776.4" textLength="146.4" clip-path="url(#terminal-2789230094-line-31)">instructions</text><text class="terminal-2789230094-r2" x="207.4" y="776.4" textLength="768.6" clip-path="url(#terminal-2789230094-line-31)">Write&#160;.hlock/env/claude-code/config/CLAUDE.md&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;</text><text class="terminal-2789230094-r2" x="976" y="776.4" textLength="12.2" clip-path="url(#terminal-2789230094-line-31)">
-</text><text class="terminal-2789230094-r3" x="0" y="800.8" textLength="12.2" clip-path="url(#terminal-2789230094-line-32)">✓</text><text class="terminal-2789230094-r2" x="12.2" y="800.8" textLength="610" clip-path="url(#terminal-2789230094-line-32)">&#160;Write&#160;.hlock/env/claude-code/config/settings.json</text><text class="terminal-2789230094-r2" x="976" y="800.8" textLength="12.2" clip-path="url(#terminal-2789230094-line-32)">
-</text><text class="terminal-2789230094-r3" x="0" y="825.2" textLength="12.2" clip-path="url(#terminal-2789230094-line-33)">✓</text><text class="terminal-2789230094-r2" x="12.2" y="825.2" textLength="744.2" clip-path="url(#terminal-2789230094-line-33)">&#160;Write&#160;.hlock/env/claude-code/config/.claude.json&#160;/mcpServers</text><text class="terminal-2789230094-r2" x="976" y="825.2" textLength="12.2" clip-path="url(#terminal-2789230094-line-33)">
-</text><text class="terminal-2789230094-r3" x="0" y="849.6" textLength="12.2" clip-path="url(#terminal-2789230094-line-34)">✓</text><text class="terminal-2789230094-r2" x="12.2" y="849.6" textLength="854" clip-path="url(#terminal-2789230094-line-34)">&#160;Copy&#160;skill&#160;review-pr&#160;→&#160;.hlock/env/claude-code/config/skills/review-pr</text><text class="terminal-2789230094-r2" x="976" y="849.6" textLength="12.2" clip-path="url(#terminal-2789230094-line-34)">
-</text><text class="terminal-2789230094-r3" x="0" y="874" textLength="12.2" clip-path="url(#terminal-2789230094-line-35)">✓</text><text class="terminal-2789230094-r2" x="12.2" y="874" textLength="561.2" clip-path="url(#terminal-2789230094-line-35)">&#160;Write&#160;.hlock/env/claude-code/config/CLAUDE.md</text><text class="terminal-2789230094-r2" x="976" y="874" textLength="12.2" clip-path="url(#terminal-2789230094-line-35)">
-</text><text class="terminal-2789230094-r3" x="0" y="898.4" textLength="12.2" clip-path="url(#terminal-2789230094-line-36)">✓</text><text class="terminal-2789230094-r2" x="12.2" y="898.4" textLength="146.4" clip-path="url(#terminal-2789230094-line-36)">&#160;in&#160;sync&#160;at&#160;</text><text class="terminal-2789230094-r5" x="158.6" y="898.4" textLength="353.8" clip-path="url(#terminal-2789230094-line-36)">.hlock/env/claude-code/config</text><text class="terminal-2789230094-r1" x="536.8" y="898.4" textLength="366" clip-path="url(#terminal-2789230094-line-36)">your&#160;own&#160;config&#160;wasn&#x27;t&#160;touched</text><text class="terminal-2789230094-r2" x="976" y="898.4" textLength="12.2" clip-path="url(#terminal-2789230094-line-36)">
-</text><text class="terminal-2789230094-r1" x="0" y="922.8" textLength="85.4" clip-path="url(#terminal-2789230094-line-37)">use&#160;it:</text><text class="terminal-2789230094-r9" x="97.6" y="922.8" textLength="658.8" clip-path="url(#terminal-2789230094-line-37)">CLAUDE_CONFIG_DIR=.hlock/env/claude-code/config&#160;claude</text><text class="terminal-2789230094-r2" x="976" y="922.8" textLength="12.2" clip-path="url(#terminal-2789230094-line-37)">
-</text><text class="terminal-2789230094-r1" x="0" y="947.2" textLength="488" clip-path="url(#terminal-2789230094-line-38)">to&#160;restore&#160;into&#160;your&#160;own&#160;config&#160;instead:</text><text class="terminal-2789230094-r9" x="500.2" y="947.2" textLength="256.2" clip-path="url(#terminal-2789230094-line-38)">hlock&#160;sync&#160;--in-place</text><text class="terminal-2789230094-r2" x="976" y="947.2" textLength="12.2" clip-path="url(#terminal-2789230094-line-38)">
+    <g class="terminal-3567180846-matrix">
+    <text class="terminal-3567180846-r1" x="0" y="20" textLength="195.2" clip-path="url(#terminal-3567180846-line-0)">#&#160;on&#160;your&#160;laptop</text><text class="terminal-3567180846-r2" x="976" y="20" textLength="12.2" clip-path="url(#terminal-3567180846-line-0)">
+</text><text class="terminal-3567180846-r3" x="0" y="44.4" textLength="12.2" clip-path="url(#terminal-3567180846-line-1)">$</text><text class="terminal-3567180846-r4" x="24.4" y="44.4" textLength="195.2" clip-path="url(#terminal-3567180846-line-1)">hlock&#160;pin&#160;--user</text><text class="terminal-3567180846-r2" x="976" y="44.4" textLength="12.2" clip-path="url(#terminal-3567180846-line-1)">
+</text><text class="terminal-3567180846-r3" x="0" y="68.8" textLength="12.2" clip-path="url(#terminal-3567180846-line-2)">✓</text><text class="terminal-3567180846-r2" x="12.2" y="68.8" textLength="97.6" clip-path="url(#terminal-3567180846-line-2)">&#160;pinned&#160;</text><text class="terminal-3567180846-r4" x="109.8" y="68.8" textLength="134.2" clip-path="url(#terminal-3567180846-line-2)">claude-code</text><text class="terminal-3567180846-r2" x="244" y="68.8" textLength="109.8" clip-path="url(#terminal-3567180846-line-2)">&#160;2.1.0&#160;→&#160;</text><text class="terminal-3567180846-r5" x="353.8" y="68.8" textLength="146.4" clip-path="url(#terminal-3567180846-line-2)">harness.lock</text><text class="terminal-3567180846-r1" x="524.6" y="68.8" textLength="341.6" clip-path="url(#terminal-3567180846-line-2)">(the&#160;only&#160;installed&#160;harness)</text><text class="terminal-3567180846-r2" x="976" y="68.8" textLength="12.2" clip-path="url(#terminal-3567180846-line-2)">
+</text><text class="terminal-3567180846-r6" x="0" y="93.2" textLength="24.4" clip-path="url(#terminal-3567180846-line-3)">╭─</text><text class="terminal-3567180846-r7" x="36.6" y="93.2" textLength="280.6" clip-path="url(#terminal-3567180846-line-3)">📌&#160;harness.lock&#160;·&#160;pinned</text><text class="terminal-3567180846-r6" x="341.6" y="93.2" textLength="536.8" clip-path="url(#terminal-3567180846-line-3)">────────────────────────────────────────────</text><text class="terminal-3567180846-r6" x="878.4" y="93.2" textLength="24.4" clip-path="url(#terminal-3567180846-line-3)">─╮</text><text class="terminal-3567180846-r2" x="976" y="93.2" textLength="12.2" clip-path="url(#terminal-3567180846-line-3)">
+</text><text class="terminal-3567180846-r6" x="0" y="117.6" textLength="12.2" clip-path="url(#terminal-3567180846-line-4)">│</text><text class="terminal-3567180846-r6" x="890.6" y="117.6" textLength="12.2" clip-path="url(#terminal-3567180846-line-4)">│</text><text class="terminal-3567180846-r2" x="976" y="117.6" textLength="12.2" clip-path="url(#terminal-3567180846-line-4)">
+</text><text class="terminal-3567180846-r6" x="0" y="142" textLength="12.2" clip-path="url(#terminal-3567180846-line-5)">│</text><text class="terminal-3567180846-r8" x="36.6" y="142" textLength="158.6" clip-path="url(#terminal-3567180846-line-5)">harness&#160;&#160;&#160;&#160;&#160;&#160;</text><text class="terminal-3567180846-r4" x="219.6" y="142" textLength="134.2" clip-path="url(#terminal-3567180846-line-5)">claude-code</text><text class="terminal-3567180846-r2" x="353.8" y="142" textLength="97.6" clip-path="url(#terminal-3567180846-line-5)">&#160;2.1.0&#160;&#160;</text><text class="terminal-3567180846-r6" x="890.6" y="142" textLength="12.2" clip-path="url(#terminal-3567180846-line-5)">│</text><text class="terminal-3567180846-r2" x="976" y="142" textLength="12.2" clip-path="url(#terminal-3567180846-line-5)">
+</text><text class="terminal-3567180846-r6" x="0" y="166.4" textLength="12.2" clip-path="url(#terminal-3567180846-line-6)">│</text><text class="terminal-3567180846-r8" x="36.6" y="166.4" textLength="158.6" clip-path="url(#terminal-3567180846-line-6)">scope&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;</text><text class="terminal-3567180846-r2" x="219.6" y="166.4" textLength="646.6" clip-path="url(#terminal-3567180846-line-6)">project&#160;+&#160;user&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;</text><text class="terminal-3567180846-r6" x="890.6" y="166.4" textLength="12.2" clip-path="url(#terminal-3567180846-line-6)">│</text><text class="terminal-3567180846-r2" x="976" y="166.4" textLength="12.2" clip-path="url(#terminal-3567180846-line-6)">
+</text><text class="terminal-3567180846-r6" x="0" y="190.8" textLength="12.2" clip-path="url(#terminal-3567180846-line-7)">│</text><text class="terminal-3567180846-r8" x="36.6" y="190.8" textLength="158.6" clip-path="url(#terminal-3567180846-line-7)">llm&#160;·&#160;default</text><text class="terminal-3567180846-r4" x="219.6" y="190.8" textLength="170.8" clip-path="url(#terminal-3567180846-line-7)">anthropic:opus</text><text class="terminal-3567180846-r6" x="890.6" y="190.8" textLength="12.2" clip-path="url(#terminal-3567180846-line-7)">│</text><text class="terminal-3567180846-r2" x="976" y="190.8" textLength="12.2" clip-path="url(#terminal-3567180846-line-7)">
+</text><text class="terminal-3567180846-r6" x="0" y="215.2" textLength="12.2" clip-path="url(#terminal-3567180846-line-8)">│</text><text class="terminal-3567180846-r8" x="36.6" y="215.2" textLength="158.6" clip-path="url(#terminal-3567180846-line-8)">mcp&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;</text><text class="terminal-3567180846-r2" x="219.6" y="215.2" textLength="85.4" clip-path="url(#terminal-3567180846-line-8)">github&#160;</text><text class="terminal-3567180846-r1" x="305" y="215.2" textLength="85.4" clip-path="url(#terminal-3567180846-line-8)">(stdio)</text><text class="terminal-3567180846-r6" x="890.6" y="215.2" textLength="12.2" clip-path="url(#terminal-3567180846-line-8)">│</text><text class="terminal-3567180846-r2" x="976" y="215.2" textLength="12.2" clip-path="url(#terminal-3567180846-line-8)">
+</text><text class="terminal-3567180846-r6" x="0" y="239.6" textLength="12.2" clip-path="url(#terminal-3567180846-line-9)">│</text><text class="terminal-3567180846-r8" x="36.6" y="239.6" textLength="158.6" clip-path="url(#terminal-3567180846-line-9)">skills&#160;&#160;&#160;&#160;&#160;&#160;&#160;</text><text class="terminal-3567180846-r2" x="219.6" y="239.6" textLength="36.6" clip-path="url(#terminal-3567180846-line-9)">1&#160;&#160;</text><text class="terminal-3567180846-r1" x="256.2" y="239.6" textLength="109.8" clip-path="url(#terminal-3567180846-line-9)">(1&#160;local)</text><text class="terminal-3567180846-r6" x="890.6" y="239.6" textLength="12.2" clip-path="url(#terminal-3567180846-line-9)">│</text><text class="terminal-3567180846-r2" x="976" y="239.6" textLength="12.2" clip-path="url(#terminal-3567180846-line-9)">
+</text><text class="terminal-3567180846-r6" x="0" y="264" textLength="12.2" clip-path="url(#terminal-3567180846-line-10)">│</text><text class="terminal-3567180846-r8" x="36.6" y="264" textLength="158.6" clip-path="url(#terminal-3567180846-line-10)">instructions&#160;</text><text class="terminal-3567180846-r2" x="219.6" y="264" textLength="646.6" clip-path="url(#terminal-3567180846-line-10)">{root}/CLAUDE.md&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;</text><text class="terminal-3567180846-r6" x="890.6" y="264" textLength="12.2" clip-path="url(#terminal-3567180846-line-10)">│</text><text class="terminal-3567180846-r2" x="976" y="264" textLength="12.2" clip-path="url(#terminal-3567180846-line-10)">
+</text><text class="terminal-3567180846-r6" x="0" y="288.4" textLength="12.2" clip-path="url(#terminal-3567180846-line-11)">│</text><text class="terminal-3567180846-r8" x="36.6" y="288.4" textLength="158.6" clip-path="url(#terminal-3567180846-line-11)">config&#160;&#160;&#160;&#160;&#160;&#160;&#160;</text><text class="terminal-3567180846-r2" x="219.6" y="288.4" textLength="451.4" clip-path="url(#terminal-3567180846-line-11)">{root}/settings.json,&#160;~/.claude.json&#160;</text><text class="terminal-3567180846-r1" x="671" y="288.4" textLength="134.2" clip-path="url(#terminal-3567180846-line-11)">/mcpServers</text><text class="terminal-3567180846-r6" x="890.6" y="288.4" textLength="12.2" clip-path="url(#terminal-3567180846-line-11)">│</text><text class="terminal-3567180846-r2" x="976" y="288.4" textLength="12.2" clip-path="url(#terminal-3567180846-line-11)">
+</text><text class="terminal-3567180846-r6" x="0" y="312.8" textLength="12.2" clip-path="url(#terminal-3567180846-line-12)">│</text><text class="terminal-3567180846-r8" x="36.6" y="312.8" textLength="158.6" clip-path="url(#terminal-3567180846-line-12)">secrets&#160;&#160;&#160;&#160;&#160;&#160;</text><text class="terminal-3567180846-r2" x="219.6" y="312.8" textLength="146.4" clip-path="url(#terminal-3567180846-line-12)">1&#160;redacted&#160;&#160;</text><text class="terminal-3567180846-r1" x="366" y="312.8" textLength="500.2" clip-path="url(#terminal-3567180846-line-12)">(supplied&#160;as&#160;HLOCK_SECRET_*&#160;when&#160;syncing)</text><text class="terminal-3567180846-r6" x="890.6" y="312.8" textLength="12.2" clip-path="url(#terminal-3567180846-line-12)">│</text><text class="terminal-3567180846-r2" x="976" y="312.8" textLength="12.2" clip-path="url(#terminal-3567180846-line-12)">
+</text><text class="terminal-3567180846-r6" x="0" y="337.2" textLength="12.2" clip-path="url(#terminal-3567180846-line-13)">│</text><text class="terminal-3567180846-r6" x="890.6" y="337.2" textLength="12.2" clip-path="url(#terminal-3567180846-line-13)">│</text><text class="terminal-3567180846-r2" x="976" y="337.2" textLength="12.2" clip-path="url(#terminal-3567180846-line-13)">
+</text><text class="terminal-3567180846-r6" x="0" y="361.6" textLength="902.8" clip-path="url(#terminal-3567180846-line-14)">╰────────────────────────────────────────────────────────────────────────╯</text><text class="terminal-3567180846-r2" x="976" y="361.6" textLength="12.2" clip-path="url(#terminal-3567180846-line-14)">
+</text><text class="terminal-3567180846-r1" x="0" y="386" textLength="256.2" clip-path="url(#terminal-3567180846-line-15)">vendored&#160;4&#160;files&#160;into</text><text class="terminal-3567180846-r5" x="268.4" y="386" textLength="317.2" clip-path="url(#terminal-3567180846-line-15)">.hlock/vendor/claude-code/</text><text class="terminal-3567180846-r1" x="610" y="386" textLength="317.2" clip-path="url(#terminal-3567180846-line-15)">·&#160;review&#160;before&#160;committing</text><text class="terminal-3567180846-r2" x="976" y="386" textLength="12.2" clip-path="url(#terminal-3567180846-line-15)">
+</text><text class="terminal-3567180846-r1" x="0" y="410.4" textLength="73.2" clip-path="url(#terminal-3567180846-line-16)">next&#160;→</text><text class="terminal-3567180846-r9" x="85.4" y="410.4" textLength="134.2" clip-path="url(#terminal-3567180846-line-16)">hlock&#160;check</text><text class="terminal-3567180846-r1" x="219.6" y="410.4" textLength="61" clip-path="url(#terminal-3567180846-line-16)">&#160;&#160;·&#160;&#160;</text><text class="terminal-3567180846-r9" x="280.6" y="410.4" textLength="122" clip-path="url(#terminal-3567180846-line-16)">hlock&#160;sync</text><text class="terminal-3567180846-r2" x="976" y="410.4" textLength="12.2" clip-path="url(#terminal-3567180846-line-16)">
+</text><text class="terminal-3567180846-r2" x="976" y="434.8" textLength="12.2" clip-path="url(#terminal-3567180846-line-17)">
+</text><text class="terminal-3567180846-r3" x="0" y="459.2" textLength="12.2" clip-path="url(#terminal-3567180846-line-18)">$</text><text class="terminal-3567180846-r4" x="24.4" y="459.2" textLength="134.2" clip-path="url(#terminal-3567180846-line-18)">hlock&#160;check</text><text class="terminal-3567180846-r2" x="976" y="459.2" textLength="12.2" clip-path="url(#terminal-3567180846-line-18)">
+</text><text class="terminal-3567180846-r3" x="0" y="483.6" textLength="12.2" clip-path="url(#terminal-3567180846-line-19)">✓</text><text class="terminal-3567180846-r2" x="12.2" y="483.6" textLength="390.4" clip-path="url(#terminal-3567180846-line-19)">&#160;your&#160;claude-code&#160;setup&#160;matches&#160;</text><text class="terminal-3567180846-r5" x="402.6" y="483.6" textLength="146.4" clip-path="url(#terminal-3567180846-line-19)">harness.lock</text><text class="terminal-3567180846-r2" x="976" y="483.6" textLength="12.2" clip-path="url(#terminal-3567180846-line-19)">
+</text><text class="terminal-3567180846-r2" x="976" y="508" textLength="12.2" clip-path="url(#terminal-3567180846-line-20)">
+</text><text class="terminal-3567180846-r1" x="0" y="532.4" textLength="451.4" clip-path="url(#terminal-3567180846-line-21)">#&#160;on&#160;another&#160;machine,&#160;after&#160;git&#160;clone</text><text class="terminal-3567180846-r2" x="976" y="532.4" textLength="12.2" clip-path="url(#terminal-3567180846-line-21)">
+</text><text class="terminal-3567180846-r3" x="0" y="556.8" textLength="12.2" clip-path="url(#terminal-3567180846-line-22)">$</text><text class="terminal-3567180846-r4" x="24.4" y="556.8" textLength="207.4" clip-path="url(#terminal-3567180846-line-22)">hlock&#160;trust&#160;--yes</text><text class="terminal-3567180846-r2" x="976" y="556.8" textLength="12.2" clip-path="url(#terminal-3567180846-line-22)">
+</text><text class="terminal-3567180846-r4" x="36.6" y="581.2" textLength="48.8" clip-path="url(#terminal-3567180846-line-23)">kind</text><text class="terminal-3567180846-r4" x="109.8" y="581.2" textLength="73.2" clip-path="url(#terminal-3567180846-line-23)">name&#160;&#160;</text><text class="terminal-3567180846-r4" x="207.4" y="581.2" textLength="390.4" clip-path="url(#terminal-3567180846-line-23)">runs&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;</text><text class="terminal-3567180846-r4" x="622.2" y="581.2" textLength="146.4" clip-path="url(#terminal-3567180846-line-23)">digest&#160;&#160;&#160;&#160;&#160;&#160;</text><text class="terminal-3567180846-r4" x="793" y="581.2" textLength="183" clip-path="url(#terminal-3567180846-line-23)">status&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;</text><text class="terminal-3567180846-r2" x="976" y="581.2" textLength="12.2" clip-path="url(#terminal-3567180846-line-23)">
+</text><text class="terminal-3567180846-r10" x="0" y="605.6" textLength="12.2" clip-path="url(#terminal-3567180846-line-24)">⚑</text><text class="terminal-3567180846-r2" x="36.6" y="605.6" textLength="48.8" clip-path="url(#terminal-3567180846-line-24)">mcp&#160;</text><text class="terminal-3567180846-r8" x="109.8" y="605.6" textLength="73.2" clip-path="url(#terminal-3567180846-line-24)">github</text><text class="terminal-3567180846-r2" x="207.4" y="605.6" textLength="390.4" clip-path="url(#terminal-3567180846-line-24)">npx&#160;-y&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;</text><text class="terminal-3567180846-r1" x="622.2" y="605.6" textLength="146.4" clip-path="url(#terminal-3567180846-line-24)">bd687d330ce4</text><text class="terminal-3567180846-r10" x="793" y="605.6" textLength="183" clip-path="url(#terminal-3567180846-line-24)">not&#160;yet&#160;trusted</text><text class="terminal-3567180846-r2" x="976" y="605.6" textLength="12.2" clip-path="url(#terminal-3567180846-line-24)">
+</text><text class="terminal-3567180846-r2" x="207.4" y="630" textLength="390.4" clip-path="url(#terminal-3567180846-line-25)">@modelcontextprotocol/server-git</text><text class="terminal-3567180846-r2" x="976" y="630" textLength="12.2" clip-path="url(#terminal-3567180846-line-25)">
+</text><text class="terminal-3567180846-r2" x="207.4" y="654.4" textLength="390.4" clip-path="url(#terminal-3567180846-line-26)">hub&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;</text><text class="terminal-3567180846-r2" x="976" y="654.4" textLength="12.2" clip-path="url(#terminal-3567180846-line-26)">
+</text><text class="terminal-3567180846-r3" x="0" y="678.8" textLength="12.2" clip-path="url(#terminal-3567180846-line-27)">✓</text><text class="terminal-3567180846-r2" x="12.2" y="678.8" textLength="158.6" clip-path="url(#terminal-3567180846-line-27)">&#160;approved&#160;1&#160;&#160;</text><text class="terminal-3567180846-r1" x="170.8" y="678.8" textLength="402.6" clip-path="url(#terminal-3567180846-line-27)">(recorded&#160;in&#160;~/.hlock/trust.toml)</text><text class="terminal-3567180846-r2" x="976" y="678.8" textLength="12.2" clip-path="url(#terminal-3567180846-line-27)">
+</text><text class="terminal-3567180846-r1" x="0" y="703.2" textLength="73.2" clip-path="url(#terminal-3567180846-line-28)">next&#160;→</text><text class="terminal-3567180846-r9" x="85.4" y="703.2" textLength="122" clip-path="url(#terminal-3567180846-line-28)">hlock&#160;sync</text><text class="terminal-3567180846-r2" x="976" y="703.2" textLength="12.2" clip-path="url(#terminal-3567180846-line-28)">
+</text><text class="terminal-3567180846-r2" x="976" y="727.6" textLength="12.2" clip-path="url(#terminal-3567180846-line-29)">
+</text><text class="terminal-3567180846-r3" x="0" y="752" textLength="12.2" clip-path="url(#terminal-3567180846-line-30)">$</text><text class="terminal-3567180846-r4" x="24.4" y="752" textLength="195.2" clip-path="url(#terminal-3567180846-line-30)">hlock&#160;sync&#160;--yes</text><text class="terminal-3567180846-r2" x="976" y="752" textLength="12.2" clip-path="url(#terminal-3567180846-line-30)">
+</text><text class="terminal-3567180846-r4" x="0" y="776.4" textLength="109.8" clip-path="url(#terminal-3567180846-line-31)">Sync&#160;plan</text><text class="terminal-3567180846-r2" x="109.8" y="776.4" textLength="305" clip-path="url(#terminal-3567180846-line-31)">&#160;for&#160;Claude&#160;Code&#160;2.1.0&#160;→&#160;</text><text class="terminal-3567180846-r5" x="414.8" y="776.4" textLength="353.8" clip-path="url(#terminal-3567180846-line-31)">.hlock/env/claude-code/config</text><text class="terminal-3567180846-r2" x="976" y="776.4" textLength="12.2" clip-path="url(#terminal-3567180846-line-31)">
+</text><text class="terminal-3567180846-r3" x="0" y="800.8" textLength="12.2" clip-path="url(#terminal-3567180846-line-32)">✓</text><text class="terminal-3567180846-r8" x="36.6" y="800.8" textLength="146.4" clip-path="url(#terminal-3567180846-line-32)">harness&#160;&#160;&#160;&#160;&#160;</text><text class="terminal-3567180846-r2" x="207.4" y="800.8" textLength="768.6" clip-path="url(#terminal-3567180846-line-32)">Claude&#160;Code&#160;2.1.0&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;</text><text class="terminal-3567180846-r2" x="976" y="800.8" textLength="12.2" clip-path="url(#terminal-3567180846-line-32)">
+</text><text class="terminal-3567180846-r3" x="0" y="825.2" textLength="12.2" clip-path="url(#terminal-3567180846-line-33)">✓</text><text class="terminal-3567180846-r8" x="36.6" y="825.2" textLength="146.4" clip-path="url(#terminal-3567180846-line-33)">mcp&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;</text><text class="terminal-3567180846-r2" x="207.4" y="825.2" textLength="768.6" clip-path="url(#terminal-3567180846-line-33)">`npx`&#160;for&#160;MCP&#160;servers:&#160;github&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;</text><text class="terminal-3567180846-r2" x="976" y="825.2" textLength="12.2" clip-path="url(#terminal-3567180846-line-33)">
+</text><text class="terminal-3567180846-r3" x="0" y="849.6" textLength="12.2" clip-path="url(#terminal-3567180846-line-34)">✓</text><text class="terminal-3567180846-r8" x="36.6" y="849.6" textLength="146.4" clip-path="url(#terminal-3567180846-line-34)">secret&#160;&#160;&#160;&#160;&#160;&#160;</text><text class="terminal-3567180846-r2" x="207.4" y="849.6" textLength="768.6" clip-path="url(#terminal-3567180846-line-34)">HLOCK_SECRET_GITHUB_GITHUB_TOKEN&#160;(mcp&#160;github&#160;GITHUB_TOKEN)&#160;&#160;&#160;&#160;&#160;</text><text class="terminal-3567180846-r2" x="976" y="849.6" textLength="12.2" clip-path="url(#terminal-3567180846-line-34)">
+</text><text class="terminal-3567180846-r7" x="0" y="874" textLength="12.2" clip-path="url(#terminal-3567180846-line-35)">●</text><text class="terminal-3567180846-r8" x="36.6" y="874" textLength="146.4" clip-path="url(#terminal-3567180846-line-35)">config&#160;&#160;&#160;&#160;&#160;&#160;</text><text class="terminal-3567180846-r2" x="207.4" y="874" textLength="768.6" clip-path="url(#terminal-3567180846-line-35)">Write&#160;.hlock/env/claude-code/config/settings.json&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;</text><text class="terminal-3567180846-r2" x="976" y="874" textLength="12.2" clip-path="url(#terminal-3567180846-line-35)">
+</text><text class="terminal-3567180846-r7" x="0" y="898.4" textLength="12.2" clip-path="url(#terminal-3567180846-line-36)">●</text><text class="terminal-3567180846-r8" x="36.6" y="898.4" textLength="146.4" clip-path="url(#terminal-3567180846-line-36)">config&#160;&#160;&#160;&#160;&#160;&#160;</text><text class="terminal-3567180846-r2" x="207.4" y="898.4" textLength="768.6" clip-path="url(#terminal-3567180846-line-36)">Write&#160;.hlock/env/claude-code/config/.claude.json&#160;/mcpServers&#160;&#160;&#160;</text><text class="terminal-3567180846-r2" x="976" y="898.4" textLength="12.2" clip-path="url(#terminal-3567180846-line-36)">
+</text><text class="terminal-3567180846-r7" x="0" y="922.8" textLength="12.2" clip-path="url(#terminal-3567180846-line-37)">●</text><text class="terminal-3567180846-r8" x="36.6" y="922.8" textLength="146.4" clip-path="url(#terminal-3567180846-line-37)">skill&#160;&#160;&#160;&#160;&#160;&#160;&#160;</text><text class="terminal-3567180846-r2" x="207.4" y="922.8" textLength="768.6" clip-path="url(#terminal-3567180846-line-37)">Copy&#160;skill&#160;review-pr&#160;→&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;</text><text class="terminal-3567180846-r2" x="976" y="922.8" textLength="12.2" clip-path="url(#terminal-3567180846-line-37)">
+</text><text class="terminal-3567180846-r2" x="207.4" y="947.2" textLength="768.6" clip-path="url(#terminal-3567180846-line-38)">.hlock/env/claude-code/config/skills/review-pr&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;</text><text class="terminal-3567180846-r2" x="976" y="947.2" textLength="12.2" clip-path="url(#terminal-3567180846-line-38)">
+</text><text class="terminal-3567180846-r7" x="0" y="971.6" textLength="12.2" clip-path="url(#terminal-3567180846-line-39)">●</text><text class="terminal-3567180846-r8" x="36.6" y="971.6" textLength="146.4" clip-path="url(#terminal-3567180846-line-39)">instructions</text><text class="terminal-3567180846-r2" x="207.4" y="971.6" textLength="768.6" clip-path="url(#terminal-3567180846-line-39)">Write&#160;.hlock/env/claude-code/config/CLAUDE.md&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;</text><text class="terminal-3567180846-r2" x="976" y="971.6" textLength="12.2" clip-path="url(#terminal-3567180846-line-39)">
+</text><text class="terminal-3567180846-r3" x="0" y="996" textLength="12.2" clip-path="url(#terminal-3567180846-line-40)">✓</text><text class="terminal-3567180846-r2" x="12.2" y="996" textLength="610" clip-path="url(#terminal-3567180846-line-40)">&#160;Write&#160;.hlock/env/claude-code/config/settings.json</text><text class="terminal-3567180846-r2" x="976" y="996" textLength="12.2" clip-path="url(#terminal-3567180846-line-40)">
+</text><text class="terminal-3567180846-r3" x="0" y="1020.4" textLength="12.2" clip-path="url(#terminal-3567180846-line-41)">✓</text><text class="terminal-3567180846-r2" x="12.2" y="1020.4" textLength="744.2" clip-path="url(#terminal-3567180846-line-41)">&#160;Write&#160;.hlock/env/claude-code/config/.claude.json&#160;/mcpServers</text><text class="terminal-3567180846-r2" x="976" y="1020.4" textLength="12.2" clip-path="url(#terminal-3567180846-line-41)">
+</text><text class="terminal-3567180846-r3" x="0" y="1044.8" textLength="12.2" clip-path="url(#terminal-3567180846-line-42)">✓</text><text class="terminal-3567180846-r2" x="12.2" y="1044.8" textLength="854" clip-path="url(#terminal-3567180846-line-42)">&#160;Copy&#160;skill&#160;review-pr&#160;→&#160;.hlock/env/claude-code/config/skills/review-pr</text><text class="terminal-3567180846-r2" x="976" y="1044.8" textLength="12.2" clip-path="url(#terminal-3567180846-line-42)">
+</text><text class="terminal-3567180846-r3" x="0" y="1069.2" textLength="12.2" clip-path="url(#terminal-3567180846-line-43)">✓</text><text class="terminal-3567180846-r2" x="12.2" y="1069.2" textLength="561.2" clip-path="url(#terminal-3567180846-line-43)">&#160;Write&#160;.hlock/env/claude-code/config/CLAUDE.md</text><text class="terminal-3567180846-r2" x="976" y="1069.2" textLength="12.2" clip-path="url(#terminal-3567180846-line-43)">
+</text><text class="terminal-3567180846-r3" x="0" y="1093.6" textLength="12.2" clip-path="url(#terminal-3567180846-line-44)">✓</text><text class="terminal-3567180846-r2" x="12.2" y="1093.6" textLength="146.4" clip-path="url(#terminal-3567180846-line-44)">&#160;in&#160;sync&#160;at&#160;</text><text class="terminal-3567180846-r5" x="158.6" y="1093.6" textLength="353.8" clip-path="url(#terminal-3567180846-line-44)">.hlock/env/claude-code/config</text><text class="terminal-3567180846-r1" x="536.8" y="1093.6" textLength="366" clip-path="url(#terminal-3567180846-line-44)">your&#160;own&#160;config&#160;wasn&#x27;t&#160;touched</text><text class="terminal-3567180846-r2" x="976" y="1093.6" textLength="12.2" clip-path="url(#terminal-3567180846-line-44)">
+</text><text class="terminal-3567180846-r1" x="0" y="1118" textLength="85.4" clip-path="url(#terminal-3567180846-line-45)">use&#160;it:</text><text class="terminal-3567180846-r9" x="97.6" y="1118" textLength="658.8" clip-path="url(#terminal-3567180846-line-45)">CLAUDE_CONFIG_DIR=.hlock/env/claude-code/config&#160;claude</text><text class="terminal-3567180846-r2" x="976" y="1118" textLength="12.2" clip-path="url(#terminal-3567180846-line-45)">
+</text><text class="terminal-3567180846-r1" x="0" y="1142.4" textLength="488" clip-path="url(#terminal-3567180846-line-46)">to&#160;restore&#160;into&#160;your&#160;own&#160;config&#160;instead:</text><text class="terminal-3567180846-r9" x="500.2" y="1142.4" textLength="256.2" clip-path="url(#terminal-3567180846-line-46)">hlock&#160;sync&#160;--in-place</text><text class="terminal-3567180846-r2" x="976" y="1142.4" textLength="12.2" clip-path="url(#terminal-3567180846-line-46)">
 </text>
     </g>
     </g>
