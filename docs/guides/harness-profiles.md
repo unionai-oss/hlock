@@ -28,6 +28,16 @@ Each directory holds `harnesses/*.toml` and `runtimes/*.toml`. A profile with th
 as an earlier one replaces it, so you can override a built-in. `hlock harness show <name>`
 prints where the active profile came from.
 
+`./.hlock/profiles/` comes with the repository you're in, so hlock trusts it less, since
+`hlock check` runs each profile's binaries to read their versions. A profile there:
+
+- can add a new `id`, but can't replace a built-in or one from the directories above it
+  (hlock skips it; override a built-in in `~/.config/hlock/profiles/` instead);
+- names its `binaries` and `run.python` as programs on `PATH`; an entry with a `/` or `\`
+  is ignored;
+- probes its version only with a version flag (`--version`, `-version`, `-V`, `-v` or
+  `version`); other `version.args` are ignored.
+
 ## A harness profile
 
 ```toml

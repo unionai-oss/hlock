@@ -238,7 +238,7 @@ tags = ["writing"]
 
 | Key | Required | Default | Description |
 |---|---|---|---|
-| `id` | yes | | Unique task id within the pack |
+| `id` | yes | | Unique task id within the pack: letters, digits, `.`, `_` and `-` only, since it names the task's workspace directory |
 | `prompt` | yes | | Path to the prompt file, relative to the pack directory |
 | `fixtures` | no | | Directory copied into the task's workspace before the run |
 | `solution` | no | | Directory with the files a correct run leaves, used to [check the graders](#check-your-graders) |
@@ -247,6 +247,12 @@ tags = ["writing"]
 | `graders` | no | `[]` | How the run is scored: strings or tables, see [Grading](#grading). Empty means only the `expected.artifacts` check. |
 | `tags` | no | `[]` | Free-form labels for slicing results |
 | `timeout-seconds` | no | `600` | Per-task timeout |
+
+Paths in a pack (`prompt`, `fixtures`, `solution`, and the files graders name) are
+relative to the pack directory, and paths to output files (`expected.artifacts`, a
+grader's `path` or `artifacts`) are relative to the workspace. Neither may be absolute or
+use `..`: a pack with such a path, or with an id outside the characters above, doesn't
+load.
 
 ## Grading
 
@@ -286,7 +292,9 @@ graders = [
 | `contains` | Strings the file must contain (a string or a list) |
 
 With no content keys, it checks that the files exist. `"artifact:out.csv"` is the short
-form for that. The score is the fraction of files that pass.
+form for that. The score is the fraction of files that pass. A symlink, or anything that
+isn't a regular file, fails the check: graders don't follow links the agent left. Judges
+see such a file as missing.
 
 ### Tests
 
@@ -304,8 +312,11 @@ graders = [
 |---|---|---|
 | `script` | | A file in the pack. A `.py` file runs with `python3` (or `HL_PYTHON`); anything else runs directly. `"tests:<path>"` is the short form. |
 | `command` | | A shell command, instead of a `script` |
-| `files` | `[]` | Files or directories in the pack that are copied into the workspace, by name, before it runs. They replace anything the agent wrote with the same name. |
-| `timeout-seconds` | `300` | The command is stopped, and fails, after this long |
+| `files` | `[]` | Files or directories in the pack that are copied into the workspace, by name, before it runs. They replace anything the agent wrote with the same name, including a symlink. |
+| `timeout-seconds` | `300` | The command is stopped, and fails, after this long, along with everything it started |
+
+Anything the command leaves running in the background (`server &`) is stopped when it
+exits.
 
 Keep tests the agent shouldn't see out of `workspace/`, and copy them in with `files`.
 Then the agent can't read them or change them.
@@ -317,8 +328,8 @@ The command gets these environment variables:
 | `HLOCK_WORKSPACE` | The workspace, also the working directory |
 | `HLOCK_PACK_DIR` | The pack directory, for reference data kept next to the script |
 | `HLOCK_TASK` | The task id |
-| `HLOCK_GRADE` | A path where the command may write `{"score": 0.5, "success": false, "detail": "…"}` |
-| `HLOCK_TRACE` | The run's trace as JSON (in `resolve`; unset when you grade a directory by hand) |
+| `HLOCK_GRADE` | A path where the command may write `{"score": 0.5, "success": false, "detail": "…"}`, in a temporary directory only you can read, removed afterwards |
+| `HLOCK_TRACE` | The run's trace as JSON, in the same directory (in `resolve`; unset when you grade a directory by hand) |
 
 Without a `HLOCK_GRADE` file, the score is 1 on exit code 0 and 0 otherwise. Each key in
 the file is optional, and `success` defaults to the exit code. The last lines of output
@@ -383,12 +394,13 @@ graders = [
 |---|---|---|
 | `criteria` | | Points a good result meets: strings, or tables with `text` and `true`/`false` descriptions of each answer. The score is the mean P(met) (a decider) or the fraction met (an LLM). |
 | `levels` | | 2 to 10 ordered descriptions, worst first. The model places the result on them, and the score is the level reached over the top level. With `criteria`, the score is the mean of the two. |
-| `rubric` | | A file in the pack instead: its `- ` items are criteria, and a numbered list under a `## Levels` heading is levels. An LLM judge also reads a free-form rubric and scores it 0 to 1. `"judge:<path>"` is the short form. |
+| `rubric` | | A file in the pack instead: its `- ` items are criteria, and a numbered list under a `## Levels` heading is levels (2 to 10 of them, as inline). An LLM judge also reads a free-form rubric and scores it 0 to 1. `"judge:<path>"` is the short form. |
 | `artifacts` | `expected.artifacts` | The workspace files the model reads |
 | `pass` | `0.7` | The lowest score that passes |
 
 The grade's detail names the unmet criteria (and the level reached), and `hlock evals
-grade` prints each criterion's probability.
+grade` prints each criterion's probability. Scores and probabilities a model reports are
+kept within 0 to 1, and a level that isn't on the scale fails the grade.
 
 #### Which judge
 

@@ -96,7 +96,8 @@ where
                 other => serde_json::from_value(other.clone()).map_err(D::Error::custom),
             })
             .collect(),
-        _ => Ok(vec![]),
+        serde_json::Value::Null => Ok(vec![]),
+        other => Err(D::Error::custom(format!("`harness` must be a list of names or [[candidates.harness]] tables, not {other}"))),
     }
 }
 
@@ -137,6 +138,9 @@ pub struct Manifest {
     pub deciders: BTreeMap<String, serde_json::Value>,
     #[serde(skip)]
     pub source_path: Option<PathBuf>,
+    /// The text this manifest was parsed from, which [`Manifest::manifest_hash`] hashes.
+    #[serde(skip)]
+    pub source_text: Option<String>,
 }
 
 /// The nearest `harness.toml` at or above `start`, like Cargo finds `Cargo.toml`.
@@ -156,8 +160,9 @@ impl Manifest {
     pub fn load(path: &Path) -> Result<Manifest> {
         let text = std::fs::read_to_string(path)
             .map_err(|e| Error::Manifest(format!("cannot read {}: {e}", path.display())))?;
-        let mut m: Manifest = toml::from_str(&text)
-            .map_err(|e| Error::Manifest(format!("invalid harness.toml: {e}")))?;
+        let mut m = Manifest::from_str(&text)?;
+        // a bad [deciders] table is an error here, not a silent fallback later
+        m.deciders()?;
         m.source_path = Some(path.to_path_buf());
         Ok(m)
     }
@@ -176,7 +181,9 @@ impl Manifest {
 
     /// Parse from an in-memory TOML string.
     pub fn from_str(text: &str) -> Result<Manifest> {
-        toml::from_str(text).map_err(|e| Error::Manifest(format!("invalid harness.toml: {e}")))
+        let mut m: Manifest = toml::from_str(text).map_err(|e| Error::Manifest(format!("invalid harness.toml: {e}")))?;
+        m.source_text = Some(text.to_string());
+        Ok(m)
     }
 
     pub fn name(&self) -> String {
@@ -212,11 +219,20 @@ impl Manifest {
     }
 
     /// `[evals.judge]`: the model that scores `judge` graders, over any pack's own.
+    /// An invalid table reads as unset; [`Manifest::judge_checked`] reports it.
     pub fn judge(&self) -> Option<crate::graders::JudgeConfig> {
-        self.evals
-            .get("judge")
-            .and_then(|v| serde_json::from_value::<crate::graders::JudgeConfig>(v.clone()).ok())
-            .filter(|j| j.is_set())
+        self.judge_checked().ok().flatten()
+    }
+
+    /// [`Manifest::judge`], with an error for an invalid `[evals.judge]` table.
+    pub fn judge_checked(&self) -> Result<Option<crate::graders::JudgeConfig>> {
+        match self.evals.get("judge") {
+            None => Ok(None),
+            Some(v) => {
+                let j: crate::graders::JudgeConfig = serde_json::from_value(v.clone()).map_err(|e| Error::Manifest(format!("[evals.judge]: {e}")))?;
+                Ok(j.is_set().then_some(j))
+            }
+        }
     }
 
     /// `[deciders.<use>]`, checked, with defaults filled in.
@@ -232,18 +248,25 @@ impl Manifest {
 
     /// The judge `[deciders.judge]`, else `[deciders.default]`, names: used when
     /// neither `[evals.judge]` nor a pack's `[pack.judge]` is set.
+    /// An invalid `[deciders]` table reads as unset; [`Manifest::default_judge_checked`]
+    /// reports it.
     pub fn default_judge(&self) -> Option<crate::graders::JudgeConfig> {
-        let specs = self.deciders().ok()?;
-        let spec = specs.get("judge").or_else(|| specs.get("default"))?;
-        let model = spec.model.clone()?;
-        Some(crate::graders::JudgeConfig {
-            model,
+        self.default_judge_checked().ok().flatten()
+    }
+
+    /// [`Manifest::default_judge`], with an error for an invalid `[deciders]` table. A
+    /// `[deciders.judge]` with only `any-of` falls back to `[deciders.default]`'s model.
+    pub fn default_judge_checked(&self) -> Result<Option<crate::graders::JudgeConfig>> {
+        let specs = self.deciders()?;
+        let Some(spec) = ["judge", "default"].iter().filter_map(|u| specs.get(*u)).find(|s| s.model.is_some()) else { return Ok(None) };
+        Ok(Some(crate::graders::JudgeConfig {
+            model: spec.model.clone().unwrap_or_default(),
             protocol: spec.protocol.clone(),
             base_url: spec.base_url.clone(),
             key_env: spec.key_env.clone(),
             long_context: spec.long_context,
             ..Default::default()
-        })
+        }))
     }
 
     pub fn backend_target(&self) -> String {
@@ -271,16 +294,49 @@ impl Manifest {
             .unwrap_or(0.7)
     }
 
-    /// Hash of the manifest (of the source file when loaded, else of its TOML).
+    /// Hash of the manifest: of the text it was parsed from (so it matches what the run
+    /// used, whether loaded or parsed), else of its TOML (built in code).
     pub fn manifest_hash(&self) -> String {
-        if let Some(p) = &self.source_path {
-            if let Ok(bytes) = std::fs::read(p) {
-                return sha256_bytes(&bytes);
-            }
+        if let Some(text) = &self.source_text {
+            return sha256_bytes(text.as_bytes());
         }
         match toml::to_string(self) {
             Ok(s) => sha256_bytes(s.as_bytes()),
             Err(_) => String::new(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bad_tables_are_errors_not_defaults() {
+        let e = Manifest::from_str("[candidates]\nharness = \"reference\"\n").unwrap_err();
+        assert!(e.to_string().contains("must be a list"), "{e}");
+        let m = Manifest::from_str("[evals.judge]\nmodel = 3\n").unwrap();
+        assert!(m.judge_checked().is_err() && m.judge().is_none());
+        let m = Manifest::from_str("[deciders.judge]\nmodel = \"anthropic:x\"\n").unwrap();
+        assert!(m.default_judge_checked().is_err() && m.default_judge().is_none());
+        // a use with only any-of candidates falls back to [deciders.default]'s model
+        let m = Manifest::from_str("[deciders.judge]\nany-of = [\"ollama:kev:4b\"]\n[deciders.default]\nmodel = \"typesafe:jev-1.13.0\"\n").unwrap();
+        assert_eq!(m.default_judge_checked().unwrap().unwrap().model, "typesafe:jev-1.13.0");
+    }
+
+    #[test]
+    fn load_checks_deciders_and_hashes_what_it_parsed() {
+        let d = std::env::temp_dir().join(format!("hlock-manifest-{}", std::process::id()));
+        std::fs::create_dir_all(&d).unwrap();
+        let p = d.join("harness.toml");
+        std::fs::write(&p, "[deciders.stop]\nmodel = \"anthropic:x\"\n").unwrap();
+        assert!(Manifest::load(&p).unwrap_err().to_string().contains("[deciders.stop]"));
+        let text = "[project]\nname = \"a\"\n";
+        std::fs::write(&p, text).unwrap();
+        let m = Manifest::load(&p).unwrap();
+        assert_eq!(m.manifest_hash(), Manifest::from_str(text).unwrap().manifest_hash());
+        std::fs::write(&p, "[project]\nname = \"changed\"\n").unwrap();
+        assert_eq!(m.manifest_hash(), sha256_bytes(text.as_bytes()), "the hash is of what was parsed, not the file now");
+        let _ = std::fs::remove_dir_all(&d);
     }
 }

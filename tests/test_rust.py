@@ -119,3 +119,92 @@ def test_upgrade_and_tune(tmp_path, monkeypatch):
     tune_lock = hlock.Lockfile.load(str(tmp_path / "harness.tune.lock"))
     assert "tuned" in tune_lock.to_json() or tune_lock.harness
     assert tuned["summary"] != ""
+
+
+def test_errors_are_typed_value_errors(tmp_path):
+    for name in ("ManifestError", "LockfileError", "EvalPackError", "StoreError", "TuningError", "ProfileError",
+                 "WorkerError", "PullError"):
+        assert issubclass(getattr(hlock, name), hlock.HarnessLockError)
+    assert issubclass(hlock.HarnessLockError, ValueError)
+    with pytest.raises(hlock.ManifestError) as e:
+        hlock.Manifest.load(str(tmp_path / "missing.toml"))
+    assert isinstance(e.value, ValueError) and "cannot read" in str(e.value)
+    (tmp_path / "bad.lock").write_text("lock-version = 1\ngenerated-by = 't'\ngenerated-at = ''\n[harness]\nname = '../x'\n")
+    with pytest.raises(hlock.LockfileError, match="plain name"):
+        hlock.Lockfile.load(str(tmp_path / "bad.lock"))
+    with pytest.raises(hlock.PullError):
+        hlock.pull_parse("github:alice/setup@--upload-pack=x")
+    import hlock as alias
+
+    assert alias.HarnessLockError is hlock.HarnessLockError
+
+
+def test_search_space_rejects_invalid_json():
+    with pytest.raises(ValueError, match="evals isn't valid JSON"):
+        hlock.SearchSpace(evals="{packs: nope")
+    with pytest.raises(hlock.HarnessLockError, match="policy must be a JSON object"):
+        hlock.SearchSpace(policy="[1, 2]")
+    hlock.SearchSpace(policy='{"retries": [0, 1]}')
+
+
+def test_an_explicit_manifest_path_must_exist(tmp_path):
+    pack = tmp_path / "ws"
+    (pack / "t1").mkdir(parents=True)
+    (pack / "t1" / "prompt.md").write_text("x")
+    (pack / "pack.toml").write_text(PACK_TOML)
+    with pytest.raises(hlock.ManifestError, match="cannot read"):
+        hlock.check_eval_pack(str(pack), manifest=str(tmp_path / "nope.toml"))
+    with pytest.raises(hlock.ManifestError, match="cannot read"):
+        hlock.decide("x", "[]", manifest=str(tmp_path / "nope.toml"))
+    # without one, there's nothing to read
+    assert json.loads(hlock.check_eval_pack(str(pack)))["name"] == "test/pack"
+
+
+def test_decide_state_and_hook_input_must_be_json_when_they_look_like_it(tmp_path):
+    with pytest.raises(hlock.HarnessLockError, match="state isn't valid JSON"):
+        hlock.decide("{not json", "[]", model="system-one:kev-4b")
+    lock = tmp_path / "harness.lock"
+    lock.write_text("lock-version = 1\ngenerated-by = 't'\ngenerated-at = ''\n")
+    out = json.loads(hlock.decide_hook("approve", "claude-code", "not json", str(lock)))
+    assert out["exit"] == 0 and out["stdout"] == "" and "wasn't JSON" in out["note"]
+
+
+def test_long_calls_stop_on_ctrl_c():
+    import _thread
+    import threading
+    import time
+
+    step = {"id": "t", "status": "auto", "action": {"type": "run", "argv": ["sleep", "3"], "env": {}}}
+    threading.Timer(0.3, _thread.interrupt_main).start()
+    start = time.monotonic()
+    with pytest.raises(KeyboardInterrupt):
+        hlock.sync_run_step(json.dumps(step))
+    assert time.monotonic() - start < 2
+    with pytest.raises(hlock.ProfileError, match="no command"):
+        hlock.sync_run_step(json.dumps({**step, "action": {"type": "run", "argv": [], "env": {}}}))
+
+
+def test_decide_with_an_explicit_model_uses_its_own_provider(tmp_path, monkeypatch):
+    from fake_models import Fake, systemone
+
+    ours, other = Fake(lambda path, body: systemone(body)), Fake(lambda path, body: systemone(body))
+    try:
+        manifest = tmp_path / "harness.toml"
+        manifest.write_text(f'[deciders.default]\nmodel = "system-one:kev-4b"\nbase-url = "{ours.url}"\n')
+        monkeypatch.setenv("OLLAMA_HOST", other.url)
+        q = json.dumps([{"id": "q1", "type": "noul", "instructions": "ok?"}])
+        # the same provider keeps the spec's base URL
+        hlock.decide("s", q, model="system-one:kev-8b", manifest=str(manifest))
+        assert len(ours.requests) == 1 and not other.requests
+        # another provider doesn't inherit it
+        hlock.decide("s", q, model="ollama:kev:4b", manifest=str(manifest))
+        assert len(ours.requests) == 1 and len(other.requests) == 1
+        # a use with only any-of candidates falls back to [deciders.default]'s model
+        manifest.write_text(f'[deciders.draft]\nany-of = ["ollama:kev:4b"]\n'
+                            f'[deciders.default]\nmodel = "system-one:kev-4b"\nbase-url = "{ours.url}"\n')
+        hlock.decide("s", q, use_="draft", manifest=str(manifest))
+        assert len(ours.requests) == 2
+        assert hlock.Manifest.load(str(manifest)).decider("draft") == "system-one:kev-4b"
+    finally:
+        ours.close()
+        other.close()

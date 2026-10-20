@@ -155,8 +155,8 @@ mean = 1.0
 mean = 0.0001
 
 [evidence.latency-s-per-task]
-p50 = 0.259
-p95 = 0.395
+p50 = 0.5928
+p95 = 1.279
 
 [provenance]
 backend = "local"
@@ -245,7 +245,7 @@ records.
 | `use` | What it decides: `approve`, `stop`, `route`, `tool` |
 | `provider`, `model` | The decision model, as the provider names it |
 | `protocol` | `systemone` or `decisions` |
-| `endpoint`, `key-env` | Where it's reached, and the variable its API key is read from |
+| `endpoint`, `key-env` | Where it's reached, and the variable its API key is read from. Used only when they're on this machine, the provider's own, or what your `harness.toml` sets ([why](../guides/deciders.md#locks-from-someone-else)) |
 | `runtime` | The local runtime serving it (`ollama`, `ollaya`) |
 | `resolved-from` | The `harness.toml` reference it came from, or the harness setting `pin` read |
 | `via` | `hook` (hlock wires it in), `native` (a setting of the harness's own), `env` (code harnesses), `simulated` (the reference harness) |
@@ -253,3 +253,20 @@ records.
 | `may`, `min-probability`, `timeout-ms` | What it may answer, how sure it must be, how long a hook waits |
 | `questions` | A digest of hlock's questions for the use; a newer hlock with other questions is drift |
 | `[decider.policy]` | The policy file's `path` and `digest` |
+
+## Checks
+
+A lock can come from someone else's repository ([`hlock pull`](../guides/pull.md)), so hlock
+checks every lock it reads, before using any of it, for values that become paths or
+command-line words:
+
+| Value | Must be |
+|---|---|
+| `[harness] name`, `[[skill]] name` | A plain name: no `/`, `\`, or `..` |
+| `vendored` (skills, instructions, config), `[decider.policy] path` | A relative path inside the project: no leading `/`, no `..` |
+| `[harness] version`, `[[native]] version`, `[[runtime]]` `name`, `version`, and each model's `id`, `source` and `revision`, `[[llm]] runtime`, `[[decider]]` `model`, `runtime` and wiring `event` | Letters, digits and `._:/@+-`, not starting with `-` |
+| `[[decider]] use` | `approve`, `stop`, `route`, or `tool` |
+
+A lock that fails a check isn't read: the error names the field. hlock writes locks
+atomically (a temporary file, then a rename), and leaves out JSON `null`s, which TOML
+can't hold.

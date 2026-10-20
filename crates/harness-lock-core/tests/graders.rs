@@ -442,3 +442,144 @@ graders = [{ type = "judge", criteria = ["Is short"] }]"#);
     let g = p.grade_with(&p.tasks[0], &root, &GradeOptions { judge: Some(judge), ..Default::default() });
     assert!(g[1].grader.ends_with("(openai:gpt-x)"), "{g:?}");
 }
+
+#[cfg(unix)]
+#[test]
+fn a_test_command_that_leaves_a_process_running_returns_promptly() {
+    // the background `sleep` holds the output pipe; it's stopped when the command exits
+    let (root, p) = pack("leftover", r#"graders = [{ type = "tests", command = "sleep 30 & echo started" }]"#);
+    let start = std::time::Instant::now();
+    let g = grade(&p, &root);
+    assert!(start.elapsed() < std::time::Duration::from_secs(10), "took {:?}", start.elapsed());
+    assert!(g[0].1, "{g:?}");
+}
+
+#[cfg(unix)]
+#[test]
+fn planted_symlinks_and_fifos_in_the_workspace_are_not_followed() {
+    let (root, p) = pack("planted", r#"
+expected = { artifacts = ["count.txt", "notes.md"] }
+graders = [
+  { type = "artifact", path = "count.txt", equals = "secret" },
+  { type = "artifact", path = "notes.md", contains = ["x"] },
+  { type = "judge", criteria = ["Is short"], artifacts = ["count.txt"] },
+]"#);
+    write(&root, "secret.txt", "secret\n");
+    let ws = root.join("ws");
+    fs::create_dir_all(&ws).unwrap();
+    std::os::unix::fs::symlink(root.join("secret.txt"), ws.join("count.txt")).unwrap();
+    // a FIFO would block a plain read forever
+    let fifo = std::ffi::CString::new(ws.join("notes.md").to_string_lossy().as_bytes()).unwrap();
+    // SAFETY: a valid NUL-terminated path.
+    assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o600) }, 0);
+    let (url, req) = fake_model("{\"criteria\": [true]}");
+    let judge = JudgeConfig { model: "local:tiny".into(), base_url: Some(url), ..Default::default() };
+    let start = std::time::Instant::now();
+    let g = p.grade_with(&p.tasks[0], &ws, &GradeOptions { judge: Some(judge), ..Default::default() });
+    assert!(start.elapsed() < std::time::Duration::from_secs(5));
+    assert_eq!(g[0].detail, "count.txt is a symlink, not a file the run wrote");
+    assert!(!g[1].success && g[1].detail.contains("not a regular file"), "{g:?}");
+    // the judge isn't shown what the link points at
+    let prompt = req.join().unwrap();
+    assert!(!prompt.contains("secret") && prompt.contains("missing"), "{prompt}");
+}
+
+#[cfg(unix)]
+#[test]
+fn hidden_files_replace_a_planted_symlink_instead_of_writing_through_it() {
+    let (root, p) = pack("through", r#"graders = [{ type = "tests", command = "cat expected.txt", files = ["a/expected.txt"] }]"#);
+    write(&root, "a/expected.txt", "42\n");
+    write(&root, "victim.txt", "keep\n");
+    let ws = root.join("ws");
+    fs::create_dir_all(&ws).unwrap();
+    std::os::unix::fs::symlink(root.join("victim.txt"), ws.join("expected.txt")).unwrap();
+    let g = grade(&p, &ws);
+    assert!(g[0].1, "{g:?}");
+    assert_eq!(fs::read_to_string(root.join("victim.txt")).unwrap(), "keep\n");
+    assert_eq!(fs::read_to_string(ws.join("expected.txt")).unwrap(), "42\n");
+}
+
+#[cfg(unix)]
+#[test]
+fn the_grade_file_is_in_a_private_directory_removed_afterwards() {
+    let (root, p) = pack("private", r#"graders = [{ type = "tests", command = "d=$(dirname \"$HLOCK_GRADE\"); echo \"$d\" > where.txt; ls -ld \"$d\" | cut -c1-10 > mode.txt; test -f \"$HLOCK_TRACE\"" }]"#);
+    let g = p.grade_with(&p.tasks[0], &root, &GradeOptions { trace: Some(serde_json::json!({"events": []})), ..Default::default() });
+    assert!(g[0].success, "the trace was written for the command: {g:?}");
+    let dir = fs::read_to_string(root.join("where.txt")).unwrap();
+    assert_ne!(Path::new(dir.trim()), std::env::temp_dir().as_path(), "not loose in the shared temp directory");
+    assert_eq!(fs::read_to_string(root.join("mode.txt")).unwrap().trim(), "drwx------");
+    assert!(!Path::new(dir.trim()).exists(), "removed after grading");
+}
+
+#[test]
+fn grader_paths_must_stay_inside_the_pack_and_the_workspace() {
+    let (_, p) = pack("paths", r#"
+expected = { artifacts = ["out.md"] }
+graders = [
+  "tests:/etc/passwd",
+  { type = "tests", command = "true", files = ["../outside"] },
+  { type = "artifact", path = "out.md", same-as = "../../golden" },
+  "judge:/tmp/rubric.md",
+  { type = "judge", criteria = ["x"], artifacts = ["/etc/hosts"] },
+  "artifact:../x",
+]"#);
+    let errs: Vec<String> = p.tasks[0].grader_list().into_iter().filter_map(Result::err).collect();
+    assert_eq!(errs.len(), 6, "{errs:?}");
+    assert!(errs[0].starts_with("script \"/etc/passwd\" must be a relative path"), "{errs:?}");
+    assert!(errs[1].starts_with("file \"../outside\""), "{errs:?}");
+    assert!(errs[2].starts_with("same-as"), "{errs:?}");
+    assert!(errs[3].starts_with("rubric"), "{errs:?}");
+    assert!(errs[4].starts_with("artifact \"/etc/hosts\""), "{errs:?}");
+    assert!(errs[5].starts_with("artifact \"../x\""), "{errs:?}");
+}
+
+#[test]
+fn a_rubric_with_one_level_is_an_error() {
+    let (root, p) = pack("onelevel", r#"
+expected = { artifacts = ["s.md"] }
+graders = ["judge:a/rubric.md"]"#);
+    write(&root, "a/rubric.md", "- Is short\n\n## Levels\n\n0. Done\n");
+    write(&root, "s.md", "x\n");
+    let judge = JudgeConfig { model: "local:tiny".into(), base_url: Some("http://127.0.0.1:9".into()), ..Default::default() };
+    let g = p.grade_with(&p.tasks[0], &root, &GradeOptions { judge: Some(judge), ..Default::default() });
+    assert!(!g[1].success && g[1].detail.contains("needs 2 to 10 levels"), "{:?}", g[1]);
+    // the public prompt builder errors on a grader that isn't a judge, rather than panicking
+    let tests = harness_lock_core::graders::Grader::Tests { command: Some("true".into()), script: None, files: vec![], timeout_seconds: 1 };
+    assert!(harness_lock_core::graders::judge_prompt(&tests, &p.tasks[0], &root, &root).is_err());
+}
+
+#[test]
+fn a_decider_level_off_the_scale_is_an_error() {
+    let (root, p) = pack("offscale", r#"
+expected = { artifacts = ["s.md"] }
+graders = [{ type = "judge", criteria = ["Is short"], levels = ["Bad", "Good"] }]"#);
+    write(&root, "s.md", "x\n");
+    let (url, _) = serve(serde_json::json!({"model": "kev-4b", "answers": {
+        "c1": {"type": "noul", "noul": 1.0},
+        "level": {"type": "score", "score": 7, "probabilities": {"7": 1.0}},
+    }}));
+    let judge = JudgeConfig { model: "system-one:kev-4b".into(), base_url: Some(url), ..Default::default() };
+    let g = p.grade_with(&p.tasks[0], &root, &GradeOptions { judge: Some(judge), ..Default::default() });
+    assert!(!g[1].success && g[1].score == 0.0 && g[1].detail.contains("isn't on the 0 to 1 scale"), "{:?}", g[1]);
+}
+
+#[test]
+fn judges_read_keys_from_the_grading_environment() {
+    let (root, p) = pack("envkey", r#"
+expected = { artifacts = ["summary.md"] }
+graders = [{ type = "judge", criteria = ["Is short"] }]"#);
+    write(&root, "summary.md", "short\n");
+    // set in the process, but judges read the grading environment they're given
+    std::env::set_var("HLOCK_TEST_PROCESS_ONLY_KEY", "k");
+    let judge = JudgeConfig { model: "openai:gpt-x".into(), key_env: Some("HLOCK_TEST_PROCESS_ONLY_KEY".into()), ..Default::default() };
+    let opts = GradeOptions { judge: Some(judge), env: Some(Default::default()), ..Default::default() };
+    let g = p.grade_with(&p.tasks[0], &root, &opts);
+    assert_eq!(g[1].detail, "HLOCK_TEST_PROCESS_ONLY_KEY isn't set; the judge reads its openai API key from it");
+}
+
+#[test]
+fn llm_judge_scores_are_kept_within_0_and_1() {
+    use harness_lock_core::graders::judge_reply;
+    assert_eq!(judge_reply("{\"score\": -2}", 0).unwrap().0, 0.0);
+    assert_eq!(judge_reply("{\"score\": 1e300}", 0).unwrap().0, 1.0);
+}

@@ -95,6 +95,10 @@ pub fn plan_upgrade(lock: Option<&Lockfile>, manifest: &Manifest, spec: &Upgrade
     }
     let mut entries = Vec::new();
     for (role, model) in &roles {
+        // `--to` names the planner's target, not every role's
+        if spec.to.is_some() && role != "planner" {
+            continue;
+        }
         if let Some(t) = target_for(model, spec.to.as_deref(), spec.all) {
             entries.push(serde_json::json!({"role": role, "from": model, "to": t}));
         }
@@ -123,7 +127,31 @@ pub fn upgrade(manifest: Manifest, spec: &UpgradeSpec) -> Result<UpgradeOutcome>
     let lock_path = spec.lock.clone().unwrap_or_else(|| cwd.join(LOCKFILE_PATH));
     let prev_path = PathBuf::from(format!("{}.prev", lock_path.display()));
 
-    let current_lock = Lockfile::load(&lock_path).ok();
+    // ---- rollback ---- (even from a lock that no longer parses)
+    if spec.rollback {
+        let current_lock = Lockfile::load(&lock_path).ok();
+        let mut outcome = UpgradeOutcome {
+            plan: plan_upgrade(current_lock.as_ref(), &manifest, spec),
+            applied: false,
+            rolled_back: false,
+            before: current_lock.as_ref().map(baseline_sr),
+            after: None,
+            lock_path: lock_path.clone(),
+            message: String::new(),
+        };
+        if prev_path.exists() {
+            std::fs::copy(&prev_path, &lock_path)?;
+            outcome.rolled_back = true;
+            outcome.message = "restored the previous harness.lock from harness.lock.prev".into();
+            outcome.after = Lockfile::load(&lock_path).ok().map(|l| baseline_sr(&l));
+            return Ok(outcome);
+        }
+        return Err(Error::Tuning("harness.lock.prev not found — nothing to roll back".into()));
+    }
+
+    // a missing lock plans from the manifest; one that doesn't load is an error, not a
+    // baseline of 0 that any upgrade beats
+    let current_lock = load_if_present(&lock_path)?;
     let plan = plan_upgrade(current_lock.as_ref(), &manifest, spec);
     let mut outcome = UpgradeOutcome {
         plan: plan.clone(),
@@ -134,18 +162,6 @@ pub fn upgrade(manifest: Manifest, spec: &UpgradeSpec) -> Result<UpgradeOutcome>
         lock_path: lock_path.clone(),
         message: String::new(),
     };
-
-    // ---- rollback ----
-    if spec.rollback {
-        if prev_path.exists() {
-            std::fs::copy(&prev_path, &lock_path)?;
-            outcome.rolled_back = true;
-            outcome.message = "restored the previous harness.lock from harness.lock.prev".into();
-            outcome.after = Lockfile::load(&lock_path).ok().map(|l| baseline_sr(&l));
-            return Ok(outcome);
-        }
-        return Err(Error::Tuning("harness.lock.prev not found — nothing to roll back".into()));
-    }
 
     // ---- plan only (dry-run) ----
     let upgradeable = plan.get("upgradeable").and_then(serde_json::Value::as_array).cloned().unwrap_or_default();
@@ -166,11 +182,13 @@ pub fn upgrade(manifest: Manifest, spec: &UpgradeSpec) -> Result<UpgradeOutcome>
         return Ok(outcome);
     }
 
-    // ---- apply: derive a manifest targeting the upgraded planner and deciders ----
+    // ---- apply: derive a manifest targeting the upgraded models and deciders ----
     let (decider_ups, llm_ups): (Vec<&serde_json::Value>, Vec<&serde_json::Value>) = upgradeable.iter().partition(|e| e.get("decider").is_some());
-    // the planner's own upgrade (roles sort by name, so another role may come first)
-    let planner_up = llm_ups.iter().find(|e| e["role"] == "planner").or(llm_ups.first());
-    let target = planner_up.and_then(|e| e.get("to")).and_then(serde_json::Value::as_str).map(str::to_string);
+    // each role's own target; a role without an upgrade (or a decider-only upgrade) keeps its models
+    let targets: Vec<(String, String)> = llm_ups
+        .iter()
+        .filter_map(|e| Some((e["role"].as_str()?.to_string(), e["to"].as_str()?.to_string())))
+        .collect();
 
     if lock_path.exists() {
         std::fs::copy(&lock_path, &prev_path)?; // keep harness.lock.prev for --rollback
@@ -178,11 +196,12 @@ pub fn upgrade(manifest: Manifest, spec: &UpgradeSpec) -> Result<UpgradeOutcome>
     let mut derived = manifest.clone();
     let mut cand = crate::manifest::Candidates::default();
     cand.llm = manifest.candidates.llm.clone();
-    if let Some(t) = &target {
-        // only a planner upgrade changes the planner; a decider-only upgrade keeps it
-        let spec_str = format!("reference:{t}");
+    for (role, to) in &targets {
+        // the provider the lock has for this role
+        let provider = current_lock.as_ref().and_then(|l| l.llm.iter().find(|x| &x.role == role)).map(|x| x.provider.clone()).unwrap_or_else(|| "reference".into());
+        let spec_str = format!("{provider}:{to}");
         cand.llm
-            .entry("planner".to_string())
+            .entry(role.clone())
             .and_modify(|c| c.any_of = vec![spec_str.clone()])
             .or_insert(crate::manifest::LLMCandidate { any_of: vec![spec_str] });
     }
@@ -221,7 +240,7 @@ pub fn upgrade(manifest: Manifest, spec: &UpgradeSpec) -> Result<UpgradeOutcome>
         return Ok(outcome);
     }
     outcome.applied = true;
-    let what: Vec<String> = target.iter().map(|t| format!("planner to {t}")).chain(decider_ups.iter().map(|e| format!("the {} decider to {}", e["decider"].as_str().unwrap_or("?"), e["to"].as_str().unwrap_or("?")))).collect();
+    let what: Vec<String> = targets.iter().map(|(role, t)| format!("{role} to {t}")).chain(decider_ups.iter().map(|e| format!("the {} decider to {}", e["decider"].as_str().unwrap_or("?"), e["to"].as_str().unwrap_or("?")))).collect();
     outcome.message = format!(
         "upgraded {}: success-rate {:.2} -> {:.2}. previous lock kept at harness.lock.prev.",
         what.join(" and "),
@@ -229,6 +248,15 @@ pub fn upgrade(manifest: Manifest, spec: &UpgradeSpec) -> Result<UpgradeOutcome>
         after
     );
     Ok(outcome)
+}
+
+/// The lock at `path`, or `None` when there's no file there. A file that can't be read
+/// or parsed is an error.
+fn load_if_present(path: &std::path::Path) -> Result<Option<Lockfile>> {
+    match std::fs::symlink_metadata(path) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        _ => Lockfile::load(path).map(Some),
+    }
 }
 
 fn baseline_sr(l: &Lockfile) -> f64 {
@@ -342,7 +370,9 @@ pub fn tune(manifest: Manifest, spec: &TuneSpec) -> Result<TuneOutcome> {
     );
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let lock_path = spec.lock.clone().unwrap_or_else(|| cwd.join(LOCKFILE_PATH));
-    let base_lock = Lockfile::load(&lock_path).ok();
+    // no lock means no baseline; a lock that doesn't load must not become a baseline of
+    // 0 that `--strict` lets anything beat
+    let base_lock = load_if_present(&lock_path)?;
     let baseline_sr = base_lock.as_ref().map(baseline_sr).unwrap_or(0.0);
 
     let mut resolver = crate::resolver::Resolver::with_backend(manifest.clone(), &spec.workdir, backend);
@@ -457,7 +487,7 @@ pub fn tune(manifest: Manifest, spec: &TuneSpec) -> Result<TuneOutcome> {
     // pick best (highest success, then lowest cost)
     let best = scored
         .iter()
-        .max_by(|a, b| a.4.partial_cmp(&b.4).unwrap().then(b.5.partial_cmp(&a.5).unwrap()));
+        .max_by(|a, b| a.4.total_cmp(&b.4).then(b.5.total_cmp(&a.5)));
     let Some((bm, br, btemp, btto, bs, bc, bn_trials)) = best.cloned() else {
         return Err(Error::Tuning("tune produced no candidate".into()));
     };

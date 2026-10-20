@@ -9,14 +9,81 @@
 //! surface small and robust.
 
 use std::path::{Path, PathBuf};
+use std::sync::mpsc;
+use std::time::Duration;
 
+use pyo3::create_exception;
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 
 use harness_lock_core as core;
 
+// Errors from the core, by kind. All are ValueErrors, so `except ValueError` still
+// catches them; I/O errors are raised as the matching OSError (FileNotFoundError, …).
+create_exception!(hlock, HarnessLockError, PyValueError, "An error from hlock. A ValueError.");
+create_exception!(hlock, ManifestError, HarnessLockError, "harness.toml is missing or invalid.");
+create_exception!(hlock, LockfileError, HarnessLockError, "A lock is missing, invalid, or refused.");
+create_exception!(hlock, EvalPackError, HarnessLockError, "An eval pack is missing or invalid.");
+create_exception!(hlock, StoreError, HarnessLockError, "The content-addressed store is missing a blob.");
+create_exception!(hlock, TuningError, HarnessLockError, "Tuning found no viable stack, or failed.");
+create_exception!(hlock, ProfileError, HarnessLockError, "A harness or runtime profile, a selection, or a step failed.");
+create_exception!(hlock, WorkerError, HarnessLockError, "The Python worker failed.");
+create_exception!(hlock, PullError, HarnessLockError, "`hlock pull`: a source can't be read, or git failed.");
+
 fn py_err(e: core::Error) -> PyErr {
-    PyValueError::new_err(e.to_string())
+    use core::Error as E;
+    let msg = e.to_string();
+    match e {
+        E::Io(io) => PyErr::from(io),
+        E::Manifest(_) => ManifestError::new_err(msg),
+        E::Lockfile(_) => LockfileError::new_err(msg),
+        E::EvalPack(_) => EvalPackError::new_err(msg),
+        E::Store(_) => StoreError::new_err(msg),
+        E::Tuning(_) => TuningError::new_err(msg),
+        E::Profile(_) => ProfileError::new_err(msg),
+        E::Worker(_) => WorkerError::new_err(msg),
+        E::Pull(_) => PullError::new_err(msg),
+        E::Toml(_) | E::Json(_) => HarnessLockError::new_err(msg),
+    }
+}
+
+/// A JSON argument that doesn't parse.
+fn json_arg_err(what: &str, e: serde_json::Error) -> PyErr {
+    HarnessLockError::new_err(format!("{what} isn't valid JSON: {e}"))
+}
+
+/// How often a long call checks for Ctrl-C.
+const SIGNAL_POLL: Duration = Duration::from_millis(100);
+
+/// Wait up to [`SIGNAL_POLL`] for a result, without the GIL. (A `Receiver` isn't `Sync`,
+/// so it moves through `allow_threads` and back.)
+fn wait<T: Send>(py: Python<'_>, rx: mpsc::Receiver<T>) -> (Result<T, mpsc::RecvTimeoutError>, mpsc::Receiver<T>) {
+    py.allow_threads(move || (rx.recv_timeout(SIGNAL_POLL), rx))
+}
+
+/// Run `work` on its own thread, without the GIL, and wait for it while checking for
+/// Ctrl-C. On KeyboardInterrupt (or another signal handler's exception), stop every
+/// child process the core is waiting on, so the work ends promptly, and raise it.
+fn interruptible<T: Send + 'static>(py: Python<'_>, work: impl FnOnce() -> PyResult<T> + Send + 'static) -> PyResult<T> {
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(work());
+    });
+    let mut rx = rx;
+    loop {
+        let got;
+        (got, rx) = wait(py, rx);
+        match got {
+            Ok(r) => return r,
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                if let Err(e) = py.check_signals() {
+                    core::process::stop_all();
+                    return Err(e);
+                }
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => return Err(HarnessLockError::new_err("hlock's core stopped unexpectedly (a panic); please report it")),
+        }
+    }
 }
 
 // --------------------------------------------------------------------------- //
@@ -70,15 +137,15 @@ impl PyManifest {
         self.inner.target_harness()
     }
 
-    /// The model `[deciders.<use>]` names, else `[deciders.default]`'s; raises on an
-    /// invalid `[deciders]` table.
+    /// The model `[deciders.<use>]` names, else `[deciders.default]`'s (also when the
+    /// use has only `any-of` candidates); raises on an invalid `[deciders]` table.
     fn decider(&self, use_: &str) -> PyResult<Option<String>> {
         let specs = self.inner.deciders().map_err(py_err)?;
-        Ok(specs.get(use_).or_else(|| specs.get("default")).and_then(|s| s.model.clone()))
+        Ok(spec_with_model(&specs, Some(use_)).and_then(|s| s.model.clone()))
     }
 
-    fn to_json(&self) -> String {
-        serde_json::to_string(&self.inner.evals).unwrap_or_default()
+    fn to_json(&self) -> PyResult<String> {
+        serde_json::to_string(&self.inner.evals).map_err(|e| py_err(e.into()))
     }
 }
 
@@ -118,8 +185,8 @@ impl PyObjective {
         self.select.clone()
     }
     #[getter]
-    fn constraints(&self) -> String {
-        serde_json::to_string(&self.constraints).unwrap_or_default()
+    fn constraints(&self) -> PyResult<String> {
+        serde_json::to_string(&self.constraints).map_err(|e| py_err(e.into()))
     }
 }
 
@@ -193,25 +260,27 @@ impl PySearchSpace {
         budget: Option<PyBudget>,
         evals: Option<String>,
         tasks: Option<String>,
-    ) -> Self {
-        let parse = |s: Option<String>, fallback: serde_json::Value| -> serde_json::Value {
-            match s {
-                Some(txt) => serde_json::from_str(&txt).unwrap_or(fallback),
-                None => fallback,
+    ) -> PyResult<Self> {
+        // each is a JSON object; anything else is an error, not a silent default
+        let parse = |what: &str, s: Option<String>, fallback: serde_json::Value| -> PyResult<serde_json::Value> {
+            let Some(txt) = s else { return Ok(fallback) };
+            match serde_json::from_str(&txt).map_err(|e| json_arg_err(what, e))? {
+                v @ serde_json::Value::Object(_) => Ok(v),
+                other => Err(HarnessLockError::new_err(format!("{what} must be a JSON object, not {other}"))),
             }
         };
-        PySearchSpace {
+        Ok(PySearchSpace {
             llm: llm.unwrap_or_default(),
             decision: decision.unwrap_or_default(),
             harness: harness.unwrap_or_default(),
-            policy: parse(policy, serde_json::json!({})),
-            tools: parse(tools, serde_json::json!({})),
-            skills: parse(skills, serde_json::json!({})),
+            policy: parse("policy", policy, serde_json::json!({}))?,
+            tools: parse("tools", tools, serde_json::json!({}))?,
+            skills: parse("skills", skills, serde_json::json!({}))?,
             // `tasks` is the old name for `evals`
-            evals: parse(evals.or(tasks), default_evals()),
+            evals: parse("evals", evals.or(tasks), default_evals())?,
             objective,
             budget,
-        }
+        })
     }
 
     fn to_manifest(&self, name: &str) -> PyManifest {
@@ -308,8 +377,8 @@ impl PyLockfile {
         self.inner.summary()
     }
 
-    fn to_json(&self) -> String {
-        serde_json::to_string(&self.inner).unwrap_or_default()
+    fn to_json(&self) -> PyResult<String> {
+        serde_json::to_string(&self.inner).map_err(|e| py_err(e.into()))
     }
 
     #[getter]
@@ -426,10 +495,13 @@ fn resolve(
     let wd = workdir.map(PathBuf::from).unwrap_or_else(|| root.join(".hlock"));
     let lock = lock.map(PathBuf::from).unwrap_or_else(|| root.join(core::LOCKFILE_PATH));
     let backend = core::Backend::parse(core_manifest.backend_target().as_str());
-    let mut resolver = core::Resolver::with_backend(core_manifest, &wd, backend);
-    resolver.harness_override = harness;
-    let lf = resolver.resolve_lock().map_err(py_err)?;
-    lf.save(&lock).map_err(py_err)?;
+    let lf = interruptible(py, move || {
+        let mut resolver = core::Resolver::with_backend(core_manifest, &wd, backend);
+        resolver.harness_override = harness;
+        let lf = resolver.resolve_lock().map_err(py_err)?;
+        lf.save(&lock).map_err(py_err)?;
+        Ok(lf)
+    })?;
     Ok(PyLockfile { inner: lf })
 }
 
@@ -457,7 +529,7 @@ fn resolve_manifest(py: Python<'_>, manifest: Option<PyObject>, backend: Option<
                     core::Manifest::from_str(&s).map_err(py_err)?
                 }
             } else {
-                return Err(PyValueError::new_err(
+                return Err(ManifestError::new_err(
                     "manifest must be a hlock.Manifest, hlock.SearchSpace, a path, or TOML text",
                 ));
             }
@@ -499,17 +571,19 @@ fn upgrade(
         workdir: workdir.map(PathBuf::from).unwrap_or_else(|| root.join(".hlock")),
         lock: Some(lock.map(PathBuf::from).unwrap_or_else(|| root.join(core::LOCKFILE_PATH))),
     };
-    let o = core::ops::upgrade(m, &spec).map_err(py_err)?;
-    Ok(serde_json::json!({
-        "plan": o.plan,
-        "applied": o.applied,
-        "rolled_back": o.rolled_back,
-        "before": o.before,
-        "after": o.after,
-        "lock_path": o.lock_path.to_string_lossy(),
-        "message": o.message,
+    interruptible(py, move || {
+        let o = core::ops::upgrade(m, &spec).map_err(py_err)?;
+        Ok(serde_json::json!({
+            "plan": o.plan,
+            "applied": o.applied,
+            "rolled_back": o.rolled_back,
+            "before": o.before,
+            "after": o.after,
+            "lock_path": o.lock_path.to_string_lossy(),
+            "message": o.message,
+        })
+        .to_string())
     })
-    .to_string())
 }
 
 #[pyfunction]
@@ -542,13 +616,15 @@ fn tune(
         workdir: workdir.map(PathBuf::from).unwrap_or_else(|| root.join(".hlock")),
         lock: Some(lock.map(PathBuf::from).unwrap_or_else(|| root.join(core::LOCKFILE_PATH))),
     };
-    let o = core::ops::tune(m, &spec).map_err(py_err)?;
-    Ok(serde_json::json!({
-        "path": o.path.to_string_lossy(),
-        "report": o.report,
-        "summary": o.lock.summary(),
+    interruptible(py, move || {
+        let o = core::ops::tune(m, &spec).map_err(py_err)?;
+        Ok(serde_json::json!({
+            "path": o.path.to_string_lossy(),
+            "report": o.report,
+            "summary": o.lock.summary(),
+        })
+        .to_string())
     })
-    .to_string())
 }
 
 // --------------------------------------------------------------------------- //
@@ -597,79 +673,86 @@ fn json_str(v: serde_json::Value) -> String {
 /// Pass `probe=False` to skip running each harness's `--version`.
 #[pyfunction]
 #[pyo3(signature = (probe=true, manifest=None))]
-fn harnesses(probe: bool, manifest: Option<String>) -> PyResult<String> {
-    let (reg, ctx, _) = registry(manifest.as_deref(), None)?;
-    let rows: Vec<serde_json::Value> = reg
-        .harnesses
-        .iter()
-        .map(|h| {
-            let p = if probe {
-                core::profiles::probe_harness(h, &ctx)
-            } else {
-                core::profiles::Probe { id: h.id.clone(), active: h.is_active(&ctx), ..Default::default() }
-            };
-            serde_json::json!({
-                "id": h.id, "name": h.name, "kind": h.kind, "autonomous": h.autonomous, "aliases": h.aliases, "support": h.support,
-                "origin": h.origin, "probe": p,
+fn harnesses(py: Python<'_>, probe: bool, manifest: Option<String>) -> PyResult<String> {
+    // probing runs each harness's `--version`
+    interruptible(py, move || {
+        let (reg, ctx, _) = registry(manifest.as_deref(), None)?;
+        let rows: Vec<serde_json::Value> = reg
+            .harnesses
+            .iter()
+            .map(|h| {
+                let p = if probe {
+                    core::profiles::probe_harness(h, &ctx)
+                } else {
+                    core::profiles::Probe { id: h.id.clone(), active: h.is_active(&ctx), ..Default::default() }
+                };
+                serde_json::json!({
+                    "id": h.id, "name": h.name, "kind": h.kind, "autonomous": h.autonomous, "aliases": h.aliases, "support": h.support,
+                    "origin": h.origin, "probe": p,
+                })
             })
-        })
-        .collect();
-    Ok(json_str(serde_json::json!(rows)))
+            .collect();
+        Ok(json_str(serde_json::json!(rows)))
+    })
 }
 
 /// Every known inference-runtime profile with what's installed here, as JSON.
 #[pyfunction]
 #[pyo3(signature = (probe=true, manifest=None))]
-fn runtimes(probe: bool, manifest: Option<String>) -> PyResult<String> {
-    let (reg, ctx, _) = registry(manifest.as_deref(), None)?;
-    let rows: Vec<serde_json::Value> = reg
-        .runtimes
-        .iter()
-        .map(|r| {
-            let p = if probe {
-                core::profiles::probe_runtime(r, &ctx)
-            } else {
-                core::profiles::Probe { id: r.id.clone(), ..Default::default() }
-            };
-            serde_json::json!({
-                "id": r.id, "name": r.name, "aliases": r.aliases, "ports": r.ports,
-                "origin": r.origin, "models_dir": r.models_dir(&ctx), "probe": p,
+fn runtimes(py: Python<'_>, probe: bool, manifest: Option<String>) -> PyResult<String> {
+    interruptible(py, move || {
+        let (reg, ctx, _) = registry(manifest.as_deref(), None)?;
+        let rows: Vec<serde_json::Value> = reg
+            .runtimes
+            .iter()
+            .map(|r| {
+                let p = if probe {
+                    core::profiles::probe_runtime(r, &ctx)
+                } else {
+                    core::profiles::Probe { id: r.id.clone(), ..Default::default() }
+                };
+                serde_json::json!({
+                    "id": r.id, "name": r.name, "aliases": r.aliases, "ports": r.ports,
+                    "origin": r.origin, "models_dir": r.models_dir(&ctx), "probe": p,
+                })
             })
-        })
-        .collect();
-    Ok(json_str(serde_json::json!(rows)))
+            .collect();
+        Ok(json_str(serde_json::json!(rows)))
+    })
 }
 
 /// One harness profile (by id or alias), its probe, and the paths it resolves to here.
 #[pyfunction]
 #[pyo3(signature = (name, manifest=None))]
-fn harness_profile(name: &str, manifest: Option<String>) -> PyResult<String> {
-    let (reg, ctx, _) = registry(manifest.as_deref(), None)?;
-    let h = reg.require_harness(name).map_err(py_err)?;
-    let root = h.config_root(&ctx);
-    let files: serde_json::Map<String, serde_json::Value> = h
-        .files
-        .keys()
-        .map(|id| {
-            let p = h.file_path(id, &ctx).unwrap_or_default();
-            (id.clone(), serde_json::json!({"path": p, "exists": p.exists()}))
-        })
-        .collect();
-    let skills: Vec<serde_json::Value> = h
-        .skills
-        .dirs
-        .iter()
-        .map(|d| {
-            let p = ctx.expand(d, Some(&root));
-            serde_json::json!({"path": p, "exists": p.is_dir()})
-        })
-        .collect();
-    Ok(json_str(serde_json::json!({
-        "profile": h,
-        "probe": core::profiles::probe_harness(h, &ctx),
-        "paths": {"config_root": root, "files": files, "skills": skills},
-        "isolation_env": h.config_root.env,
-    })))
+fn harness_profile(py: Python<'_>, name: String, manifest: Option<String>) -> PyResult<String> {
+    interruptible(py, move || {
+        let (reg, ctx, _) = registry(manifest.as_deref(), None)?;
+        let h = reg.require_harness(&name).map_err(py_err)?;
+        let root = h.config_root(&ctx);
+        let files: serde_json::Map<String, serde_json::Value> = h
+            .files
+            .keys()
+            .map(|id| {
+                let p = h.file_path(id, &ctx).unwrap_or_default();
+                (id.clone(), serde_json::json!({"path": p, "exists": p.exists()}))
+            })
+            .collect();
+        let skills: Vec<serde_json::Value> = h
+            .skills
+            .dirs
+            .iter()
+            .map(|d| {
+                let p = ctx.expand(d, Some(&root));
+                serde_json::json!({"path": p, "exists": p.is_dir()})
+            })
+            .collect();
+        Ok(json_str(serde_json::json!({
+            "profile": h,
+            "probe": core::profiles::probe_harness(h, &ctx),
+            "paths": {"config_root": root, "files": files, "skills": skills},
+            "isolation_env": h.config_root.env,
+        })))
+    })
 }
 
 /// Pick the target harness: `explicit`, then `HLOCK_HARNESS`, then
@@ -677,10 +760,12 @@ fn harness_profile(name: &str, manifest: Option<String>) -> PyResult<String> {
 /// installed one. Returns JSON `{"id", "reason"}`.
 #[pyfunction]
 #[pyo3(signature = (explicit=None, manifest_target=None, manifest=None))]
-fn select_harness(explicit: Option<String>, manifest_target: Option<String>, manifest: Option<String>) -> PyResult<String> {
-    let (reg, ctx, _) = registry(manifest.as_deref(), None)?;
-    let sel = reg.select(explicit.as_deref(), manifest_target.as_deref(), &ctx).map_err(py_err)?;
-    Ok(json_str(serde_json::json!(sel)))
+fn select_harness(py: Python<'_>, explicit: Option<String>, manifest_target: Option<String>, manifest: Option<String>) -> PyResult<String> {
+    interruptible(py, move || {
+        let (reg, ctx, _) = registry(manifest.as_deref(), None)?;
+        let sel = reg.select(explicit.as_deref(), manifest_target.as_deref(), &ctx).map_err(py_err)?;
+        Ok(json_str(serde_json::json!(sel)))
+    })
 }
 
 /// Capture the target harness's live setup into a pinned lock at `out`: the project's
@@ -691,41 +776,45 @@ fn select_harness(explicit: Option<String>, manifest_target: Option<String>, man
 #[pyfunction]
 #[pyo3(signature = (harness=None, out="harness.lock".to_string(), vendor=true, force=false, manifest=None, user=false, include=None))]
 #[allow(clippy::too_many_arguments)]
-fn pin(harness: Option<String>, out: String, vendor: bool, force: bool, manifest: Option<String>, user: bool, include: Option<Vec<String>>) -> PyResult<String> {
+fn pin(py: Python<'_>, harness: Option<String>, out: String, vendor: bool, force: bool, manifest: Option<String>, user: bool, include: Option<Vec<String>>) -> PyResult<String> {
     let include = include.unwrap_or_default();
     let scope = match (user, include.is_empty()) {
-        (true, false) => return Err(PyValueError::new_err("pass user or include, not both: user already includes everything")),
+        (true, false) => return Err(HarnessLockError::new_err("pass user or include, not both: user already includes everything")),
         (true, true) => core::capture::UserScope::All,
         (false, false) => core::capture::UserScope::Matching(include),
         (false, true) => core::capture::UserScope::None,
     };
-    let (reg, ctx, manifest) = registry(manifest.as_deref(), Some(&lock_dir(&out)))?;
-    let out = if Path::new(&out).is_absolute() { out } else { std::env::current_dir().unwrap_or_default().join(&out).to_string_lossy().into_owned() };
-    let target = manifest.as_ref().and_then(|m| m.target_harness());
-    let project = manifest.as_ref().and_then(|m| m.project.get("name").and_then(|v| v.as_str()).map(str::to_string));
-    let o = core::capture::pin(&reg, &ctx, harness.as_deref(), target.as_deref(), project.as_deref(), Path::new(&out), vendor, force, scope)
-        .map_err(py_err)?;
-    Ok(json_str(serde_json::json!({
-        "lock": o.lock,
-        "path": o.path,
-        "selection": o.selection,
-        "diff": o.diff,
-        "previous": o.previous,
-        "vendored": o.vendored,
-        "warnings": o.warnings,
-        "skipped": o.skipped,
-    })))
+    interruptible(py, move || {
+        let (reg, ctx, manifest) = registry(manifest.as_deref(), Some(&lock_dir(&out)))?;
+        let out = if Path::new(&out).is_absolute() { out } else { std::env::current_dir().unwrap_or_default().join(&out).to_string_lossy().into_owned() };
+        let target = manifest.as_ref().and_then(|m| m.target_harness());
+        let project = manifest.as_ref().and_then(|m| m.project.get("name").and_then(|v| v.as_str()).map(str::to_string));
+        let o = core::capture::pin(&reg, &ctx, harness.as_deref(), target.as_deref(), project.as_deref(), Path::new(&out), vendor, force, scope)
+            .map_err(py_err)?;
+        Ok(json_str(serde_json::json!({
+            "lock": o.lock,
+            "path": o.path,
+            "selection": o.selection,
+            "diff": o.diff,
+            "previous": o.previous,
+            "vendored": o.vendored,
+            "warnings": o.warnings,
+            "skipped": o.skipped,
+        })))
+    })
 }
 
 /// Re-capture the harness a pinned lock is for; returns a JSON list of drift lines.
 /// With `prefix`, re-capture the isolated root `hlock sync --prefix` writes instead.
 #[pyfunction]
 #[pyo3(signature = (path="harness.lock".to_string(), prefix=None, manifest=None))]
-fn check_pin(path: String, prefix: Option<String>, manifest: Option<String>) -> PyResult<String> {
-    let (reg, ctx, _) = registry(manifest.as_deref(), Some(&lock_dir(&path)))?;
-    let lock = core::Lockfile::load(Path::new(&path)).map_err(py_err)?;
-    let drift = core::capture::check_pin_at(&lock, &reg, &ctx, prefix.as_deref().map(Path::new)).map_err(py_err)?;
-    Ok(json_str(serde_json::json!(drift)))
+fn check_pin(py: Python<'_>, path: String, prefix: Option<String>, manifest: Option<String>) -> PyResult<String> {
+    interruptible(py, move || {
+        let (reg, ctx, _) = registry(manifest.as_deref(), Some(&lock_dir(&path)))?;
+        let lock = core::Lockfile::load(Path::new(&path)).map_err(py_err)?;
+        let drift = core::capture::check_pin_at(&lock, &reg, &ctx, prefix.as_deref().map(Path::new)).map_err(py_err)?;
+        Ok(json_str(serde_json::json!(drift)))
+    })
 }
 
 /// Pull the lock at `source` (`github:…`, `gitlab:…`, `git:…`, or a repository URL) into
@@ -734,13 +823,25 @@ fn check_pin(path: String, prefix: Option<String>, manifest: Option<String>) -> 
 /// lock it replaced, vendored files, other locks in the repo, and warnings.
 #[pyfunction]
 #[pyo3(signature = (source, out=None, name=None, force=false))]
-fn pull(source: String, out: Option<String>, name: Option<String>, force: bool) -> PyResult<String> {
+fn pull(py: Python<'_>, source: String, out: Option<String>, name: Option<String>, force: bool) -> PyResult<String> {
     let target = match out {
         Some(o) => core::pull::Target::File(std::env::current_dir().unwrap_or_default().join(o)),
         None => core::pull::Target::Store(name),
     };
-    let o = core::pull::pull(&source, &target, force).map_err(py_err)?;
-    Ok(json_str(serde_json::to_value(&o).map_err(|e| py_err(e.into()))?))
+    // fetching waits on the network
+    interruptible(py, move || {
+        let o = core::pull::pull(&source, &target, force).map_err(py_err)?;
+        Ok(json_str(serde_json::to_value(&o).map_err(|e| py_err(e.into()))?))
+    })
+}
+
+/// Parse a pull source (`github:…`, `gitlab:…`, `git:…`, a repository URL) the way `pull`
+/// does, and return it as JSON (`spec`, `url`, `ref`, `path`, `owner`; credentials left
+/// out). Raises `PullError` for a source `pull` would refuse.
+#[pyfunction]
+fn pull_parse(source: &str) -> PyResult<String> {
+    let s = core::pull::parse(source).map_err(py_err)?;
+    Ok(json_str(serde_json::to_value(&s).map_err(|e| py_err(e.into()))?))
 }
 
 /// The lock path of the stored pull `name`, or None.
@@ -792,7 +893,7 @@ fn sync_options(prefix: Option<String>, in_place: bool, docker: Option<String>, 
 #[pyo3(signature = (path="harness.lock".to_string(), prefix=None, in_place=false, docker=None, install=false, pull=false, all_models=false, exact=false, manifest=None))]
 fn sync_plan(py: Python<'_>, path: String, prefix: Option<String>, in_place: bool, docker: Option<String>, install: bool, pull: bool, all_models: bool, exact: bool, manifest: Option<String>) -> PyResult<String> {
     // no GIL while it waits on the network (deciders), so other Python threads keep running
-    py.allow_threads(move || {
+    interruptible(py, move || {
         let (reg, ctx, _) = registry(manifest.as_deref(), Some(&lock_dir(&path)))?;
         let lock = core::Lockfile::load(Path::new(&path)).map_err(py_err)?;
         let opts = sync_options(prefix, in_place, docker, install, pull, all_models, exact);
@@ -803,16 +904,22 @@ fn sync_plan(py: Python<'_>, path: String, prefix: Option<String>, in_place: boo
 
 /// Perform one `auto` step from a plan (its JSON); returns a message.
 #[pyfunction]
-fn sync_run_step(step: &str) -> PyResult<String> {
-    let step: core::sync::Step = serde_json::from_str(step).map_err(|e| PyValueError::new_err(e.to_string()))?;
-    core::sync::run_step(&step, &core::profiles::Ctx::from_process()).map_err(py_err)
+fn sync_run_step(py: Python<'_>, step: &str) -> PyResult<String> {
+    let step: core::sync::Step = serde_json::from_str(step).map_err(|e| json_arg_err("step", e))?;
+    if let Some(core::sync::Action::Run { argv, .. }) = &step.action {
+        if argv.first().is_none_or(|a| a.is_empty()) {
+            return Err(ProfileError::new_err(format!("step {:?} has no command to run", step.id)));
+        }
+    }
+    // installers and downloads run here; Ctrl-C stops them
+    interruptible(py, move || core::sync::run_step(&step, &core::profiles::Ctx::from_process()).map_err(py_err))
 }
 
 /// Mark a prefix-mode plan's isolated environment as not for version control
 /// (a `.gitignore` of `*`). Does nothing for other plans.
 #[pyfunction]
 fn sync_ignore_env(plan: &str) -> PyResult<()> {
-    let plan: core::sync::Plan = serde_json::from_str(plan).map_err(|e| PyValueError::new_err(e.to_string()))?;
+    let plan: core::sync::Plan = serde_json::from_str(plan).map_err(|e| json_arg_err("plan", e))?;
     match &plan.env {
         Some(dir) => core::sync::ignore_env(dir).map_err(py_err),
         None => Ok(()),
@@ -823,39 +930,42 @@ fn sync_ignore_env(plan: &str) -> PyResult<()> {
 /// JSON `{"file": …, "keychain": …, "secrets": [{name, used_by, source}]}`.
 #[pyfunction]
 #[pyo3(signature = (path="harness.lock".to_string(), manifest=None))]
-fn secret_status(path: String, manifest: Option<String>) -> PyResult<String> {
-    let (_, ctx, _) = registry(manifest.as_deref(), Some(&lock_dir(&path)))?;
-    let lock = core::Lockfile::load(Path::new(&path)).map_err(py_err)?;
-    core::secrets::references(&ctx).map_err(py_err)?; // surface a malformed secrets file
-    let rows: Vec<_> = lock
-        .secret
-        .iter()
-        .map(|s| serde_json::json!({"name": s.name, "used_by": s.used_by, "source": core::secrets::locate(&s.name, &ctx)}))
-        .collect();
-    Ok(json_str(serde_json::json!({
-        "file": core::secrets::secrets_file(&ctx),
-        "keychain": core::secrets::keychain(&ctx).map(|(k, _)| k),
-        "secrets": rows,
-    })))
+fn secret_status(py: Python<'_>, path: String, manifest: Option<String>) -> PyResult<String> {
+    // the keychain lookups run a command each
+    interruptible(py, move || {
+        let (_, ctx, _) = registry(manifest.as_deref(), Some(&lock_dir(&path)))?;
+        let lock = core::Lockfile::load(Path::new(&path)).map_err(py_err)?;
+        core::secrets::references(&ctx).map_err(py_err)?; // surface a malformed secrets file
+        let rows: Vec<_> = lock
+            .secret
+            .iter()
+            .map(|s| serde_json::json!({"name": s.name, "used_by": s.used_by, "source": core::secrets::locate(&s.name, &ctx)}))
+            .collect();
+        Ok(json_str(serde_json::json!({
+            "file": core::secrets::secrets_file(&ctx),
+            "keychain": core::secrets::keychain(&ctx).map(|(k, _)| k),
+            "secrets": rows,
+        })))
+    })
 }
 
 /// Store a secret in the OS keychain; returns its full `HLOCK_SECRET_…` name.
 #[pyfunction]
-fn secret_set(name: &str, value: &str) -> PyResult<String> {
-    core::secrets::keychain_set(name, value, &core::profiles::Ctx::from_process()).map_err(py_err)
+fn secret_set(py: Python<'_>, name: String, value: String) -> PyResult<String> {
+    interruptible(py, move || core::secrets::keychain_set(&name, &value, &core::profiles::Ctx::from_process()).map_err(py_err))
 }
 
 /// Remove a secret from the OS keychain; false when it had none.
 #[pyfunction]
-fn secret_delete(name: &str) -> PyResult<bool> {
-    core::secrets::keychain_delete(name, &core::profiles::Ctx::from_process()).map_err(py_err)
+fn secret_delete(py: Python<'_>, name: String) -> PyResult<bool> {
+    interruptible(py, move || core::secrets::keychain_delete(&name, &core::profiles::Ctx::from_process()).map_err(py_err))
 }
 
 /// The rehydrate Agent Skill (SKILL.md text) for a plan.
 #[pyfunction]
 #[pyo3(signature = (plan, lock_name="harness.lock".to_string()))]
 fn sync_skill(plan: &str, lock_name: String) -> PyResult<String> {
-    let plan: core::sync::Plan = serde_json::from_str(plan).map_err(|e| PyValueError::new_err(e.to_string()))?;
+    let plan: core::sync::Plan = serde_json::from_str(plan).map_err(|e| json_arg_err("plan", e))?;
     Ok(core::sync::rehydrate_skill(&plan, &lock_name))
 }
 
@@ -863,7 +973,7 @@ fn sync_skill(plan: &str, lock_name: String) -> PyResult<String> {
 #[pyfunction]
 #[pyo3(signature = (plan, path="harness.lock".to_string(), manifest=None))]
 fn sync_dockerfile(plan: &str, path: String, manifest: Option<String>) -> PyResult<String> {
-    let plan: core::sync::Plan = serde_json::from_str(plan).map_err(|e| PyValueError::new_err(e.to_string()))?;
+    let plan: core::sync::Plan = serde_json::from_str(plan).map_err(|e| json_arg_err("plan", e))?;
     let (reg, _, _) = registry(manifest.as_deref(), Some(&lock_dir(&path)))?;
     let lock = core::Lockfile::load(Path::new(&path)).map_err(py_err)?;
     let profile = reg.require_harness(&plan.harness).map_err(py_err)?;
@@ -875,7 +985,9 @@ fn sync_dockerfile(plan: &str, path: String, manifest: Option<String>) -> PyResu
 /// JSON with the argv and environment to exec, plus what was done and notes.
 #[pyfunction]
 #[pyo3(signature = (path="harness.lock".to_string(), harness=None, prefix=None, allow_version_mismatch=false, in_place=false, args=Vec::new(), manifest=None, prompt=None))]
+#[allow(clippy::too_many_arguments)]
 fn launch_prepare(
+    py: Python<'_>,
     path: String,
     harness: Option<String>,
     prefix: Option<String>,
@@ -885,37 +997,41 @@ fn launch_prepare(
     manifest: Option<String>,
     prompt: Option<String>,
 ) -> PyResult<String> {
-    let (reg, ctx, _) = registry(manifest.as_deref(), Some(&lock_dir(&path)))?;
-    let lock = core::Lockfile::load(Path::new(&path)).map_err(py_err)?;
-    let opts = core::launch::LaunchOptions {
-        prompt,
-        target: harness,
-        prefix: prefix.map(PathBuf::from),
-        allow_version_mismatch,
-        in_place,
-        workspace: std::env::current_dir().ok(),
-        ..Default::default()
-    };
-    let prep = core::launch::prepare(&lock, Path::new(&path), &reg, &ctx, &opts, &args).map_err(py_err)?;
-    Ok(json_str(serde_json::json!(prep)))
+    interruptible(py, move || {
+        let (reg, ctx, _) = registry(manifest.as_deref(), Some(&lock_dir(&path)))?;
+        let lock = core::Lockfile::load(Path::new(&path)).map_err(py_err)?;
+        let opts = core::launch::LaunchOptions {
+            prompt,
+            target: harness,
+            prefix: prefix.map(PathBuf::from),
+            allow_version_mismatch,
+            in_place,
+            workspace: std::env::current_dir().ok(),
+            ..Default::default()
+        };
+        let prep = core::launch::prepare(&lock, Path::new(&path), &reg, &ctx, &opts, &args).map_err(py_err)?;
+        Ok(json_str(serde_json::json!(prep)))
+    })
 }
 
 /// Run a locked code harness (`[harnesses.<id>]`) on a prompt through the
 /// execution contract. Returns JSON with success, output, cost, latency and log.
 #[pyfunction]
 #[pyo3(signature = (prompt, path="harness.lock".to_string(), workspace=None, timeout=600, manifest=None))]
-fn run_code_harness(prompt: String, path: String, workspace: Option<String>, timeout: u64, manifest: Option<String>) -> PyResult<String> {
-    let (reg, ctx, _) = registry(manifest.as_deref(), Some(&lock_dir(&path)))?;
-    let lock = core::Lockfile::load(Path::new(&path)).map_err(py_err)?;
-    let profile = reg.require_harness(&lock.harness.name).map_err(py_err)?;
-    if profile.kind != "custom" {
-        return Err(PyValueError::new_err(format!("{} isn't a code harness", profile.id)));
-    }
-    // the agent works where the user is; the project root stays on PYTHONPATH
-    let ws = workspace.map(PathBuf::from).or_else(|| std::env::current_dir().ok()).unwrap_or_else(|| ctx.cwd.clone());
-    let inv = core::contract::invocation(profile, Some(&lock), Some(Path::new(&path)), None, &prompt, &ws, 0, &ctx).map_err(py_err)?;
-    let r = core::contract::run(&inv, &ctx, std::time::Duration::from_secs(timeout)).map_err(py_err)?;
-    Ok(json_str(serde_json::json!(r)))
+fn run_code_harness(py: Python<'_>, prompt: String, path: String, workspace: Option<String>, timeout: u64, manifest: Option<String>) -> PyResult<String> {
+    interruptible(py, move || {
+        let (reg, ctx, _) = registry(manifest.as_deref(), Some(&lock_dir(&path)))?;
+        let lock = core::Lockfile::load(Path::new(&path)).map_err(py_err)?;
+        let profile = reg.require_harness(&lock.harness.name).map_err(py_err)?;
+        if profile.kind != "custom" {
+            return Err(ProfileError::new_err(format!("{} isn't a code harness", profile.id)));
+        }
+        // the agent works where the user is; the project root stays on PYTHONPATH
+        let ws = workspace.map(PathBuf::from).or_else(|| std::env::current_dir().ok()).unwrap_or_else(|| ctx.cwd.clone());
+        let inv = core::contract::invocation(profile, Some(&lock), Some(Path::new(&path)), None, &prompt, &ws, 0, &ctx).map_err(py_err)?;
+        let r = core::contract::run(&inv, &ctx, std::time::Duration::from_secs(timeout)).map_err(py_err)?;
+        Ok(json_str(serde_json::json!(r)))
+    })
 }
 
 /// Write a localized (all-local) copy of a lock to `out`. Evaluates candidates on
@@ -925,6 +1041,7 @@ fn run_code_harness(prompt: String, path: String, workspace: Option<String>, tim
 #[pyfunction]
 #[pyo3(signature = (path="harness.lock".to_string(), out="harness.local.lock".to_string(), harness=None, runtime=None, models=Vec::new(), memory_gb=None, evals=None, tasks=None, strict=false, allow_network=false, workdir=None, manifest=None))]
 fn localize(
+    py: Python<'_>,
     path: String,
     out: String,
     harness: Option<String>,
@@ -938,30 +1055,32 @@ fn localize(
     workdir: Option<String>,
     manifest: Option<String>,
 ) -> PyResult<String> {
-    let (reg, ctx, found) = registry(manifest.as_deref(), Some(&lock_dir(&path)))?;
-    let manifest = match evals.or(tasks) {
-        Some(t) => Some(
-            core::Manifest::from_str(&format!(
-                "[evals]\npacks = [{t:?}]\nseeds = 2\n[objective]\nprimary = \"success-rate\"\nselect = \"max-quality\"\n"
-            ))
-            .map_err(py_err)?,
-        ),
-        None => found,
-    };
-    let opts = core::localize::LocalizeOptions {
-        harness,
-        runtime,
-        models,
-        memory_gb,
-        manifest,
-        strict,
-        allow_network,
-        workdir: workdir.map(PathBuf::from).unwrap_or_else(|| ctx.cwd.join(".hlock/localize")),
-    };
-    let cwd = std::env::current_dir().unwrap_or_default();
-    let abs = |p: &str| if Path::new(p).is_absolute() { PathBuf::from(p) } else { cwd.join(p) };
-    let o = core::localize::localize_to(&abs(&path), &abs(&out), &reg, &ctx, &opts).map_err(py_err)?;
-    Ok(json_str(serde_json::json!({"lock": o.lock, "report": o.report, "path": out})))
+    interruptible(py, move || {
+        let (reg, ctx, found) = registry(manifest.as_deref(), Some(&lock_dir(&path)))?;
+        let manifest = match evals.or(tasks) {
+            Some(t) => Some(
+                core::Manifest::from_str(&format!(
+                    "[evals]\npacks = [{t:?}]\nseeds = 2\n[objective]\nprimary = \"success-rate\"\nselect = \"max-quality\"\n"
+                ))
+                .map_err(py_err)?,
+            ),
+            None => found,
+        };
+        let opts = core::localize::LocalizeOptions {
+            harness,
+            runtime,
+            models,
+            memory_gb,
+            manifest,
+            strict,
+            allow_network,
+            workdir: workdir.map(PathBuf::from).unwrap_or_else(|| ctx.cwd.join(".hlock/localize")),
+        };
+        let cwd = std::env::current_dir().unwrap_or_default();
+        let abs = |p: &str| if Path::new(p).is_absolute() { PathBuf::from(p) } else { cwd.join(p) };
+        let o = core::localize::localize_to(&abs(&path), &abs(&out), &reg, &ctx, &opts).map_err(py_err)?;
+        Ok(json_str(serde_json::json!({"lock": o.lock, "report": o.report, "path": out})))
+    })
 }
 
 /// Free text with credential-looking words replaced by `[redacted]`.
@@ -970,24 +1089,23 @@ fn redact_text(text: String) -> String {
     core::capture::redact_text(&text)
 }
 
-/// The manifest at `path`, when there is one.
+/// The manifest at `path`, when one is passed; a path that isn't a file is an error.
 fn load_manifest(path: Option<&str>) -> PyResult<Option<core::Manifest>> {
     match path {
-        Some(p) if Path::new(p).is_file() => Ok(Some(core::Manifest::load(Path::new(p)).map_err(py_err)?)),
-        _ => Ok(None),
+        Some(p) => Ok(Some(core::Manifest::load(Path::new(p)).map_err(py_err)?)),
+        None => Ok(None),
     }
 }
 
 /// Grading options from the manifest at `path`: `[evals.judge]`, `[deciders.judge]` or
-/// `[deciders.default]`, and, with `auto`, a judge hlock finds.
+/// `[deciders.default]`, and, with `auto`, a judge hlock finds. Invalid tables raise.
 fn grade_options(manifest: Option<&str>, auto: bool) -> PyResult<core::tasks::GradeOptions> {
     let m = load_manifest(manifest)?;
-    Ok(core::tasks::GradeOptions {
-        judge: m.as_ref().and_then(core::Manifest::judge),
-        default_judge: m.as_ref().and_then(core::Manifest::default_judge),
-        auto,
-        ..Default::default()
-    })
+    let (judge, default_judge) = match &m {
+        Some(m) => (m.judge_checked().map_err(py_err)?, m.default_judge_checked().map_err(py_err)?),
+        None => (None, None),
+    };
+    Ok(core::tasks::GradeOptions { judge, default_judge, auto, ..Default::default() })
 }
 
 /// Load the eval pack at `path` and check it (see `EvalPack::check`). With `run`, also
@@ -999,7 +1117,7 @@ fn grade_options(manifest: Option<&str>, auto: bool) -> PyResult<core::tasks::Gr
 #[pyo3(signature = (path, run=false, manifest=None, judges=false))]
 fn check_eval_pack(py: Python<'_>, path: String, run: bool, manifest: Option<String>, judges: bool) -> PyResult<String> {
     // no GIL while it waits on the network, so other Python threads keep running
-    py.allow_threads(move || {
+    interruptible(py, move || {
         let pack = core::tasks::EvalPack::load(&path, None).map_err(py_err)?;
         let mut opts = grade_options(manifest.as_deref(), run)?;
         opts.judges = if judges { core::tasks::Judges::All } else { core::tasks::Judges::Deciders };
@@ -1033,7 +1151,7 @@ fn check_eval_pack(py: Python<'_>, path: String, run: bool, manifest: Option<Str
 #[pyo3(signature = (path, task, workspace=None, manifest=None))]
 fn grade_eval_task(py: Python<'_>, path: String, task: String, workspace: Option<String>, manifest: Option<String>) -> PyResult<String> {
     // no GIL while it waits on the network, so other Python threads keep running
-    py.allow_threads(move || {
+    interruptible(py, move || {
         let pack = core::tasks::EvalPack::load(&path, None).map_err(py_err)?;
         let opts = grade_options(manifest.as_deref(), true)?;
         let grades = pack.grade_dir(&task, workspace.as_deref().map(Path::new), &opts).map_err(py_err)?;
@@ -1056,7 +1174,7 @@ fn grade_eval_task(py: Python<'_>, path: String, task: String, workspace: Option
 #[pyo3(signature = (path, against, model=None, manifest=None, against_base_url=None))]
 fn calibrate_eval_pack(py: Python<'_>, path: String, against: String, model: Option<String>, manifest: Option<String>, against_base_url: Option<String>) -> PyResult<String> {
     // no GIL while it waits on the network, so other Python threads keep running
-    py.allow_threads(move || {
+    interruptible(py, move || {
         let pack = core::tasks::EvalPack::load(&path, None).map_err(py_err)?;
         let opts = grade_options(manifest.as_deref(), true)?;
         let a = match model {
@@ -1075,6 +1193,34 @@ fn calibrate_eval_pack(py: Python<'_>, path: String, against: String, model: Opt
     })
 }
 
+/// The `[deciders.<use_>]` spec that names a model, else `[deciders.default]`'s (a use
+/// with only `any-of` candidates has no model to call).
+fn spec_with_model<'a>(specs: &'a std::collections::BTreeMap<String, core::decide::DeciderSpec>, use_: Option<&str>) -> Option<&'a core::decide::DeciderSpec> {
+    let named = |u: &str| specs.get(u).filter(|s| s.model.is_some());
+    use_.and_then(named).or_else(|| named("default"))
+}
+
+/// What `decide` calls: an explicit `model`, with the manifest spec's settings (base URL,
+/// key, protocol) only when that spec's model is from the same provider; else the spec's
+/// model; else a decider hlock finds.
+fn decider_config(specs: &std::collections::BTreeMap<String, core::decide::DeciderSpec>, use_: Option<&str>, model: Option<String>) -> Option<core::decide::DeciderConfig> {
+    let spec = spec_with_model(specs, use_);
+    let provider = |m: &str| core::decide::split_ref(core::decide::split_threshold(m).0).map(|(p, _)| p.to_string());
+    match model {
+        Some(mdl) => {
+            let same = spec.filter(|s| provider(&mdl).is_some() && s.model.as_deref().and_then(provider) == provider(&mdl));
+            Some(match same {
+                Some(s) => s.config(&mdl),
+                None => core::decide::DeciderConfig::from_ref(core::decide::split_threshold(&mdl).0),
+            })
+        }
+        None => match spec.and_then(|s| s.model.as_deref().map(|m| s.config(m))) {
+            Some(c) => Some(c),
+            None => core::graders::auto_judge().map(|j| core::decide::DeciderConfig { model: j.model, ..Default::default() }),
+        },
+    }
+}
+
 /// Ask a decision model `questions` (JSON: a list of `{id, type, instructions,
 /// criteria}`) about `state` (JSON). `model` is `provider:model`; without one, the
 /// manifest's `[deciders.<use_>]`, then `[deciders.default]`, then one hlock finds.
@@ -1082,19 +1228,19 @@ fn calibrate_eval_pack(py: Python<'_>, path: String, against: String, model: Opt
 #[pyo3(signature = (state, questions, model=None, use_=None, manifest=None))]
 fn decide(py: Python<'_>, state: String, questions: String, model: Option<String>, use_: Option<String>, manifest: Option<String>) -> PyResult<String> {
     // no GIL while it waits on the network, so other Python threads keep running
-    py.allow_threads(move || {
-        let state: serde_json::Value = serde_json::from_str(&state).unwrap_or(serde_json::Value::String(state));
-        let questions: Vec<core::decide::Question> = serde_json::from_str(&questions).map_err(|e| py_err(core::Error::Manifest(format!("questions: {e}"))))?;
+    interruptible(py, move || {
+        // plain text is a state too, but text that starts like JSON must be JSON
+        let state: serde_json::Value = match serde_json::from_str(&state) {
+            Ok(v) => v,
+            Err(e) if state.trim_start().starts_with(['{', '[']) => return Err(json_arg_err("state", e)),
+            Err(_) => serde_json::Value::String(state),
+        };
+        let questions: Vec<core::decide::Question> = serde_json::from_str(&questions).map_err(|e| json_arg_err("questions", e))?;
         let m = load_manifest(manifest.as_deref())?;
         let specs = m.as_ref().map(|m| m.deciders()).transpose().map_err(py_err)?.unwrap_or_default();
-        let spec = use_.as_deref().and_then(|u| specs.get(u)).or_else(|| specs.get("default"));
-        let cfg = match (model, spec) {
-            (Some(mdl), s) => s.map(|s| s.config(&mdl)).unwrap_or(core::decide::DeciderConfig { model: mdl, ..Default::default() }),
-            (None, Some(s)) if s.model.is_some() => s.config(s.model.as_deref().unwrap()),
-            _ => core::graders::auto_judge().map(|j| core::decide::DeciderConfig { model: j.model, ..Default::default() }).ok_or_else(|| {
-                py_err(core::Error::Manifest("no decision model: pass --model, set [deciders.default] in harness.toml, run Kev on Ollama or Ollaya, or set TYPESAFE_API_KEY".into()))
-            })?,
-        };
+        let cfg = decider_config(&specs, use_.as_deref(), model).ok_or_else(|| {
+            py_err(core::Error::Manifest("no decision model: pass --model, set [deciders.default] in harness.toml, run Kev on Ollama or Ollaya, or set TYPESAFE_API_KEY".into()))
+        })?;
         let var = |k: &str| std::env::var(k).ok();
         let ep = cfg.endpoint(&var).map_err(|e| py_err(core::Error::Profile(e)))?;
         let decided = core::decide::decide(&ep, &state, &questions).map_err(|e| py_err(core::Error::Profile(e)))?;
@@ -1112,12 +1258,15 @@ fn decide_hook(py: Python<'_>, use_: String, format: String, input: String, lock
     py.allow_threads(move || {
         let lock_path = Path::new(&lock);
         let out = match core::Lockfile::load(lock_path) {
-            Ok(l) => {
-                let input: serde_json::Value = serde_json::from_str(&input).unwrap_or_default();
-                let root = lock_path.parent().filter(|p| !p.as_os_str().is_empty()).map(Path::to_path_buf).unwrap_or_else(|| PathBuf::from("."));
-                let var = |k: &str| std::env::var(k).ok();
-                core::decide::hook(&use_, &format, event.as_deref(), &input, &l, &root, &var)
-            }
+            Ok(l) => match serde_json::from_str::<serde_json::Value>(&input) {
+                Ok(input) => {
+                    let root = lock_path.parent().filter(|p| !p.as_os_str().is_empty()).map(Path::to_path_buf).unwrap_or_else(|| PathBuf::from("."));
+                    let var = |k: &str| std::env::var(k).ok();
+                    core::decide::hook(&use_, &format, event.as_deref(), &input, &l, &root, &var)
+                }
+                // defer, and say why
+                Err(e) => core::decide::HookOutput { stdout: String::new(), exit: 0, note: format!("the hook's input wasn't JSON ({e}); deferring") },
+            },
             Err(e) => core::decide::HookOutput { stdout: String::new(), exit: 0, note: format!("can't read the lock: {e}") },
         };
         json_str(serde_json::json!(out))
@@ -1194,45 +1343,52 @@ fn meta_config(meta_manifest: Option<String>) -> PyResult<String> {
 #[pyfunction]
 #[pyo3(signature = (harness=None, provider=None, model=None, runtime=None, memory_gb=None, base_url=None, manifest=None))]
 #[allow(clippy::too_many_arguments)]
-fn meta_init(harness: Option<String>, provider: Option<String>, model: Option<String>, runtime: Option<String>, memory_gb: Option<f64>, base_url: Option<String>, manifest: Option<String>) -> PyResult<String> {
-    let (reg, ctx, _) = registry(manifest.as_deref(), None)?;
-    let opts = core::meta::InitOptions { harness, provider, model, runtime, memory_gb, base_url };
-    let c = core::meta::choose(&reg, &ctx, &opts).map_err(py_err)?;
-    Ok(json_str(serde_json::json!({"choice": c, "manifest": core::meta::manifest_text(&c)})))
+fn meta_init(py: Python<'_>, harness: Option<String>, provider: Option<String>, model: Option<String>, runtime: Option<String>, memory_gb: Option<f64>, base_url: Option<String>, manifest: Option<String>) -> PyResult<String> {
+    // probes installed harnesses and runtimes
+    interruptible(py, move || {
+        let (reg, ctx, _) = registry(manifest.as_deref(), None)?;
+        let opts = core::meta::InitOptions { harness, provider, model, runtime, memory_gb, base_url };
+        let c = core::meta::choose(&reg, &ctx, &opts).map_err(py_err)?;
+        Ok(json_str(serde_json::json!({"choice": c, "manifest": core::meta::manifest_text(&c)})))
+    })
 }
 
 /// Pin the meta harness into `out`: write `harness.meta.toml`'s `[model]` into the
 /// meta harness's own config root, then capture that config.
 #[pyfunction]
 #[pyo3(signature = (out="harness.meta.lock".to_string(), meta_manifest="harness.meta.toml".to_string(), vendor=true, force=false, manifest=None))]
-fn meta_pin(out: String, meta_manifest: String, vendor: bool, force: bool, manifest: Option<String>) -> PyResult<String> {
-    let (reg, ctx, manifest) = registry(manifest.as_deref(), Some(&lock_dir(&out)))?;
-    let out = if Path::new(&out).is_absolute() { out } else { std::env::current_dir().unwrap_or_default().join(&out).to_string_lossy().into_owned() };
-    let meta = self::meta_manifest(Some(&meta_manifest))?
-        .ok_or_else(|| PyValueError::new_err(format!("cannot read {meta_manifest}: no such file; create one with `hlock meta init`")))?;
-    let project = manifest.as_ref().and_then(|m| m.project.get("name").and_then(|v| v.as_str()).map(str::to_string));
-    let o = core::meta::pin(&reg, &ctx, &meta, Path::new(&out), project.as_deref(), vendor, force).map_err(py_err)?;
-    Ok(json_str(serde_json::json!({
-        "lock": o.lock,
-        "path": o.path,
-        "diff": o.diff,
-        "previous": o.previous,
-        "vendored": o.vendored,
-        "warnings": o.warnings,
-    })))
+fn meta_pin(py: Python<'_>, out: String, meta_manifest: String, vendor: bool, force: bool, manifest: Option<String>) -> PyResult<String> {
+    interruptible(py, move || {
+        let (reg, ctx, manifest) = registry(manifest.as_deref(), Some(&lock_dir(&out)))?;
+        let out = if Path::new(&out).is_absolute() { out } else { std::env::current_dir().unwrap_or_default().join(&out).to_string_lossy().into_owned() };
+        let meta = self::meta_manifest(Some(&meta_manifest))?
+            .ok_or_else(|| ManifestError::new_err(format!("cannot read {meta_manifest}: no such file; create one with `hlock meta init`")))?;
+        let project = manifest.as_ref().and_then(|m| m.project.get("name").and_then(|v| v.as_str()).map(str::to_string));
+        let o = core::meta::pin(&reg, &ctx, &meta, Path::new(&out), project.as_deref(), vendor, force).map_err(py_err)?;
+        Ok(json_str(serde_json::json!({
+            "lock": o.lock,
+            "path": o.path,
+            "diff": o.diff,
+            "previous": o.previous,
+            "vendored": o.vendored,
+            "warnings": o.warnings,
+        })))
+    })
 }
 
 /// Drift between `harness.meta.toml`, the meta lock, and the meta harness's own
 /// config, as a JSON list of lines (empty when they match).
 #[pyfunction]
 #[pyo3(signature = (path="harness.meta.lock".to_string(), meta_manifest=None, manifest=None))]
-fn meta_check(path: String, meta_manifest: Option<String>, manifest: Option<String>) -> PyResult<String> {
-    let (reg, ctx, _) = registry(manifest.as_deref(), Some(&lock_dir(&path)))?;
-    let meta = self::meta_manifest(meta_manifest.as_deref())?;
-    let abs = if Path::new(&path).is_absolute() { PathBuf::from(&path) } else { std::env::current_dir().unwrap_or_default().join(&path) };
-    let lock = core::Lockfile::load(&abs).map_err(py_err)?;
-    let drift = core::meta::check(&reg, &ctx, meta.as_ref(), &lock, &abs).map_err(py_err)?;
-    Ok(json_str(serde_json::json!(drift)))
+fn meta_check(py: Python<'_>, path: String, meta_manifest: Option<String>, manifest: Option<String>) -> PyResult<String> {
+    interruptible(py, move || {
+        let (reg, ctx, _) = registry(manifest.as_deref(), Some(&lock_dir(&path)))?;
+        let meta = self::meta_manifest(meta_manifest.as_deref())?;
+        let abs = if Path::new(&path).is_absolute() { PathBuf::from(&path) } else { std::env::current_dir().unwrap_or_default().join(&path) };
+        let lock = core::Lockfile::load(&abs).map_err(py_err)?;
+        let drift = core::meta::check(&reg, &ctx, meta.as_ref(), &lock, &abs).map_err(py_err)?;
+        Ok(json_str(serde_json::json!(drift)))
+    })
 }
 
 /// Prepare a meta job: render its prompt and build the command that runs it in the
@@ -1241,6 +1397,7 @@ fn meta_check(path: String, meta_manifest: Option<String>, manifest: Option<Stri
 #[pyo3(signature = (job, lock="harness.lock".to_string(), meta_lock="harness.meta.lock".to_string(), meta_manifest=None, manifest=None, out=None, count=10, instructions=String::new(), guide=None, headless=None, allow_version_mismatch=false, dry_run=false))]
 #[allow(clippy::too_many_arguments)]
 fn meta_prepare(
+    py: Python<'_>,
     job: String,
     lock: String,
     meta_lock: String,
@@ -1256,13 +1413,15 @@ fn meta_prepare(
 ) -> PyResult<String> {
     let meta = self::meta_manifest(meta_manifest.as_deref())?;
     if !Path::new(&meta_lock).is_file() {
-        return Err(PyValueError::new_err(format!("no meta harness pinned: {meta_lock} doesn't exist; pin one with `hlock meta pin`")));
+        return Err(LockfileError::new_err(format!("no meta harness pinned: {meta_lock} doesn't exist; pin one with `hlock meta pin`")));
     }
-    let (input, reg, ctx) = meta_input(&lock, &meta_lock, manifest.as_deref(), out, count, instructions, guide)?;
-    let ml = core::Lockfile::load(&input.meta_lock_path).map_err(py_err)?;
-    let opts = core::meta::RunOptions { headless, allow_version_mismatch, dry_run };
-    let prep = core::meta::prepare(&job, &input, meta.as_ref(), &ml, &reg, &ctx, &opts).map_err(py_err)?;
-    Ok(json_str(serde_json::json!(prep)))
+    interruptible(py, move || {
+        let (input, reg, ctx) = meta_input(&lock, &meta_lock, manifest.as_deref(), out, count, instructions, guide)?;
+        let ml = core::Lockfile::load(&input.meta_lock_path).map_err(py_err)?;
+        let opts = core::meta::RunOptions { headless, allow_version_mismatch, dry_run };
+        let prep = core::meta::prepare(&job, &input, meta.as_ref(), &ml, &reg, &ctx, &opts).map_err(py_err)?;
+        Ok(json_str(serde_json::json!(prep)))
+    })
 }
 
 /// hlock's own check of a meta job's result. Returns JSON (see `meta::Verdict`).
@@ -1270,7 +1429,7 @@ fn meta_prepare(
 #[pyo3(signature = (job, lock="harness.lock".to_string(), meta_lock="harness.meta.lock".to_string(), meta_manifest=None, manifest=None, out=None, count=0))]
 fn meta_verify(py: Python<'_>, job: String, lock: String, meta_lock: String, meta_manifest: Option<String>, manifest: Option<String>, out: Option<String>, count: usize) -> PyResult<String> {
     // no GIL while it waits on the network (deciders), so other Python threads keep running
-    py.allow_threads(move || {
+    interruptible(py, move || {
         let meta = self::meta_manifest(meta_manifest.as_deref())?;
         let (input, reg, ctx) = meta_input(&lock, &meta_lock, manifest.as_deref(), out, count, String::new(), None)?;
         let v = core::meta::verify(&job, &input, meta.as_ref(), &reg, &ctx).map_err(py_err)?;
@@ -1302,31 +1461,73 @@ fn agent_run(
     if manifest.is_file() {
         cfg.decider = core::meta::MetaManifest::load(&manifest).map_err(py_err)?.default_decider().map_err(py_err)?;
     }
-    // release the GIL while the agent waits on the model and on commands; take it back
-    // only to call the callbacks, which also gives Ctrl-C a chance to stop the run
-    let out = py.allow_threads(|| {
-        let mut say_fn = |kind: &str, text: &str| -> bool {
-            Python::with_gil(|py| {
-                if let Some(f) = &say {
-                    match f.call1(py, (kind, text)) {
-                        Ok(r) if !r.bind(py).is_truthy().unwrap_or(true) => return false,
-                        Ok(_) => {}
-                        Err(_) => return false,
-                    }
+    // The agent runs on its own thread without the GIL, taking it only to call the
+    // callbacks. The first exception (a callback's, or Ctrl-C here) stops the run and is
+    // raised once it has stopped.
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Arc, Mutex};
+    let failed: Arc<Mutex<Option<PyErr>>> = Arc::new(Mutex::new(None));
+    let stop = Arc::new(AtomicBool::new(false));
+    let fail = |cell: &Mutex<Option<PyErr>>, stop: &AtomicBool, e: PyErr| {
+        if let Ok(mut first) = cell.lock() {
+            first.get_or_insert(e);
+        }
+        stop.store(true, Ordering::SeqCst);
+    };
+    let (tx, rx) = mpsc::channel();
+    {
+        let (failed, stop) = (failed.clone(), stop.clone());
+        std::thread::spawn(move || {
+            let mut say_fn = |kind: &str, text: &str| -> bool {
+                if stop.load(Ordering::SeqCst) {
+                    return false;
                 }
-                py.check_signals().is_ok()
-            })
-        };
-        let mut ask_fn = |command: &str| -> String {
-            Python::with_gil(|py| {
-                ask.as_ref()
-                    .and_then(|f| f.call1(py, (command,)).ok())
-                    .and_then(|r| r.extract::<String>(py).ok())
-                    .unwrap_or_else(|| "n".into())
-            })
-        };
-        core::agent::run(&cfg, &prompt, &mut say_fn, &mut ask_fn)
-    });
+                let Some(f) = &say else { return true };
+                Python::with_gil(|py| match f.call1(py, (kind, text)).and_then(|r| r.bind(py).is_truthy()) {
+                    Ok(keep_going) => keep_going,
+                    Err(e) => {
+                        fail(&failed, &stop, e);
+                        false
+                    }
+                })
+            };
+            let mut ask_fn = |command: &str| -> String {
+                let Some(f) = ask.as_ref().filter(|_| !stop.load(Ordering::SeqCst)) else { return "n".into() };
+                Python::with_gil(|py| match f.call1(py, (command,)).and_then(|r| r.extract::<String>(py)) {
+                    Ok(answer) => answer,
+                    Err(e) => {
+                        fail(&failed, &stop, e);
+                        "n".into()
+                    }
+                })
+            };
+            let _ = tx.send(core::agent::run(&cfg, &prompt, &mut say_fn, &mut ask_fn));
+        });
+    }
+    // after Ctrl-C, give the run a moment to stop on its own (its commands are killed)
+    let mut interrupted: Option<std::time::Instant> = None;
+    let mut rx = rx;
+    let out = loop {
+        let got;
+        (got, rx) = wait(py, rx);
+        match got {
+            Ok(out) => break Some(out),
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                if interrupted.is_some_and(|t| t.elapsed() > Duration::from_secs(5)) {
+                    break None;
+                }
+                if let Err(e) = py.check_signals() {
+                    fail(&failed, &stop, e);
+                    core::process::stop_all();
+                    interrupted.get_or_insert_with(std::time::Instant::now);
+                }
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => return Err(HarnessLockError::new_err("the built-in agent stopped unexpectedly (a panic); please report it")),
+        }
+    };
+    if let Some(e) = failed.lock().ok().and_then(|mut first| first.take()) {
+        return Err(e);
+    }
     Ok(json_str(serde_json::json!(out)))
 }
 
@@ -1349,6 +1550,7 @@ fn _hlock(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(pin, m)?)?;
     m.add_function(wrap_pyfunction!(pull, m)?)?;
     m.add_function(wrap_pyfunction!(pull_find, m)?)?;
+    m.add_function(wrap_pyfunction!(pull_parse, m)?)?;
     m.add_function(wrap_pyfunction!(pull_list, m)?)?;
     m.add_function(wrap_pyfunction!(pull_remove, m)?)?;
     m.add_function(wrap_pyfunction!(pull_env, m)?)?;
@@ -1379,6 +1581,16 @@ fn _hlock(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(meta_check, m)?)?;
     m.add_function(wrap_pyfunction!(meta_prepare, m)?)?;
     m.add_function(wrap_pyfunction!(meta_verify, m)?)?;
+    let py = m.py();
+    m.add("HarnessLockError", py.get_type::<HarnessLockError>())?;
+    m.add("ManifestError", py.get_type::<ManifestError>())?;
+    m.add("LockfileError", py.get_type::<LockfileError>())?;
+    m.add("EvalPackError", py.get_type::<EvalPackError>())?;
+    m.add("StoreError", py.get_type::<StoreError>())?;
+    m.add("TuningError", py.get_type::<TuningError>())?;
+    m.add("ProfileError", py.get_type::<ProfileError>())?;
+    m.add("WorkerError", py.get_type::<WorkerError>())?;
+    m.add("PullError", py.get_type::<PullError>())?;
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
     m.add("LOCK_VERSION", core::LOCK_VERSION)?;
     Ok(())

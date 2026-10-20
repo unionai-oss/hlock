@@ -102,6 +102,35 @@ that receive secret values, and their backups, are readable only by you (`0600`)
 Models a provider lists but no locked role uses are optional; `--all-models` includes them.
 `--exact` also moves aside skills in the target skill directory that aren't in the lock.
 
+### What a lock can't make hlock do
+
+A lock may be someone else's ([`hlock pull`](pull.md)), and `launch` runs the automatic
+steps without asking, so hlock checks what a lock asks for. A step that fails a check is
+manual, with the reason ending in "refusing to write it automatically"; hlock never does it
+for you:
+
+- **Instruction files** go only where the harness reads them (`CLAUDE.md`,
+  `{root}/CLAUDE.md`, … as its [profile](harness-profiles.md) lists). A lock entry named
+  `~/.zshrc` or `{root}/settings.json` is refused.
+- **Skills** go only under the harness's skill directories, and a skill's name must be a
+  plain directory name (no `/` or `..`).
+- **Vendored copies** must be relative paths inside the lock's directory.
+- **Values that reach a command** (a version, package, model id, revision or git ref) must
+  be plain: letters, digits and `._:/@+-`, not starting with `-`. They're quoted as well.
+  A version like `1; curl x | sh` is refused.
+- **Skills from git** come only from `https://`, `http://`, `ssh://`, `git://` or
+  `user@host:path` URLs, at a hash or a plain ref; hlock checks a full hash after checkout.
+- **A decider's model** is pulled only through a local runtime hlock knows (`ollama`,
+  `ollaya`), with that runtime's own pull command.
+- **Decider hooks** are written only for the uses and events `hlock decide hook` answers;
+  see [Deciders](deciders.md#locks-from-someone-else).
+- **Plugins, marketplaces and packages** from a pulled lock (one with a `[pulled]` table)
+  install only with `--install`, because a plugin runs code. From your own lock they install
+  automatically, as before.
+
+Installers run with the same environment as the rest of `sync`, and stop after four hours.
+Config files are written whole or not at all (through a temporary file and a rename).
+
 ## Let your agent do the manual steps
 
 ```console

@@ -20,7 +20,7 @@ use crate::lockfile::{
     ConfigFile, Context, Decision, Harness, Instructions, Lockfile, Native, Provenance, Runtime, RuntimeModel,
     SecretRef, Skill, Tool, LLM,
 };
-use crate::profiles::{probe_harness, probe_runtime, run_capture, Ctx, HarnessProfile, Registry, RuntimeProfile};
+use crate::profiles::{probe_harness, probe_runtime, Ctx, HarnessProfile, Registry, RuntimeProfile};
 
 /// Where vendored files go, relative to the lock's directory.
 pub const VENDOR_DIR: &str = ".hlock/vendor";
@@ -424,6 +424,47 @@ pub fn redact_text(s: &str) -> String {
     out
 }
 
+/// Whether a URL scheme's user name is only a name (`ssh://git@host`), not a credential
+/// as it is in `https://<token>@host`.
+fn userinfo_is_a_name(scheme: &str) -> bool {
+    matches!(scheme.to_ascii_lowercase().as_str(), "ssh" | "git+ssh" | "ssh+git" | "sftp")
+}
+
+/// A URL recorded as a source (a skill's git remote, a marketplace) with its
+/// credentials removed: all userinfo for http(s) and other schemes
+/// (`https://ghp_…@github.com/a/b` → `https://github.com/a/b`), the password for ssh.
+/// `git@host:path` (scp-like) keeps its user name. A query's credential-looking
+/// parameters are dropped.
+pub fn strip_userinfo(url: &str) -> String {
+    let (base, query) = url.split_once('?').map(|(b, q)| (b, Some(q))).unwrap_or((url, None));
+    let base = match base.split_once("://") {
+        Some((scheme, rest)) => {
+            let (auth, path) = rest.split_once('/').map(|(a, p)| (a, Some(p))).unwrap_or((rest, None));
+            let host = match auth.rsplit_once('@') {
+                Some((cred, host)) if userinfo_is_a_name(scheme) => match cred.split_once(':') {
+                    Some((user, _)) => format!("{user}@{host}"),
+                    None => format!("{cred}@{host}"),
+                },
+                Some((_, host)) => host.to_string(),
+                None => auth.to_string(),
+            };
+            format!("{scheme}://{host}{}", path.map(|p| format!("/{p}")).unwrap_or_default())
+        }
+        // scp-like: user@host:path, a user name only
+        None => match base.split_once('@') {
+            Some((user, rest)) if user.contains(':') => format!("{}@{rest}", user.split(':').next().unwrap_or_default()),
+            _ => base.to_string(),
+        },
+    };
+    match query {
+        Some(q) => {
+            let kept: Vec<&str> = q.split('&').filter(|kv| !kv.split_once('=').is_some_and(|(k, v)| is_secret_key(k) || looks_secret(v))).collect();
+            if kept.is_empty() { base } else { format!("{base}?{}", kept.join("&")) }
+        }
+        None => base,
+    }
+}
+
 /// Collects placeholders for the secrets a capture redacts.
 #[derive(Default)]
 struct Secrets {
@@ -493,12 +534,13 @@ impl Secrets {
             Some((b, q)) => (b.to_string(), Some(q.to_string())),
             None => (url.to_string(), None),
         };
-        // userinfo: scheme://user:pass@host
+        // userinfo: scheme://user:pass@host, or a token alone (https://ghp_…@host); an ssh
+        // user name without a password (ssh://git@host) isn't a secret
         let base = match base.split_once("://") {
             Some((scheme, rest)) => {
                 let (auth, host) = rest.split_once('/').map(|(a, h)| (a.to_string(), format!("/{h}"))).unwrap_or((rest.to_string(), String::new()));
                 match auth.rsplit_once('@') {
-                    Some((cred, hostpart)) if cred.contains(':') => {
+                    Some((cred, hostpart)) if cred.contains(':') || !userinfo_is_a_name(scheme) => {
                         let mut ctx2: Vec<&str> = context.to_vec();
                         ctx2.push("url_credentials");
                         let ph = self.redact(&ctx2, &format!("{used_by} (credentials)"), cred);
@@ -742,8 +784,10 @@ fn glob_match(pat: &[u8], text: &[u8]) -> bool {
 }
 
 /// Files under `dir` (sorted, relative), skipping VCS metadata and OS litter.
-fn walk_files(dir: &Path) -> Vec<PathBuf> {
-    fn rec(base: &Path, dir: &Path, out: &mut Vec<PathBuf>) {
+/// Symlinks inside it are never followed (a link to `~/.ssh` isn't vendored, and a link
+/// to a parent can't loop); they're listed in the second vector.
+fn walk(dir: &Path) -> (Vec<PathBuf>, Vec<PathBuf>) {
+    fn rec(base: &Path, dir: &Path, out: &mut Vec<PathBuf>, links: &mut Vec<PathBuf>) {
         let Ok(rd) = std::fs::read_dir(dir) else { return };
         for e in rd.flatten() {
             let name = e.file_name().to_string_lossy().into_owned();
@@ -751,19 +795,25 @@ fn walk_files(dir: &Path) -> Vec<PathBuf> {
                 continue;
             }
             let p = e.path();
-            if p.is_dir() {
-                rec(base, &p, out);
-            } else if p.is_file() {
-                if let Ok(rel) = p.strip_prefix(base) {
-                    out.push(rel.to_path_buf());
-                }
+            let rel = || p.strip_prefix(base).map(Path::to_path_buf).ok();
+            // the entry's own type: a symlink is a symlink, whatever it points to
+            match e.file_type() {
+                Ok(t) if t.is_symlink() => links.extend(rel()),
+                Ok(t) if t.is_dir() => rec(base, &p, out, links),
+                Ok(t) if t.is_file() => out.extend(rel()),
+                _ => {}
             }
         }
     }
-    let mut out = Vec::new();
-    rec(dir, dir, &mut out);
+    let (mut out, mut links) = (Vec::new(), Vec::new());
+    rec(dir, dir, &mut out, &mut links);
     out.sort();
-    out
+    links.sort();
+    (out, links)
+}
+
+fn walk_files(dir: &Path) -> Vec<PathBuf> {
+    walk(dir).0
 }
 
 #[cfg(unix)]
@@ -780,36 +830,46 @@ fn is_executable(_p: &Path) -> bool {
 /// Merkle-style tree digest (SPEC §7.7.2): normalized relative paths, contents,
 /// and executable bits. A vendored copy and a checkout of the same tree match.
 pub fn tree_digest(dir: &Path) -> String {
+    tree_digest_checked(dir).0
+}
+
+/// [`tree_digest`], and the files it couldn't read. An unreadable file is digested as
+/// unreadable, never as empty, so it can't match an empty file.
+fn tree_digest_checked(dir: &Path) -> (String, Vec<String>) {
     let mut acc = String::new();
+    let mut unreadable = Vec::new();
     for rel in walk_files(dir) {
         let p = dir.join(&rel);
-        let bytes = std::fs::read(&p).unwrap_or_default();
-        acc.push_str(&format!(
-            "{}\0{}\0{}\n",
-            rel.to_string_lossy().replace('\\', "/"),
-            if is_executable(&p) { "x" } else { "-" },
-            sha256_bytes(&bytes)
-        ));
+        let digest = match std::fs::read(&p) {
+            Ok(bytes) => sha256_bytes(&bytes),
+            Err(e) => {
+                unreadable.push(format!("{}: {e}", p.display()));
+                "unreadable".into()
+            }
+        };
+        acc.push_str(&format!("{}\0{}\0{}\n", rel.to_string_lossy().replace('\\', "/"), if is_executable(&p) { "x" } else { "-" }, digest));
     }
-    sha256_bytes(acc.as_bytes())
+    (sha256_bytes(acc.as_bytes()), unreadable)
 }
 
 const MAX_VENDOR_BYTES: u64 = 20 * 1024 * 1024;
 
-fn vendor_tree(dir: &Path, dest: &str, out: &mut Vec<VendorFile>) -> std::result::Result<(), String> {
-    let files = walk_files(dir);
+/// Vendor the files under `dir` as `dest/…`: all of them, or none (an unreadable file
+/// is an error, not an empty file). Symlinks aren't followed; each one is a warning.
+fn vendor_tree(dir: &Path, dest: &str, out: &mut Vec<VendorFile>, warnings: &mut Vec<String>) -> std::result::Result<(), String> {
+    let (files, links) = walk(dir);
     let total: u64 = files.iter().filter_map(|f| std::fs::metadata(dir.join(f)).ok()).map(|m| m.len()).sum();
     if total > MAX_VENDOR_BYTES {
         return Err(format!("{} is {} MB, too large to vendor", dir.display(), total / 1_000_000));
     }
+    let mut add = Vec::new();
     for rel in files {
         let p = dir.join(&rel);
-        out.push(VendorFile {
-            rel: format!("{dest}/{}", rel.to_string_lossy().replace('\\', "/")),
-            bytes: std::fs::read(&p).unwrap_or_default(),
-            executable: is_executable(&p),
-        });
+        let bytes = std::fs::read(&p).map_err(|e| format!("can't read {}: {e}; not vendored", p.display()))?;
+        add.push(VendorFile { rel: format!("{dest}/{}", rel.to_string_lossy().replace('\\', "/")), bytes, executable: is_executable(&p) });
     }
+    out.extend(add);
+    warnings.extend(links.iter().map(|l| format!("{} is a symlink; not vendored", dir.join(l).display())));
     Ok(())
 }
 
@@ -872,6 +932,7 @@ fn match_runtime<'r>(reg: &'r Registry, provider: Option<&str>, base_url: Option
 
 fn new_runtime(rt: &RuntimeProfile, location: &str, endpoint: Option<String>, ctx: &Ctx) -> Runtime {
     let p = if location == "local" { probe_runtime(rt, ctx) } else { Default::default() };
+    let endpoint = endpoint.as_deref().map(strip_userinfo);
     let name = runtime_key(rt, location, endpoint.as_deref());
     Runtime { name, location: location.into(), version: p.version, source: p.source, endpoint, model: vec![] }
 }
@@ -1129,13 +1190,14 @@ fn skill_name(dir: &Path) -> String {
 /// Remote, commit and cleanliness of the git checkout containing `dir`, if any.
 fn git_origin(dir: &Path, ctx: &Ctx) -> Option<(String, String, String, bool)> {
     let git = ctx.which("git")?;
-    let t = Duration::from_secs(5);
+    // stdout of a command that succeeded; `None` when git fails (not a checkout, no remote)
     let run = |args: &[&str]| {
-        let mut a = vec!["-C".to_string(), dir.to_string_lossy().into_owned()];
-        a.extend(args.iter().map(|s| s.to_string()));
-        run_capture(&git, &a, ctx, t).map(|s| s.trim().to_string())
+        let mut cmd = std::process::Command::new(&git);
+        cmd.arg("-C").arg(dir).args(args).current_dir(&ctx.cwd).env_clear().envs(&ctx.env).stdin(std::process::Stdio::null());
+        let out = crate::process::run(cmd, &crate::process::Limits::timeout(Duration::from_secs(5))).ok()?;
+        out.success.then(|| out.stdout_text().trim().to_string())
     };
-    let top = run(&["rev-parse", "--show-toplevel"]).filter(|s| !s.contains("fatal"))?;
+    let top = run(&["rev-parse", "--show-toplevel"])?;
     let top = PathBuf::from(top.lines().next()?);
     if top == ctx.home || ctx.cwd.starts_with(&top) {
         return None; // a dotfiles repo at ~, or the project itself
@@ -1194,9 +1256,9 @@ fn claude_plugins(profile: &HarnessProfile, src: &Sources, path: &Path, out: &mu
         let s = &markets[&m]["source"];
         let (source, revision) = match s["source"].as_str() {
             Some("github") => (s["repo"].as_str().map(|r| format!("github:{r}")), s["ref"].as_str().map(str::to_string)),
-            Some("git") => (s["url"].as_str().map(|u| format!("git+{u}")), s["ref"].as_str().map(str::to_string)),
+            Some("git") => (s["url"].as_str().map(|u| format!("git+{}", strip_userinfo(u))), s["ref"].as_str().map(str::to_string)),
             Some("directory") | Some("local") => (s["path"].as_str().map(|p| format!("path:{p}")), None),
-            Some("url") => (s["url"].as_str().map(str::to_string), None),
+            Some("url") => (s["url"].as_str().map(strip_userinfo), None),
             _ => (None, None),
         };
         out.push(Native {
@@ -1402,7 +1464,7 @@ pub fn capture(profile: &HarnessProfile, reg: &Registry, ctx: &Ctx, project: Opt
             if !seen.insert(real.clone()) {
                 continue;
             }
-            let name = skill_name(&sk);
+            let name = plain_skill_name(&sk, &mut warnings);
             let project = is_project_path(&sk, &root, ctx);
             let builtin = is_builtin_dir || builtin_dirs.iter().any(|b| sk.starts_with(b)) || builtins.contains(&name);
             // a harness's built-in skills come with its version, so they're always recorded
@@ -1410,7 +1472,8 @@ pub fn capture(profile: &HarnessProfile, reg: &Registry, ctx: &Ctx, project: Opt
                 skip("skills", 1);
                 continue;
             }
-            let digest = tree_digest(&sk);
+            let (digest, unreadable) = tree_digest_checked(&sk);
+            warnings.extend(unreadable.into_iter().map(|u| format!("skill {name}: can't read {u}")));
             let mut s = Skill {
                 name: name.clone(),
                 digest: Some(digest),
@@ -1430,7 +1493,7 @@ pub fn capture(profile: &HarnessProfile, reg: &Registry, ctx: &Ctx, project: Opt
                 s.source = Some(format!("path:{}", portable_path(&sk, None, ctx)));
             } else if let Some((url, commit, rel, dirty)) = git_origin(&real, ctx) {
                 s.origin = "third-party".into();
-                s.source = Some(format!("git+{url}@{commit}#path={rel}"));
+                s.source = Some(format!("git+{}@{commit}#path={rel}", strip_userinfo(&url)));
                 if dirty {
                     warnings.push(format!("skill {name} has uncommitted changes; vendoring it"));
                 }
@@ -1489,7 +1552,13 @@ pub fn capture(profile: &HarnessProfile, reg: &Registry, ctx: &Ctx, project: Opt
         let name = portable_path(&p, Some(&root), ctx);
         let mut ins = Instructions { name: name.clone(), digest: Some(sha256_bytes(&bytes)), scope: if project { "project" } else { "user" }.into(), vendored: None };
         if !project {
-            let rel = format!("{vroot}/instructions/{}", p.file_name().unwrap_or_default().to_string_lossy());
+            // by file name; a second file of the same name (two AGENTS.md) gets `-2`
+            let file = Path::new(p.file_name().unwrap_or_default());
+            let (stem, ext) = (file.file_stem().unwrap_or_default().to_string_lossy(), file.extension().map(|e| format!(".{}", e.to_string_lossy())).unwrap_or_default());
+            let rel = (1..)
+                .map(|n| if n == 1 { format!("{vroot}/instructions/{stem}{ext}") } else { format!("{vroot}/instructions/{stem}-{n}{ext}") })
+                .find(|r| !vendor.iter().any(|f| &f.rel == r))
+                .unwrap_or_default();
             vendor.push(VendorFile { rel: rel.clone(), bytes, executable: false });
             ins.vendored = Some(rel);
         }
@@ -1639,11 +1708,28 @@ pub fn capture(profile: &HarnessProfile, reg: &Registry, ctx: &Ctx, project: Opt
 }
 
 fn vendor_skill(dir: &Path, vroot: &str, name: &str, s: &mut Skill, vendor: &mut Vec<VendorFile>, warnings: &mut Vec<String>) {
-    let dest = format!("{vroot}/skills/{name}");
-    match vendor_tree(dir, &dest, vendor) {
+    // a plain name (capture checks), and one directory per skill: two skills of the same
+    // name in different places get `-2`, `-3`, …
+    let base = format!("{vroot}/skills/{name}");
+    let taken = |d: &str| vendor.iter().any(|f| f.rel.starts_with(&format!("{d}/")));
+    let dest = (1..).map(|n| if n == 1 { base.clone() } else { format!("{base}-{n}") }).find(|d| !taken(d)).unwrap_or(base);
+    match vendor_tree(dir, &dest, vendor, warnings) {
         Ok(()) => s.vendored = Some(dest),
         Err(e) => warnings.push(format!("skill {name}: {e}")),
     }
+}
+
+/// A skill's name as the lock records it: its frontmatter `name`, when that's a plain
+/// directory name; else the directory's own name. It names the vendored copy and the
+/// directory `sync` writes.
+fn plain_skill_name(dir: &Path, warnings: &mut Vec<String>) -> String {
+    let name = skill_name(dir);
+    if crate::fsutil::plain_name(&name) {
+        return name;
+    }
+    let fallback = dir.file_name().map(|n| n.to_string_lossy().into_owned()).filter(|n| crate::fsutil::plain_name(n)).unwrap_or_else(|| "skill".into());
+    warnings.push(format!("skill {name:?} in {}: its name isn't a plain directory name; locked as {fallback:?}", dir.display()));
+    fallback
 }
 
 /// The raw MCP server entries a harness has configured right now, by name.
@@ -1769,6 +1855,58 @@ fn relocate_vendored(cap: &mut Capture, id: &str, ns: &str) {
     cap.lock.config.iter_mut().filter_map(|c| c.vendored.as_mut()).for_each(mv);
 }
 
+/// Replace the vendor directory `vdir` with `files` (each `rel` is `prefix` and a path
+/// inside `vdir`): they're written into a sibling directory first, which then takes the
+/// old one's place, so a failed pin leaves the previous vendored files as they were.
+/// With nothing to vendor, `vdir` is removed and nothing is created.
+fn write_vendor_dir(vdir: &Path, prefix: &str, files: &[VendorFile]) -> Result<()> {
+    if files.is_empty() {
+        let _ = std::fs::remove_dir_all(vdir);
+        return Ok(());
+    }
+    let parent = vdir.parent().ok_or_else(|| Error::Lockfile(format!("{} has no parent directory", vdir.display())))?;
+    std::fs::create_dir_all(parent)?;
+    let name = vdir.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let new = parent.join(format!(".{name}.hlock-new-{}", std::process::id()));
+    let old = parent.join(format!(".{name}.hlock-old-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&new);
+    let written = (|| -> Result<()> {
+        std::fs::create_dir(&new)?;
+        for f in files {
+            let rel = f.rel.strip_prefix(prefix).filter(|r| crate::fsutil::safe_rel(r)).ok_or_else(|| Error::Lockfile(format!("vendored path {:?} isn't under {prefix}", f.rel)))?;
+            let dest = new.join(rel);
+            if let Some(p) = dest.parent() {
+                std::fs::create_dir_all(p)?;
+            }
+            std::fs::write(&dest, &f.bytes)?;
+            #[cfg(unix)]
+            if f.executable {
+                use std::os::unix::fs::PermissionsExt;
+                let _ = std::fs::set_permissions(&dest, std::fs::Permissions::from_mode(0o755));
+            }
+        }
+        Ok(())
+    })();
+    if let Err(e) = written {
+        let _ = std::fs::remove_dir_all(&new);
+        return Err(e);
+    }
+    let _ = std::fs::remove_dir_all(&old);
+    let had_old = std::fs::symlink_metadata(vdir).is_ok();
+    if had_old {
+        std::fs::rename(vdir, &old)?;
+    }
+    if let Err(e) = std::fs::rename(&new, vdir) {
+        if had_old {
+            let _ = std::fs::rename(&old, vdir);
+        }
+        let _ = std::fs::remove_dir_all(&new);
+        return Err(e.into());
+    }
+    let _ = std::fs::remove_dir_all(&old);
+    Ok(())
+}
+
 /// What [`pin`] did.
 #[derive(Debug, Clone)]
 pub struct PinOutcome {
@@ -1834,20 +1972,12 @@ pub fn pin(
             Some(ns) => base.join(VENDOR_DIR).join(ns).join(&profile.id),
             None => base.join(VENDOR_DIR).join(&profile.id),
         };
-        let _ = std::fs::remove_dir_all(&vdir);
-        for f in &cap.vendor {
-            let dest = base.join(&f.rel);
-            if let Some(parent) = dest.parent() {
-                std::fs::create_dir_all(parent)?;
-            }
-            std::fs::write(&dest, &f.bytes)?;
-            #[cfg(unix)]
-            if f.executable {
-                use std::os::unix::fs::PermissionsExt;
-                let _ = std::fs::set_permissions(&dest, std::fs::Permissions::from_mode(0o755));
-            }
-            vendored.push(f.rel.clone());
-        }
+        let prefix = match &ns {
+            Some(ns) => format!("{VENDOR_DIR}/{ns}/{}/", profile.id),
+            None => format!("{VENDOR_DIR}/{}/", profile.id),
+        };
+        write_vendor_dir(&vdir, &prefix, &cap.vendor)?;
+        vendored.extend(cap.vendor.iter().map(|f| f.rel.clone()));
     } else {
         for s in cap.lock.skill.iter_mut() {
             s.vendored = None;
@@ -2078,5 +2208,128 @@ mod tests {
         assert_eq!(npm_name_version("npm:pi-free"), ("pi-free".into(), None));
         assert_eq!(npm_name_version("@scope/pkg@1.2.3"), ("@scope/pkg".into(), Some("1.2.3".into())));
         assert_eq!(launcher_source("npx", &["-y".into(), "pkg@2".into()]).as_deref(), Some("npm:pkg@2"));
+    }
+
+    #[test]
+    fn recorded_urls_carry_no_credentials() {
+        assert_eq!(strip_userinfo("https://ghp_x@github.com/a/b"), "https://github.com/a/b");
+        assert_eq!(strip_userinfo("https://user:pass@gitlab.com/a/b.git"), "https://gitlab.com/a/b.git");
+        assert_eq!(strip_userinfo("https://x-access-token:ghs_abc@github.com/a/b?private_token=zzz&ref=main"), "https://github.com/a/b?ref=main");
+        // an ssh user name is a name, not a credential; its password isn't kept
+        assert_eq!(strip_userinfo("ssh://git@github.com/a/b"), "ssh://git@github.com/a/b");
+        assert_eq!(strip_userinfo("ssh://me:pw@host/a"), "ssh://me@host/a");
+        assert_eq!(strip_userinfo("git@github.com:a/b.git"), "git@github.com:a/b.git");
+        let rt = Registry::builtin();
+        let ctx = Ctx { home: scratch("rt"), cwd: scratch("rt-cwd"), env: BTreeMap::new(), path: vec![] };
+        let r = new_runtime(rt.runtime("vllm").unwrap(), "network", Some("http://admin:pw@10.0.0.5:8000/v1".into()), &ctx);
+        assert_eq!(r.endpoint.as_deref(), Some("http://10.0.0.5:8000/v1"));
+        // in a config value, a token alone is redacted to a placeholder like user:pass
+        let mut s = Secrets::default();
+        let v = s.scrub(&["mcp", "x"], "url", "https://ghp_x@github.com/a/b", false, "mcp x url");
+        assert!(!v.contains("ghp_x") && v.starts_with("https://${HLOCK_SECRET_") && v.ends_with("@github.com/a/b"), "{v}");
+    }
+
+    fn scratch(tag: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("hlock-capture-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn skills_with_symlinks_are_walked_without_following_them() {
+        let d = scratch("links");
+        let sk = d.join("skill");
+        std::fs::create_dir_all(sk.join("sub")).unwrap();
+        std::fs::write(sk.join("SKILL.md"), "---\nname: s\n---\n").unwrap();
+        std::fs::write(d.join("id_rsa"), "PRIVATE").unwrap();
+        std::os::unix::fs::symlink(&sk, sk.join("sub/loop")).unwrap(); // a loop
+        std::os::unix::fs::symlink(d.join("id_rsa"), sk.join("key")).unwrap(); // a file outside
+        assert_eq!(walk_files(&sk), [PathBuf::from("SKILL.md")]);
+        let digest = tree_digest(&sk);
+        let (mut out, mut warnings) = (Vec::new(), Vec::new());
+        vendor_tree(&sk, ".hlock/vendor/x/skills/s", &mut out, &mut warnings).unwrap();
+        assert_eq!(out.iter().map(|f| f.rel.as_str()).collect::<Vec<_>>(), [".hlock/vendor/x/skills/s/SKILL.md"]);
+        assert_eq!(warnings.len(), 2, "{warnings:?}");
+        // the same tree without the links has the same digest
+        std::fs::remove_file(sk.join("key")).unwrap();
+        std::fs::remove_file(sk.join("sub/loop")).unwrap();
+        assert_eq!(tree_digest(&sk), digest);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unreadable_files_are_never_vendored_or_digested_as_empty() {
+        use std::os::unix::fs::PermissionsExt;
+        let d = scratch("unreadable");
+        std::fs::write(d.join("a"), "").unwrap();
+        let empty = tree_digest(&d);
+        std::fs::set_permissions(d.join("a"), std::fs::Permissions::from_mode(0o000)).unwrap();
+        if std::fs::read(d.join("a")).is_ok() {
+            return; // running as root: everything is readable
+        }
+        let (digest, unreadable) = tree_digest_checked(&d);
+        assert_ne!(digest, empty);
+        assert_eq!(unreadable.len(), 1);
+        let (mut out, mut warnings) = (Vec::new(), Vec::new());
+        assert!(vendor_tree(&d, "v", &mut out, &mut warnings).unwrap_err().contains("can't read"));
+        assert!(out.is_empty());
+        std::fs::set_permissions(d.join("a"), std::fs::Permissions::from_mode(0o644)).unwrap();
+    }
+
+    #[test]
+    fn skill_and_instruction_vendor_names_never_escape_or_collide() {
+        let d = scratch("names");
+        let sk = d.join("my-skill");
+        std::fs::create_dir_all(&sk).unwrap();
+        std::fs::write(sk.join("SKILL.md"), "---\nname: ../../../.ssh\n---\n").unwrap();
+        let mut warnings = Vec::new();
+        assert_eq!(plain_skill_name(&sk, &mut warnings), "my-skill");
+        assert_eq!(warnings.len(), 1);
+        // two skills of one name get two directories
+        let (mut vendor, mut s) = (Vec::new(), Skill::default());
+        vendor_skill(&sk, "v", "my-skill", &mut s, &mut vendor, &mut warnings);
+        vendor_skill(&sk, "v", "my-skill", &mut s, &mut vendor, &mut warnings);
+        assert_eq!(s.vendored.as_deref(), Some("v/skills/my-skill-2"));
+        assert_eq!(vendor.len(), 2);
+
+        // two user instruction files called AGENTS.md
+        let home = d.join("home");
+        for sub in ["a", "b"] {
+            std::fs::create_dir_all(home.join(sub)).unwrap();
+            std::fs::write(home.join(sub).join("AGENTS.md"), sub).unwrap();
+        }
+        let ctx = Ctx { home: home.clone(), cwd: d.join("proj"), env: BTreeMap::new(), path: vec![] };
+        let profile = HarnessProfile {
+            id: "t".into(),
+            name: "T".into(),
+            instructions: vec!["~/a/AGENTS.md".into(), "~/b/AGENTS.md".into()],
+            config_root: crate::profiles::ConfigRoot { default: "~/.t".into(), ..Default::default() },
+            ..Default::default()
+        };
+        let cap = capture(&profile, &Registry::default(), &ctx, None, &UserScope::All).unwrap();
+        let rels: Vec<&str> = cap.lock.instructions.iter().filter_map(|i| i.vendored.as_deref()).collect();
+        assert_eq!(rels, [".hlock/vendor/t/instructions/AGENTS.md", ".hlock/vendor/t/instructions/AGENTS-2.md"]);
+        assert_eq!(cap.vendor.iter().map(|f| f.bytes.clone()).collect::<Vec<_>>(), [b"a".to_vec(), b"b".to_vec()]);
+    }
+
+    #[test]
+    fn the_vendor_dir_is_replaced_whole() {
+        let d = scratch("swap");
+        let vdir = d.join(".hlock/vendor/t");
+        std::fs::create_dir_all(vdir.join("skills/old")).unwrap();
+        std::fs::write(vdir.join("skills/old/SKILL.md"), "old").unwrap();
+        let file = |rel: &str| VendorFile { rel: rel.into(), bytes: b"new".to_vec(), executable: false };
+        // a file outside the prefix fails the write, and the old directory stays
+        assert!(write_vendor_dir(&vdir, ".hlock/vendor/t/", &[file(".hlock/vendor/t/a"), file(".hlock/vendor/t/../../x")]).is_err());
+        assert!(vdir.join("skills/old/SKILL.md").is_file());
+        write_vendor_dir(&vdir, ".hlock/vendor/t/", &[file(".hlock/vendor/t/skills/new/SKILL.md")]).unwrap();
+        assert!(!vdir.join("skills/old").exists() && vdir.join("skills/new/SKILL.md").is_file());
+        // nothing is left beside it
+        assert_eq!(std::fs::read_dir(d.join(".hlock/vendor")).unwrap().count(), 1);
+        // nothing to vendor removes it
+        write_vendor_dir(&vdir, ".hlock/vendor/t/", &[]).unwrap();
+        assert!(!vdir.exists());
     }
 }

@@ -16,11 +16,12 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::Mutex;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use serde::Serialize;
 
 use crate::error::{Error, Result};
+use crate::process::{self, Limits};
 use crate::profiles::Ctx;
 
 /// The prefix every placeholder variable carries.
@@ -28,6 +29,8 @@ pub const PREFIX: &str = "HLOCK_SECRET_";
 /// The keychain service hlock stores secrets under.
 pub const SERVICE: &str = "hlock";
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(120);
+/// The most of a secret command's output read; a longer value is refused.
+const MAX_VALUE: usize = 1 << 20;
 
 /// A secret's value and where it came from.
 #[derive(Debug, Clone)]
@@ -112,32 +115,15 @@ fn run_command(cmd: &str, ctx: &Ctx) -> Option<String> {
         return hit;
     }
     let value = (|| {
-        let mut child = Command::new("sh")
-            .args(["-c", cmd])
-            .current_dir(&ctx.cwd)
-            .env_clear()
-            .envs(&ctx.env)
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::inherit())
-            .spawn()
-            .ok()?;
-        let start = Instant::now();
-        loop {
-            match child.try_wait() {
-                Ok(Some(_)) => break,
-                Ok(None) if start.elapsed() > COMMAND_TIMEOUT => {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    return None;
-                }
-                Ok(None) => std::thread::sleep(Duration::from_millis(20)),
-                Err(_) => return None,
-            }
+        let mut c = Command::new("sh");
+        c.args(["-c", cmd]).current_dir(&ctx.cwd).env_clear().envs(&ctx.env).stdin(Stdio::null());
+        let out = process::run(c, &Limits { max_bytes: MAX_VALUE, ..Limits::timeout(COMMAND_TIMEOUT) }).ok()?;
+        // what it said on stderr (a sign-in hint, an error) is for the user, as before
+        if !out.stderr.is_empty() {
+            let _ = std::io::stderr().write_all(&out.stderr);
         }
-        let out = child.wait_with_output().ok()?;
         let v = String::from_utf8_lossy(&out.stdout).trim().to_string();
-        (out.status.success() && !v.is_empty()).then_some(v)
+        (out.success && !out.truncated && !v.is_empty()).then_some(v)
     })();
     if let Ok(mut c) = COMMAND_CACHE.lock() {
         c.insert(cmd.to_string(), value.clone());
@@ -227,8 +213,9 @@ pub fn keychain_get(name: &str, ctx: &Ctx) -> Option<String> {
 
 /// Store a secret in the keychain. The value goes over stdin, never on a command line.
 pub fn keychain_set(name: &str, value: &str, ctx: &Ctx) -> Result<String> {
-    let (kind, bin) = keychain(ctx).ok_or_else(no_keychain)?;
     let name = full_name(name);
+    check_name(&name)?;
+    let (kind, bin) = keychain(ctx).ok_or_else(no_keychain)?;
     if value.is_empty() || value.contains(['\n', '\r']) {
         return Err(Error::Manifest("a secret must be one non-empty line".into()));
     }
@@ -236,7 +223,8 @@ pub fn keychain_set(name: &str, value: &str, ctx: &Ctx) -> Result<String> {
         "security" => {
             // `security -i` reads commands from stdin; quote the value for its parser
             let quoted = value.replace('\\', "\\\\").replace('"', "\\\"");
-            let line = format!("add-generic-password -U -s {SERVICE} -a {name} -l \"hlock {name}\" -w \"{quoted}\"\n");
+            // the name is checked to be a plain variable name, but quote it anyway
+            let line = format!("add-generic-password -U -s {SERVICE} -a \"{name}\" -l \"hlock {name}\" -w \"{quoted}\"\n");
             keychain_run(&bin, &["-i"], Some(&line), ctx)
         }
         _ => keychain_run(&bin, &["store", "--label", &format!("hlock {name}"), "service", SERVICE, "account", &name], Some(value), ctx),
@@ -244,6 +232,17 @@ pub fn keychain_set(name: &str, value: &str, ctx: &Ctx) -> Result<String> {
     match ok {
         Some((true, _)) if keychain_get(&name, ctx).as_deref() == Some(value) => Ok(name),
         _ => Err(Error::Profile(format!("couldn't store {name} with {kind}"))),
+    }
+}
+
+/// A secret's full name must be a variable name (`HLOCK_SECRET_` and letters, digits,
+/// `_`): it goes into an environment, and into the command line `security -i` parses.
+fn check_name(name: &str) -> Result<()> {
+    let rest = name.strip_prefix(PREFIX).unwrap_or_default();
+    if !rest.is_empty() && rest.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+        Ok(())
+    } else {
+        Err(Error::Manifest(format!("{name:?} isn't a valid secret name (letters, digits and _ only)")))
     }
 }
 
@@ -331,5 +330,30 @@ mod tests {
         std::fs::write(dir.join(".config/hlock/secrets.toml"), "[secrets]\nA = \"sk-literal\"\n").unwrap();
         assert!(references(&c).unwrap_err().to_string().contains("hlock secret set A"));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_command_printing_more_than_a_pipe_holds_does_not_hang() {
+        let dir = std::env::temp_dir().join(format!("hlock-secrets-big-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let c = ctx(&[], &dir);
+        let t = std::time::Instant::now();
+        // 200 KB on stdout (more than a pipe buffer) used to deadlock the polling loop
+        let v = run_command("head -c 200000 /dev/zero | tr '\\0' x", &c).unwrap();
+        assert_eq!(v.len(), 200_000);
+        assert!(t.elapsed() < Duration::from_secs(10));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn keychain_names_are_plain() {
+        let c = ctx(&[], Path::new("/nonexistent"));
+        for bad in ["X\" -w evil", "A B", "A;B", ""] {
+            assert!(keychain_set(bad, "v", &c).unwrap_err().to_string().contains("isn't a valid secret name"), "{bad}");
+        }
+        assert!(check_name("HLOCK_SECRET_GH_TOKEN").is_ok());
+        // a fine name gets as far as finding no keychain (HLOCK_KEYCHAIN=0 here)
+        assert!(keychain_set("GH_TOKEN", "v", &c).unwrap_err().to_string().contains("no keychain"));
     }
 }

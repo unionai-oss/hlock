@@ -4,19 +4,21 @@
 //! It talks to Anthropic's Messages API, or to any OpenAI-compatible chat-completions
 //! endpoint (OpenAI, OpenRouter, Gemini's OpenAI endpoint, and local runtimes such as
 //! Ollama, LM Studio, llama.cpp and vLLM). Its tools read, search and edit files in the
-//! project and run commands. In an interactive run every command that isn't allowed is
-//! put to the user first; a headless run executes only allowlisted commands.
+//! project and run commands. In an interactive run every command that isn't allowed, and
+//! every file outside the project (or one of hlock's own files it would write), is put to
+//! the user first; a headless run executes only allowlisted commands and stays in the project.
 
 use std::collections::BTreeMap;
-use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use serde::Serialize;
 use serde_json::{json, Value};
 
 use crate::error::{Error, Result};
+use crate::fsutil;
+use crate::process::{self, Limits};
 
 /// Commands a headless run may execute without asking: hlock's safe commands and read-only git.
 pub const DEFAULT_ALLOW: &[&str] = &["@hlock", "git log", "git show", "git diff", "git status"];
@@ -25,22 +27,32 @@ pub const DEFAULT_ALLOW: &[&str] = &["@hlock", "git log", "git show", "git diff"
 /// read and check, or write where hlock writes by default (the project, `.hlock/`), and
 /// that don't run code from the project (test graders, code harnesses) or install
 /// software. A `!` entry refuses a command that starts like it and has all of its `-` flags.
+/// A path argument that's absolute or climbs out with `..` isn't covered either.
 pub const HLOCK_SAFE: &[&str] = &[
     "hlock check", "hlock show", "hlock tree", "hlock harness list", "hlock harness show",
     "hlock runtime list", "hlock backend status",
-    "hlock evals init", "!hlock evals init --skill-dir", "hlock evals templates",
+    "hlock evals init", "!hlock evals init --skill-dir", "!hlock evals init --force", "hlock evals templates",
     "hlock evals check", "!hlock evals check --run",
     "hlock meta check", "hlock meta show", "hlock meta jobs",
-    // a custom job's check runs a command from harness.meta.toml, but hlock runs it after the job anyway
-    "hlock meta verify",
+    // only the built-in jobs' checks: a custom job's runs a shell command from
+    // harness.meta.toml, a file the agent can edit (hlock runs it after the job anyway)
+    "hlock meta verify install", "hlock meta verify bootstrap-evals", "hlock meta verify update",
     // the install job's last step, without package installs, model downloads, builds, or the user's own config
     "hlock sync", "!hlock sync --install", "!hlock sync --pull", "!hlock sync --build", "!hlock sync --in-place",
-    "!hlock sync --prefix",
+    "!hlock sync --prefix", "!hlock sync --skill-dir",
 ];
+
+/// git options that write files, run a program, or point git at another repository or
+/// config. An allowlisted git command with any of them isn't allowlisted.
+const GIT_UNSAFE: &[&str] = &["--output", "--ext-diff", "--textconv", "--no-index", "-c", "--config-env", "--exec-path", "--git-dir", "--work-tree"];
 pub const DEFAULT_MAX_STEPS: u32 = 60;
 pub const DEFAULT_TIMEOUT_SECONDS: u64 = 300;
 /// The most a tool result sends back to the model, in bytes.
 const MAX_RESULT: usize = 24_000;
+/// The most of a file `read_file` reads.
+const MAX_READ: usize = 8 << 20;
+/// `search` skips files bigger than this (model weights, archives, databases).
+const MAX_SEARCH_FILE: u64 = 2 << 20;
 
 /// Where each API provider lives, and the variable its key is read from.
 pub const PROVIDERS: &[(&str, &str, &str)] = &[
@@ -82,7 +94,8 @@ fn ask_decider(cfg: &AgentConfig, state: &Value, question: crate::decide::Questi
     let var = |k: &str| std::env::var(k).ok();
     let ep = cfg.decider.as_ref()?.endpoint(&var).ok()?;
     let d = crate::decide::decide(&ep, state, &[question]).ok()?;
-    Some((d.answers.first()?.probability(), format!("{}:{}", ep.provider, d.model)))
+    let a = d.answers.first().filter(|a| !a.refused)?;
+    Some((a.probability(), format!("{}:{}", ep.provider, d.model)))
 }
 
 /// The default base URL for an API provider.
@@ -135,7 +148,7 @@ enum Msg {
 fn tools() -> Vec<(&'static str, &'static str, Value)> {
     let s = |props: Value, req: &[&str]| json!({"type": "object", "properties": props, "required": req});
     vec![
-        ("list_dir", "List a directory's entries (directories end with /).", s(json!({"path": {"type": "string", "description": "Directory, relative to the project (default: the project)"}}), &[])),
+        ("list_dir", "List a directory's entries (directories end with /). Outside the project, the user must approve.", s(json!({"path": {"type": "string", "description": "Directory, relative to the project (default: the project)"}}), &[])),
         ("read_file", "Read a text file, optionally a range of lines.", s(json!({
             "path": {"type": "string"},
             "offset": {"type": "integer", "description": "First line to read, from 1"},
@@ -145,7 +158,7 @@ fn tools() -> Vec<(&'static str, &'static str, Value)> {
             "pattern": {"type": "string", "description": "Text to look for (case-sensitive)"},
             "path": {"type": "string", "description": "Directory or file to search (default: the project)"}
         }), &["pattern"])),
-        ("write_file", "Create or overwrite a file inside the project.", s(json!({"path": {"type": "string"}, "content": {"type": "string"}}), &["path", "content"])),
+        ("write_file", "Create or overwrite a file inside the project. Files outside it, hlock's own files (harness.toml, harness.meta.toml, harness*.lock) and anything under .git/ or .hlock/ need the user's approval.", s(json!({"path": {"type": "string"}, "content": {"type": "string"}}), &["path", "content"])),
         ("edit_file", "Replace one exact, unique occurrence of a string in a file inside the project.", s(json!({
             "path": {"type": "string"}, "old": {"type": "string"}, "new": {"type": "string"}
         }), &["path", "old", "new"])),
@@ -161,9 +174,9 @@ fn system_prompt(cfg: &AgentConfig) -> String {
          {} When you're finished, reply with a short summary of what you did and what's left, and call no tools.",
         cfg.project.display(),
         if cfg.interactive {
-            "Commands that aren't on the allowlist are shown to the user, who approves or refuses each one."
+            "Commands that aren't on the allowlist, files outside the project, and writes to hlock's own files or under .git/ or .hlock/ are shown to the user, who approves or refuses each one."
         } else {
-            "This run is unattended: only allowlisted commands run, and others are refused; when you need one, say which and why in your summary."
+            "This run is unattended: only allowlisted commands run, and others are refused; files outside the project, and writes to hlock's own files or under .git/ or .hlock/, are refused too. When you need one, say which and why in your summary."
         }
     )
 }
@@ -359,23 +372,81 @@ fn resolve(cfg: &AgentConfig, p: &str) -> PathBuf {
     }
 }
 
-/// Lexically normalized, so `project/../x` isn't mistaken for a path inside the project.
-fn normalize(p: &Path) -> PathBuf {
-    let mut out = PathBuf::new();
-    for c in p.components() {
-        match c {
-            std::path::Component::ParentDir => {
-                out.pop();
-            }
-            std::path::Component::CurDir => {}
-            other => out.push(other),
-        }
-    }
-    out
+/// Whether `p` is in the project, after resolving `..` and symlinks (a symlink in the
+/// project that points out of it is outside).
+fn inside_project(cfg: &AgentConfig, p: &Path) -> bool {
+    fsutil::within(&cfg.project, p)
 }
 
-fn inside_project(cfg: &AgentConfig, p: &Path) -> bool {
-    normalize(p).starts_with(normalize(&cfg.project))
+/// Why a write to `p` (in the project) needs the user's approval, if it does: hlock's
+/// own files say what commands run and what's installed, and `.git/` and `.hlock/` hold
+/// hooks, config and run records.
+fn protected(cfg: &AgentConfig, p: &Path) -> Option<&'static str> {
+    let real = fsutil::resolve(p);
+    let rel = real.strip_prefix(fsutil::resolve(&cfg.project)).ok()?;
+    if rel.components().any(|c| c.as_os_str() == ".git" || c.as_os_str() == ".hlock") {
+        return Some("under .git/ or .hlock/");
+    }
+    let name = rel.file_name()?.to_string_lossy();
+    let own = matches!(name.as_ref(), "harness.toml" | "harness.meta.toml" | "harness.lock") || (name.starts_with("harness.") && name.ends_with(".lock"));
+    own.then_some("one of hlock's own files")
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum Access {
+    Read,
+    Write,
+}
+
+/// What the user approved during a run: command prefixes, and paths.
+struct Grants {
+    allow: Vec<String>,
+    paths: Vec<(Access, PathBuf)>,
+}
+
+/// Ask the user to approve reading or writing `path` (`why` says what's unusual about
+/// it). A headless run refuses. "Always" covers the directory for reads, the one file
+/// for writes.
+fn approve(cfg: &AgentConfig, grants: &mut Grants, access: Access, path: &Path, why: &str, say: &mut Say, ask: &mut Ask) -> std::result::Result<(), String> {
+    let real = fsutil::resolve(path);
+    if grants.paths.iter().any(|(a, p)| *a == access && (real == *p || (access == Access::Read && real.starts_with(p)))) {
+        return Ok(());
+    }
+    let verb = if access == Access::Read { "read" } else { "write" };
+    let what = format!("{verb} {} ({why})", path.display());
+    if !cfg.interactive {
+        say("denied", &what);
+        return Err(format!("refused: {what}, and this run is unattended. Do without it, or say in your summary that the user should do it"));
+    }
+    match ask(&what).trim().to_ascii_lowercase().as_str() {
+        "y" | "yes" => Ok(()),
+        "a" | "always" => {
+            let scope = if access == Access::Read && !real.is_dir() { real.parent().map(Path::to_path_buf).unwrap_or(real) } else { real };
+            grants.paths.push((access, scope));
+            Ok(())
+        }
+        _ => {
+            say("denied", &what);
+            Err(format!("the user refused to let you {verb} {}; don't try again, and ask what they'd prefer", path.display()))
+        }
+    }
+}
+
+fn check_read(cfg: &AgentConfig, grants: &mut Grants, path: &Path, say: &mut Say, ask: &mut Ask) -> std::result::Result<(), String> {
+    if inside_project(cfg, path) {
+        return Ok(());
+    }
+    approve(cfg, grants, Access::Read, path, "outside the project", say, ask)
+}
+
+fn check_write(cfg: &AgentConfig, grants: &mut Grants, path: &Path, say: &mut Say, ask: &mut Ask) -> std::result::Result<(), String> {
+    if !inside_project(cfg, path) {
+        return approve(cfg, grants, Access::Write, path, "outside the project", say, ask);
+    }
+    match protected(cfg, path) {
+        Some(why) => approve(cfg, grants, Access::Write, path, why, say, ask),
+        None => Ok(()),
+    }
 }
 
 fn truncate(s: String) -> String {
@@ -391,21 +462,34 @@ fn truncate(s: String) -> String {
 
 const SKIP_DIRS: &[&str] = &[".git", "node_modules", "target", ".venv", "__pycache__", ".hlock"];
 
+/// Search `dir` (a file or a directory, already resolved) for `pattern`. Symlinks are
+/// skipped, never followed, and so are files over [`MAX_SEARCH_FILE`] and binary files
+/// (a NUL in the first 8 KB).
 fn search(dir: &Path, pattern: &str, out: &mut Vec<String>, base: &Path) {
     if out.len() >= 200 {
         return;
     }
-    if dir.is_file() {
-        if let Ok(text) = std::fs::read_to_string(dir) {
-            for (i, line) in text.lines().enumerate().filter(|(_, l)| l.contains(pattern)) {
-                let rel = dir.strip_prefix(base).unwrap_or(dir).display();
-                out.push(format!("{rel}:{}: {}", i + 1, line.trim_end().chars().take(200).collect::<String>()));
-                if out.len() >= 200 {
-                    return;
-                }
+    let Ok(meta) = std::fs::symlink_metadata(dir) else { return };
+    if meta.is_file() {
+        if meta.len() > MAX_SEARCH_FILE {
+            return;
+        }
+        let Ok(bytes) = fsutil::read_regular(dir, MAX_SEARCH_FILE as usize) else { return };
+        if bytes[..bytes.len().min(8192)].contains(&0) {
+            return;
+        }
+        let text = String::from_utf8_lossy(&bytes);
+        for (i, line) in text.lines().enumerate().filter(|(_, l)| l.contains(pattern)) {
+            let rel = dir.strip_prefix(base).unwrap_or(dir).display();
+            out.push(format!("{rel}:{}: {}", i + 1, line.trim_end().chars().take(200).collect::<String>()));
+            if out.len() >= 200 {
+                return;
             }
         }
         return;
+    }
+    if !meta.is_dir() {
+        return; // symlinks, FIFOs, sockets, devices
     }
     let Ok(rd) = std::fs::read_dir(dir) else { return };
     let mut entries: Vec<_> = rd.flatten().collect();
@@ -456,13 +540,21 @@ pub fn command_words(cmd: &str) -> Option<Vec<String>> {
 }
 
 /// Whether `cmd` is on the allowlist: plain words (no shell syntax) starting with an
-/// allowed prefix's words. A program may be named by path (`/usr/bin/git log`). `@hlock`
-/// stands for [`HLOCK_SAFE`], and an entry starting with `!` refuses a command that
-/// starts with its words and has all of its flags (`!hlock sync --install`).
+/// allowed prefix's words. The program must be a bare name, found on `PATH`: one named by
+/// path (`./git log`, `/usr/bin/git log`) could be anything, so it's never allowlisted
+/// (the user can still approve it). `@hlock` stands for [`HLOCK_SAFE`], and an entry
+/// starting with `!` refuses a command that starts with its words and has all of its
+/// flags (`!hlock sync --install`). git with an option in [`GIT_UNSAFE`] isn't allowlisted.
 pub fn allowed(cmd: &str, allow: &[String]) -> bool {
-    let Some(mut words) = command_words(cmd) else { return false };
+    let Some(words) = command_words(cmd) else { return false };
     let Some(first) = words.first() else { return false };
-    words[0] = Path::new(first).file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_default();
+    if first.is_empty() || first.contains(['/', '\\']) {
+        return false;
+    }
+    let has = |w: &str, f: &str| w == f || w.starts_with(&format!("{f}="));
+    if first == "git" && words[1..].iter().any(|w| GIT_UNSAFE.iter().any(|f| has(w, f))) {
+        return false;
+    }
     let starts = |want: &[&str]| !want.is_empty() && want.len() <= words.len() && want.iter().zip(&words).all(|(w, x)| w == x);
     let denies = |entry: &str| {
         let want: Vec<&str> = entry.split_whitespace().collect();
@@ -473,18 +565,25 @@ pub fn allowed(cmd: &str, allow: &[String]) -> bool {
         let (deny, ok): (Vec<&str>, Vec<&str>) = entries.partition(|e| e.starts_with('!'));
         !deny.iter().any(|d| denies(&d[1..])) && ok.iter().any(|a| starts(&a.split_whitespace().collect::<Vec<_>>()))
     };
+    // `@hlock` covers paths in the project: none absolute, under `~`, or climbing out with `..`
+    let leaves_project = words[1..].iter().any(|w| {
+        let v = if w.starts_with("--") { w.split_once('=').map_or("", |(_, v)| v) } else { w.as_str() };
+        let p = Path::new(v);
+        p.is_absolute() || v.starts_with(['~', '/', '\\']) || p.components().any(|c| c == std::path::Component::ParentDir)
+    });
     let (deny, ok): (Vec<&String>, Vec<&String>) = allow.iter().partition(|e| e.starts_with('!'));
     !deny.iter().any(|d| denies(&d[1..]))
         && ok.iter().any(|a| match a.as_str() {
-            "@hlock" => allows(&mut HLOCK_SAFE.iter().copied()),
+            "@hlock" => !leaves_project && allows(&mut HLOCK_SAFE.iter().copied()),
             a => allows(&mut std::iter::once(a)),
         })
 }
 
-/// The prefix "always" approves: the program, plus its subcommand when it has one.
+/// The prefix "always" approves: the program, plus its subcommand when it has one. None
+/// for a program named by path, which no allowlist entry matches.
 fn always_prefix(cmd: &str) -> Option<String> {
     let words = command_words(cmd)?;
-    let prog = Path::new(words.first()?).file_name()?.to_string_lossy().into_owned();
+    let prog = words.first().filter(|w| !w.is_empty() && !w.contains(['/', '\\']))?.clone();
     Some(match words.get(1) {
         Some(sub) if !sub.starts_with('-') && !sub.contains('/') && !sub.contains('.') => format!("{prog} {sub}"),
         _ => prog,
@@ -501,42 +600,14 @@ fn run_command(cfg: &AgentConfig, cmd: &str) -> String {
         c.args(["-c", cmd]);
         c
     };
-    c.current_dir(&cfg.project).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
-    let mut child = match c.spawn() {
-        Ok(ch) => ch,
+    c.current_dir(&cfg.project).stdin(Stdio::null());
+    // what it leaves running (`server &`) is stopped with it
+    let res = match process::run(c, &Limits::timeout(Duration::from_secs(cfg.timeout_seconds.max(1)))) {
+        Ok(r) => r,
         Err(e) => return format!("cannot run it: {e}"),
     };
-    let (mut so, mut se) = (child.stdout.take().unwrap(), child.stderr.take().unwrap());
-    let t_out = std::thread::spawn(move || {
-        let mut b = Vec::new();
-        let _ = so.read_to_end(&mut b);
-        b
-    });
-    let t_err = std::thread::spawn(move || {
-        let mut b = Vec::new();
-        let _ = se.read_to_end(&mut b);
-        b
-    });
-    let start = Instant::now();
-    let limit = Duration::from_secs(cfg.timeout_seconds.max(1));
-    let status = loop {
-        match child.try_wait() {
-            Ok(Some(s)) => break Some(s),
-            Ok(None) if start.elapsed() > limit => {
-                let _ = child.kill();
-                let _ = child.wait();
-                break None;
-            }
-            Ok(None) => std::thread::sleep(Duration::from_millis(20)),
-            Err(_) => break None,
-        }
-    };
-    let out = String::from_utf8_lossy(&t_out.join().unwrap_or_default()).into_owned();
-    let err = String::from_utf8_lossy(&t_err.join().unwrap_or_default()).into_owned();
-    let head = match status {
-        Some(s) => format!("exit code {}", s.code().unwrap_or(-1)),
-        None => format!("timed out after {}s and was stopped", cfg.timeout_seconds),
-    };
+    let (out, err) = (res.stdout_text(), res.stderr_text());
+    let head = if res.timed_out { format!("timed out after {}s and was stopped", cfg.timeout_seconds) } else { format!("exit code {}", res.code.unwrap_or(-1)) };
     truncate(format!("{head}\n{out}{}{err}", if err.is_empty() || out.ends_with('\n') || out.is_empty() { "" } else { "\n" }))
 }
 
@@ -545,12 +616,13 @@ fn arg<'a>(args: &'a Value, key: &str) -> Option<&'a str> {
 }
 
 /// Run one tool call. Returns the result for the model and a one-line summary.
-fn call_tool(cfg: &AgentConfig, allow: &mut Vec<String>, call: &Call, say: &mut Say, ask: &mut Ask) -> (String, String) {
+fn call_tool(cfg: &AgentConfig, grants: &mut Grants, call: &Call, say: &mut Say, ask: &mut Ask) -> (String, String) {
     let a = &call.args;
     let need = |k: &str| arg(a, k).ok_or_else(|| format!("missing `{k}`"));
     let result: std::result::Result<(String, String), String> = (|| match call.name.as_str() {
         "list_dir" => {
             let dir = resolve(cfg, arg(a, "path").unwrap_or("."));
+            check_read(cfg, grants, &dir, say, ask)?;
             let mut names: Vec<String> = std::fs::read_dir(&dir)
                 .map_err(|e| format!("cannot list {}: {e}", dir.display()))?
                 .flatten()
@@ -563,7 +635,10 @@ fn call_tool(cfg: &AgentConfig, allow: &mut Vec<String>, call: &Call, say: &mut 
         }
         "read_file" => {
             let path = resolve(cfg, need("path")?);
-            let text = std::fs::read_to_string(&path).map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+            check_read(cfg, grants, &path, say, ask)?;
+            // through symlinks (it was checked where they lead), but only a regular file, and only its start
+            let bytes = fsutil::read_regular(&fsutil::resolve(&path), MAX_READ).map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+            let text = String::from_utf8_lossy(&bytes);
             let offset = a.get("offset").and_then(Value::as_u64).unwrap_or(1).max(1) as usize;
             // models often send 0 for "no limit"
             let limit = a.get("limit").and_then(Value::as_u64).filter(|n| *n > 0).unwrap_or(2000) as usize;
@@ -573,16 +648,15 @@ fn call_tool(cfg: &AgentConfig, allow: &mut Vec<String>, call: &Call, say: &mut 
         "search" => {
             let pattern = need("pattern")?;
             let base = resolve(cfg, arg(a, "path").unwrap_or("."));
+            check_read(cfg, grants, &base, say, ask)?;
             let mut hits = Vec::new();
-            search(&base, pattern, &mut hits, &cfg.project);
+            search(&fsutil::resolve(&base), pattern, &mut hits, &fsutil::resolve(&cfg.project));
             let n = hits.len();
             Ok((if hits.is_empty() { "no matches".into() } else { hits.join("\n") }, format!("{n} matches")))
         }
         "write_file" | "edit_file" => {
             let path = resolve(cfg, need("path")?);
-            if !inside_project(cfg, &path) {
-                return Err(format!("{} is outside the project; write files there with `run`, which the user approves", path.display()));
-            }
+            check_write(cfg, grants, &path, say, ask)?;
             let body = if call.name == "write_file" {
                 need("content")?.to_string()
             } else {
@@ -603,12 +677,12 @@ fn call_tool(cfg: &AgentConfig, allow: &mut Vec<String>, call: &Call, say: &mut 
         }
         "run" => {
             let cmd = need("command")?.trim().to_string();
-            if !allowed(&cmd, allow) {
+            if !allowed(&cmd, &grants.allow) {
                 if !cfg.interactive {
                     say("denied", &cmd);
                     return Err(format!(
                         "refused: `{cmd}` isn't on the allowlist ({}), and this run is unattended. Do without it, or say in your summary that the user should run it",
-                        allow.join(", ")
+                        grants.allow.join(", ")
                     ));
                 }
                 let risk = crate::decide::Question::noul(
@@ -622,7 +696,7 @@ fn call_tool(cfg: &AgentConfig, allow: &mut Vec<String>, call: &Call, say: &mut 
                     "y" | "yes" => {}
                     "a" | "always" => {
                         if let Some(p) = always_prefix(&cmd) {
-                            allow.push(p);
+                            grants.allow.push(p);
                         }
                     }
                     _ => {
@@ -659,8 +733,10 @@ fn describe(call: &Call) -> String {
 
 /// Run the agent on `prompt` until the model stops calling tools, or `max_steps`.
 pub fn run(cfg: &AgentConfig, prompt: &str, say: &mut Say, ask: &mut Ask) -> Outcome {
+    // absolute, so "inside the project" means something for a relative one
+    let cfg = &AgentConfig { project: fsutil::absolute(&cfg.project), ..cfg.clone() };
     let mut history = vec![Msg::User(prompt.to_string())];
-    let mut allow = cfg.allow.clone();
+    let mut grants = Grants { allow: cfg.allow.clone(), paths: Vec::new() };
     let mut out = Outcome { status: "max-steps".into(), ..Default::default() };
     let mut continued = 0;
     while out.steps < cfg.max_steps.max(1) {
@@ -706,8 +782,11 @@ pub fn run(cfg: &AgentConfig, prompt: &str, say: &mut Say, ask: &mut Ask) -> Out
                 out.status = "stopped".into();
                 return out;
             }
-            let (full, summary) = call_tool(cfg, &mut allow, c, say, ask);
-            say("result", &summary);
+            let (full, summary) = call_tool(cfg, &mut grants, c, say, ask);
+            if !say("result", &summary) {
+                out.status = "stopped".into();
+                return out;
+            }
             results.push((c.id.clone(), full));
         }
         history.push(Msg::Assistant { text: reply.text, calls: reply.calls });
@@ -741,7 +820,7 @@ pub fn config_from_lock(lock: &crate::lockfile::Lockfile, project: &Path, intera
         timeout_seconds: lock.policy.tool_timeout_seconds.unwrap_or(DEFAULT_TIMEOUT_SECONDS),
         allow: if lock.policy.tool_allowlist.is_empty() { DEFAULT_ALLOW.iter().map(|s| s.to_string()).collect() } else { lock.policy.tool_allowlist.clone() },
         interactive,
-        project: project.to_path_buf(),
+        project: fsutil::absolute(project),
         decider: None,
     })
 }
@@ -773,7 +852,6 @@ mod tests {
         assert!(!allowed("npm install --global=true x", &allow(&["npm install", "!npm install --global"])));
         assert!(allowed("npm install x", &allow(&["npm install", "!npm install --global"])));
         assert!(allowed("git log -5 --oneline", &a));
-        assert!(allowed("/usr/bin/git show HEAD", &a));
         assert!(!allowed("git push", &a));
         assert!(!allowed("git log; rm -rf /", &a));
         assert!(!allowed("hlock sync > out.txt", &a));
@@ -784,6 +862,152 @@ mod tests {
         assert_eq!(command_words("git commit -m 'a b'").unwrap(), ["git", "commit", "-m", "a b"]);
         assert_eq!(always_prefix("npm install -g x").as_deref(), Some("npm install"));
         assert_eq!(always_prefix("ls -la").as_deref(), Some("ls"));
+        assert_eq!(always_prefix("./hlock check"), None);
+    }
+
+    #[test]
+    fn programs_named_by_path_are_never_allowlisted() {
+        let a = allow(DEFAULT_ALLOW);
+        for cmd in ["./git log", "/usr/bin/git show HEAD", "./hlock check", "bin/hlock show", ".\\hlock check"] {
+            assert!(!allowed(cmd, &a), "{cmd}");
+        }
+        assert!(!allowed("./build.sh", &allow(&["build.sh"])));
+    }
+
+    #[test]
+    fn read_only_git_stays_read_only() {
+        let a = allow(DEFAULT_ALLOW);
+        for cmd in ["git log --output=/tmp/x", "git log --output /tmp/x", "git diff --ext-diff", "git show --textconv HEAD:a",
+                    "git diff --no-index /etc/passwd x", "git log -c", "git diff --git-dir=/x", "git status --work-tree=/x"] {
+            assert!(!allowed(cmd, &a), "{cmd}");
+        }
+        assert!(allowed("git diff --stat", &a) && allowed("git show HEAD:README.md", &a));
+        // even an explicit "git" entry doesn't cover them unattended
+        assert!(!allowed("git log --output=x", &allow(&["git"])));
+    }
+
+    #[test]
+    fn hlock_safe_stays_in_the_project() {
+        let a = allow(DEFAULT_ALLOW);
+        // a custom job's check runs a shell command from harness.meta.toml, which the agent can write
+        assert!(!allowed("hlock meta verify notes", &a));
+        for job in ["install", "update", "bootstrap-evals --out evals"] {
+            assert!(allowed(&format!("hlock meta verify {job}"), &a), "{job}");
+        }
+        for cmd in ["hlock sync --skill-dir x", "hlock evals init --force", "hlock evals init evals --force",
+                    "hlock evals init /tmp/pack", "hlock evals init ../pack", "hlock evals init ~/pack",
+                    "hlock meta verify bootstrap-evals --out=/tmp/x", "hlock evals check a/../../b"] {
+            assert!(!allowed(cmd, &a), "{cmd}");
+        }
+        assert!(allowed("hlock evals init ./evals --template qa", &a));
+        // plain "hlock" still allows everything
+        assert!(allowed("hlock evals init /tmp/pack", &allow(&["hlock"])));
+    }
+
+    fn tmp(tag: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("hlock-agent-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        fsutil::resolve(&d)
+    }
+
+    fn call(name: &str, args: Value) -> Call {
+        Call { id: "1".into(), name: name.into(), args }
+    }
+
+    /// Run one tool call; `answer` is what the user says when asked. Returns the result
+    /// and what was asked.
+    fn tool(cfg: &AgentConfig, c: Call, answer: &str) -> (String, Vec<String>) {
+        let mut grants = Grants { allow: cfg.allow.clone(), paths: vec![] };
+        let mut asked = Vec::new();
+        let (full, _) = call_tool(cfg, &mut grants, &c, &mut |_, _| true, &mut |q| {
+            asked.push(q.to_string());
+            answer.to_string()
+        });
+        (full, asked)
+    }
+
+    #[test]
+    fn hlocks_own_files_need_approval() {
+        let d = tmp("own");
+        let headless = AgentConfig { project: d.clone(), ..Default::default() };
+        for p in ["harness.lock", "harness.meta.toml", "harness.toml", "harness.dev.lock", ".git/hooks/pre-commit", ".hlock/x", "sub/harness.lock"] {
+            let (out, _) = tool(&headless, call("write_file", json!({"path": p, "content": "x"})), "y");
+            assert!(out.starts_with("error: refused"), "{p}: {out}");
+            assert!(!d.join(p).exists(), "{p}");
+        }
+        let (out, _) = tool(&headless, call("write_file", json!({"path": "notes/a.md", "content": "x"})), "y");
+        assert!(out.starts_with("wrote"), "{out}");
+        // interactive: the user is asked, and decides
+        let interactive = AgentConfig { interactive: true, ..headless.clone() };
+        let (out, asked) = tool(&interactive, call("write_file", json!({"path": "harness.lock", "content": "x"})), "n");
+        assert!(out.contains("refused") && asked.len() == 1 && asked[0].starts_with("write "), "{out} {asked:?}");
+        let (out, _) = tool(&interactive, call("write_file", json!({"path": "harness.lock", "content": "x"})), "y");
+        assert!(out.starts_with("wrote"), "{out}");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn reads_outside_the_project_need_approval() {
+        let d = tmp("reads");
+        std::fs::create_dir_all(d.join("proj")).unwrap();
+        std::fs::write(d.join("secret.txt"), "s3cret").unwrap();
+        std::fs::write(d.join("proj/a.txt"), "one\ntwo\nthree\n").unwrap();
+        let cfg = AgentConfig { project: d.join("proj"), ..Default::default() };
+        for c in [call("read_file", json!({"path": "../secret.txt"})), call("list_dir", json!({"path": ".."})), call("search", json!({"pattern": "s3", "path": ".."}))] {
+            let (out, _) = tool(&cfg, c, "y");
+            assert!(out.starts_with("error: refused") && !out.contains("s3cret"), "{out}");
+        }
+        #[cfg(unix)]
+        {
+            // a symlink in the project that leads out of it is outside
+            std::os::unix::fs::symlink(d.join("secret.txt"), d.join("proj/link")).unwrap();
+            assert!(tool(&cfg, call("read_file", json!({"path": "link"})), "y").0.starts_with("error: refused"));
+        }
+        let (out, _) = tool(&cfg, call("read_file", json!({"path": "a.txt", "offset": 2, "limit": 1})), "y");
+        assert_eq!(out, "two");
+        let interactive = AgentConfig { interactive: true, ..cfg.clone() };
+        let (out, asked) = tool(&interactive, call("read_file", json!({"path": "../secret.txt"})), "y");
+        assert_eq!((out.as_str(), asked.len()), ("s3cret", 1));
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn search_skips_big_and_binary_files_and_symlinked_dirs() {
+        let d = tmp("search");
+        std::fs::create_dir_all(d.join("src")).unwrap();
+        std::fs::write(d.join("src/a.txt"), "needle\n").unwrap();
+        std::fs::write(d.join("big.bin"), format!("needle\n{}", "x".repeat(MAX_SEARCH_FILE as usize))).unwrap();
+        std::fs::write(d.join("nul.bin"), b"needle\n\0").unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&d, d.join("src/loop")).unwrap();
+        let mut hits = Vec::new();
+        search(&d, "needle", &mut hits, &d);
+        assert_eq!(hits, ["src/a.txt:1: needle"]);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn a_relative_project_is_made_absolute() {
+        let cfg = AgentConfig { project: PathBuf::from("."), ..Default::default() };
+        assert!(!inside_project(&cfg, Path::new("/etc/hosts")));
+        let lock = crate::lockfile::Lockfile {
+            llm: vec![crate::lockfile::LLM { role: "default".into(), provider: "local".into(), model: "m".into(), endpoint: Some("http://x".into()), runtime: Some("ollama".into()), ..Default::default() }],
+            ..Default::default()
+        };
+        let cfg = config_from_lock(&lock, Path::new("."), false, &BTreeMap::new()).unwrap();
+        assert!(cfg.project.is_absolute());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn commands_are_bounded() {
+        let d = tmp("cmd");
+        let cfg = AgentConfig { project: d.clone(), timeout_seconds: 1, ..Default::default() };
+        let out = run_command(&cfg, "head -c 300000 /dev/zero | tr '\\0' x");
+        assert!(out.starts_with("exit code 0") && out.contains("more bytes not shown"), "{}", out.chars().take(80).collect::<String>());
+        // the timeout is tested in tests/bounded.rs, away from process::stop_all's test
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     #[test]

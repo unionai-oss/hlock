@@ -39,7 +39,8 @@ HLOCK_SECRET_GITHUB_GITHUB_TOKEN  keychain  mcp github GITHUB_TOKEN
 secrets file ~/.config/hlock/secrets.toml  · keychain security
 ```
 
-The name works with or without the `HLOCK_SECRET_` prefix. The value is read without
+The name works with or without the `HLOCK_SECRET_` prefix, and is letters, digits and
+`_`. The value is read without
 echo, or from stdin when stdin isn't a terminal, so you can pipe it from a password
 manager:
 
@@ -79,8 +80,9 @@ HLOCK_SECRET_GITHUB_GITHUB_TOKEN  secrets file (command)  mcp github GITHUB_TOKE
 
 The file holds references, not values, so you can keep it in your dotfiles. hlock rejects
 a literal value there and points you to `hlock secret set`. A command runs at most once
-per hlock command, and its prompts (such as Touch ID for `op`) and errors show in your
-terminal. `secret list` doesn't run commands. `sync` does, even with `--plan`, because it
+per hlock command, is stopped after 2 minutes, and what it prints on stderr shows in your
+terminal when it finishes (a Touch ID prompt for `op` appears as usual). `secret list`
+doesn't run commands. `sync` does, even with `--plan`, because it
 compares the config it would write with what's already there.
 
 ## Where values go

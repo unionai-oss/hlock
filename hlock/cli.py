@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shlex
 import shutil
 import subprocess
@@ -31,8 +32,14 @@ from rich.tree import Tree
 
 from hlock import (
     LOCK_VERSION,
+    EvalPackError,
     Lockfile,
+    LockfileError,
     Manifest,
+    ManifestError,
+    ProfileError,
+    PullError,
+    WorkerError,
     __version__,
     agent_run,
     harness_profile,
@@ -72,6 +79,7 @@ from hlock import pull as _pull
 from hlock import pull_env as _pull_env
 from hlock import pull_find as _pull_find
 from hlock import pull_list as _pull_list
+from hlock import pull_parse as _pull_parse
 from hlock import pull_remove as _pull_remove
 from hlock import resolve as _resolve
 from hlock import select_harness as _select_harness
@@ -195,34 +203,36 @@ def _fail(message: str, hint: str | None = None) -> None:
     sys.exit(1)
 
 
-def _hint_for(message: str) -> str | None:
-    if "cannot read" in message and Path(_m()).name in message:
+def _hint_for(e: Exception) -> str | None:
+    """A hint for a core error, by its type (see harness_lock.HarnessLockError) and what it names."""
+    message = str(e)
+    if isinstance(e, ManifestError) and "cannot read" in message and Path(_m()).name in message:
         return "create one with [cmd]hlock init[/], or point at one with [cmd]-m PATH[/]"
-    if "cannot read" in message and Path(_l()).name in message:
+    if isinstance(e, LockfileError) and "cannot read" in message and Path(_l()).name in message:
         return "write one with [cmd]hlock resolve[/]"
     if "no tasks loaded" in message or "no viable stack" in message:
         return f"check that [key]\\[evals] packs[/] in [path]{_md()}[/] point at a directory with a pack.toml"
-    if "eval pack" in message:
+    if isinstance(e, EvalPackError):
         return f"check the [key]\\[evals] packs[/] paths in [path]{_md()}[/]"
-    if "unknown harness" in message:
+    if isinstance(e, ProfileError) and "unknown harness" in message:
         return "list the known harnesses with [cmd]hlock harness list[/]"
-    if "several harnesses are installed" in message or "no supported harness" in message:
+    if isinstance(e, ProfileError) and ("several harnesses are installed" in message or "no supported harness" in message):
         return f"pass [cmd]--harness <name>[/] or set [key]\\[target] harness[/] in [path]{_md()}[/]"
     if "resolved lock with evidence" in message:
         return "use [cmd]hlock pin -o pinned.lock[/] to keep both"
-    if "python worker" in message:
+    if isinstance(e, WorkerError):
         return "set [key]HL_PYTHON[/] to an interpreter that has hlock installed"
     return None
 
 
 @contextmanager
 def _friendly_errors():
-    """Turn binding errors (ValueError from the Rust core) into a clean CLI error."""
+    """Turn binding errors (HarnessLockError, a ValueError, or an OSError from the Rust
+    core) into a clean CLI error."""
     try:
         yield
-    except ValueError as e:
-        msg = str(e).strip()
-        _fail(escape(msg), _hint_for(msg))  # core messages name tables like [deciders.stop]
+    except (ValueError, OSError) as e:
+        _fail(escape(str(e).strip()), _hint_for(e))  # core messages name tables like [deciders.stop]
 
 
 @contextmanager
@@ -474,7 +484,7 @@ def init(name: str, pack: str, harness: str | None, force: bool) -> None:
         try:
             sel = json.loads(_select_harness(manifest=_m()))
             target = sel if sel["reason"] == "running inside it" else None
-        except ValueError:
+        except (ValueError, OSError):
             target = None
     p.write_text(_default_manifest(name, pack, target["id"] if target else None))
     _ok(f"wrote [path]{_show(p)}[/]  [muted](project {name!r}, eval pack {pack})[/]")
@@ -1049,6 +1059,12 @@ def pull(sources: tuple[str, ...], name: str | None, out: str | None, force: boo
         with _friendly_errors():
             pulled = json.loads(Lockfile.load(path).to_json()).get("pulled") or {}
         if pulled.get("from"):
+            # a lock's [pulled] source is checked like a typed one before anything is fetched
+            try:
+                _pull_parse(pulled["from"])
+            except PullError as e:
+                _fail(f"{_show(path)} has a [pulled] source hlock won't fetch: {escape(str(e))}",
+                      "pull it again from a source you trust with [cmd]hlock pull SOURCE --force[/]")
             jobs.append((path, stored, pulled["from"]))
         elif sources:
             _fail(f"{_show(path)} wasn't pulled, so there's nothing to refresh it from",
@@ -1231,7 +1247,7 @@ def sync(lock: str, plan_only: bool, as_json: bool, yes: bool, install: bool, pu
             with console.status(f"[brand]{st['title']}…[/]", spinner="dots"):
                 try:
                     msg = sync_run_step(json.dumps(st))
-                except ValueError as e:
+                except (ValueError, OSError) as e:
                     failed += 1
                     err_console.print(f"[fail]✗[/] {st['title']}\n  [muted]{e}[/]")
                     continue
@@ -1475,7 +1491,7 @@ def _harness_kind(name: str) -> str | None:
     """`cli`, `custom` (a code harness), or None for the reference harness."""
     try:
         return json.loads(harness_profile(name, manifest=_m()))["profile"]["kind"]
-    except ValueError:
+    except (ValueError, OSError):
         return None
 
 
@@ -1889,7 +1905,7 @@ def _known_harness(name: str) -> bool:
     try:
         _select_harness(name, manifest=_m())
         return True
-    except ValueError:
+    except (ValueError, OSError):
         return False
 
 
@@ -2653,14 +2669,24 @@ def meta_agent_cmd(prompt: str, meta_lock: str | None, headless: bool) -> None:
             err_console.print(Text.assemble(("✗ ", "fail"), text), soft_wrap=True)
         return True
 
-    def ask(command: str) -> str:
-        console.print(Text.assemble(("? ", "warn"), "the agent wants to run ", (command, "cmd")), soft_wrap=True)
+    def ask(request: str) -> str:
+        # file access arrives as "read <path> (why)" or "write <path> (why)"; anything else is a command
+        access = re.fullmatch(r"(read|write) (.+) \((.+)\)", request)
+        if access:
+            verb, path, why = access.groups()
+            console.print(Text.assemble(("? ", "warn"), f"the agent wants to {verb} ", (path, "cmd"), f" ({why})"), soft_wrap=True)
+            question = f"  {verb} it? (y)es, (n)o, (a)lways " + ("for this directory" if verb == "read" else "for this file")
+        else:
+            console.print(Text.assemble(("? ", "warn"), "the agent wants to run ", (request, "cmd")), soft_wrap=True)
+            question = "  run it? (y)es, (n)o, (a)lways for this program"
         flush_notes()
         try:
-            return click.prompt("  run it? (y)es, (n)o, (a)lways for this program", default="y",
-                                type=click.Choice(["y", "n", "a"]), show_choices=False)
-        except (click.Abort, EOFError):
+            return click.prompt(question, default="y", type=click.Choice(["y", "n", "a"]), show_choices=False)
+        except EOFError:
             return "n"
+        except click.Abort:
+            # Ctrl-C at the prompt stops the run rather than answering no
+            raise KeyboardInterrupt from None
 
     with _friendly_errors():
         out = json.loads(agent_run(prompt, meta_lock=meta_lock or _ml(), interactive=interactive, say=say, ask=ask,

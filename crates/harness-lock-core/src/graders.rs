@@ -13,18 +13,19 @@
 //! Every file in `expected.artifacts` must also exist, so a task with no graders is
 //! graded on its artifacts alone.
 
-use std::collections::BTreeSet;
-use std::io::Read;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use crate::agent::{provider_base_url, provider_key_env, AgentConfig};
 use crate::decide::{DeciderConfig, Question};
+use crate::fsutil::{read_regular, read_regular_text, safe_rel};
+use crate::process::Limits;
 use crate::tasks::{Task, PLACEHOLDER};
 
 pub const DEFAULT_TESTS_TIMEOUT: u64 = 300;
@@ -39,6 +40,10 @@ pub const DEFAULT_HOSTED_JUDGE: &str = "typesafe:jev-1.13.0";
 const MAX_JUDGE_FILE: usize = 20_000;
 /// Lines of a failing test command's output kept in the grade's detail.
 const DETAIL_LINES: usize = 12;
+/// The most of a test command's output kept, per stream (only its tail is shown).
+const MAX_TEST_OUTPUT: usize = 64 * 1024;
+/// The most of an output file an artifact check reads.
+const MAX_ARTIFACT: usize = 8 << 20;
 
 const JUDGE_SYSTEM: &str = "You grade the work of an AI agent. Judge only what the files show, \
     be strict and literal, and don't give credit for intentions. Reply with JSON only.";
@@ -94,7 +99,8 @@ impl JudgeConfig {
         }
     }
 
-    fn agent_config(&self) -> Result<AgentConfig, String> {
+    /// The LLM endpoint, with the key read through `var`.
+    fn agent_config(&self, var: &dyn Fn(&str) -> Option<String>) -> Result<AgentConfig, String> {
         let (provider, model) = self
             .model
             .split_once(':')
@@ -106,7 +112,7 @@ impl JudgeConfig {
             .or_else(|| provider_base_url(provider).map(str::to_string))
             .ok_or_else(|| format!("hlock doesn't know where {provider:?} is; set the judge's base-url"))?;
         let key_env = self.key_env.clone().or_else(|| provider_key_env(provider).map(str::to_string));
-        let api_key = key_env.as_ref().and_then(|k| std::env::var(k).ok()).filter(|v| !v.is_empty());
+        let api_key = key_env.as_deref().and_then(var).filter(|v| !v.is_empty());
         if api_key.is_none() && self.base_url.is_none() {
             return Err(format!("{} isn't set; the judge reads its {provider} API key from it", key_env.unwrap_or_default()));
         }
@@ -220,6 +226,17 @@ pub struct GradeOptions {
     pub judges: Judges,
     /// The run's trace events, for `trace` graders and `$HLOCK_TRACE`.
     pub trace: Option<Value>,
+    /// The environment judges read their API keys and endpoints from; `None` reads the
+    /// process's, as [`Ctx::from_process`](crate::profiles::Ctx::from_process) sees it.
+    pub env: Option<BTreeMap<String, String>>,
+}
+
+impl GradeOptions {
+    /// Look up a non-empty variable in [`env`](Self::env), or the process's.
+    fn var(&self) -> impl Fn(&str) -> Option<String> + '_ {
+        let process = self.env.is_none().then(|| crate::profiles::Ctx::from_process().env);
+        move |k: &str| self.env.as_ref().or(process.as_ref()).and_then(|e| e.get(k)).filter(|v| !v.is_empty()).cloned()
+    }
 }
 
 /// The judge to use when none is configured: a Kev model a local Ollama or Ollaya is
@@ -227,7 +244,8 @@ pub struct GradeOptions {
 /// off. Looked up once per process.
 pub fn auto_judge() -> Option<JudgeConfig> {
     static FOUND: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
-    let var = |k: &str| std::env::var(k).ok().filter(|v| !v.is_empty());
+    let ctx = crate::profiles::Ctx::from_process();
+    let var = |k: &str| ctx.var(k).map(str::to_string);
     if var("HLOCK_JUDGE_AUTO").as_deref() == Some("0") {
         return None;
     }
@@ -283,7 +301,34 @@ fn strings(v: &Value, key: &str) -> Result<Vec<String>, String> {
 }
 
 /// Parse one `graders` entry: a string like `"tests:check.py"`, or a table with a `type`.
+/// Paths must be relative and stay inside the pack (or the workspace).
 pub fn parse(spec: &Value, task: &Task) -> Result<Grader, String> {
+    let g = parse_entry(spec, task)?;
+    let inside = |what: &str, paths: &[&String]| -> Result<(), String> {
+        match paths.iter().find(|p| !safe_rel(p)) {
+            Some(p) => Err(format!("{what} {p:?} must be a relative path inside its directory (no leading '/', no '..')")),
+            None => Ok(()),
+        }
+    };
+    match &g {
+        Grader::Artifact { paths, same_as, .. } => {
+            inside("artifact", &paths.iter().collect::<Vec<_>>())?;
+            inside("same-as", &same_as.iter().collect::<Vec<_>>())?;
+        }
+        Grader::Tests { script, files, .. } => {
+            inside("script", &script.iter().collect::<Vec<_>>())?;
+            inside("file", &files.iter().collect::<Vec<_>>())?;
+        }
+        Grader::Judge { rubric, artifacts, .. } => {
+            inside("rubric", &rubric.iter().collect::<Vec<_>>())?;
+            inside("artifact", &artifacts.iter().collect::<Vec<_>>())?;
+        }
+        Grader::Trace { .. } => {}
+    }
+    Ok(g)
+}
+
+fn parse_entry(spec: &Value, task: &Task) -> Result<Grader, String> {
     let expected = task.expected_artifacts();
     let table = match spec {
         Value::String(s) => {
@@ -482,18 +527,21 @@ pub fn grade(task: &Task, workspace: &Path, opts: &GradeOptions) -> Vec<Grade> {
     }
     let judge = opts.judge.as_ref().filter(|j| j.is_set());
     let decider = judge.is_some_and(JudgeConfig::is_decider);
+    let var = opts.var();
     for g in &graders {
         let grade = match g {
             Err(e) => Grade::new("invalid".into(), false, 0.0, e.clone()),
             Ok(Grader::Judge { .. } | Grader::Trace { .. }) if opts.judges == Judges::None => continue,
             Ok(Grader::Judge { .. } | Grader::Trace { .. }) if opts.judges == Judges::Deciders && !decider => continue,
-            Ok(Grader::Trace { .. }) if opts.trace.is_none() => continue, // nothing ran, so there's no trace to grade
             Ok(Grader::Artifact { paths, equals, same_as, contains }) => {
                 artifact(paths, equals.as_deref(), same_as.as_deref(), contains, workspace, &pack_dir)
             }
             Ok(g @ Grader::Tests { .. }) => tests(g, task, workspace, &pack_dir, opts.trace.as_ref()),
-            Ok(g @ Grader::Judge { .. }) => judge_run(g, task, workspace, &pack_dir, judge),
-            Ok(g @ Grader::Trace { .. }) => trace_run(g, task, opts.trace.as_ref().unwrap(), judge),
+            Ok(g @ Grader::Judge { .. }) => judge_run(g, task, workspace, &pack_dir, judge, &var),
+            Ok(g @ Grader::Trace { .. }) => match &opts.trace {
+                Some(trace) => trace_run(g, task, trace, judge, &var),
+                None => continue, // nothing ran, so there's no trace to grade
+            },
         };
         out.push(grade);
     }
@@ -518,14 +566,32 @@ fn artifact(paths: &[String], equals: Option<&str>, same_as: Option<&str>, conta
     let mut problems = Vec::new();
     let mut ok = 0usize;
     for p in paths {
-        let f = ws.join(p);
-        if !f.exists() {
-            problems.push(format!("{p} is missing"));
+        if !safe_rel(p) {
+            problems.push(format!("{p} isn't a path inside the workspace"));
             continue;
+        }
+        let f = ws.join(p);
+        match std::fs::symlink_metadata(&f) {
+            Err(_) => {
+                problems.push(format!("{p} is missing"));
+                continue;
+            }
+            // the run may have planted a link to a file it didn't write
+            Ok(m) if m.file_type().is_symlink() => {
+                problems.push(format!("{p} is a symlink, not a file the run wrote"));
+                continue;
+            }
+            Ok(_) => {}
         }
         let before = problems.len();
         if equals.is_some() || golden.is_some() || !contains.is_empty() {
-            let text = std::fs::read(&f).map(|b| String::from_utf8_lossy(&b).into_owned()).unwrap_or_default();
+            let text = match read_regular_text(&f, MAX_ARTIFACT) {
+                Ok(t) => t,
+                Err(e) => {
+                    problems.push(format!("can't read {p}: {e}"));
+                    continue;
+                }
+            };
             if let Some(want) = equals.or(golden.as_deref()) {
                 if norm(&text) != norm(want) {
                     let what = same_as.map(|s| format!("the same as {s}")).unwrap_or_else(|| format!("{:?}", short(want)));
@@ -544,73 +610,59 @@ fn artifact(paths: &[String], equals: Option<&str>, same_as: Option<&str>, conta
     Grade::new(label, problems.is_empty(), score, problems.join("; "))
 }
 
-fn copy_into(src: &Path, ws: &Path) -> std::io::Result<()> {
+/// Copy a pack file or directory into the workspace under its own name. Symlinks the
+/// run left where it lands are replaced, not written through.
+fn copy_into(src: &Path, ws: &Path) -> crate::error::Result<()> {
     let name = src.file_name().ok_or_else(|| std::io::Error::other("no file name"))?;
-    if src.is_dir() {
-        crate::adapters::copy_dir(src, &ws.join(name));
-        Ok(())
-    } else {
-        std::fs::copy(src, ws.join(name)).map(|_| ())
-    }
+    crate::fsutil::copy_tree(src, &ws.join(name)).map(|_| ())
 }
 
-/// Run a command with a time limit; returns its exit code (None when it timed out or
-/// couldn't start) and its combined output.
+/// Run a command with a time limit, in its own process group: a timeout stops what it
+/// started too (`cd x && pytest`), and so does a normal exit (`server &`). Returns its
+/// exit code (None when it timed out or couldn't start) and the tail of its output.
 fn run_limited(mut cmd: Command, limit: Duration) -> (Option<i32>, String) {
-    cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
-    // its own process group, so a timeout stops what it started too (`cd x && pytest`)
-    #[cfg(unix)]
-    std::os::unix::process::CommandExt::process_group(&mut cmd, 0);
-    let mut child = match cmd.spawn() {
-        Ok(c) => c,
-        Err(e) => return (None, format!("can't run it: {e}")),
-    };
-    let (mut so, mut se) = (child.stdout.take().unwrap(), child.stderr.take().unwrap());
-    let t_out = std::thread::spawn(move || {
-        let mut b = Vec::new();
-        let _ = so.read_to_end(&mut b);
-        b
-    });
-    let t_err = std::thread::spawn(move || {
-        let mut b = Vec::new();
-        let _ = se.read_to_end(&mut b);
-        b
-    });
-    let start = Instant::now();
-    let code = loop {
-        match child.try_wait() {
-            Ok(Some(s)) => break s.code().or(Some(-1)),
-            Ok(None) if start.elapsed() > limit => {
-                #[cfg(unix)]
-                kill_group(child.id());
-                let _ = child.kill();
-                let _ = child.wait();
-                break None;
-            }
-            Ok(None) => std::thread::sleep(Duration::from_millis(20)),
-            Err(_) => break None,
-        }
-    };
-    let mut out = String::from_utf8_lossy(&t_out.join().unwrap_or_default()).into_owned();
-    out.push_str(&String::from_utf8_lossy(&t_err.join().unwrap_or_default()));
-    if code.is_none() && start.elapsed() > limit {
-        out.push_str(&format!("\ntimed out after {}s", limit.as_secs()));
+    cmd.stdin(Stdio::null());
+    let limits = Limits { max_bytes: MAX_TEST_OUTPUT, ..Limits::timeout(limit) };
+    match crate::process::run(cmd, &limits) {
+        Err(e) => (None, format!("can't run it: {e}")),
+        Ok(out) if out.timed_out => (None, format!("{}\ntimed out after {}s", out.text(), limit.as_secs())),
+        Ok(out) => (out.code.or(Some(-1)), out.text()),
     }
-    (code, out)
 }
 
-/// Stop a process group (the command and everything it started) with SIGKILL. A call
-/// into libc rather than the `kill` program, whose handling of `-PID` differs (procps
-/// reads it as a signal).
-#[cfg(unix)]
-fn kill_group(pgid: u32) {
-    extern "C" {
-        fn kill(pid: i32, sig: i32) -> i32;
+/// A new, empty directory only this process can use, for a grader's scratch files.
+/// Never an existing path, so nothing planted there is followed.
+pub(crate) fn private_dir(tag: &str) -> std::io::Result<PathBuf> {
+    static N: AtomicUsize = AtomicUsize::new(0);
+    let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.subsec_nanos()).unwrap_or(0);
+    let mut builder = std::fs::DirBuilder::new();
+    #[cfg(unix)]
+    std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
+    let mut last = None;
+    for _ in 0..16 {
+        let n = N.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!("hlock-{tag}-{}-{n}-{nanos:x}", std::process::id()));
+        match builder.create(&dir) {
+            Ok(()) => return Ok(dir),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => last = Some(e),
+            Err(e) => return Err(e),
+        }
     }
-    const SIGKILL: i32 = 9;
-    // SAFETY: kill(2) takes plain integers; a negative pid names the process group.
-    unsafe {
-        kill(-(pgid as i32), SIGKILL);
+    Err(last.unwrap_or_else(|| std::io::Error::other("no free temporary directory")))
+}
+
+/// A [`private_dir`] removed when dropped.
+pub(crate) struct ScratchDir(pub PathBuf);
+
+impl ScratchDir {
+    pub(crate) fn new(tag: &str) -> std::io::Result<ScratchDir> {
+        private_dir(tag).map(ScratchDir)
+    }
+}
+
+impl Drop for ScratchDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
     }
 }
 
@@ -620,8 +672,10 @@ fn tail(text: &str) -> String {
 }
 
 fn tests(g: &Grader, task: &Task, ws: &Path, pack_dir: &Path, trace: Option<&Value>) -> Grade {
-    let Grader::Tests { command, script, files, timeout_seconds } = g else { unreachable!() };
     let label = g.label();
+    let Grader::Tests { command, script, files, timeout_seconds } = g else {
+        return Grade::new(label, false, 0.0, "not a tests grader");
+    };
     for f in files {
         if let Err(e) = copy_into(&pack_dir.join(f), ws) {
             return Grade::new(label, false, 0.0, format!("can't copy {f} into the workspace: {e}"));
@@ -648,16 +702,18 @@ fn tests(g: &Grader, task: &Task, ws: &Path, pack_dir: &Path, trace: Option<&Val
         }
         (None, None) => return Grade::new(label, false, 0.0, "no command or script"),
     };
-    static N: AtomicUsize = AtomicUsize::new(0);
-    let n = N.fetch_add(1, Ordering::Relaxed);
-    let result = std::env::temp_dir().join(format!("hlock-grade-{}-{n}.json", std::process::id()));
-    let _ = std::fs::remove_file(&result);
-    let trace_file = trace.map(|t| {
-        let f = std::env::temp_dir().join(format!("hlock-trace-{}-{n}.json", std::process::id()));
-        let _ = std::fs::write(&f, serde_json::to_vec(t).unwrap_or_default());
-        f
-    });
-    if let Some(f) = &trace_file {
+    // the result and trace files live in a fresh directory of our own, not at a name in
+    // the shared temp directory that someone could have planted a link at
+    let scratch = match ScratchDir::new("grade") {
+        Ok(d) => d,
+        Err(e) => return Grade::new(label, false, 0.0, format!("can't make a directory for the grade: {e}")),
+    };
+    let result = scratch.0.join("grade.json");
+    if let Some(t) = trace {
+        let f = scratch.0.join("trace.json");
+        if let Err(e) = crate::fsutil::write_private(&f, serde_json::to_vec(t).unwrap_or_default()) {
+            return Grade::new(label, false, 0.0, format!("can't write the trace for the grader: {e}"));
+        }
         cmd.env("HLOCK_TRACE", f);
     }
     cmd.current_dir(ws)
@@ -666,11 +722,8 @@ fn tests(g: &Grader, task: &Task, ws: &Path, pack_dir: &Path, trace: Option<&Val
         .env("HLOCK_TASK", &task.id)
         .env("HLOCK_GRADE", &result);
     let (code, output) = run_limited(cmd, Duration::from_secs(*timeout_seconds));
-    if let Some(f) = &trace_file {
-        let _ = std::fs::remove_file(f);
-    }
-    let reported: Option<Value> = std::fs::read_to_string(&result).ok().and_then(|t| serde_json::from_str(&t).ok());
-    let _ = std::fs::remove_file(&result);
+    let reported: Option<Value> = read_regular(&result, 1 << 20).ok().and_then(|b| serde_json::from_slice(&b).ok());
+    drop(scratch);
     let passed = code == Some(0);
     let detail = |fallback: String| reported.as_ref().and_then(|r| r["detail"].as_str()).map(str::to_string).unwrap_or(fallback);
     match code {
@@ -685,15 +738,19 @@ fn tests(g: &Grader, task: &Task, ws: &Path, pack_dir: &Path, trace: Option<&Val
 }
 
 /// The files a judge reads, by path: their text (cut at [`MAX_JUDGE_FILE`] characters),
-/// or `None` when the run didn't write one.
+/// or `None` when the run didn't write one as a regular file (a symlink it planted
+/// isn't followed).
 fn judge_files(artifacts: &[String], ws: &Path) -> Vec<(String, Option<String>)> {
+    // enough bytes for MAX_JUDGE_FILE characters of any width, and one more
+    let cap = MAX_JUDGE_FILE * 4 + 1;
     artifacts
         .iter()
         .map(|a| {
-            let text = std::fs::read(ws.join(a)).ok().map(|b| {
+            let read = if safe_rel(a) { read_regular(&ws.join(a), cap).ok() } else { None };
+            let text = read.map(|b| {
                 let text = String::from_utf8_lossy(&b).into_owned();
                 let cut: String = text.chars().take(MAX_JUDGE_FILE).collect();
-                if cut.len() < text.len() { format!("{cut}\n[… cut]") } else { cut }
+                if cut.len() < text.len() || b.len() >= cap { format!("{cut}\n[… cut]") } else { cut }
             });
             (a.clone(), text)
         })
@@ -703,11 +760,15 @@ fn judge_files(artifacts: &[String], ws: &Path) -> Vec<(String, Option<String>)>
 /// What a judge grader asks: its criteria and levels, from the grader or its rubric
 /// file, and the rubric's text.
 fn judge_spec(g: &Grader, pack_dir: &Path) -> Result<(Vec<Criterion>, Vec<String>, Option<String>), String> {
-    let Grader::Judge { rubric, criteria, levels, .. } = g else { unreachable!() };
+    let Grader::Judge { rubric, criteria, levels, .. } = g else { return Err(format!("{} isn't a judge grader", g.label())) };
     match rubric {
         Some(r) => {
             let text = std::fs::read_to_string(pack_dir.join(r)).map_err(|e| format!("can't read rubric {r}: {e}"))?;
             let (c, l) = rubric_parts(&text);
+            // the same rule as inline `levels`
+            if !l.is_empty() && !(2..=10).contains(&l.len()) {
+                return Err(format!("rubric {r}: `## Levels` needs 2 to 10 levels, worst first (it has {})", l.len()));
+            }
             Ok((c, l, Some(text)))
         }
         None => Ok((criteria.clone(), levels.clone(), None)),
@@ -716,7 +777,7 @@ fn judge_spec(g: &Grader, pack_dir: &Path) -> Result<(Vec<Criterion>, Vec<String
 
 /// The LLM judge's prompt: the task, the rubric, criteria or levels, and the files.
 pub fn judge_prompt(g: &Grader, task: &Task, ws: &Path, pack_dir: &Path) -> Result<String, String> {
-    let Grader::Judge { artifacts, .. } = g else { unreachable!() };
+    let Grader::Judge { artifacts, .. } = g else { return Err(format!("{} isn't a judge grader", g.label())) };
     let (criteria, levels, rubric) = judge_spec(g, pack_dir)?;
     let mut p = format!("<task>\n{}\n</task>\n\n", task.prompt_text.trim());
     if let Some(text) = &rubric {
@@ -783,6 +844,9 @@ fn judge_reply_parts(reply: &str, n_criteria: usize, n_levels: usize) -> Result<
         parts.extend(met.iter().map(|m| Part { label: String::new(), value: if *m { 1.0 } else { 0.0 } }));
         scores.push(met.iter().filter(|m| **m).count() as f64 / n_criteria as f64);
     }
+    if n_levels == 1 {
+        return Err("a scale needs 2 to 10 levels; this one has 1".into());
+    }
     if n_levels > 0 {
         let level = v["level"].as_f64().ok_or_else(bad)?.clamp(0.0, (n_levels - 1) as f64);
         scores.push(level / (n_levels - 1) as f64);
@@ -791,22 +855,30 @@ fn judge_reply_parts(reply: &str, n_criteria: usize, n_levels: usize) -> Result<
     if n_criteria == 0 && n_levels == 0 {
         scores.push(v["score"].as_f64().ok_or_else(bad)?.clamp(0.0, 1.0));
     }
-    Ok((scores.iter().sum::<f64>() / scores.len() as f64, reason, parts))
+    Ok((unit(scores.iter().sum::<f64>() / scores.len() as f64), reason, parts))
+}
+
+/// `x` within 0–1 (NaN is 0), for scores and probabilities a model reported.
+fn unit(x: f64) -> f64 {
+    if x.is_nan() { 0.0 } else { x.clamp(0.0, 1.0) }
 }
 
 const NO_JUDGE: &str = "no judge model: set [evals.judge] model in harness.toml or [pack.judge] in pack.toml, run Kev on Ollama or Ollaya, or set TYPESAFE_API_KEY";
 
-fn judge_run(g: &Grader, task: &Task, ws: &Path, pack_dir: &Path, judge: Option<&JudgeConfig>) -> Grade {
+/// Reads the judge's keys and endpoints through `var`.
+type Var<'a> = &'a dyn Fn(&str) -> Option<String>;
+
+fn judge_run(g: &Grader, task: &Task, ws: &Path, pack_dir: &Path, judge: Option<&JudgeConfig>, var: Var) -> Grade {
     let Some(judge) = judge else {
         return Grade::new(g.label(), false, 0.0, NO_JUDGE);
     };
     if !judge.is_decider() {
-        return llm_judge(g, task, ws, pack_dir, judge);
+        return llm_judge(g, task, ws, pack_dir, judge, var);
     }
-    let grade = decider_judge(g, task, ws, pack_dir, judge);
+    let grade = decider_judge(g, task, ws, pack_dir, judge, var);
     match judge.fallback.as_deref().filter(|f| !f.trim().is_empty()) {
         Some(fallback) if grade.uncertain => {
-            let llm = llm_judge(g, task, ws, pack_dir, &JudgeConfig { base_url: judge.fallback_base_url.clone(), ..JudgeConfig::new(fallback) });
+            let llm = llm_judge(g, task, ws, pack_dir, &JudgeConfig { base_url: judge.fallback_base_url.clone(), ..JudgeConfig::new(fallback) }, var);
             let detail = format!(
                 "uncertain at {:.2} by {}; re-judged by {fallback}: {}",
                 grade.score,
@@ -819,13 +891,13 @@ fn judge_run(g: &Grader, task: &Task, ws: &Path, pack_dir: &Path, judge: Option<
     }
 }
 
-fn llm_judge(g: &Grader, task: &Task, ws: &Path, pack_dir: &Path, judge: &JudgeConfig) -> Grade {
-    let Grader::Judge { pass, .. } = g else { unreachable!() };
+fn llm_judge(g: &Grader, task: &Task, ws: &Path, pack_dir: &Path, judge: &JudgeConfig, var: Var) -> Grade {
     let label = format!("{} ({})", g.label(), judge.model);
+    let Grader::Judge { pass, .. } = g else { return Grade::new(label, false, 0.0, "not a judge grader") };
     let run = || -> Result<(f64, String, Vec<Part>), String> {
         let (criteria, levels, rubric) = judge_spec(g, pack_dir)?;
         let structured = rubric.is_none() || !criteria.is_empty() || !levels.is_empty();
-        let cfg = judge.agent_config()?;
+        let cfg = judge.agent_config(var)?;
         let prompt = judge_prompt(g, task, ws, pack_dir)?;
         let (reply, _, _) = crate::agent::complete(&cfg, JUDGE_SYSTEM, &prompt).map_err(|e| e.to_string())?;
         let (n_c, n_l) = if structured { (criteria.len(), levels.len()) } else { (0, 0) };
@@ -846,14 +918,18 @@ fn llm_judge(g: &Grader, task: &Task, ws: &Path, pack_dir: &Path, judge: &JudgeC
 }
 
 /// Score answers into a grade: criteria (nouls) and a level (a score question), each
-/// counted as one part of the mean.
-fn decided_grade(label: String, decided: &crate::decide::Decided, criteria: &[Criterion], levels: &[String], pass: f64, margin: f64) -> Grade {
+/// counted as one part of the mean. Probabilities are kept within 0–1, and a level
+/// outside the scale is an error.
+fn decided_grade(label: String, decided: &crate::decide::Decided, criteria: &[Criterion], levels: &[String], pass: f64, margin: f64) -> Result<Grade, String> {
     let (mut scores, mut parts, mut certainty) = (Vec::new(), Vec::new(), 1.0f64);
     let mut unmet = Vec::new();
     for (i, c) in criteria.iter().enumerate() {
         let Some(a) = decided.get(&format!("c{}", i + 1)) else { continue };
-        let p = a.probability();
-        certainty = certainty.min(a.certainty());
+        if a.refused {
+            return Err(format!("{} gave no answer for {:?}", decided.model, c.text));
+        }
+        let p = unit(a.probability());
+        certainty = certainty.min(unit(a.certainty()));
         if p < 0.5 {
             unmet.push(format!("{} ({p:.2})", c.text));
         }
@@ -865,30 +941,39 @@ fn decided_grade(label: String, decided: &crate::decide::Decided, criteria: &[Cr
     }
     let mut detail = if unmet.is_empty() { String::new() } else { format!("unmet: {}", unmet.join("; ")) };
     if let Some(a) = decided.get("level").filter(|_| levels.len() >= 2) {
+        if a.refused {
+            return Err(format!("{} gave no answer for the level", decided.model));
+        }
+        let top = levels.len() - 1;
+        if let Some(l) = a.probabilities.keys().find(|l| !l.parse::<usize>().is_ok_and(|n| n <= top)) {
+            return Err(format!("{} answered level {l:?}, which isn't on the 0 to {top} scale", decided.model));
+        }
         let level = a.value.as_f64().unwrap_or(0.0);
-        certainty = certainty.min(a.certainty());
+        if !(0.0..=top as f64).contains(&level) {
+            return Err(format!("{} answered level {level}, which isn't on the 0 to {top} scale", decided.model));
+        }
+        certainty = certainty.min(unit(a.certainty()));
         let reached = levels.get(level.round() as usize).cloned().unwrap_or_default();
         scores.push(level / (levels.len() - 1) as f64);
         parts.push(Part { label: format!("level: {reached}"), value: level });
         let sep = if detail.is_empty() { "" } else { "; " };
         detail = format!("{detail}{sep}level {level:.1} of {}: {reached}", levels.len() - 1);
     }
-    let score = scores.iter().sum::<f64>() / scores.len().max(1) as f64;
+    let score = unit(scores.iter().sum::<f64>() / scores.len().max(1) as f64);
     if score < pass && detail.is_empty() {
         detail = format!("score {score:.2} is below {pass}");
     }
     let uncertain = (score - pass).abs() < margin || certainty < 0.5;
-    Grade { parts, uncertain, judged_by: Some(decided.model.clone()), cost_usd: decided.cost_usd, ..Grade::new(label, score >= pass, score, detail) }
+    Ok(Grade { parts, uncertain, judged_by: Some(decided.model.clone()), cost_usd: decided.cost_usd, ..Grade::new(label, score >= pass, score, detail) })
 }
 
-fn decider_endpoint(judge: &JudgeConfig) -> Result<crate::decide::Endpoint, String> {
-    let var = |k: &str| std::env::var(k).ok();
-    judge.decider().endpoint(&var)
+fn decider_endpoint(judge: &JudgeConfig, var: Var) -> Result<crate::decide::Endpoint, String> {
+    judge.decider().endpoint(var)
 }
 
-fn decider_judge(g: &Grader, task: &Task, ws: &Path, pack_dir: &Path, judge: &JudgeConfig) -> Grade {
-    let Grader::Judge { artifacts, pass, .. } = g else { unreachable!() };
+fn decider_judge(g: &Grader, task: &Task, ws: &Path, pack_dir: &Path, judge: &JudgeConfig, var: Var) -> Grade {
     let label = format!("{} ({})", g.label(), judge.model);
+    let Grader::Judge { artifacts, pass, .. } = g else { return Grade::new(label, false, 0.0, "not a judge grader") };
     let run = || -> Result<Grade, String> {
         let (criteria, levels, _) = judge_spec(g, pack_dir)?;
         if criteria.is_empty() && levels.is_empty() {
@@ -901,8 +986,8 @@ fn decider_judge(g: &Grader, task: &Task, ws: &Path, pack_dir: &Path, judge: &Ju
         if levels.len() >= 2 {
             qs.push(Question::score("level", "Where do the files the agent wrote sit on this scale, for the task in the state?", &levels));
         }
-        let decided = crate::decide::decide(&decider_endpoint(judge)?, &state, &qs)?;
-        Ok(decided_grade(label.clone(), &decided, &criteria, &levels, *pass, judge.uncertain.unwrap_or(DEFAULT_UNCERTAIN)))
+        let decided = crate::decide::decide(&decider_endpoint(judge, var)?, &state, &qs)?;
+        decided_grade(label.clone(), &decided, &criteria, &levels, *pass, judge.uncertain.unwrap_or(DEFAULT_UNCERTAIN))
     };
     run().unwrap_or_else(|e| Grade::new(label, false, 0.0, e))
 }
@@ -920,9 +1005,9 @@ fn trace_state(trace: &Value) -> Value {
     json!({"tool_calls": calls})
 }
 
-fn trace_run(g: &Grader, task: &Task, trace: &Value, judge: Option<&JudgeConfig>) -> Grade {
-    let Grader::Trace { criteria, pass } = g else { unreachable!() };
+fn trace_run(g: &Grader, task: &Task, trace: &Value, judge: Option<&JudgeConfig>, var: Var) -> Grade {
     let label = g.label();
+    let Grader::Trace { criteria, pass } = g else { return Grade::new(label, false, 0.0, "not a trace grader") };
     let Some(judge) = judge.filter(|j| j.is_decider()) else {
         return Grade::new(label, false, 0.0, "trace graders need a decision model as the judge (see [evals.judge])");
     };
@@ -931,8 +1016,28 @@ fn trace_run(g: &Grader, task: &Task, trace: &Value, judge: Option<&JudgeConfig>
         let mut state = trace_state(trace);
         state["task"] = json!(task.prompt_text.trim());
         let qs: Vec<Question> = criteria.iter().enumerate().map(|(i, c)| c.question(format!("c{}", i + 1))).collect();
-        let decided = crate::decide::decide(&decider_endpoint(judge)?, &state, &qs)?;
-        Ok(decided_grade(label.clone(), &decided, criteria, &[], *pass, judge.uncertain.unwrap_or(DEFAULT_UNCERTAIN)))
+        let decided = crate::decide::decide(&decider_endpoint(judge, var)?, &state, &qs)?;
+        decided_grade(label.clone(), &decided, criteria, &[], *pass, judge.uncertain.unwrap_or(DEFAULT_UNCERTAIN))
     };
     run().unwrap_or_else(|e| Grade::new(label, false, 0.0, e))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::decide::{Answer, Decided, Kind};
+
+    fn noul(id: &str, p: Option<f64>) -> Answer {
+        Answer { id: id.into(), kind: Kind::Noul, value: p.map_or(Value::Null, Value::from), probabilities: Default::default(), confidence: None, refused: p.is_none() }
+    }
+
+    #[test]
+    fn a_refused_answer_is_an_error_not_a_zero() {
+        let criteria = [Criterion { text: "has tests".into(), if_true: None, if_false: None }, Criterion { text: "is short".into(), if_true: None, if_false: None }];
+        let ok = Decided { model: "m".into(), answers: vec![noul("c1", Some(0.9)), noul("c2", Some(0.8))], ..Default::default() };
+        assert!(decided_grade("j".into(), &ok, &criteria, &[], 0.5, 0.1).unwrap().success);
+        let refused = Decided { model: "m".into(), answers: vec![noul("c1", Some(0.9)), noul("c2", None)], ..Default::default() };
+        let e = decided_grade("j".into(), &refused, &criteria, &[], 0.5, 0.1).unwrap_err();
+        assert!(e.contains("no answer") && e.contains("is short"), "{e}");
+    }
 }

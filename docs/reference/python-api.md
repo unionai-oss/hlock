@@ -182,9 +182,15 @@ The functions behind [`hlock decide`](cli.md#decide). Each returns JSON, except
 
 | Function | Does |
 |---|---|
-| `decide(state, questions, model=None, use_=None, manifest=None)` | Ask `questions` (JSON: a list of `{id, type, instructions, criteria}`, `type` being `noul`, `choice` or `score`) about `state` (JSON, or text). Returns `provider` and `decided`: the `model` that answered, `answers` (each with `id`, `type`, `value`, `probabilities`, `confidence`), `input_tokens`, and `cost_usd`. |
-| `decide_hook(use_, format, input, lock)` | Answer a hook event (JSON) with the lock's decider for `use_`. Returns `stdout`, `exit`, and `note`; it never raises. |
+| `decide(state, questions, model=None, use_=None, manifest=None)` | Ask `questions` (JSON: a list of `{id, type, instructions, criteria}`, `type` being `noul`, `choice` or `score`) about `state` (JSON, or text; text that starts with `{` or `[` must be JSON). Returns `provider` and `decided`: the `model` that answered, `answers` (each with `id`, `type`, `value`, `probabilities`, `confidence`), `input_tokens`, and `cost_usd`. |
+| `decide_hook(use_, format, input, lock)` | Answer a hook event (JSON) with the lock's decider for `use_`. Returns `stdout`, `exit`, and `note`; it never raises, and defers (with a note saying why) when `input` isn't JSON. |
 | `decider_drift(lock)` | A list of what changed in the lock's deciders: hlock's questions, policy files |
+
+Without `model`, `decide` asks the model `[deciders.<use_>]` names, else
+`[deciders.default]`'s, else one hlock finds. With `model`, it takes the base URL, key
+variable and protocol from that table only when the table's model is from the same
+provider. A `manifest` path that doesn't exist raises `ManifestError`, here and in the
+eval functions.
 
 ```python
 questions = json.dumps([{"id": "urgent", "type": "noul", "instructions": "Is it urgent?"}])
@@ -227,6 +233,8 @@ SearchSpace(llm=None, decision=None, harness=None, policy=None, tools=None,
 | `evals` | `str` (JSON) | `{"packs": [...], "seeds": n}`. Defaults to `{"seeds": 2}`. `tasks` is the old name. |
 | `policy`, `tools`, `skills` | `str` (JSON) | Matching manifest sections |
 
+Each JSON argument must be a JSON object; anything else raises `HarnessLockError`.
+
 `SearchSpace.to_manifest(name)` returns the equivalent `Manifest`. A lock resolved from
 a `SearchSpace` gets the stack name `"agent"`.
 
@@ -256,9 +264,9 @@ Budget(max_spend_usd=None, max_trials=None, strategy="grid", random_seed=0)
 | `Manifest.from_str(text)` | Parse TOML text |
 | `.name` | Project name |
 | `.backend` | Configured backend target |
-| `.manifest_hash()` | `"sha256:…"` hash, as recorded in the lock |
+| `.manifest_hash()` | `"sha256:…"` hash of the text the manifest was parsed from, as recorded in the lock |
 | `.eval_packs()` | List of eval pack paths (`.task_packs()` is the old name) |
-| `.decider(use)` | The model `[deciders.<use>]` names, else `[deciders.default]`'s, or `None` |
+| `.decider(use)` | The model `[deciders.<use>]` names, else `[deciders.default]`'s (also when the use lists only `any-of` candidates), or `None` |
 | `.to_json()` | The manifest as JSON |
 
 ### `Lockfile`
@@ -291,6 +299,37 @@ Budget(max_spend_usd=None, max_trials=None, strategy="grid", random_seed=0)
 
 ## Errors
 
-Invalid input and failed operations raise `ValueError` with a message prefixed by the
-error kind: `manifest error:`, `lockfile error:`, `eval pack error:`, `tuning error:`,
-`python worker error:`, and so on.
+Invalid input and failed operations raise a `HarnessLockError`, a subclass of
+`ValueError`, so `except ValueError` still catches them. Catch a subclass to handle one
+kind:
+
+| Exception | Raised for |
+|---|---|
+| `ManifestError` | A `harness.toml` that's missing (when a path is passed) or invalid, including a bad `[deciders]` or `[evals.judge]` table |
+| `LockfileError` | A lock that's missing or invalid, or that hlock refuses (see [checks on a lock](lockfile.md#checks)) |
+| `EvalPackError` | An eval pack that's missing or invalid |
+| `StoreError` | A blob missing from the content-addressed store |
+| `TuningError` | No viable stack, or a failed tuning run |
+| `ProfileError` | A harness or runtime profile, harness selection, or a sync or launch step that failed |
+| `WorkerError` | The Python worker failed |
+| `PullError` | A [`pull`](../guides/pull.md) source hlock can't read or won't fetch, or `git` failed |
+
+Messages keep their prefix (`manifest error:`, `lockfile error:`, …). A file hlock can't
+read or write raises the matching `OSError` (`FileNotFoundError`, `PermissionError`, …),
+not a `ValueError`. Arguments that should be JSON (`SearchSpace`'s, `decide`'s
+`questions`) raise `HarnessLockError` when they aren't.
+
+```python
+import hlock as hl
+
+try:
+    hl.Lockfile.load("harness.lock")
+except hl.LockfileError as e:
+    print(e)   # lockfile error: cannot read harness.lock: No such file or directory (os error 2)
+```
+
+Calls that run commands or wait on the network (`resolve`, `tune`, `upgrade`, `pull`,
+`sync_plan`, `sync_run_step`, `launch_prepare`, `localize`, `decide`, the eval and meta
+functions, and probes) release the GIL, and Ctrl-C stops them: they raise
+`KeyboardInterrupt` and stop the commands they started. `agent_run` re-raises the first
+exception its `say` or `ask` callback raises, after stopping the run.

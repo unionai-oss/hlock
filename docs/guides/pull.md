@@ -155,6 +155,29 @@ an SSH key, or a `url.<base>.insteadOf` rewrite. For GitHub Enterprise or a self
 GitLab, set `HLOCK_GITHUB_URL` or `HLOCK_GITLAB_URL` to its base URL. `HLOCK_HOME` moves the
 store from `~/.hlock`.
 
+A token in the URL (`https://user:TOKEN@host/…` or `https://TOKEN@host/…`) is used for the
+fetch and nowhere else: hlock leaves it out of `[pulled]`, its messages, and `git`'s errors,
+so a refresh (`hlock pull NAME`) fetches with your `git` credentials. An SSH URL keeps its
+user name and loses a password.
+
+## What hlock checks
+
+Everything in a pulled lock came from someone else, so `pull` checks it before it writes
+anything:
+
+- The source: a `REF` or URL that starts with `-`, a URL with a transport helper
+  (`ext::…`), and a `PATH` with `..` are refused. `git` runs with only the `file`, `git`,
+  `http`, `https` and `ssh` transports.
+- The lock: names and paths that would reach outside the vendor directory, and versions or
+  model ids that sync would put in a command, are refused (see
+  [checks on a lock](../reference/lockfile.md#checks)).
+- Vendored files: a symlink in the repository is skipped with a warning, never followed,
+  and every file is written inside the lock's vendor directory.
+- A refresh checks each lock's `[pulled] from` the same way before fetching anything.
+
+The vendored files are copied into a new directory that replaces the old one only once the
+copy is complete, so a failed pull leaves the previous files in place.
+
 ## Where it came from
 
 A pulled lock records its origin in a `[pulled]` table, and `hlock --lock alice show` prints

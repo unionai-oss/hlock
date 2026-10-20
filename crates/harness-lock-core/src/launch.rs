@@ -15,10 +15,11 @@ use serde_json::{json, Map, Value};
 
 use crate::capture::{live_mcp_servers, read_config, render_config, tree_digest};
 use crate::error::{Error, Result};
+use crate::fsutil;
 use crate::lockfile::{Lockfile, Tool};
 use crate::profiles::{probe_harness, Ctx, HarnessProfile, Registry};
 use crate::secrets;
-use crate::sync::{self, copy_tree, lock_dir_of, placeholders, pretty, set_pointer, SyncOptions};
+use crate::sync::{self, lock_dir_of, placeholders, pretty, set_pointer, SyncOptions};
 
 /// Default directory for isolated launch environments.
 pub const ENV_DIR: &str = ".hlock/env";
@@ -202,14 +203,21 @@ fn fill_tool(t: &Tool, live: Option<&Value>, ctx: &Ctx, env_ref: Option<&str>, v
     t
 }
 
-fn write_pointer(path: &Path, format: &str, ptr: &str, value: Value) -> Result<()> {
+/// Set `ptr` in a config file. `private` (it will hold secret values) writes it 0600
+/// from the start, so the secrets are never readable by others, even briefly.
+fn write_pointer(path: &Path, format: &str, ptr: &str, value: Value, private: bool) -> Result<()> {
     let mut doc = read_config(path, format)?.filter(Value::is_object).unwrap_or_else(|| json!({}));
     set_pointer(&mut doc, ptr, value);
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
     let fmt = if format == "jsonc" { "json" } else { format };
-    std::fs::write(path, render_config(&doc, fmt).map_err(Error::Profile)?)?;
+    let text = render_config(&doc, fmt).map_err(Error::Profile)?;
+    if private {
+        fsutil::write_private(path, text)?;
+    } else {
+        std::fs::write(path, text)?;
+    }
     Ok(())
 }
 
@@ -236,10 +244,9 @@ fn translate(lock: &Lockfile, lock_path: &Path, source: Option<&HarnessProfile>,
                     .map(|x| (x.name.clone(), mcp_entry(&fill_tool(x, live.get(&x.name), ctx, env_ref, &mut values, &mut missing), shape)))
                     .collect();
                 let n = servers.len();
-                write_pointer(&path, &spec.format, ptr, Value::Object(servers))?;
-                if env_ref.is_none() && tools.iter().any(|x| x.env.values().chain(x.headers.values()).chain(x.url.iter()).any(|v| !placeholders(v).is_empty())) {
-                    secrets::restrict(&path)?; // secret values were written into it
-                }
+                // secret values are written into it, unless the target reads them from its environment
+                let private = env_ref.is_none() && tools.iter().any(|x| x.env.values().chain(x.headers.values()).chain(x.url.iter()).any(|v| !placeholders(v).is_empty()));
+                write_pointer(&path, &spec.format, ptr, Value::Object(servers), private)?;
                 prep.secret_env.extend(values);
                 prep.done.push(format!("wrote {n} MCP server{} to {}", if n == 1 { "" } else { "s" }, pretty(&path, ctx)));
                 prep.missing_secrets.extend(missing);
@@ -253,6 +260,11 @@ fn translate(lock: &Lockfile, lock_path: &Path, source: Option<&HarnessProfile>,
         let dir = t.expand(write, Some(root));
         let mut copied = 0;
         for s in lock.skill.iter().filter(|s| !matches!(s.origin.as_str(), "harness-builtin" | "bundled")) {
+            // the name becomes a directory that's replaced: never `..` or a path
+            if !fsutil::plain_name(&s.name) {
+                prep.notes.push(format!("skill {:?} wasn't copied: its name must be a plain name (no '/', '\\', or '..')", s.name));
+                continue;
+            }
             let src = s
                 .vendored
                 .as_ref()
@@ -267,8 +279,7 @@ fn translate(lock: &Lockfile, lock_path: &Path, source: Option<&HarnessProfile>,
             if dest.join("SKILL.md").is_file() && Some(tree_digest(&dest)) == s.digest {
                 continue;
             }
-            let _ = std::fs::remove_dir_all(&dest);
-            copy_tree(&src, &dest)?;
+            replace_dir(&src, &dest)?;
             copied += 1;
         }
         if copied > 0 {
@@ -310,6 +321,26 @@ fn translate(lock: &Lockfile, lock_path: &Path, source: Option<&HarnessProfile>,
     if lock.config.iter().any(|c| c.restore != "record") {
         prep.notes.push(format!("{}-specific settings (permissions, hooks, theme, providers) don't carry over", source.map(|s| s.name.as_str()).unwrap_or("source")));
     }
+    Ok(())
+}
+
+/// Replace the directory `dest` with a copy of `src`: copy into a temporary sibling
+/// first, so a failed copy leaves the old one in place.
+fn replace_dir(src: &Path, dest: &Path) -> Result<()> {
+    let name = dest.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let tmp = dest.with_file_name(format!(".{name}.hlock-new-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    if let Err(e) = fsutil::copy_tree(src, &tmp) {
+        let _ = std::fs::remove_dir_all(&tmp);
+        return Err(e);
+    }
+    // a symlink in the way is removed, not followed
+    if std::fs::symlink_metadata(dest).is_ok_and(|m| m.file_type().is_symlink() || !m.is_dir()) {
+        std::fs::remove_file(dest)?;
+    } else if dest.exists() {
+        std::fs::remove_dir_all(dest)?;
+    }
+    std::fs::rename(&tmp, dest)?;
     Ok(())
 }
 
@@ -494,6 +525,58 @@ mod tests {
         let filled = fill_tool(&t, None, &ctx, None, &mut values, &mut missing);
         assert_eq!(filled.env["TOKEN"], "${HLOCK_SECRET_GH_TOKEN}");
         assert!(missing.contains("HLOCK_SECRET_GH_TOKEN"));
+    }
+
+    fn tmp(tag: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("hlock-launch-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    #[test]
+    fn a_failed_skill_copy_keeps_the_old_one() {
+        let d = tmp("replace");
+        std::fs::create_dir_all(d.join("dest")).unwrap();
+        std::fs::write(d.join("dest/SKILL.md"), "old").unwrap();
+        assert!(replace_dir(&d.join("missing"), &d.join("dest")).is_err());
+        assert_eq!(std::fs::read_to_string(d.join("dest/SKILL.md")).unwrap(), "old");
+        std::fs::create_dir_all(d.join("src")).unwrap();
+        std::fs::write(d.join("src/SKILL.md"), "new").unwrap();
+        replace_dir(&d.join("src"), &d.join("dest")).unwrap();
+        assert_eq!(std::fs::read_to_string(d.join("dest/SKILL.md")).unwrap(), "new");
+        assert_eq!(std::fs::read_dir(&d).unwrap().count(), 2); // no temp dir left
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn skills_with_path_names_are_skipped() {
+        let d = tmp("skillname");
+        std::fs::create_dir_all(d.join("skill")).unwrap();
+        std::fs::write(d.join("skill/SKILL.md"), "x").unwrap();
+        std::fs::create_dir_all(d.join("keep")).unwrap();
+        let ctx = Ctx { home: d.join("home"), cwd: d.clone(), env: [("HLOCK_KEYCHAIN".to_string(), "0".to_string())].into(), path: vec![] };
+        let reg = Registry::builtin();
+        let target = reg.harness("claude-code").unwrap();
+        let skill = |name: &str| crate::lockfile::Skill { name: name.into(), origin: "user".into(), path: Some(d.join("skill").to_string_lossy().into_owned()), ..Default::default() };
+        let lock = Lockfile { skill: vec![skill("../../keep"), skill("ok")], ..Default::default() };
+        let root = d.join("root");
+        let mut prep = LaunchPrep::default();
+        translate(&lock, &d.join("harness.lock"), None, target, &ctx, &root, &ctx, &mut prep).unwrap();
+        assert!(d.join("keep").is_dir(), "a path-named skill must not replace anything");
+        assert!(prep.notes.iter().any(|n| n.contains("\"../../keep\" wasn't copied")), "{:?}", prep.notes);
+        assert!(prep.done.iter().any(|n| n.starts_with("copied 1 skill")), "{:?}", prep.done);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn configs_with_secrets_are_private_from_the_start() {
+        use std::os::unix::fs::PermissionsExt;
+        let d = tmp("private");
+        write_pointer(&d.join("a.json"), "json", "/mcpServers", json!({"x": {"env": {"T": "s3"}}}), true).unwrap();
+        assert_eq!(std::fs::metadata(d.join("a.json")).unwrap().permissions().mode() & 0o777, 0o600);
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     #[test]

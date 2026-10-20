@@ -21,13 +21,14 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 toml = { workspace = true }
 sha2 = { workspace = true }
-anyhow = { workspace = true }
 thiserror = { workspace = true }
 # The flyte-sdk-rs backend (optional — links libpython via flyte_core/pyo3 and is
 # only compiled when the `flyte` feature is enabled).
 flyte = { version = "0.1", optional = true }
 serde_norway = "0.9.42"
 # The built-in meta agent's model calls: a small blocking client with rustls (no async runtime).
+# killpg / O_NOFOLLOW for the process runner and safe file reads
+libc = "0.2"
 ureq = { version = "3", default-features = false, features = ["rustls"] }
 
 [features]

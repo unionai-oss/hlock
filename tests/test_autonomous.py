@@ -257,12 +257,15 @@ def test_localize_openclaw_uses_ollamas_native_api(local):
     assert r.exit_code == 0, r.output
     lock = load("harness.local.lock")
     assert lock["harness"]["name"] == "openclaw"
-    (cfg,) = [c for c in lock["config"] if c["restore"] == "pointers"]
-    sets = json.loads(Path(cfg["vendored"]).read_text())
+    # the same harness: the local model settings go into the config file it already locks,
+    # not into a second entry for the same file
+    (cfg,) = [c for c in lock["config"] if c["id"] == "config"]
+    assert "/localize/" in cfg["vendored"] and cfg["restore"] != "pointers"
+    doc = json.loads(Path(cfg["vendored"]).read_text())
     # not the /v1 endpoint, which makes tool calling unreliable in OpenClaw
-    assert sets["/models/providers/ollama"]["api"] == "ollama"
-    assert sets["/models/providers/ollama"]["baseUrl"] == "http://localhost:11434"
-    assert sets["/agents/defaults/model/primary"] == "ollama/qwen3:8b"
+    assert doc["models"]["providers"]["ollama"]["api"] == "ollama"
+    assert doc["models"]["providers"]["ollama"]["baseUrl"] == "http://localhost:11434"
+    assert doc["agents"]["defaults"]["model"]["primary"] == "ollama/qwen3:8b"
 
 
 def test_localize_zeroclaw_says_what_to_set(local):
@@ -285,7 +288,7 @@ def test_localize_onto_another_agent_keeps_each_instruction_file(local):
 def test_localize_openclaw_on_another_runtime(local):
     r = invoke("localize", "--harness", "openclaw", "--runtime", "lmstudio", "--models", "qwen/qwen3-8b", "-o", "lms.lock")
     assert r.exit_code == 0, r.output
-    (cfg,) = [c for c in load("lms.lock")["config"] if c["restore"] == "pointers"]
-    sets = json.loads(Path(cfg["vendored"]).read_text())
-    assert sets["/models/providers/lmstudio"]["api"] == "openai-completions"
-    assert sets["/models/providers/lmstudio"]["baseUrl"].endswith(":1234/v1")
+    (cfg,) = [c for c in load("lms.lock")["config"] if c["id"] == "config"]
+    doc = json.loads(Path(cfg["vendored"]).read_text())
+    assert doc["models"]["providers"]["lmstudio"]["api"] == "openai-completions"
+    assert doc["models"]["providers"]["lmstudio"]["baseUrl"].endswith(":1234/v1")

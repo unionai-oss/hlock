@@ -185,7 +185,11 @@ def test_command_harness_and_failures(code_project):
     manifest = code_project / "harness.toml"
     manifest.write_text(manifest.read_text().replace('harness = "triage"', 'harness = "loop"')
                         + '\n[harnesses.loop]\ncommand = ["./agent.sh", "{prompt}"]\n')
-    invoke("resolve")
+    # every trial fails, so no stack meets `success-rate >= 0.5`, and resolve says so
+    r = invoke("resolve")
+    assert r.exit_code != 0 and "no stack meets [objective.constraints]" in r.output, r.output
+    manifest.write_text(manifest.read_text().replace('success-rate = ">=0.5"', ""))
+    assert invoke("resolve").exit_code == 0
     r = invoke("run", "--json", "do it")
     assert r.exit_code == 1
     result = json.loads(r.output)

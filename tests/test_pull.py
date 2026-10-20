@@ -240,8 +240,41 @@ def test_refuses_vendored_paths_outside_the_repo(world):
     lock.write_text(text.replace(vendored, 'vendored = "../../home-me/.ssh/id_rsa"', 1))
     commit(world["repo"], "evil")
     r = invoke("pull", "github:alice/agent-setup")
-    assert r.exit_code == 1 and "isn't a path inside the repository" in r.output, r.output
+    assert r.exit_code == 1 and "must be a relative path inside" in r.output, r.output
     assert not (world["store"] / "alice").exists()
+
+
+def test_refuses_a_harness_name_that_is_a_path(world):
+    lock = world["repo"] / "harness.lock"
+    text = lock.read_text()
+    assert '[harness]\nname = "claude-code"' in text
+    lock.write_text(text.replace('[harness]\nname = "claude-code"', '[harness]\nname = "../../victim"'))
+    commit(world["repo"], "evil")
+    victim = world["project"] / "victim"
+    victim.mkdir()
+    (victim / "keep").write_text("mine")
+    r = invoke("pull", "github:alice/agent-setup", "-o", "harness.lock")
+    assert r.exit_code == 1 and "must be a plain name" in r.output, r.output
+    assert (victim / "keep").read_text() == "mine"
+
+
+def test_refresh_checks_the_pulled_source(world):
+    assert invoke("pull", "github:alice/agent-setup", "-o", "harness.alice.lock").exit_code == 0
+    lock = world["project"] / "harness.alice.lock"
+    lock.write_text(lock.read_text().replace('from = "github:alice/agent-setup"', 'from = "github:alice/agent-setup@--upload-pack=touch x"'))
+    r = invoke("pull")
+    assert r.exit_code == 1 and "won't fetch" in r.output, r.output
+    assert not (world["project"] / "x").exists()
+
+
+def test_sources_are_checked_and_credentials_left_out():
+    from hlock import PullError, pull_parse
+
+    src = json.loads(pull_parse("https://user:ghp_secret@github.com/alice/agent-setup"))
+    assert src["url"] == "https://github.com/alice/agent-setup.git" and "ghp_" not in json.dumps(src)
+    for bad in ("github:alice/agent-setup@--upload-pack=x", "git:-oProxyCommand=x", "git:ext::sh -c x"):
+        with pytest.raises(PullError):
+            pull_parse(bad)
 
 
 def test_missing_vendor_dir_is_a_warning(world):
