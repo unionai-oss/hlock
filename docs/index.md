@@ -107,7 +107,7 @@ If you've used `uv`, `cargo`, or `npm`, you already know the shape of `hlock`:
 
 </div>
 
-## Manage your repo's or team's agents
+## Manage your repo's agents
 
 A repository can version the agent it's built with, the way it versions its dependencies:
 commit a `harness.lock` at the root for the setup the project recommends. Contributors rarely

@@ -80,7 +80,7 @@ See the [Quickstart](https://docs.hlock.ai/getting-started/quickstart/),
 [Rehydrating with sync](https://docs.hlock.ai/guides/sync/), and
 [Launching a locked harness](https://docs.hlock.ai/guides/launch/).
 
-### Manage your repo's or team's agents
+### Manage your repo's agents
 
 A repository can version the agent it's built with: commit a `harness.lock` at the root for
 the setup the project recommends. When contributors use different setups, each person can
