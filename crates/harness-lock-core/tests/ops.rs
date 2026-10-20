@@ -67,7 +67,7 @@ fn ops_end_to_end_upgrade_and_tune() {
 
     make_pack(&dir);
     let manifest = make_manifest(&dir);
-    let _ = Resolver::new(manifest.clone(), dir.join(".harnesslock")).resolve().unwrap();
+    let _ = Resolver::new(manifest.clone(), dir.join(".hlock")).resolve().unwrap();
     let base = Lockfile::load(Path::new(LOCKFILE_PATH)).unwrap();
     let base_model = base.llm[0].model.clone();
 
@@ -75,13 +75,13 @@ fn ops_end_to_end_upgrade_and_tune() {
     let plan = plan_upgrade(Some(&base), &manifest, &UpgradeSpec::default());
     assert!(!plan["upgradeable"].as_array().unwrap().is_empty());
 
-    let apply_spec = UpgradeSpec { all: true, apply: true, workdir: dir.join(".harnesslock"), ..Default::default() };
+    let apply_spec = UpgradeSpec { all: true, apply: true, workdir: dir.join(".hlock"), ..Default::default() };
     let applied = upgrade(manifest.clone(), &apply_spec).unwrap();
     assert!(applied.applied);
     assert!(dir.join(format!("{LOCKFILE_PATH}.prev")).exists());
     assert_eq!(Lockfile::load(Path::new(LOCKFILE_PATH)).unwrap().llm[0].model, "qwen-32b");
 
-    let rb = UpgradeSpec { rollback: true, apply: false, workdir: dir.join(".harnesslock"), ..Default::default() };
+    let rb = UpgradeSpec { rollback: true, apply: false, workdir: dir.join(".hlock"), ..Default::default() };
     assert!(upgrade(manifest.clone(), &rb).unwrap().rolled_back);
     assert_eq!(Lockfile::load(Path::new(LOCKFILE_PATH)).unwrap().llm[0].model, base_model);
 
@@ -90,7 +90,7 @@ fn ops_end_to_end_upgrade_and_tune() {
         depth: "hpo".into(),
         data: "user".into(),
         out: dir.join("harness.tune.lock"),
-        workdir: dir.join(".harnesslock"),
+        workdir: dir.join(".hlock"),
         ..Default::default()
     };
     let outcome = tune(manifest.clone(), &tune_spec).unwrap();
@@ -114,10 +114,10 @@ fn a_lock_that_doesnt_load_is_an_error_not_a_zero_baseline() {
     make_pack(&dir);
     let lock = dir.join("harness.lock");
     fs::write(&lock, "this isn't = [ a lock").unwrap();
-    let tune_spec = TuneSpec { strict: true, out: dir.join("harness.tune.lock"), workdir: dir.join(".harnesslock"), lock: Some(lock.clone()), ..Default::default() };
+    let tune_spec = TuneSpec { strict: true, out: dir.join("harness.tune.lock"), workdir: dir.join(".hlock"), lock: Some(lock.clone()), ..Default::default() };
     assert!(tune(make_manifest(&dir), &tune_spec).is_err());
     assert!(!dir.join("harness.tune.lock").exists());
-    let up = UpgradeSpec { all: true, apply: true, workdir: dir.join(".harnesslock"), lock: Some(lock.clone()), ..Default::default() };
+    let up = UpgradeSpec { all: true, apply: true, workdir: dir.join(".hlock"), lock: Some(lock.clone()), ..Default::default() };
     assert!(upgrade(make_manifest(&dir), &up).is_err());
     assert_eq!(fs::read_to_string(&lock).unwrap(), "this isn't = [ a lock", "left alone");
     // no lock at all is no baseline, which tune may still beat
@@ -137,8 +137,8 @@ fn an_upgrade_writes_each_roles_own_target() {
     m.candidates.llm.get_mut("planner").unwrap().any_of = vec!["reference:qwen-7b".into()];
     m.candidates.llm.insert("coder".into(), harness_lock_core::manifest::LLMCandidate { any_of: vec!["reference:qwen-1.5b".into()] });
     let lock = dir.join("harness.lock");
-    Resolver::new(m.clone(), dir.join(".harnesslock")).resolve_lock().unwrap().save(&lock).unwrap();
-    let up = UpgradeSpec { apply: true, force: true, workdir: dir.join(".harnesslock"), lock: Some(lock.clone()), ..Default::default() };
+    Resolver::new(m.clone(), dir.join(".hlock")).resolve_lock().unwrap().save(&lock).unwrap();
+    let up = UpgradeSpec { apply: true, force: true, workdir: dir.join(".hlock"), lock: Some(lock.clone()), ..Default::default() };
     let o = upgrade(m, &up).unwrap();
     assert!(o.applied, "{}", o.message);
     let roles: Vec<(String, String)> = Lockfile::load(&lock).unwrap().llm.iter().map(|l| (l.role.clone(), l.model.clone())).collect();

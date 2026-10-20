@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-import harness_lock as hlock
+import hlock
 
 REPO = Path(__file__).resolve().parent.parent
 TASKS = REPO / "evals"
@@ -52,7 +52,7 @@ def test_search_space_tune(workspace, monkeypatch):
         harness=["reference"],
         evals=json.dumps({"packs": [str(ws)], "seeds": 2}),
     )
-    lf = hlock.resolve(space, backend="local", workdir=str(base / ".harnesslock"))
+    lf = hlock.resolve(space, backend="local", workdir=str(base / ".hlock"))
     assert lf.harness == "reference"
     ev = json.loads(lf.evidence)
     assert ev["trials"] >= 1
@@ -99,7 +99,7 @@ def test_upgrade_and_tune(tmp_path, monkeypatch):
     )
     (tmp_path / "harness.toml").write_text(manifest)
 
-    hlock.resolve(manifest="harness.toml", backend="local", workdir=str(tmp_path / ".harnesslock"))
+    hlock.resolve(manifest="harness.toml", backend="local", workdir=str(tmp_path / ".hlock"))
     assert (tmp_path / "harness.lock").exists()
 
     plan = _json.loads(hlock.upgrade(manifest="harness.toml", all=True))

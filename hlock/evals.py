@@ -557,7 +557,7 @@ def review_requests(prompts: list[str], decide) -> list[dict]:
     """Ask a decision model about each drafted request: does it stand alone, is its
     result checkable, what kind of work is it, and does it hold a secret. ``decide`` is
     called as ``decide(state, questions_json)`` and returns the JSON
-    ``harness_lock.decide`` does."""
+    ``hlock.decide`` does."""
     questions = json.dumps([
         {"id": "alone", "type": "noul", "instructions": "This request stands on its own: it doesn't refer to "
          "an earlier conversation (\"like before\", \"fix it\")."},
@@ -587,7 +587,7 @@ def draft_from_traces(dest: str | Path, sessions, name: str | None = None, n_tas
     `review_requests`), a decision model skips requests whose result can't be checked,
     marks ones that lean on earlier context or may hold a secret, and picks each task's
     grader stub. Returns the files written (``pack.toml`` first) and the number of tasks."""
-    from harness_lock import redact_text
+    from hlock import redact_text
 
     dest, project = Path(dest), (project or Path.cwd()).resolve()
     if (dest / "pack.toml").exists() and not force:

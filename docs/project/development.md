@@ -53,7 +53,8 @@ uv run prek run --all-files
 ```
 
 The whitespace hooks fix files in place; stage the fixes and commit again. Generated
-files (`harness.lock`, `uv.lock`, `Cargo.lock`, `docs/assets/quickstart.svg`) are
+files (`harness.lock`, `uv.lock`, `Cargo.lock`, `docs/assets/quickstart.svg`,
+`docs/assets/demo.{webp,mp4}`) are
 excluded. Tests and `cargo test` don't run on commit; CI runs them.
 
 CI runs the same checks on every PR, on Python 3.9, 3.12, and 3.13. It also builds
@@ -91,6 +92,15 @@ session. Regenerate it after changing CLI output:
 
 ```bash
 uv run python scripts/cli_screenshot.py         # writes docs/assets/quickstart.svg
+```
+
+The animation at the top of the README is a recording of the home page's terminal
+(`docs/javascripts/terminal.js`), played in headless Chrome under a fake clock. Regenerate
+it after changing that script. It needs Google Chrome and ffmpeg:
+
+```bash
+uv run --group docs zensical build --clean
+uv run --with playwright python scripts/demo_video.py   # writes docs/assets/demo.{webp,mp4}
 ```
 
 ## Where things live

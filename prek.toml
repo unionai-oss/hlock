@@ -4,7 +4,7 @@
 #:schema https://www.schemastore.org/prek.json
 
 # Generated files are rewritten by their tools, never by hand (see AGENTS.md).
-exclude = '^(harness\.lock|uv\.lock|Cargo\.lock|docs/assets/quickstart\.svg)$'
+exclude = '^(harness\.lock|uv\.lock|Cargo\.lock|docs/assets/quickstart\.svg|docs/assets/demo\.(webp|mp4))$'
 
 # prek's built-in hooks: Rust ports of pre-commit-hooks, no clone or environment needed.
 [[repos]]

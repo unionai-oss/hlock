@@ -38,6 +38,10 @@ better one.
 | 📦 `uv sync` / `npm ci` | **`hlock sync`**: rehydrate the locked setup on any machine |
 | ▶️ `uv run` | **`hlock launch`** and **`hlock run`**: start sessions and run prompts on the locked setup |
 
+<p align="center">
+  <img src="https://raw.githubusercontent.com/unionai-oss/hlock/main/docs/assets/demo.webp" alt="An hlock session: pin a Claude Code setup into harness.lock and push it to GitHub, then pull and sync it on another machine" width="852">
+</p>
+
 ## Install
 
 ```bash
@@ -71,14 +75,25 @@ For your own work, `hlock evals init -t coding` (or `data`, `research`, `support
 an eval pack template plus an Agent Skill, so the agent you already use can fill it in
 with real tasks from your project. See [Eval packs](https://docs.hlock.ai/guides/eval-packs/).
 
-<p align="center">
-  <img src="https://raw.githubusercontent.com/unionai-oss/hlock/main/docs/assets/quickstart.svg" alt="An hlock session: pin a Claude Code setup, check it, and sync it onto another machine" width="640">
-</p>
-
 See the [Quickstart](https://docs.hlock.ai/getting-started/quickstart/),
 [Pinning your setup](https://docs.hlock.ai/guides/pin/),
 [Rehydrating with sync](https://docs.hlock.ai/guides/sync/), and
 [Launching a locked harness](https://docs.hlock.ai/guides/launch/).
+
+### Manage your team's agents
+
+Contributors to one repository rarely share an agent setup. Each person can commit their own
+lock to `.hlock/locks/harness.<handle>.lock`, next to the code it was used on, and anyone
+with a clone can try a teammate's setup in isolation:
+
+```bash
+hlock pin -o .hlock/locks/harness.alice.lock         # commit your setup with the code
+hlock launch --lock .hlock/locks/harness.bob.lock    # try a teammate's, isolated from yours
+```
+
+Add the [hlock badge](https://docs.hlock.ai/project/badge/) to your README to point readers
+at the locks. See [Team repositories](https://docs.hlock.ai/guides/teams/) for the layout,
+the conventions, and pulling a teammate's lock from outside the repository.
 
 ### Then make it better
 
@@ -161,10 +176,10 @@ Flyte task on a cluster.
 | Path | What lives there |
 |---|---|
 | [`crates/harness-lock-core`](https://github.com/unionai-oss/hlock/tree/main/crates/harness-lock-core) | The core library (pure Rust): manifests, lockfiles, search planning, trial bookkeeping, evidence, lock construction. It orchestrates and aggregates, and never does heavy compute itself. |
-| [`crates/harness-lock-py`](https://github.com/unionai-oss/hlock/tree/main/crates/harness-lock-py) | PyO3 bindings, compiled into `harness_lock._harness_lock` and shipped only inside the wheel. |
+| [`crates/harness-lock-py`](https://github.com/unionai-oss/hlock/tree/main/crates/harness-lock-py) | PyO3 bindings, compiled into `hlock._hlock` and shipped only inside the wheel. |
 | [`crates/hlock`](https://github.com/unionai-oss/hlock/tree/main/crates/hlock), [`crates/harness-lock`](https://github.com/unionai-oss/hlock/tree/main/crates/harness-lock) | Thin crates that re-export the core (`harness-lock` is the alias). |
-| [`harness_lock/`](https://github.com/unionai-oss/hlock/tree/main/harness_lock) | The Python package: the `hlock` CLI and the heavy-work worker ([`tasks/worker.py`](https://github.com/unionai-oss/hlock/blob/main/harness_lock/tasks/worker.py)). |
-| [`hlock/`](https://github.com/unionai-oss/hlock/tree/main/hlock) | A shim that re-exports `harness_lock`, so `import hlock` works. |
+| [`hlock/`](https://github.com/unionai-oss/hlock/tree/main/hlock) | The Python package: the `hlock` CLI and the heavy-work worker ([`tasks/worker.py`](https://github.com/unionai-oss/hlock/blob/main/hlock/tasks/worker.py)). |
+| [`harness_lock/`](https://github.com/unionai-oss/hlock/tree/main/harness_lock) | A shim that re-exports `hlock`, so `import harness_lock` works. |
 | [`packaging/harness-lock`](https://github.com/unionai-oss/hlock/tree/main/packaging/harness-lock) | The `harness-lock` PyPI alias, which pins the matching `hlock` release. |
 | [`docs/`](https://github.com/unionai-oss/hlock/tree/main/docs) | The documentation site ([Zensical](https://zensical.org)), published to GitHub Pages. |
 
@@ -184,6 +199,32 @@ hlock tune --backend cluster --depth ft --data user:./runs   # LoRA on a GPU wor
 
 See [Backends](https://docs.hlock.ai/guides/backends/) for setup and
 the `HL_*` environment variables.
+
+## Related projects
+
+hlock builds on, and borrows from, a lot of good work. Package managers install agent
+config, dotfile managers and Nix reproduce it, eval frameworks measure it, and optimizers
+generate it. hlock isn't trying to replace any of them; it has different devex goals:
+
+- **speed**: one command pins the setup you already have
+- **quick portability**: the whole stack, from harness version and models to MCP servers,
+  skills and config, in one lock you can rehydrate anywhere
+- **tunability**: eval packs, the resolver and the tuner measure your stack against your own tasks
+- **let agents do the busy work**: some packaging and syncing work that users need to do around hlock
+  can be further automated with a meta agent.
+
+| If you want to… | Reach for | Where hlock fits |
+|---|---|---|
+| Install skills, instructions and MCP servers from git into many agents, with org policy | [APM](https://github.com/microsoft/apm) | APM installs; hlock pins the rest of the stack around it and measures whether it works |
+| Keep one set of rules in sync across many agents | [rulesync](https://github.com/dyoshikawa/rulesync), [Ruler](https://github.com/intellectronica/ruler) | They translate config; hlock locks it, with digests and drift checks |
+| Add skills from the open ecosystem | [`npx skills`](https://github.com/vercel-labs/skills) | `hlock pin` records them with the rest of your setup |
+| Carry your dotfiles to every machine | [chezmoi](https://github.com/twpayne/chezmoi), [yadm](https://github.com/yadm-dev/yadm) | hlock knows what a harness's files mean: versions, models, secrets, drift |
+| Reproduce a toolchain bit for bit | [Nix](https://github.com/NixOS/nix), [mise](https://github.com/jdx/mise), [Dev Containers](https://containers.dev) | Nix pins inputs; a resolved `harness.lock` also records how well the stack did |
+| Run agent evals and benchmarks at scale | [Harbor](https://github.com/harbor-framework/harbor), [Inspect](https://inspect.aisi.org.uk), [promptfoo](https://github.com/promptfoo/promptfoo) | They measure the variants you list; hlock searches, selects, and locks the winner |
+| Write better prompts and programs | [DSPy](https://github.com/stanfordnlp/dspy), [GEPA](https://github.com/gepa-ai/gepa) | They generate candidates; hlock picks among stacks and makes the pick reproducible |
+
+The [comparison page](https://docs.hlock.ai/concepts/related/) goes through each one,
+including "why not just dotfiles / chezmoi / Nix / APM?".
 
 ## Development
 

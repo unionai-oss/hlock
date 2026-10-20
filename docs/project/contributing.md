@@ -30,6 +30,7 @@ looks like. For setting up a working copy, see [Development](development.md).
     | Python bindings, CLI, or worker | `tests/test_rust.py`, `tests/test_cli.py`, or `tests/test_worker.py` |
     | Behavior users can see | The matching page in `docs/` |
     | CLI output | Also run `uv run python scripts/cli_screenshot.py` |
+    | The home page terminal (`docs/javascripts/terminal.js`) | Also build the docs and run `uv run --with playwright python scripts/demo_video.py` |
     | A built-in harness or runtime profile | Also run `uv run python scripts/harness_table.py` |
 
 4.  Run the same checks CI runs:
@@ -60,7 +61,7 @@ ask for changes.
 - **Don't bump versions** in a pull request. Releases are cut by maintainers; see
   [Releasing](releasing.md).
 - **Don't hand-edit generated files**, such as `harness.lock`, `uv.lock`,
-  `docs/assets/quickstart.svg`, or the tables in `docs/reference/harnesses.md`.
+  `docs/assets/quickstart.svg`, `docs/assets/demo.webp`, or the tables in `docs/reference/harnesses.md`.
   Regenerate them with the tool that owns them.
 - **Docs describe what the code does today.** If a feature is planned but not built,
   say so, or leave it to the [design specs](https://github.com/unionai-oss/hlock/tree/main/specs).

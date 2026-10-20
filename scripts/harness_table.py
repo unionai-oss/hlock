@@ -18,7 +18,7 @@ import sys
 import tempfile
 from pathlib import Path
 
-import harness_lock
+import hlock
 
 REPO = Path(__file__).resolve().parent.parent
 PAGE = REPO / "docs" / "reference" / "harnesses.md"
@@ -34,10 +34,10 @@ def builtin_profiles() -> tuple[list[dict], list[dict]]:
             os.environ["HOME"] = tmp
             os.environ.pop("HLOCK_PROFILE_PATH", None)
             os.chdir(tmp)
-            rows = json.loads(harness_lock.harnesses(probe=False))
-            harnesses = [json.loads(harness_lock.harness_profile(r["id"]))["profile"]
+            rows = json.loads(hlock.harnesses(probe=False))
+            harnesses = [json.loads(hlock.harness_profile(r["id"]))["profile"]
                          for r in rows if r["origin"] == "builtin"]
-            runtimes = [r for r in json.loads(harness_lock.runtimes(probe=False))
+            runtimes = [r for r in json.loads(hlock.runtimes(probe=False))
                         if r["origin"] == "builtin"]
         finally:
             os.chdir(saved_cwd)

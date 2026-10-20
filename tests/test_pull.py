@@ -10,8 +10,8 @@ from pathlib import Path
 import pytest
 from click.testing import CliRunner
 
-from harness_lock import is_pull_source
-from harness_lock.cli import MANUAL_EXIT, main
+from hlock import is_pull_source
+from hlock.cli import MANUAL_EXIT, main
 
 GH_TOKEN = "ghp_0123456789abcdefABCDEF0123456789"
 
@@ -268,7 +268,7 @@ def test_refresh_checks_the_pulled_source(world):
 
 
 def test_sources_are_checked_and_credentials_left_out():
-    from harness_lock import PullError, pull_parse
+    from hlock import PullError, pull_parse
 
     src = json.loads(pull_parse("https://user:ghp_secret@github.com/alice/agent-setup"))
     assert src["url"] == "https://github.com/alice/agent-setup.git" and "ghp_" not in json.dumps(src)

@@ -11,8 +11,8 @@ from pathlib import Path
 import pytest
 from click.testing import CliRunner
 
-from harness_lock import launch_prepare
-from harness_lock.cli import main
+from hlock import launch_prepare
+from hlock.cli import main
 
 REPO = Path(__file__).resolve().parent.parent
 GH_TOKEN = "ghp_0123456789abcdefABCDEF0123456789"
@@ -81,7 +81,7 @@ def test_launch_same_harness_isolated(pinned):
 
 def test_launch_execs_the_harness(pinned):
     env = {**os.environ, "HL_PYTHON": sys.executable}
-    out = subprocess.run([sys.executable, "-m", "harness_lock.cli", "launch", "--", "-p", "hi"],
+    out = subprocess.run([sys.executable, "-m", "hlock.cli", "launch", "--", "-p", "hi"],
                          capture_output=True, text=True, env=env, check=False)
     assert out.returncode == 0, out.stderr + out.stdout
     assert "CONFIG=" in out.stdout and ".hlock/env/claude-code/config" in out.stdout and "ARGS=-p hi" in out.stdout
@@ -96,7 +96,7 @@ def test_run_drives_the_locked_cli(pinned):
     assert ".hlock/env/claude-code/config" in out["output"] and "ARGS=-p summarize README.md" in out["output"]
 
     env = {**os.environ, "HL_PYTHON": sys.executable}  # streamed, not captured, without --json
-    out = subprocess.run([sys.executable, "-m", "harness_lock.cli", "run", "hi"],
+    out = subprocess.run([sys.executable, "-m", "hlock.cli", "run", "hi"],
                          capture_output=True, text=True, env=env, check=False)
     assert out.returncode == 0 and "ARGS=-p hi" in out.stdout and "✓ success" in out.stdout, out.stdout
 

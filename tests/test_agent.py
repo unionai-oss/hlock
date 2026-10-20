@@ -12,9 +12,9 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import pytest
 from click.testing import CliRunner
 
-import harness_lock
-from harness_lock import Lockfile, agent_run
-from harness_lock.cli import main
+import hlock
+from hlock import Lockfile, agent_run
+from hlock.cli import main
 
 
 def invoke(*args):
@@ -83,7 +83,7 @@ def project(tmp_path, monkeypatch):
         d.mkdir()
     # `hlock` for the agent's commands: this checkout's CLI
     hl = bindir / "hlock"
-    hl.write_text(f'#!/bin/sh\nexec "{sys.executable}" -m harness_lock.cli "$@"\n')
+    hl.write_text(f'#!/bin/sh\nexec "{sys.executable}" -m hlock.cli "$@"\n')
     hl.chmod(hl.stat().st_mode | stat.S_IXUSR)
     monkeypatch.setenv("HOME", str(home))
     monkeypatch.setenv("PATH", f"{bindir}{os.pathsep}/usr/bin{os.pathsep}/bin")
@@ -112,7 +112,7 @@ def test_builtin_is_the_default(project, monkeypatch):
     assert "install" not in r.output.split("pinned")[0].lower().replace("nothing to install", "")
     lock = json.loads(Lockfile.load("harness.meta.lock").to_json())
     h = lock["harness"]
-    assert (h["name"], h["version"], h["source"]) == ("builtin", harness_lock.__version__, f"hlock@{harness_lock.__version__}")
+    assert (h["name"], h["version"], h["source"]) == ("builtin", hlock.__version__, f"hlock@{hlock.__version__}")
     assert [(x["provider"], x["model"], x["params"]) for x in lock["llm"]] == [
         ("anthropic", "claude-sonnet-5-5", {"key-env": "ANTHROPIC_API_KEY"})]
     assert lock["policy"]["tool-allowlist"] == ["@hlock", "git log", "git show", "git diff", "git status"]
@@ -258,7 +258,7 @@ def test_builtin_lock_pins_what_it_may_do(project, monkeypatch):
     assert invoke("meta", "pin").exit_code == 0 and invoke("meta", "check").exit_code == 0
     # a lock from another hlock version is drift, and runs need --allow-version-mismatch
     lp = project / "harness.meta.lock"
-    lp.write_text(lp.read_text().replace(f'version = "{harness_lock.__version__}"', 'version = "0.0.1"'))
+    lp.write_text(lp.read_text().replace(f'version = "{hlock.__version__}"', 'version = "0.0.1"'))
     assert "the lock pins hlock 0.0.1" in invoke("meta", "check").output
     r = invoke("meta", "run", "notes", "--headless")
     assert r.exit_code == 1 and "--allow-version-mismatch" in r.output

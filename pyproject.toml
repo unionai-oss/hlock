@@ -54,18 +54,18 @@ docs = [
 ]
 
 [project.scripts]
-hlock = "harness_lock.cli:main"
-harness-lock = "harness_lock.cli:main"
+hlock = "hlock.cli:main"
+harness-lock = "hlock.cli:main"
 
-# The wheel ships two importable packages: `harness_lock` (the implementation, with the
-# compiled `harness_lock._harness_lock` module) and `hlock` (a re-export shim, so
-# `import hlock` matches the distribution name). The `harness-lock` PyPI name is a
+# The wheel ships two importable packages: `hlock` (the implementation, with the
+# compiled `hlock._hlock` module) and `harness_lock` (a re-export shim, so
+# `import harness_lock` matches the alias name). The `harness-lock` PyPI name is a
 # code-free alias in packaging/harness-lock that pins this package.
 [tool.maturin]
 manifest-path = "crates/harness-lock-py/Cargo.toml"
-module-name = "harness_lock._harness_lock"
+module-name = "hlock._hlock"
 python-source = "."
-python-packages = ["hlock"]
+python-packages = ["harness_lock"]
 
 [tool.uv]
 # Rebuild the Rust extension on `uv sync` / `uv run` whenever Rust sources change.

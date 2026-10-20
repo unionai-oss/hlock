@@ -44,7 +44,7 @@ class LocalBackend:
 
     def __init__(self, concurrency: int = 8, run_dir: Path | None = None, cache_db: Any = None) -> None:
         self.concurrency = concurrency
-        self.run_dir = run_dir or Path(".harnesslock/runs")
+        self.run_dir = run_dir or Path(".hlock/runs")
         self.run_dir.mkdir(parents=True, exist_ok=True)
         self.cache_db = cache_db
 

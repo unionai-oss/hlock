@@ -13,8 +13,8 @@ from pathlib import Path
 import pytest
 from click.testing import CliRunner
 
-from harness_lock import Lockfile
-from harness_lock.cli import main
+from hlock import Lockfile
+from hlock.cli import main
 
 
 def invoke(*args, env=None):
@@ -148,7 +148,7 @@ def test_bootstrap_pack_headless_verified(project, monkeypatch):
         "grep -q 'TODO(hlock)' evals/pack.toml && "
         "mkdir -p evals/one && echo 'do it' > evals/one/prompt.md && "
         f"cat > evals/pack.toml <<'EOF'\n{PACK}EOF\n"
-        '"$HL_PYTHON" -m harness_lock.cli harness show pi --json > .agent-view.json'
+        '"$HL_PYTHON" -m hlock.cli harness show pi --json > .agent-view.json'
     ))
     r = invoke("meta", "run", "bootstrap-evals", "--headless", "--count", "2")
     assert r.exit_code == 0, r.output
@@ -248,7 +248,7 @@ def test_install_job(project, monkeypatch):
     assert r.exit_code == 1 and "my-skill" in r.output
     prompt = json.loads(invoke("meta", "run", "install", "--dry-run", "--headless", "--json").output)["prompt"]
     assert "my-skill" in prompt and "hlock sync --yes" in prompt and "isolated root under `.hlock/env`" in prompt
-    monkeypatch.setenv("FAKE_AGENT", '"$HL_PYTHON" -m harness_lock.cli sync --yes')
+    monkeypatch.setenv("FAKE_AGENT", '"$HL_PYTHON" -m hlock.cli sync --yes')
     r = invoke("meta", "run", "install", "--headless")
     assert r.exit_code == 0, r.output
     assert (project["project"] / ".hlock/env/claude-code/config/skills/my-skill/SKILL.md").is_file()

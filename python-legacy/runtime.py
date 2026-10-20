@@ -58,7 +58,7 @@ class LockedAgent:
     def __init__(self, lock: Lockfile, guard: RuntimeGuard | None = None, workdir: Path | None = None) -> None:
         self.lock = lock
         self.guard = guard or RuntimeGuard(lock, mode="strict")
-        self.workdir = workdir or Path(".harnesslock/run")
+        self.workdir = workdir or Path(".hlock/run")
 
     @classmethod
     def load(cls, path: str | Path, mode: str = "strict") -> LockedAgent:

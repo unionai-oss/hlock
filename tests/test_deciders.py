@@ -10,8 +10,8 @@ import pytest
 from click.testing import CliRunner
 from fake_models import Fake, systemone
 
-from harness_lock import Lockfile
-from harness_lock.cli import main
+from hlock import Lockfile
+from hlock.cli import main
 
 
 def invoke(*args, input=None):

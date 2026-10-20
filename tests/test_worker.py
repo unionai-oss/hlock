@@ -1,4 +1,4 @@
-"""Tests for the Rust <-> Python worker bridge (harness_lock.tasks.worker).
+"""Tests for the Rust <-> Python worker bridge (hlock.tasks.worker).
 
 These prove the seam ``hlock tune --backend devbox|cluster`` uses: the Rust core
 shells a trial out to the Python worker over a versioned JSON contract and
@@ -29,7 +29,7 @@ def run_worker(req: dict) -> dict:
         rs_path = td / "_al_response.json"
         rq_path.write_text(json.dumps(req))
         proc = subprocess.run(
-            [sys.executable, "-m", "harness_lock.tasks.worker", str(rq_path), str(rs_path)],
+            [sys.executable, "-m", "hlock.tasks.worker", str(rq_path), str(rs_path)],
             capture_output=True,
             text=True,
             check=False,
@@ -130,7 +130,7 @@ max_trials = 1
 """
     (tmp_path / "harness.toml").write_text(manifest)
 
-    import harness_lock as hlock
+    import hlock
 
     out = json.loads(hlock.tune(backend="devbox", depth="probe", data="synthetic:1", max_trials=1))
     report = out["report"]
@@ -214,7 +214,7 @@ max_trials = 2
 """
     (tmp_path / "harness.toml").write_text(manifest)
 
-    import harness_lock as hlock
+    import hlock
 
     json.loads(hlock.tune(backend="devbox", depth="prompt", data="synthetic:2", max_trials=2))
     d = json.loads(hlock.Lockfile.load(str(tmp_path / "harness.tune.lock")).to_json())

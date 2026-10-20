@@ -60,7 +60,7 @@ pub struct UpgradeSpec {
     pub rollback: bool,
     /// Skip the evidence gate (apply even if success-rate regresses).
     pub force: bool,
-    /// Where `.harnesslock/` store + runs live.
+    /// Where `.hlock/` store + runs live.
     pub workdir: PathBuf,
     /// The lock to upgrade (default `./harness.lock`).
     pub lock: Option<PathBuf>,
@@ -296,7 +296,7 @@ impl Default for TuneSpec {
             apply: false,
             max_trials: None,
             backend: None,
-            workdir: PathBuf::from(".harnesslock"),
+            workdir: PathBuf::from(".hlock"),
             lock: None,
         }
     }

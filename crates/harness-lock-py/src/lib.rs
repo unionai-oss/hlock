@@ -1,6 +1,6 @@
 //! PyO3 Python bindings for **harness-lock**.
 //!
-//! Exposes the same user-facing API as the (reference) pure-Python `harness_lock`
+//! Exposes the same user-facing API as the (reference) pure-Python `hlock`
 //! package, backed by the Rust core (`harness-lock-core`): `Manifest`,
 //! `SearchSpace`, `Objective`, `Budget`, `lock()`, `load()`, and the `Lockfile`
 //! model.
@@ -20,15 +20,15 @@ use harness_lock_core as core;
 
 // Errors from the core, by kind. All are ValueErrors, so `except ValueError` still
 // catches them; I/O errors are raised as the matching OSError (FileNotFoundError, …).
-create_exception!(harness_lock, HarnessLockError, PyValueError, "An error from hlock. A ValueError.");
-create_exception!(harness_lock, ManifestError, HarnessLockError, "harness.toml is missing or invalid.");
-create_exception!(harness_lock, LockfileError, HarnessLockError, "A lock is missing, invalid, or refused.");
-create_exception!(harness_lock, EvalPackError, HarnessLockError, "An eval pack is missing or invalid.");
-create_exception!(harness_lock, StoreError, HarnessLockError, "The content-addressed store is missing a blob.");
-create_exception!(harness_lock, TuningError, HarnessLockError, "Tuning found no viable stack, or failed.");
-create_exception!(harness_lock, ProfileError, HarnessLockError, "A harness or runtime profile, a selection, or a step failed.");
-create_exception!(harness_lock, WorkerError, HarnessLockError, "The Python worker failed.");
-create_exception!(harness_lock, PullError, HarnessLockError, "`hlock pull`: a source can't be read, or git failed.");
+create_exception!(hlock, HarnessLockError, PyValueError, "An error from hlock. A ValueError.");
+create_exception!(hlock, ManifestError, HarnessLockError, "harness.toml is missing or invalid.");
+create_exception!(hlock, LockfileError, HarnessLockError, "A lock is missing, invalid, or refused.");
+create_exception!(hlock, EvalPackError, HarnessLockError, "An eval pack is missing or invalid.");
+create_exception!(hlock, StoreError, HarnessLockError, "The content-addressed store is missing a blob.");
+create_exception!(hlock, TuningError, HarnessLockError, "Tuning found no viable stack, or failed.");
+create_exception!(hlock, ProfileError, HarnessLockError, "A harness or runtime profile, a selection, or a step failed.");
+create_exception!(hlock, WorkerError, HarnessLockError, "The Python worker failed.");
+create_exception!(hlock, PullError, HarnessLockError, "`hlock pull`: a source can't be read, or git failed.");
 
 fn py_err(e: core::Error) -> PyErr {
     use core::Error as E;
@@ -90,7 +90,7 @@ fn interruptible<T: Send + 'static>(py: Python<'_>, work: impl FnOnce() -> PyRes
 // Manifest
 // --------------------------------------------------------------------------- //
 /// A parsed `harness.toml`.
-#[pyclass(module = "harness_lock", name = "Manifest")]
+#[pyclass(module = "hlock", name = "Manifest")]
 #[derive(Clone)]
 pub struct PyManifest {
     inner: core::Manifest,
@@ -152,7 +152,7 @@ impl PyManifest {
 // --------------------------------------------------------------------------- //
 // Objective / Budget
 // --------------------------------------------------------------------------- //
-#[pyclass(module = "harness_lock", name = "Objective")]
+#[pyclass(module = "hlock", name = "Objective")]
 #[derive(Clone)]
 pub struct PyObjective {
     primary: String,
@@ -190,7 +190,7 @@ impl PyObjective {
     }
 }
 
-#[pyclass(module = "harness_lock", name = "Budget")]
+#[pyclass(module = "hlock", name = "Budget")]
 #[derive(Clone)]
 pub struct PyBudget {
     max_spend_usd: Option<f64>,
@@ -227,7 +227,7 @@ impl PyBudget {
 // --------------------------------------------------------------------------- //
 // SearchSpace
 // --------------------------------------------------------------------------- //
-#[pyclass(module = "harness_lock", name = "SearchSpace")]
+#[pyclass(module = "hlock", name = "SearchSpace")]
 #[derive(Clone)]
 pub struct PySearchSpace {
     llm: std::collections::BTreeMap<String, Vec<String>>,
@@ -361,7 +361,7 @@ fn object_of(v: &serde_json::Value) -> std::collections::BTreeMap<String, serde_
 // --------------------------------------------------------------------------- //
 // Lockfile
 // --------------------------------------------------------------------------- //
-#[pyclass(module = "harness_lock", name = "Lockfile")]
+#[pyclass(module = "hlock", name = "Lockfile")]
 pub struct PyLockfile {
     inner: core::Lockfile,
 }
@@ -446,7 +446,7 @@ impl PyLockfile {
 // --------------------------------------------------------------------------- //
 // LockedAgent
 // --------------------------------------------------------------------------- //
-#[pyclass(module = "harness_lock", name = "LockedAgent")]
+#[pyclass(module = "hlock", name = "LockedAgent")]
 pub struct PyLockedAgent {
     lock: core::Lockfile,
 }
@@ -492,7 +492,7 @@ fn resolve(
 ) -> PyResult<PyLockfile> {
     let core_manifest = resolve_manifest(py, manifest, backend.as_deref())?;
     let root = core_manifest.root();
-    let wd = workdir.map(PathBuf::from).unwrap_or_else(|| root.join(".harnesslock"));
+    let wd = workdir.map(PathBuf::from).unwrap_or_else(|| root.join(".hlock"));
     let lock = lock.map(PathBuf::from).unwrap_or_else(|| root.join(core::LOCKFILE_PATH));
     let backend = core::Backend::parse(core_manifest.backend_target().as_str());
     let lf = interruptible(py, move || {
@@ -568,7 +568,7 @@ fn upgrade(
         apply,
         rollback,
         force,
-        workdir: workdir.map(PathBuf::from).unwrap_or_else(|| root.join(".harnesslock")),
+        workdir: workdir.map(PathBuf::from).unwrap_or_else(|| root.join(".hlock")),
         lock: Some(lock.map(PathBuf::from).unwrap_or_else(|| root.join(core::LOCKFILE_PATH))),
     };
     interruptible(py, move || {
@@ -613,7 +613,7 @@ fn tune(
         apply,
         max_trials,
         backend,
-        workdir: workdir.map(PathBuf::from).unwrap_or_else(|| root.join(".harnesslock")),
+        workdir: workdir.map(PathBuf::from).unwrap_or_else(|| root.join(".hlock")),
         lock: Some(lock.map(PathBuf::from).unwrap_or_else(|| root.join(core::LOCKFILE_PATH))),
     };
     interruptible(py, move || {
@@ -1063,7 +1063,7 @@ fn localize(
             manifest,
             strict,
             allow_network,
-            workdir: workdir.map(PathBuf::from).unwrap_or_else(|| ctx.cwd.join(".harnesslock/localize")),
+            workdir: workdir.map(PathBuf::from).unwrap_or_else(|| ctx.cwd.join(".hlock/localize")),
         };
         let cwd = std::env::current_dir().unwrap_or_default();
         let abs = |p: &str| if Path::new(p).is_absolute() { PathBuf::from(p) } else { cwd.join(p) };
@@ -1521,7 +1521,7 @@ fn agent_run(
 }
 
 #[pymodule]
-fn _harness_lock(m: &Bound<'_, PyModule>) -> PyResult<()> {
+fn _hlock(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyManifest>()?;
     m.add_class::<PyObjective>()?;
     m.add_class::<PyBudget>()?;

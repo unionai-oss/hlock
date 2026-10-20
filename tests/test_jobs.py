@@ -12,8 +12,8 @@ from pathlib import Path
 import pytest
 from click.testing import CliRunner
 
-from harness_lock import jobs
-from harness_lock.cli import main
+from hlock import jobs
+from hlock.cli import main
 
 REPO = Path(__file__).resolve().parent.parent
 

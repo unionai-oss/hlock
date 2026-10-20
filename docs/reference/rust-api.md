@@ -31,7 +31,7 @@ fn main() -> hlock::Result<()> {
     // Resolve: load the manifest and search it. `resolve()` also writes ./harness.lock.
     let manifest = Manifest::load(Path::new("harness.toml"))?;
     let live_hash = manifest.manifest_hash();
-    let lock = Resolver::new(manifest, ".harnesslock").resolve()?;
+    let lock = Resolver::new(manifest, ".hlock").resolve()?;
     println!("{}", lock.summary());
 
     // Check: an empty list means the lock matches the manifest.
@@ -64,7 +64,7 @@ success rate Some(1.0) over 2 trials
 | [`Resolver`](https://docs.rs/harness-lock-core/latest/harness_lock_core/resolver/struct.Resolver.html) | The resolver: `new`, `with_backend`, `enumerate_stacks`, `run_trial`, `resolve` |
 | [`Lockfile`](https://docs.rs/harness-lock-core/latest/harness_lock_core/lockfile/struct.Lockfile.html) | The `harness.lock` model: `load`, `from_str`, `save`, `check_manifest`, `summary`, and public fields for every section |
 | [`Backend`](https://docs.rs/harness-lock-core/latest/harness_lock_core/worker/enum.Backend.html) | `Local`, `Devbox`, or `Cluster`; `Backend::parse("devbox")` |
-| [`Store`](https://docs.rs/harness-lock-core/latest/harness_lock_core/store/struct.Store.html) | The content-addressed artifact store under `.harnesslock/` |
+| [`Store`](https://docs.rs/harness-lock-core/latest/harness_lock_core/store/struct.Store.html) | The content-addressed artifact store under `.hlock/` |
 | [`HarnessAdapter`](https://docs.rs/harness-lock-core/latest/harness_lock_core/adapters/trait.HarnessAdapter.html) | The trait a harness implements to run trials |
 | [`Error`](https://docs.rs/harness-lock-core/latest/harness_lock_core/error/enum.Error.html), [`Result`](https://docs.rs/harness-lock-core/latest/harness_lock_core/error/type.Result.html) | The error type, with one variant per kind (`Manifest`, `Lockfile`, `EvalPack`, `Tuning`, …) |
 | `LOCK_VERSION`, `LOCKFILE_PATH`, `MANIFEST_PATH` | Schema version `1`, `"harness.lock"`, `"harness.toml"` |

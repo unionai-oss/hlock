@@ -2,7 +2,7 @@
 
 Large content (prompts, tool schemas, traces, report blobs) is referenced by
 ``sha256:<digest>`` in the lockfile rather than inlined. Locally these blobs live
-under ``.harnesslock/store/`` addressed by digest. On devbox/cluster the same
+under ``.hlock/store/`` addressed by digest. On devbox/cluster the same
 interface is backed by an object store via fsspec-style paths ``store://...``.
 """
 

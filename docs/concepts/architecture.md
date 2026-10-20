@@ -20,7 +20,7 @@ flowchart TB
     py -- "PyO3 bindings" --> core
 
     core -- "backend = local" --> LOCAL["⚡ in-process reference harness<br/><sub>deterministic · offline · CI-friendly</sub>"]
-    core -- "backend = devbox / cluster<br/><sub>versioned JSON contract</sub>" --> W["🐍 Python worker<br/><sub>harness_lock.tasks.worker</sub>"]
+    core -- "backend = devbox / cluster<br/><sub>versioned JSON contract</sub>" --> W["🐍 Python worker<br/><sub>hlock.tasks.worker</sub>"]
 
     W --> HEAVY["real LLM calls · trace loading · synthetic data<br/>grading · prompt search · LoRA fine-tuning"]
     W -. "optional" .-> FLYTE["☁️ Flyte / Union tasks<br/><sub>CPU + GPU images · caching · lineage</sub>"]
@@ -33,7 +33,7 @@ dependency. It owns:
 
 - **manifest**: parsing and hashing `harness.toml`
 - **lockfile**: the schema-v1 `harness.lock` and `harness.tune.lock` models
-- **store**: a content-addressed store for trial artifacts under `.harnesslock/`
+- **store**: a content-addressed store for trial artifacts under `.hlock/`
 - **eval packs**: loading packs, the deterministic search/holdout split, and grading
 - **search**: grid expansion, Pareto fronts, constraint filtering, winner selection
 - **resolver**: running trials, aggregating evidence, and building the lock
@@ -46,19 +46,19 @@ The core orchestrates and aggregates. It never does heavy compute itself.
 
 The `hlock` package is a thin layer over the core:
 
-- **PyO3 bindings** (`harness_lock._harness_lock`), compiled into the wheel, expose
+- **PyO3 bindings** (`hlock._hlock`), compiled into the wheel, expose
   `Manifest`, `SearchSpace`, `resolve`, `load`, and the rest of the
   [Python API](../reference/python-api.md).
-- **The CLI** (`harness_lock.cli`) is built on those bindings, so the CLI and the API
+- **The CLI** (`hlock.cli`) is built on those bindings, so the CLI and the API
   always behave the same.
-- **The worker** (`harness_lock.tasks.worker`) runs the heavy stages.
+- **The worker** (`hlock.tasks.worker`) runs the heavy stages.
 
 ## The worker contract
 
 On the `devbox` and `cluster` backends, the Rust core shells each work item out to:
 
 ```bash
-$HL_PYTHON -m harness_lock.tasks.worker request.json response.json
+$HL_PYTHON -m hlock.tasks.worker request.json response.json
 ```
 
 Requests and responses follow a versioned JSON contract (`CONTRACT_VERSION = 1`). The
@@ -83,8 +83,8 @@ runnable in CI and on a bare install.
 | `crates/harness-lock-core` | The Rust core library |
 | `crates/harness-lock-py` | PyO3 bindings, shipped only inside the wheel (`publish = false`) |
 | `crates/hlock`, `crates/harness-lock` | Thin crates that re-export the core (`harness-lock` is the alias) |
-| `harness_lock/` | The Python package: bindings re-export, CLI, worker |
-| `hlock/` | Shim that re-exports `harness_lock`, so `import hlock` works |
+| `hlock/` | The Python package: bindings re-export, CLI, worker |
+| `harness_lock/` | Shim that re-exports `hlock`, so `import harness_lock` works |
 | `packaging/harness-lock` | The `harness-lock` PyPI alias, pinned to the matching `hlock` |
 | `evals/` | The demo eval pack |
 | `docs/` | This site |

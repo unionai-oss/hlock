@@ -1286,7 +1286,7 @@ fn prepare_builtin(job: &str, input: &JobInput, meta: Option<&MetaManifest>, met
     let argv = vec![
         python,
         "-m".into(),
-        "harness_lock.cli".into(),
+        "hlock.cli".into(),
         "meta".into(),
         "agent".into(),
         "--meta-lock".into(),

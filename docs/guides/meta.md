@@ -88,7 +88,7 @@ it, and checks the result. Here the built-in agent, on a small local model, runs
 
 ```console
 $ hlock meta run notes --headless
-▶ built-in agent · notes · headless   python -m harness_lock.cli meta agent --meta-lock ~/demo/harness.meta.lock --headless <.hlock/meta/runs/notes-20261018T024933Z/prompt.md>
+▶ built-in agent · notes · headless   python -m hlock.cli meta agent --meta-lock ~/demo/harness.meta.lock --headless <.hlock/meta/runs/notes-20261018T024933Z/prompt.md>
 → search "(project|summary|main purpose)" in README.md
   0 matches
 → read file README.md
