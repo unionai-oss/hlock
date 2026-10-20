@@ -75,10 +75,6 @@ For your own work, `hlock evals init -t coding` (or `data`, `research`, `support
 an eval pack template plus an Agent Skill, so the agent you already use can fill it in
 with real tasks from your project. See [Eval packs](https://docs.hlock.ai/guides/eval-packs/).
 
-<p align="center">
-  <img src="https://raw.githubusercontent.com/unionai-oss/hlock/main/docs/assets/quickstart.svg" alt="An hlock session: pin a Claude Code setup, check it, and sync it onto another machine" width="640">
-</p>
-
 See the [Quickstart](https://docs.hlock.ai/getting-started/quickstart/),
 [Pinning your setup](https://docs.hlock.ai/guides/pin/),
 [Rehydrating with sync](https://docs.hlock.ai/guides/sync/), and
