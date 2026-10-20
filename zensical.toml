@@ -24,6 +24,7 @@ nav = [
   { "Concepts" = [
     "concepts/index.md",
     "concepts/architecture.md",
+    "concepts/related.md",
   ] },
   { "Guides" = [
     { "Lock your setup" = [
