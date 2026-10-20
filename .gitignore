@@ -27,6 +27,8 @@ share/python-wheels/
 .installed.cfg
 *.egg
 MANIFEST
+# (git matches case-insensitively on macOS: keep the OpenAPM manifest fixtures)
+!crates/harness-lock-core/tests/openapm/manifest/
 
 # PyInstaller
 #   Usually these files are written by a python script from a template

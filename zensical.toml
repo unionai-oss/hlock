@@ -30,6 +30,7 @@ nav = [
     { "Lock your setup" = [
       "guides/harnesses.md",
       "guides/pin.md",
+      "guides/dependencies.md",
       "guides/sync.md",
       "guides/launch.md",
       "guides/pull.md",

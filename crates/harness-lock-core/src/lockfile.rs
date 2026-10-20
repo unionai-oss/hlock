@@ -186,7 +186,7 @@ pub struct Harness {
     pub pattern: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
 #[serde(default)]
 pub struct Tool {
     pub name: String,
@@ -216,9 +216,14 @@ pub struct Tool {
     pub scope: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub enabled: Option<bool>,
+    /// The package version a declared server resolved to (`npm:`, `pypi:` sources).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
+    #[serde(flatten)]
+    pub dep: Declared,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
 #[serde(default)]
 pub struct Skill {
     pub name: String,
@@ -245,13 +250,93 @@ pub struct Skill {
     /// Copy of the skill next to the lock (`.hlock/vendor/…`), for skills with no fetchable source.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub vendored: Option<String>,
+    #[serde(flatten)]
+    pub dep: Declared,
 }
 
 fn default_true() -> bool {
     true
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+/// What a declared dependency (`hlock add`, a `harness.toml` or `apm.yml` entry) asked for
+/// and what it resolved to (`specs/dependencies.md` §5). Empty for what `pin` found on disk.
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+#[serde(default, rename_all = "kebab-case")]
+pub struct Declared {
+    /// Declared in the manifest, not only found installed.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub declared: bool,
+    /// The version range asked for (`^1.2`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub constraint: Option<String>,
+    /// The tag a range or tag resolved to (`v1.3.0`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resolved_tag: Option<String>,
+    /// The branch or tag the commit was taken from (`main`, `v1.3.0`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resolved_ref: Option<String>,
+    /// The git commit a git source is pinned to.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub commit: Option<String>,
+    /// For a dependency another package brought in: that package, and the one above it.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub required_by: Vec<String>,
+    /// The name it's declared under, when that isn't the entry's own: an instruction file
+    /// installed as `.claude/rules/style.md` (or `AGENTS.md`) is declared as `style`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub declared_as: Option<String>,
+    /// `hlock add --eval`: the eval pack with and without the dependency.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub evidence: Option<DepEvidence>,
+}
+
+/// An APM package a declared dependency resolved to (`[[package]]`): the skills,
+/// instructions and MCP servers it brought are entries of their own, with
+/// `required-by` naming it.
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+#[serde(default, rename_all = "kebab-case")]
+pub struct Package {
+    pub name: String,
+    /// `apm:OWNER/REPO[/PATH][#REF]` as declared, or as the package above it declared it.
+    pub source: String,
+    /// The package tree's digest, computed as APM computes `content_hash`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub digest: Option<String>,
+    /// 1 for a package the project declares, 2 for one that package declares, and so on.
+    pub depth: u32,
+    /// The package's `apm.yml` `version` and `license`, when it has them.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub license: Option<String>,
+    /// What it contained that hlock doesn't install (prompts, agents, hooks), by kind.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub skipped: BTreeMap<String, usize>,
+    #[serde(flatten)]
+    pub dep: Declared,
+}
+
+/// What `hlock add --eval` measured: the locked stack with and without a dependency.
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+#[serde(default, rename_all = "kebab-case")]
+pub struct DepEvidence {
+    /// The eval packs' content digest.
+    pub eval_pack: Option<String>,
+    pub split: String,
+    /// Trials per side.
+    pub trials: usize,
+    pub baseline_success_rate: f64,
+    pub success_rate: f64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub baseline_cost_usd_per_task: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cost_usd_per_task: Option<f64>,
+    /// The dependency's digest when it was measured: evidence is stale once it changes.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub digest: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
 #[serde(default)]
 pub struct Instructions {
     pub name: String,
@@ -259,6 +344,11 @@ pub struct Instructions {
     pub scope: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub vendored: Option<String>,
+    /// Where a declared instruction file comes from (`github:acme/rules/style.md`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+    #[serde(flatten)]
+    pub dep: Declared,
 }
 
 /// A harness-native component: plugin, package, extension, or marketplace (§5.3).
@@ -277,6 +367,8 @@ pub struct Native {
     /// Extra harness-specific settings (e.g. a Pi package's extension filter).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub config: Option<serde_json::Value>,
+    #[serde(flatten)]
+    pub dep: Declared,
 }
 
 /// A local inference runtime and the models the harness uses on it (pinned locks).
@@ -392,6 +484,9 @@ pub struct Provenance {
     /// Empty when the user scope was pinned whole (`--user`) or not at all.
     #[serde(default, rename = "user-include", skip_serializing_if = "Vec::is_empty")]
     pub user_include: Vec<String>,
+    /// The OpenAPM spec version declared dependencies were resolved by (`"0.1"`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub openapm: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -437,6 +532,9 @@ pub struct Lockfile {
     pub config: Vec<ConfigFile>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub secret: Vec<SecretRef>,
+    /// APM packages declared dependencies resolved to.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub package: Vec<Package>,
     /// Tune-lock-only fields (see §5.9 / `harness.tune.lock`).
     #[serde(default, skip_serializing_if = "Option::is_none", rename = "base-lock")]
     pub base_lock: Option<String>,
@@ -476,6 +574,7 @@ impl Default for Lockfile {
             runtime: Vec::new(),
             config: Vec::new(),
             secret: Vec::new(),
+            package: Vec::new(),
             base_lock: None,
             kind: None,
             tune: None,
@@ -530,16 +629,43 @@ impl Lockfile {
         if let Some(v) = &self.harness.version {
             token("[harness] version", v)?;
         }
+        // a declared dependency's commit and tags reach `git` as arguments
+        let dep = |what: &str, d: &Declared| -> Result<()> {
+            for (k, v) in [("commit", &d.commit), ("resolved-tag", &d.resolved_tag), ("resolved-ref", &d.resolved_ref)] {
+                if let Some(v) = v {
+                    token(&format!("{what} {k}"), v)?;
+                }
+            }
+            if let Some(n) = &d.declared_as {
+                name(&format!("{what} declared-as"), n)?;
+            }
+            if let Some(c) = d.constraint.as_deref().filter(|c| c.chars().any(char::is_control)) {
+                return Err(Error::Lockfile(format!("{what} constraint {c:?} has control characters")));
+            }
+            Ok(())
+        };
         for s in &self.skill {
             name("[[skill]] name", &s.name)?;
             if let Some(v) = &s.vendored {
                 rel(&format!("[[skill]] {} vendored", s.name), v)?;
             }
+            dep(&format!("[[skill]] {}", s.name), &s.dep)?;
         }
         for i in &self.instructions {
             if let Some(v) = &i.vendored {
                 rel(&format!("[[instructions]] {} vendored", i.name), v)?;
             }
+            dep(&format!("[[instructions]] {}", i.name), &i.dep)?;
+        }
+        for p in &self.package {
+            name("[[package]] name", &p.name)?;
+            dep(&format!("[[package]] {}", p.name), &p.dep)?;
+        }
+        for t in &self.tool {
+            if let Some(v) = &t.version {
+                token(&format!("[[tool]] {} version", t.name), v)?;
+            }
+            dep(&format!("[[tool]] {}", t.name), &t.dep)?;
         }
         for c in &self.config {
             if let Some(v) = &c.vendored {
@@ -550,6 +676,7 @@ impl Lockfile {
             if let Some(v) = &n.version {
                 token(&format!("[[native]] {} version", n.name), v)?;
             }
+            dep(&format!("[[native]] {}", n.name), &n.dep)?;
         }
         for r in &self.runtime {
             token("[[runtime]] name", &r.name)?;

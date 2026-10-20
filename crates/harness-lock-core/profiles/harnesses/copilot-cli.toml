@@ -12,6 +12,8 @@ binaries = ["copilot"]
 version = { args = ["--version"] }
 config-root = { env = "COPILOT_HOME", default = "~/.copilot" }
 instructions = ["AGENTS.md", ".github/copilot-instructions.md"]
+# where `hlock add instructions` installs a file (APM's copilot target uses the same)
+rules = { dir = ".github/instructions", ext = ".instructions.md" }
 
 [[install]]
 method = "npm"

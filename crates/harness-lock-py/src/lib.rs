@@ -29,6 +29,7 @@ create_exception!(hlock, TuningError, HarnessLockError, "Tuning found no viable 
 create_exception!(hlock, ProfileError, HarnessLockError, "A harness or runtime profile, a selection, or a step failed.");
 create_exception!(hlock, WorkerError, HarnessLockError, "The Python worker failed.");
 create_exception!(hlock, PullError, HarnessLockError, "`hlock pull`: a source can't be read, or git failed.");
+create_exception!(hlock, DependencyError, HarnessLockError, "A declared dependency can't be read, resolved, fetched or installed.");
 
 fn py_err(e: core::Error) -> PyErr {
     use core::Error as E;
@@ -43,6 +44,7 @@ fn py_err(e: core::Error) -> PyErr {
         E::Profile(_) => ProfileError::new_err(msg),
         E::Worker(_) => WorkerError::new_err(msg),
         E::Pull(_) => PullError::new_err(msg),
+        E::Dependency(_) => DependencyError::new_err(msg),
         E::Toml(_) | E::Json(_) => HarnessLockError::new_err(msg),
     }
 }
@@ -884,19 +886,198 @@ fn sync_options(prefix: Option<String>, in_place: bool, docker: Option<String>, 
         all_models,
         exact,
         inject: false,
+        also: Vec::new(),
     }
+}
+
+/// `[target] also` from the project's manifest, when the lock is the project's (next to it).
+fn also_harnesses(manifest: Option<&str>, lock: &str) -> Vec<String> {
+    let Ok(Some(m)) = load_manifest(manifest) else { return Vec::new() };
+    let same_dir = m.source_path.as_ref().and_then(|p| p.parent()).map(|d| core::fsutil::absolute(d)) == Some(lock_dir(lock));
+    if !same_dir {
+        return Vec::new();
+    }
+    m.target.get("also").and_then(|v| v.as_array()).map(|a| a.iter().filter_map(|x| x.as_str().map(str::to_string)).collect()).unwrap_or_default()
+}
+
+/// The project's manifest when it exists (for the dependency functions).
+fn project_manifest(path: &str) -> PyResult<Option<core::Manifest>> {
+    let p = Path::new(path);
+    if p.is_file() {
+        Ok(Some(core::Manifest::load(p).map_err(py_err)?))
+    } else {
+        Ok(None)
+    }
+}
+
+fn abs(path: &str) -> PathBuf {
+    core::fsutil::absolute(Path::new(path))
+}
+
+fn to_json<T: serde::Serialize>(v: &T) -> PyResult<String> {
+    serde_json::to_string(v).map_err(|e| py_err(e.into()))
+}
+
+/// Resolve and fetch a dependency for `hlock add` without changing the project: returns
+/// the prepared dependency as JSON (what `--dry-run` shows, and what `deps_commit` takes).
+#[pyfunction]
+#[pyo3(signature = (source, kind=None, name=None, scope=None, harness=None, manifest="harness.toml".to_string(), lock="harness.lock".to_string()))]
+#[allow(clippy::too_many_arguments)]
+fn deps_prepare(py: Python<'_>, source: String, kind: Option<String>, name: Option<String>, scope: Option<String>, harness: Option<String>, manifest: String, lock: String) -> PyResult<String> {
+    interruptible(py, move || {
+        let (reg, ctx, _) = registry(Some(&manifest), Some(&lock_dir(&lock)))?;
+        let req = core::deps::AddRequest { kind, source, name, scope, harness };
+        let p = core::deps::prepare(&req, &abs(&manifest), &abs(&lock), &reg, &ctx).map_err(py_err)?;
+        to_json(&p)
+    })
+}
+
+/// Declare, pin and (with `install`) install a prepared dependency. `evidence` is the JSON
+/// of what `deps_measure` measured, when the dependency was kept after `--eval`.
+#[pyfunction]
+#[pyo3(signature = (prepared, install=true, measurement=None))]
+fn deps_commit(py: Python<'_>, prepared: String, install: bool, measurement: Option<String>) -> PyResult<String> {
+    let p: core::deps::Prepared = serde_json::from_str(&prepared).map_err(|e| json_arg_err("prepared", e))?;
+    let m: Option<core::deps::Measurement> = measurement.map(|m| serde_json::from_str(&m)).transpose().map_err(|e| json_arg_err("measurement", e))?;
+    interruptible(py, move || {
+        let (reg, ctx, _) = registry(Some(&p.manifest.to_string_lossy()), Some(&lock_dir(&p.lock.to_string_lossy())))?;
+        let digest = p.resolved.first().and_then(|r| r.entry.digest().map(str::to_string));
+        let o = core::deps::commit(&p, &reg, &ctx, install, m.map(|m| m.evidence(digest))).map_err(py_err)?;
+        to_json(&o)
+    })
+}
+
+/// `hlock add --eval`: run the eval pack on the locked stack with and without the
+/// prepared dependency; returns the measurement as JSON. Nothing in the project changes.
+#[pyfunction]
+fn deps_measure(py: Python<'_>, prepared: String) -> PyResult<String> {
+    let p: core::deps::Prepared = serde_json::from_str(&prepared).map_err(|e| json_arg_err("prepared", e))?;
+    interruptible(py, move || {
+        let (reg, ctx, _) = registry(Some(&p.manifest.to_string_lossy()), Some(&lock_dir(&p.lock.to_string_lossy())))?;
+        to_json(&core::deps::measure(&p, &reg, &ctx).map_err(py_err)?)
+    })
+}
+
+/// `hlock add --adopt NAME`: declare something the pinned lock already records.
+#[pyfunction]
+#[pyo3(signature = (name, manifest="harness.toml".to_string(), lock="harness.lock".to_string()))]
+fn deps_adopt(py: Python<'_>, name: String, manifest: String, lock: String) -> PyResult<String> {
+    interruptible(py, move || {
+        let (reg, ctx, _) = registry(Some(&manifest), Some(&lock_dir(&lock)))?;
+        to_json(&core::deps::adopt(&name, &abs(&manifest), &abs(&lock), &reg, &ctx).map_err(py_err)?)
+    })
+}
+
+/// `hlock remove KIND NAME`: undeclare a dependency, unpin it, and (with `uninstall`)
+/// take it out of the harness.
+#[pyfunction]
+#[pyo3(signature = (kind, name, manifest="harness.toml".to_string(), lock="harness.lock".to_string(), uninstall=true))]
+fn deps_remove(py: Python<'_>, kind: String, name: String, manifest: String, lock: String, uninstall: bool) -> PyResult<String> {
+    interruptible(py, move || {
+        let (reg, ctx, _) = registry(Some(&manifest), Some(&lock_dir(&lock)))?;
+        let kind = core::deps::Kind::parse(&kind).map_err(py_err)?;
+        to_json(&core::deps::remove(kind, &name, &abs(&manifest), &abs(&lock), &reg, &ctx, uninstall).map_err(py_err)?)
+    })
+}
+
+/// How the declared dependencies differ from the lock and the harness: a JSON list of
+/// issues (`problem`, `kind`, `name`, `detail`, `fix`, `fails`).
+#[pyfunction]
+#[pyo3(signature = (lock="harness.lock".to_string(), manifest="harness.toml".to_string()))]
+fn deps_check(py: Python<'_>, lock: String, manifest: String) -> PyResult<String> {
+    interruptible(py, move || {
+        let (reg, ctx, _) = registry(Some(&manifest), Some(&lock_dir(&lock)))?;
+        let m = project_manifest(&manifest)?;
+        let l = core::Lockfile::load(Path::new(&lock)).map_err(py_err)?;
+        to_json(&core::deps::check(m.as_ref(), &l, &reg, &ctx).map_err(py_err)?)
+    })
+}
+
+/// Bring the lock's declared dependencies in line with the manifest (and `apm.yml`):
+/// returns `{"changes": […]}`. With `write`, saves the lock; with `frozen`, raises
+/// instead of changing it.
+#[pyfunction]
+#[pyo3(signature = (lock="harness.lock".to_string(), manifest="harness.toml".to_string(), frozen=false, write=true))]
+fn deps_refresh(py: Python<'_>, lock: String, manifest: String, frozen: bool, write: bool) -> PyResult<String> {
+    interruptible(py, move || {
+        let (reg, ctx, _) = registry(Some(&manifest), Some(&lock_dir(&lock)))?;
+        let m = project_manifest(&manifest)?;
+        let mut l = core::Lockfile::load(Path::new(&lock)).map_err(py_err)?;
+        let changes = core::deps::refresh(m.as_ref(), &mut l, &reg, &ctx, frozen).map_err(py_err)?;
+        if write && !changes.is_empty() {
+            l.save(Path::new(&lock)).map_err(py_err)?;
+        }
+        Ok(json_str(serde_json::json!({"changes": changes})))
+    })
+}
+
+/// After `sync` wrote declared MCP servers into project config files (`files`, profile file
+/// ids), re-record them in the lock. Returns whether the lock changed.
+#[pyfunction]
+#[pyo3(signature = (files, lock="harness.lock".to_string(), manifest="harness.toml".to_string()))]
+fn deps_record_configs(py: Python<'_>, files: Vec<String>, lock: String, manifest: String) -> PyResult<bool> {
+    interruptible(py, move || {
+        let (reg, ctx, _) = registry(Some(&manifest), Some(&lock_dir(&lock)))?;
+        core::deps::record_configs(Path::new(&lock), &reg, &ctx, &files.into_iter().collect()).map_err(py_err)
+    })
+}
+
+/// Declared dependencies with a newer upstream, as JSON (`current`, `wanted`, `latest`).
+#[pyfunction]
+#[pyo3(signature = (lock="harness.lock".to_string(), manifest="harness.toml".to_string(), kind=None))]
+fn deps_outdated(py: Python<'_>, lock: String, manifest: String, kind: Option<String>) -> PyResult<String> {
+    interruptible(py, move || {
+        let (reg, ctx, _) = registry(Some(&manifest), Some(&lock_dir(&lock)))?;
+        let m = project_manifest(&manifest)?;
+        let l = core::Lockfile::load(Path::new(&lock)).map_err(py_err)?;
+        let only = kind.map(|k| core::deps::Kind::parse(&k)).transpose().map_err(py_err)?;
+        to_json(&core::deps::outdated(m.as_ref(), &l, &reg, &ctx, only).map_err(py_err)?)
+    })
+}
+
+/// `hlock upgrade dep:NAME`: the declared dependency resolved to the newest it allows,
+/// prepared (JSON for `deps_commit`) but not applied.
+#[pyfunction]
+#[pyo3(signature = (name, manifest="harness.toml".to_string(), lock="harness.lock".to_string()))]
+fn deps_upgrade(py: Python<'_>, name: String, manifest: String, lock: String) -> PyResult<String> {
+    interruptible(py, move || {
+        let (reg, ctx, _) = registry(Some(&manifest), Some(&lock_dir(&lock)))?;
+        to_json(&core::deps::prepare_upgrade(&name, &abs(&manifest), &abs(&lock), &reg, &ctx).map_err(py_err)?)
+    })
+}
+
+/// `hlock export --format apm-lock`: the lock as `apm.lock.yaml`, written to `out` (or,
+/// with `out=None`, only returned). Returns JSON with the text and a summary.
+#[pyfunction]
+#[pyo3(signature = (lock="harness.lock".to_string(), out=None, force=false, manifest="harness.toml".to_string()))]
+fn export_apm_lock(py: Python<'_>, lock: String, out: Option<String>, force: bool, manifest: String) -> PyResult<String> {
+    interruptible(py, move || {
+        let (reg, ctx, _) = registry(Some(&manifest), Some(&lock_dir(&lock)))?;
+        let l = core::Lockfile::load(Path::new(&lock)).map_err(py_err)?;
+        let profile = reg.require_harness(&l.harness.name).map_err(py_err)?;
+        let env = core::deps::Env::new(&ctx, profile);
+        let out = out.map(|o| abs(&o));
+        to_json(&core::apm::export(&l, &env, out.as_deref(), force).map_err(py_err)?)
+    })
 }
 
 /// Build the `hlock sync` plan for a lock as JSON. Nothing is changed. The plan writes
 /// into an isolated root (`prefix`, default `.hlock/env`) unless `in_place` or `docker`.
 #[pyfunction]
-#[pyo3(signature = (path="harness.lock".to_string(), prefix=None, in_place=false, docker=None, install=false, pull=false, all_models=false, exact=false, manifest=None))]
-fn sync_plan(py: Python<'_>, path: String, prefix: Option<String>, in_place: bool, docker: Option<String>, install: bool, pull: bool, all_models: bool, exact: bool, manifest: Option<String>) -> PyResult<String> {
+#[pyo3(signature = (path="harness.lock".to_string(), prefix=None, in_place=false, docker=None, install=false, pull=false, all_models=false, exact=false, manifest=None, refresh=false))]
+#[allow(clippy::too_many_arguments)]
+fn sync_plan(py: Python<'_>, path: String, prefix: Option<String>, in_place: bool, docker: Option<String>, install: bool, pull: bool, all_models: bool, exact: bool, manifest: Option<String>, refresh: bool) -> PyResult<String> {
     // no GIL while it waits on the network (deciders), so other Python threads keep running
     interruptible(py, move || {
         let (reg, ctx, _) = registry(manifest.as_deref(), Some(&lock_dir(&path)))?;
-        let lock = core::Lockfile::load(Path::new(&path)).map_err(py_err)?;
-        let opts = sync_options(prefix, in_place, docker, install, pull, all_models, exact);
+        let mut lock = core::Lockfile::load(Path::new(&path)).map_err(py_err)?;
+        if refresh {
+            // the plan a sync would make: declarations it would lock first, in memory only
+            let m = manifest.as_deref().map(project_manifest).transpose()?.flatten();
+            core::deps::refresh(m.as_ref(), &mut lock, &reg, &ctx, false).map_err(py_err)?;
+        }
+        let mut opts = sync_options(prefix, in_place, docker, install, pull, all_models, exact);
+        opts.also = also_harnesses(manifest.as_deref(), &path);
         let plan = core::sync::plan(&lock, Path::new(&path), &reg, &ctx, &opts).map_err(py_err)?;
         Ok(json_str(serde_json::json!(plan)))
     })
@@ -1556,6 +1737,17 @@ fn _hlock(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(pull_env, m)?)?;
     m.add_function(wrap_pyfunction!(is_pull_source, m)?)?;
     m.add_function(wrap_pyfunction!(check_pin, m)?)?;
+    m.add_function(wrap_pyfunction!(deps_prepare, m)?)?;
+    m.add_function(wrap_pyfunction!(deps_commit, m)?)?;
+    m.add_function(wrap_pyfunction!(deps_measure, m)?)?;
+    m.add_function(wrap_pyfunction!(deps_adopt, m)?)?;
+    m.add_function(wrap_pyfunction!(deps_remove, m)?)?;
+    m.add_function(wrap_pyfunction!(deps_check, m)?)?;
+    m.add_function(wrap_pyfunction!(deps_refresh, m)?)?;
+    m.add_function(wrap_pyfunction!(deps_outdated, m)?)?;
+    m.add_function(wrap_pyfunction!(deps_record_configs, m)?)?;
+    m.add_function(wrap_pyfunction!(deps_upgrade, m)?)?;
+    m.add_function(wrap_pyfunction!(export_apm_lock, m)?)?;
     m.add_function(wrap_pyfunction!(sync_plan, m)?)?;
     m.add_function(wrap_pyfunction!(sync_run_step, m)?)?;
     m.add_function(wrap_pyfunction!(sync_skill, m)?)?;
@@ -1591,6 +1783,7 @@ fn _hlock(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("ProfileError", py.get_type::<ProfileError>())?;
     m.add("WorkerError", py.get_type::<WorkerError>())?;
     m.add("PullError", py.get_type::<PullError>())?;
+    m.add("DependencyError", py.get_type::<DependencyError>())?;
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
     m.add("LOCK_VERSION", core::LOCK_VERSION)?;
     Ok(())

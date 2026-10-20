@@ -16,6 +16,10 @@ Failures print a one-line error with a hint and exit `1`.
 |---|---|
 | [`pin`](#pin) | Pin your current harness setup into `harness.lock` |
 | [`check`](#check) | Fail if a pinned setup changed, or `harness.toml` has drifted from `harness.lock` |
+| [`add`](#add) | Declare a dependency, pin it, and install it into your harness |
+| [`remove`](#remove) | Undeclare a dependency, unpin it, and take it out of your harness |
+| [`outdated`](#outdated) | List declared dependencies with a newer commit, tag or version upstream |
+| [`export`](#export) | Write the lock as `apm.lock.yaml` for APM |
 | [`sync`](#sync) | Rehydrate the setup in a lock on this machine, in a prefix, or in a Docker image |
 | [`launch`](#launch) | Start a harness session that matches the lock |
 | [`pull`](#pull) | Pull someone else's lock from a git repository |
@@ -265,9 +269,79 @@ For a resolved lock, `check` also fails when the lock is for a different harness
 when the installed harness's version differs from the one the lock pins (skipped when the
 harness isn't installed).
 
+When the project declares dependencies (in `harness.toml` or `apm.yml`), `check` also fails
+when one is missing, changed, unlocked or no longer declared, or when a skill in the
+harness's project skill directory is neither declared nor pinned. It warns, without
+failing, about stale `--eval` evidence and an out-of-date exported `apm.lock.yaml`. See
+[Check what's declared](../guides/dependencies.md#check-whats-declared).
+
 ```bash
 hlock check [--prefix DIR]
 ```
+
+## `add`
+
+Declare a dependency in `harness.toml`, resolve it to a commit (or package version) and
+digest in `harness.lock`, and install it into the harness. Only that entry of the lock
+changes; a project with no lock is pinned first. See
+[Declaring dependencies](../guides/dependencies.md).
+
+```bash
+hlock add KIND SOURCE [--as NAME] [--scope project|user] [--eval [-y]] [--dry-run] [--no-install] [--harness NAME] [--json]
+hlock add apm:OWNER/REPO[/PATH][#REF] [OPTIONS]
+hlock add --adopt NAME
+```
+
+| Option | Description |
+|---|---|
+| `KIND` | `skill`, `mcp`, `instructions` or `plugin`. An `apm:` source needs none |
+| `SOURCE` | Where it comes from. See [What you can add](../guides/dependencies.md#what-you-can-add) |
+| `--as NAME` | The name to declare it under (default: from the source) |
+| `--scope` | `project` (default: installed in the project, committed with it) or `user` |
+| `--eval` | Run the eval pack with and without it, then ask before keeping it. See [Measure before you keep it](../guides/dependencies.md#measure-before-you-keep-it) |
+| `-y`, `--yes` | With `--eval`, keep it without asking (required when stdin isn't a terminal) |
+| `--dry-run` | Resolve it and print what would change; change nothing |
+| `--no-install` | Declare and pin it, but don't install it (`hlock sync` does) |
+| `--adopt NAME` | Declare something `hlock pin` already recorded, from the source the lock knows for it |
+| `--harness` | The harness to install into when there's no lock yet |
+| `--json` | Print the result as JSON |
+
+## `remove`
+
+Take a dependency out of `harness.toml` and `harness.lock`, and out of the harness. A
+package takes everything it brought with it. A skill or instruction file changed by hand
+since it was added is left in place, with a warning.
+
+```bash
+hlock remove KIND NAME [--keep-installed] [--json]
+```
+
+## `outdated`
+
+Look upstream for declared dependencies with a newer commit, tag or version. `wanted` is
+the newest the declaration allows; `latest` is the newest there is.
+
+```bash
+hlock outdated [KIND] [--json]
+```
+
+## `export`
+
+Write the lock for another tool. `--format apm-lock` writes `apm.lock.yaml` as APM writes
+it, so `apm install --frozen` gets the same dependencies as `hlock sync`. What APM has no
+field for (the harness, models, runtimes, config, evidence, plugins) is left out, and the
+summary says so. See [Teammates who use APM](../guides/dependencies.md#teammates-who-use-apm).
+
+```bash
+hlock export --format apm-lock [-o FILE] [--force] [--json]
+```
+
+| Option | Description |
+|---|---|
+| `--format` | `apm-lock` |
+| `-o`, `--out` | Where to write it (default `apm.lock.yaml` next to the lock; `-` for stdout) |
+| `--force` | Overwrite an `apm.lock.yaml` that pins a commit `harness.lock` doesn't know |
+| `--json` | Print a summary as JSON |
 
 ## `sync`
 
@@ -295,7 +369,13 @@ hlock sync [LOCK] [OPTIONS]
 | `--skill` | Write an Agent Skill that guides an agent through the remaining steps |
 | `--skill-dir DIR` | Where `--skill` writes `SKILL.md` (default `.agents/skills/hlock-rehydrate`) |
 | `--exact` | Also move aside skills that aren't in the lock |
+| `--frozen` | Fail if the declared dependencies would change the lock, instead of updating it (for CI) |
 | `-v`, `--verbose` | List every step, including optional ones |
+
+For the project's own lock, `sync` first locks what `harness.toml` or `apm.yml` newly
+declares, or declares differently (no network when nothing changed), then fetches each
+declared dependency at its commit, and installs the portable ones into the harnesses in
+`[target] also` too. See [Sync on another machine](../guides/dependencies.md#sync-on-another-machine).
 
 Exits `0` when everything matches, `3` while manual steps remain, and `1` if an automatic
 step fails.
@@ -469,10 +549,14 @@ Find newer versions of locked components, re-measure the stack, and apply only o
 request. See [Upgrading components](../guides/upgrade.md).
 
 `upgrade` works on resolved locks. On a pinned lock it exits `1`: update your setup and
-re-pin with `hlock pin` instead.
+re-pin with `hlock pin` instead. `hlock upgrade dep:NAME` works on any lock: it moves a
+declared dependency to the newest commit, tag or version its declaration allows, keeping
+the previous lock as `harness.lock.prev` (see
+[Keep them current](../guides/dependencies.md#keep-them-current)).
 
 ```bash
 hlock upgrade [--all | --to TARGET] [--apply] [--force] [--rollback] [--workdir DIR]
+hlock upgrade dep:NAME [--eval [-y]] [--apply]
 ```
 
 | Option | Description |
@@ -483,6 +567,7 @@ hlock upgrade [--all | --to TARGET] [--apply] [--force] [--rollback] [--workdir 
 | `--force` | Keep the upgrade even if the success rate drops |
 | `--rollback` | Restore `harness.lock` from `harness.lock.prev` |
 | `--workdir DIR` | Where trial artifacts go |
+| `--eval` | With `dep:NAME`, measure the new version on the eval pack first, then ask before applying (`-y` applies without asking) |
 
 ## `tune`
 

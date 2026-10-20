@@ -593,12 +593,14 @@ version = "0.4.0"
 dependencies = [
  "flyte",
  "libc",
+ "semver",
  "serde",
  "serde_json",
  "serde_norway",
  "sha2",
  "thiserror 2.0.21",
  "toml",
+ "toml_edit",
  "ureq",
 ]
 
@@ -608,6 +610,7 @@ version = "0.4.0"
 dependencies = [
  "harness-lock-core",
  "pyo3",
+ "serde",
  "serde_json",
 ]
 
@@ -1917,6 +1920,12 @@ dependencies = [
  "core-foundation-sys",
  "libc",
 ]
+
+[[package]]
+name = "semver"
+version = "1.0.28"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8a7852d02fc848982e0c167ef163aaff9cd91dc640ba85e263cb1ce46fae51cd"
 
 [[package]]
 name = "serde"

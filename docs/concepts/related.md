@@ -55,8 +55,10 @@ organization enforce an allow/deny policy in CI.
 
 APM pins *what's installed*. It doesn't record which model runs, which harness version
 runs it, or which local runtime serves it, and it doesn't measure whether a package helps.
-hlock's lock covers those, and `resolve` measures. The two compose: install with APM,
-then `hlock pin` to lock the rest of the stack around it.
+hlock's lock covers those, and `resolve` measures. The two compose: hlock reads `apm.yml`
+and `apm.lock.yaml`, resolves `apm:` packages by the same OpenAPM rules, and writes an
+`apm.lock.yaml` that `apm install --frozen` accepts, so one team can use both
+([APM packages](../guides/dependencies.md#apm-packages)).
 
 **[rulesync](https://github.com/dyoshikawa/rulesync)** and
 **[Ruler](https://github.com/intellectronica/ruler)** keep one set of rules, MCP servers
@@ -165,12 +167,15 @@ Nix and the agent stack with hlock.
 
 ### Why not APM?
 
-Use APM to install agent context: it's the most complete tool for that, with the broadest
-harness coverage and real governance features. hlock doesn't fetch packages by name today.
-Its job is the rest of the stack (harness version, models, runtimes, config, secrets) and
-the question APM leaves open: does this setup work better than the alternatives on your
-tasks? Projects can use both. APM writes the files, `hlock pin` locks them along with
-everything else, and `hlock resolve` measures stacks against your eval pack.
+Use APM to distribute agent context: it's the most complete tool for that, with the
+broadest harness coverage (prompts, agents and hooks, compiled per harness) and real
+governance features. hlock's devex goals are different: speed, quick portability, and
+tunability. [`hlock add`](../guides/dependencies.md) declares skills, MCP servers,
+instruction files and APM packages with no Python or Node on the path, and `--eval`
+answers whether one helps on your tasks. Its lock also covers the rest of the stack
+(harness version, models, runtimes, config, secrets). Projects can use both: APM users keep
+their `apm.yml`, hlock reads it, and `hlock export --format apm-lock` keeps `apm.lock.yaml`
+in step.
 
 ### Why not rulesync or Ruler?
 
@@ -202,13 +207,11 @@ your other options with hlock on a holdout split, and lock the winner.
 
 ## What we've learned from them
 
-Several of these projects do things hlock should do too, and we've written design specs
-for them:
+Several of these projects do things hlock should do too:
 
-- [Declared dependencies](https://github.com/unionai-oss/hlock/blob/main/specs/dependencies.md):
-  APM's `install`-and-lock flow for skills and MCP servers, with a dependency resolver
-  compatible with APM's `apm.yml` and `apm.lock.yaml`, plus measuring a dependency before
-  you keep it.
+- [Declared dependencies](../guides/dependencies.md): APM's `install`-and-lock flow for
+  skills and MCP servers, with a dependency resolver compatible with APM's `apm.yml` and
+  `apm.lock.yaml`, plus measuring a dependency before you keep it.
 - [Audit and trust](https://github.com/unionai-oss/hlock/blob/main/specs/audit.md):
   APM's hidden-Unicode gate, executable approval and org policy, extended to models and
   evidence.

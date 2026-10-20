@@ -69,6 +69,7 @@ hlock sync                      # on another machine: rehydrate it into .hlock/e
 hlock launch                    # start a session on the locked setup, isolated from your config
 hlock run "summarize README.md"  # or run one prompt through it (claude -p, codex exec, …)
 hlock pull github:alice/agents  # get someone else's pinned setup; then hlock launch --lock alice
+hlock add skill github:anthropics/skills/skills/pdf   # declare a dependency, pin it, install it
 ```
 
 Plain `hlock pin` records only the project's own skills, MCP servers and config, so your
@@ -218,7 +219,7 @@ generate it. hlock isn't trying to replace any of them; it has different devex g
 
 | If you want to… | Reach for | Where hlock fits |
 |---|---|---|
-| Install skills, instructions and MCP servers from git into many agents, with org policy | [APM](https://github.com/microsoft/apm) | APM installs; hlock pins the rest of the stack around it and measures whether it works |
+| Install skills, instructions and MCP servers from git into many agents, with org policy | [APM](https://github.com/microsoft/apm) | hlock reads `apm.yml`, resolves `apm:` packages by the same rules, and exports `apm.lock.yaml`; it also pins the rest of the stack and measures whether a package helps |
 | Keep one set of rules in sync across many agents | [rulesync](https://github.com/dyoshikawa/rulesync), [Ruler](https://github.com/intellectronica/ruler) | They translate config; hlock locks it, with digests and drift checks |
 | Add skills from the open ecosystem | [`npx skills`](https://github.com/vercel-labs/skills) | `hlock pin` records them with the rest of your setup |
 | Carry your dotfiles to every machine | [chezmoi](https://github.com/twpayne/chezmoi), [yadm](https://github.com/yadm-dev/yadm) | hlock knows what a harness's files mean: versions, models, secrets, drift |
@@ -249,7 +250,8 @@ Want to help? See the [contributing guide](https://docs.hlock.ai/project/contrib
 ## Status
 
 What works today: `pin`, `check`, `sync`, and `launch` for the
-[supported harnesses](https://docs.hlock.ai/guides/harnesses/), `localize`, manifest and
+[supported harnesses](https://docs.hlock.ai/guides/harnesses/), declared dependencies
+(`add`, `remove`, `outdated`, APM packages and `apm.lock.yaml` export), `localize`, manifest and
 lockfile schema v1, a content-addressed store, eval packs (`hlock evals`) with graders, the
 reference provider and harness, grid search with Pareto selection, `upgrade`
 (plan/apply/rollback), `tune` across the `local`, `devbox`, and `cluster` backends, and the

@@ -193,6 +193,13 @@ skill's vendoring, with a warning, rather than being copied as an empty file. A 
 name. Two vendored files with the same name (two `AGENTS.md`) get `AGENTS.md` and
 `AGENTS-2.md`.
 
+A [declared dependency](dependencies.md) is never vendored: it has a source and a commit,
+so `sync` fetches it. Re-pinning keeps what's declared as declared. When the installed copy
+differs from its declared pin, `pin` keeps the pin and warns (`hlock sync` restores it;
+`hlock add` accepts the new one). When the project has an `apm.lock.yaml`, the skills
+`apm install` deployed are recorded as dependencies of their package rather than as the
+project's own files.
+
 Source URLs carry no credentials: a skill's git remote or a marketplace URL is recorded
 without its user name and password or token (`https://ghp_…@github.com/a/b` is locked as
 `https://github.com/a/b`); an ssh user name (`git@github.com:a/b`) stays.

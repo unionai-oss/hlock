@@ -13,8 +13,10 @@
 | `HLOCK_SECRET_*` | unset | Values for secret placeholders in a pinned lock. They take precedence over the secrets file and the keychain. See [Secrets](../guides/secrets.md). |
 | `HLOCK_SECRETS_FILE` | `~/.config/hlock/secrets.toml` | Where secret references live. See [Secrets](../guides/secrets.md#reference-a-password-manager). |
 | `HLOCK_KEYCHAIN` | on | `0` stops hlock from reading or writing the OS keychain |
-| `HLOCK_HOME` | `~/.hlock` | hlock's per-user directory: [pulled](../guides/pull.md) locks in `pulls/`, their isolated roots in `env/` |
-| `HLOCK_GITHUB_URL` | `https://github.com` | Base URL `github:` sources fetch from (for GitHub Enterprise). See [Pulling someone else's lock](../guides/pull.md#sources). |
+| `HLOCK_HOME` | `~/.hlock` | hlock's per-user directory: [pulled](../guides/pull.md) locks in `pulls/`, their isolated roots in `env/`, and the shared git cache for [dependencies](../guides/dependencies.md) in `cache/git/` |
+| `HLOCK_GITHUB_URL` | `https://github.com` | Base URL `github:` and `apm:` sources fetch from (for GitHub Enterprise). See [Pulling someone else's lock](../guides/pull.md#sources). |
+| `HLOCK_NPM_REGISTRY` | `https://registry.npmjs.org` | The npm registry `npm:` MCP servers resolve against |
+| `HLOCK_PYPI_URL` | `https://pypi.org` | The package index `pypi:` MCP servers resolve against |
 | `HLOCK_GITLAB_URL` | `https://gitlab.com` | Base URL `gitlab:` sources fetch from (for a self-hosted GitLab) |
 | `HLOCK_META_MANIFEST` | `harness.meta.toml` next to the lock | The [meta harness](../guides/meta.md)'s manifest |
 | `HLOCK_META_LOCK` | `harness.meta.lock` next to the lock | The meta harness's lock |

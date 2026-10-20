@@ -70,7 +70,18 @@ from hlock import check_pin as _check_pin
 from hlock import decide as _decide
 from hlock import decide_hook as _decide_hook
 from hlock import decider_drift as _decider_drift
+from hlock import deps_adopt as _deps_adopt
+from hlock import deps_check as _deps_check
+from hlock import deps_commit as _deps_commit
+from hlock import deps_measure as _deps_measure
+from hlock import deps_outdated as _deps_outdated
+from hlock import deps_prepare as _deps_prepare
+from hlock import deps_record_configs as _deps_record_configs
+from hlock import deps_refresh as _deps_refresh
+from hlock import deps_remove as _deps_remove
+from hlock import deps_upgrade as _deps_upgrade
 from hlock import evals as _evals
+from hlock import export_apm_lock as _export_apm_lock
 from hlock import grade_eval_task as _grade_eval_task
 from hlock import jobs as _jobs
 from hlock import localize as _localize
@@ -177,6 +188,7 @@ click.rich_click.MAX_WIDTH = 100
 click.rich_click.COMMAND_GROUPS = {
     "hlock": [
         {"name": "Lock", "commands": ["pin", "check"]},
+        {"name": "Dependencies", "commands": ["add", "remove", "outdated", "export"]},
         {"name": "Rehydrate & run", "commands": ["sync", "launch", "run"]},
         {"name": "Optimize", "commands": ["evals", "init", "resolve", "tune", "upgrade", "decide"]},
         {"name": "Go local", "commands": ["localize"]},
@@ -1118,6 +1130,369 @@ def rm(names: tuple[str, ...]) -> None:
         _ok(f"removed [path]{n}[/]")
 
 
+# --------------------------------------------------------------------------- #
+# Declared dependencies: add, remove, outdated, export
+# --------------------------------------------------------------------------- #
+
+_DEP_KINDS = ("skill", "mcp", "instructions", "plugin", "package")
+
+
+def _entry(e: dict) -> tuple[str, dict]:
+    """A lock entry from the core (`{"skill": {...}}`) → (table, fields)."""
+    table, fields = next(iter(e.items()))
+    return table, fields
+
+
+def _dep_pin(fields: dict) -> str:
+    """What a declared entry is pinned to: its tag, its version, or its short commit."""
+    return fields.get("resolved-tag") or fields.get("version") or _short(fields.get("commit")) or ""
+
+
+def _short_digest(d: str | None) -> str:
+    return (d or "")[:15] + "…" if d and len(d) > 15 else (d or "")
+
+
+def _where(table: str, fields: dict) -> str:
+    """Where an entry is installed, for messages."""
+    if table == "skill":
+        return fields.get("path") or ""
+    if table == "instructions":
+        return fields.get("name") or ""
+    if table == "tool":
+        return "MCP server " + fields.get("name", "")
+    return fields.get("name", "")
+
+
+def _print_resolved(prepared: dict) -> None:
+    """`✓ resolved acme/skills@v1.3.0 skills/sql  sha256:9b2f…` for each resolved entry."""
+    for r in prepared["resolved"]:
+        _, f = _entry(r["entry"])
+        pin = _dep_pin(f)
+        src = f.get("source") or ""
+        via = f.get("required-by") or []
+        origin = f"  [muted]via {' → '.join(via)}[/]" if via else ""
+        digest = _short_digest(f.get("digest") or f.get("integrity"))
+        _ok(f"resolved [key]{r['kind']}[/] [bold]{escape(r['name'])}[/] {escape(src)}"
+            + (f" [muted]@ {pin}[/]" if pin else "") + (f"  [muted]{digest}[/]" if digest else "") + origin, soft_wrap=True)
+    for p in prepared.get("packages") or []:
+        skipped = ", ".join(f"{n} {k}" for k, n in (p.get("skipped") or {}).items())
+        note = f"  [muted]not installed: {skipped}[/]" if skipped else ""
+        console.print(f"  [muted]package[/] {escape(p['name'])} [muted]depth {p['depth']} · {escape(p['source'])}"
+                      f" @ {_dep_pin(p)}[/]{note}", soft_wrap=True)
+    for w in prepared.get("warnings") or []:
+        console.print(f"[warn]![/] {escape(w)}")
+
+
+def _has_eval_pack() -> bool:
+    try:
+        return bool(Manifest.load(_m()).eval_packs())
+    except (ValueError, OSError):
+        return False
+
+
+def _print_measurement(name: str, m: dict) -> None:
+    w, wo = m["with"], m["without"]
+    seeds = f"{m['seeds']} seed{'s' if m['seeds'] != 1 else ''}"
+    console.print(f"[muted]measured on {', '.join(m['packs'])} ({m['split']} split, {m['tasks']} tasks × {seeds},"
+                  f" {m['adapter']})[/]")
+    t = Table(box=None, header_style="bold", pad_edge=False)
+    for col in ("", "success", "cost/task", "p50 latency", ""):
+        t.add_column(col)
+    delta = w["success_rate"] - wo["success_rate"]
+    sign = "+" if delta >= 0 else ""
+    style = "ok" if delta > 0 else ("fail" if delta < 0 else "muted")
+    t.add_row(f"without {name}", f"{wo['success_rate']:.2f}", _usd(wo["cost_usd_per_task"]), _secs(wo["latency_s_p50"]),
+              f"[muted]{wo['cached']} cached[/]" if wo["cached"] else "")
+    t.add_row(f"with {name}", f"{w['success_rate']:.2f}", _usd(w["cost_usd_per_task"]), _secs(w["latency_s_p50"]),
+              f"[{style}]{sign}{delta:.2f} success[/]")
+    console.print(t)
+    if m["adapter"] == "reference":
+        console.print("[warn]![/] the offline reference harness doesn't read skills, MCP servers or instructions, so both "
+                      "sides score alike; set [key]\\[backend] target[/] to devbox or cluster to measure your harness")
+
+
+@main.command(context_settings={"ignore_unknown_options": False})
+@click.argument("args", nargs=-1, metavar="KIND SOURCE")
+@click.option("--as", "name", default=None, metavar="NAME", help="Name to declare it under.  [dim]\\[default: from the source][/]")
+@click.option("--scope", type=click.Choice(["project", "user"]), default=None,
+              help="Install for the project (committed with it) or for you.  [dim]\\[default: project][/]")
+@click.option("--eval", "measure", is_flag=True,
+              help="Run the eval pack with and without it, and ask before keeping it.")
+@click.option("--dry-run", is_flag=True, help="Resolve it and print what would change; change nothing.")
+@click.option("--no-install", is_flag=True, help="Declare and pin it, but don't install it (hlock sync does).")
+@click.option("--adopt", default=None, metavar="NAME", help="Declare something hlock pin already recorded, as it is.")
+@click.option("--harness", default=None, help="Harness to install into when there's no lock yet.")
+@click.option("-y", "--yes", is_flag=True, help="With --eval: keep it without asking.")
+@click.option("--json", "as_json", is_flag=True, help="Print the result as JSON.")
+def add(args: tuple[str, ...], name: str | None, scope: str | None, measure: bool, dry_run: bool, no_install: bool,
+        adopt: str | None, harness: str | None, yes: bool, as_json: bool) -> None:
+    """Declare a dependency, pin it, and install it into your harness.
+
+    KIND is [cmd]skill[/], [cmd]mcp[/], [cmd]instructions[/] or [cmd]plugin[/]; an [cmd]apm:[/] source needs none.
+    SOURCE is [cmd]github:OWNER/REPO\\[/PATH]\\[@REF|@RANGE][/], [cmd]git+URL#path=…&tag=…[/],
+    [cmd]apm:OWNER/REPO\\[/PATH]\\[#REF][/], [cmd]npm:PKG\\[@RANGE][/], [cmd]pypi:PKG[/], a URL (a remote MCP
+    server), [cmd]plugin:MARKETPLACE/NAME[/], or [cmd]./PATH[/].
+
+    The dependency goes into [path]harness.toml[/], and its commit (or version) and digest into
+    [path]harness.lock[/]; nothing else is re-captured. It's installed in the project
+    ([path].claude/skills/[/] and the like) unless [cmd]--scope user[/].
+    """
+    if adopt:
+        if args:
+            _fail("--adopt takes a NAME, not a SOURCE", f"[cmd]hlock add --adopt {escape(adopt)}[/]")
+        with _working(f"Declaring {adopt}…"):
+            out = json.loads(_deps_adopt(adopt, manifest=_m(), lock=_l()))
+        if as_json:
+            console.print_json(data=out)
+            return
+        _ok(f"declared [key]{out['kind']}[/] [bold]{escape(out['name'])}[/] as {escape(out['source'])} in [path]{_md()}[/]",
+            soft_wrap=True)
+        _next("hlock check")
+        return
+    if len(args) == 1 and args[0].startswith("apm:"):
+        kind, source = None, args[0]
+    elif len(args) == 2:
+        kind, source = args
+    else:
+        _fail("expected KIND SOURCE", "e.g. [cmd]hlock add skill github:anthropics/skills/skills/pdf[/], "
+              "or [cmd]hlock add apm:OWNER/REPO[/]")
+    if kind is not None and kind not in _DEP_KINDS:
+        _fail(f"{kind!r} isn't a dependency kind", "use skill, mcp, instructions or plugin")
+    if measure and dry_run:
+        _fail("--eval and --dry-run don't go together",
+              "--dry-run changes nothing and runs nothing; --eval installs in isolation and runs trials")
+    if measure and not _has_eval_pack():
+        _fail("--eval measures on the project's eval pack, and there isn't one", "create one with [cmd]hlock evals init[/]")
+    with _working(f"Resolving {source}…"):
+        prepared = json.loads(_deps_prepare(source, kind=kind, name=name, scope=scope, harness=harness, manifest=_m(),
+                                            lock=_l()))
+    decl = prepared["decl"]
+    if dry_run:
+        if as_json:
+            console.print_json(data=prepared)
+            return
+        _print_resolved(prepared)
+        console.print("[bold]would write[/]")
+        section = {"skill": "skills", "mcp": "mcp", "instructions": "instructions", "plugin": "plugins",
+                   "package": "packages"}[decl["kind"]]
+        console.print(f"  [path]{_md()}[/]  {escape(f'[{section}]')} {decl['name']} = {escape(json.dumps(decl['spec']))}", soft_wrap=True)
+        for r in prepared["resolved"]:
+            table, f = _entry(r["entry"])
+            console.print(f"  [path]{_ld()}[/]  {escape(f'[[{table}]]')} {escape(f.get('name', ''))} [muted]{_dep_pin(f)}[/]")
+            where = _where(table, f)
+            if where and not no_install:
+                console.print(f"  [muted]{prepared['harness']}[/]  {escape(where)}")
+        if prepared.get("replaces"):
+            console.print(f"[warn]![/] replaces {escape(prepared['replaces'])}")
+        return
+    measurement = None
+    if measure:
+        if not as_json:
+            _print_resolved(prepared)
+        with _working(f"Measuring {decl['name']} on the eval pack…"):
+            measurement = json.loads(_deps_measure(json.dumps(prepared)))
+        if not as_json:
+            _print_measurement(decl["name"], measurement)
+        if not yes:
+            if not sys.stdin.isatty():
+                _fail(f"keep {decl['name']}? there's no terminal to ask on", "pass [cmd]--yes[/] to keep it")
+            if not click.confirm(f"keep {decl['name']}?", default=True):
+                console.print("[muted]left the project as it was; the fetched copy stays in the store[/]")
+                return
+    with _working(f"Adding {decl['name']}…"):
+        out = json.loads(_deps_commit(json.dumps(prepared), install=not no_install,
+                                      measurement=json.dumps(measurement) if measurement else None))
+    if as_json:
+        console.print_json(data={**out, "measurement": measurement})
+        return
+    if not measure:
+        _print_resolved(prepared)
+    if out["created_lock"]:
+        console.print(f"[muted]pinned the project's {out['harness']} setup into[/] [path]{_ld()}[/] [muted]first[/]")
+    for line in out["installed"]:
+        console.print(f"[ok]✓[/] {escape(line)}")
+    for w in out["warnings"]:
+        console.print(f"[warn]![/] {escape(w)}")
+    where = "a new " if out["created_manifest"] else ""
+    _ok(f"declared [key]{out['kind']}[/] [bold]{escape(out['name'])}[/] in {where}[path]{_md()}[/], pinned in [path]{_ld()}[/]"
+        + ("" if not no_install else "  [muted](not installed: run hlock sync)[/]"), soft_wrap=True)
+    if out.get("replaced"):
+        console.print(f"[muted]replaced {escape(out['replaced'])}[/]")
+    hints = ["hlock check"]
+    if not measure and _has_eval_pack():
+        hints.append(f"hlock upgrade dep:{out['name']} --eval")
+    _next(*hints)
+
+
+@main.command()
+@click.argument("kind", type=click.Choice(_DEP_KINDS))
+@click.argument("name")
+@click.option("--keep-installed", is_flag=True, help="Undeclare and unpin it, but leave it installed.")
+@click.option("--json", "as_json", is_flag=True, help="Print the result as JSON.")
+def remove(kind: str, name: str, keep_installed: bool, as_json: bool) -> None:
+    """Undeclare a dependency, unpin it, and take it out of your harness.
+
+    A skill or instruction file you changed by hand since it was added is left in place.
+    """
+    with _working(f"Removing {name}…"):
+        out = json.loads(_deps_remove(kind, name, manifest=_m(), lock=_l(), uninstall=not keep_installed))
+    if as_json:
+        console.print_json(data=out)
+        return
+    for line in out["uninstalled"]:
+        console.print(f"[ok]✓[/] {escape(line)}")
+    for w in out["warnings"]:
+        console.print(f"[warn]![/] {escape(w)}")
+    parts = []
+    if out["from_manifest"]:
+        parts.append(f"[path]{_md()}[/]")
+    if out["from_lock"]:
+        parts.append(f"[path]{_ld()}[/]")
+    _ok(f"removed [key]{kind}[/] [bold]{escape(name)}[/] from {' and '.join(parts)}")
+
+
+@main.command()
+@click.argument("kind", type=click.Choice(_DEP_KINDS), required=False)
+@click.option("--json", "as_json", is_flag=True, help="Print the result as JSON.")
+def outdated(kind: str | None, as_json: bool) -> None:
+    """List declared dependencies with a newer commit, tag or version upstream.
+
+    [key]wanted[/] is the newest the declaration allows ([cmd]hlock upgrade dep:NAME[/] moves to it);
+    [key]latest[/] is the newest there is.
+    """
+    with _working("Looking upstream…"):
+        rows = json.loads(_deps_outdated(lock=_l(), manifest=_m(), kind=kind))
+    if as_json:
+        console.print_json(data=rows)
+        return
+    if not rows:
+        _ok("every declared dependency is current")
+        return
+    t = Table(box=None, header_style="bold", pad_edge=False)
+    for col in ("name", "kind", "current", "wanted", "latest", "source"):
+        t.add_column(col)
+    for r in rows:
+        t.add_row(f"[key]{escape(r['name'])}[/]", r["kind"], r["current"], f"[ok]{r['wanted']}[/]" if r.get("wanted") else "—",
+                  r.get("latest") or "—", f"[muted]{escape(r['source'])}[/]")
+    console.print(t)
+    first = next((r for r in rows if r.get("wanted")), None)
+    if first:
+        _next(f"hlock upgrade dep:{first['name']}")
+
+
+@main.command("export")
+@click.option("--format", "fmt", type=click.Choice(["apm-lock"]), required=True, help="What to write.")
+@click.option("-o", "--out", default=None, metavar="FILE",
+              help="Where to write it (- for stdout).  [dim]\\[default: apm.lock.yaml next to the lock][/]")
+@click.option("--force", is_flag=True, help="Overwrite an apm.lock.yaml that pins commits harness.lock doesn't know.")
+@click.option("--json", "as_json", is_flag=True, help="Print a summary as JSON.")
+def export(fmt: str, out: str | None, force: bool, as_json: bool) -> None:
+    """Write the lock in a format other tools read.
+
+    [cmd]apm-lock[/] writes [path]apm.lock.yaml[/], so teammates who run [cmd]apm install[/] get the same
+    dependencies as [cmd]hlock sync[/]. What APM has no place for (the harness, models, runtimes,
+    config, evidence) is left out, and the summary says so.
+    """
+    target = None if out == "-" else (out or str(_Project.lock.parent / "apm.lock.yaml"))
+    with _working("Exporting…"):
+        result = json.loads(_export_apm_lock(lock=_l(), out=target, force=force, manifest=_m()))
+    if out == "-":
+        sys.stdout.write(result["text"])
+        return
+    if as_json:
+        result.pop("text", None)
+        console.print_json(data=result)
+        return
+    _ok(f"wrote [path]{_show(target)}[/]  [muted]({result['packages']} packages, {result['files']} files, "
+        f"lockfile_version {result['lockfile_version']}, target {', '.join(result['targets'])})[/]")
+    if result["left_out"]:
+        console.print(f"  [muted]not exported: {', '.join(result['left_out'])} (APM has no place for them)[/]")
+    for n in result["notes"]:
+        console.print(f"  [warn]![/] {escape(n)}")
+    _next("apm install --frozen   [muted](should change nothing)[/]")
+
+
+def _pin_key(fields: dict) -> tuple:
+    """What says two pins of a dependency are the same: commit, version, integrity, digest."""
+    return tuple(fields.get(k) for k in ("commit", "version", "integrity", "digest"))
+
+
+def _upgrade_dep(name: str, apply: bool, measure: bool, yes: bool) -> None:
+    """`hlock upgrade dep:NAME`: move a declared dependency to the newest it allows."""
+    with _working(f"Resolving {name}…"):
+        prepared = json.loads(_deps_upgrade(name, manifest=_m(), lock=_l()))
+        lock = json.loads(Lockfile.load(_l()).to_json())
+    kind = prepared["decl"]["kind"]
+    if kind == "package":
+        new = next((p for p in prepared.get("packages") or [] if p["name"] == name), None)
+        old = next((p for p in lock.get("package") or [] if p["name"] == name and p.get("depth") == 1), None)
+    else:
+        table = {"skill": "skill", "mcp": "tool", "instructions": "instructions", "plugin": "native"}[kind]
+        new = next((_entry(r["entry"])[1] for r in prepared["resolved"] if r["name"] == name), None)
+        old = next((e for e in lock.get(table) or [] if e.get("declared") and not e.get("required-by")
+                    and (e.get("declared-as") or e.get("name")) == name), None)
+    new_pin = _dep_pin(new) if new else "—"
+    old_pin = _dep_pin(old) if old else "—"
+    same = old is not None and new is not None and _pin_key(old) == _pin_key(new)
+    console.print(f"[key]{escape(name)}[/]  {old_pin} [muted]→[/] [bold green]{new_pin}[/]" + ("  [muted](current)[/]" if same else ""))
+    if same and not measure:
+        _ok(f"{name} is already the newest its declaration allows")
+        return
+    measurement = None
+    if measure:
+        if not _has_eval_pack():
+            _fail("--eval measures on the project's eval pack, and there isn't one", "create one with [cmd]hlock evals init[/]")
+        with _working(f"Measuring {name} on the eval pack…"):
+            measurement = json.loads(_deps_measure(json.dumps(prepared)))
+        _print_measurement(name, measurement)
+        if not apply and (yes or (sys.stdin.isatty() and click.confirm(f"apply the upgrade of {name}?", default=True))):
+            apply = True
+    if not apply:
+        _next(f"hlock upgrade dep:{name} --apply")
+        return
+    shutil.copyfile(_l(), _l() + ".prev")
+    with _working(f"Upgrading {name}…"):
+        json.loads(_deps_commit(json.dumps(prepared), install=True,
+                                measurement=json.dumps(measurement) if measurement else None))
+    _ok(f"upgraded [bold]{escape(name)}[/] to {new_pin}  [muted](previous lock kept at {_ld()}.prev)[/]")
+    _next("hlock check", "hlock upgrade --rollback")
+
+
+def _print_dep_issues(issues: list[dict]) -> int:
+    """Print `deps_check` issues; returns how many fail the check."""
+    failing = [i for i in issues if i["fails"]]
+    if failing:
+        err_console.print(f"[fail]✗ dependencies:[/] {len(failing)} declared dependenc{'y differs' if len(failing) == 1 else 'ies differ'}")
+        for i in failing:
+            err_console.print(f"  [key]{i['problem']}[/] {escape(i['detail'])}  [muted]→[/] [cmd]{escape(i['fix'])}[/]", soft_wrap=True)
+    for i in issues:
+        if not i["fails"]:
+            console.print(f"[warn]![/] {escape(i['detail'])}  [muted]→[/] [cmd]{escape(i['fix'])}[/]", soft_wrap=True)
+    return len(failing)
+
+
+def _dep_issues() -> list[dict]:
+    """The declared dependencies' issues, when the project declares any (else none)."""
+    if not Path(_m()).is_file() and not (_Project.lock.parent / "apm.yml").is_file():
+        return []
+    with _friendly_errors():
+        return json.loads(_deps_check(lock=_l(), manifest=_m()))
+
+
+def _refresh_deps(plan_only: bool, frozen: bool) -> None:
+    """Before a sync: resolve declared dependencies that are new or changed, into the lock."""
+    if not Path(_l()).is_file() or not (Path(_m()).is_file() or (_Project.lock.parent / "apm.yml").is_file()):
+        return
+    with _working("Checking declared dependencies…"):
+        out = json.loads(_deps_refresh(lock=_l(), manifest=_m(), frozen=frozen, write=not plan_only))
+    if out["changes"]:
+        verb = "would update" if plan_only else "updated"
+        console.print(f"[bold]{verb}[/] [path]{_ld()}[/] [muted]for the declared dependencies[/]")
+        for line in out["changes"]:
+            style = {"+": "ok", "-": "fail"}.get(line[:1], "muted")
+            console.print(f"  [{style}]{escape(line)}[/]", soft_wrap=True)
+
+
 _STATUS = {"satisfied": "[ok]✓[/]", "auto": "[brand]●[/]", "manual": "[warn]○[/]"}
 MANUAL_EXIT = 3
 
@@ -1181,10 +1556,11 @@ def _manual_steps(plan: dict) -> list[dict]:
 @click.option("--skill", "skill", is_flag=True, help="Write an Agent Skill that guides an agent through the remaining steps.")
 @click.option("--skill-dir", default=".agents/skills/hlock-rehydrate", show_default=True, help="Where --skill writes SKILL.md.")
 @click.option("--exact", is_flag=True, help="Also remove skills that aren't in the lock (moved aside, not deleted).")
+@click.option("--frozen", is_flag=True, help="Fail if the declared dependencies would change the lock (for CI).")
 @click.option("-v", "--verbose", is_flag=True, help="List every step, including optional ones.")
 def sync(lock: str, plan_only: bool, as_json: bool, yes: bool, install: bool, pull: bool, all_models: bool,
          prefix: str | None, in_place: bool, docker: bool, build: bool, skill: bool, skill_dir: str, exact: bool,
-         verbose: bool) -> None:
+         frozen: bool, verbose: bool) -> None:
     """Rehydrate the setup in [path]harness.lock[/] on this machine.
 
     Builds a plan in which each step is [ok]✓ satisfied[/], [brand]● automatic[/] (hlock does it), or
@@ -1201,14 +1577,19 @@ def sync(lock: str, plan_only: bool, as_json: bool, yes: bool, install: bool, pu
     lock, stored = _lock_ref(lock, as_json) if lock else (_l(), None)
     if stored and prefix is None and not in_place and not docker:
         prefix = _pull_env(stored)  # the same isolated root `hlock launch --lock NAME` uses
+    if stored is None and Path(lock).resolve() == _Project.lock.resolve():
+        # the project's own lock: declared dependencies that are new or changed are locked first
+        _refresh_deps(plan_only or as_json or skill, frozen)
     docker_dir = None
     if docker:
         with _friendly_errors():
             harness_id = Lockfile.load(lock).harness
         docker_dir = str(Path(".hlock/docker") / harness_id)
     with _working("Planning…"):
+        own = stored is None and Path(lock).resolve() == _Project.lock.resolve()
         plan = json.loads(sync_plan(lock, prefix=prefix, in_place=in_place, docker=docker_dir, install=install, pull=pull,
-                                    all_models=all_models, exact=exact, manifest=_m()))
+                                    all_models=all_models, exact=exact, manifest=_m(),
+                                    refresh=own and (plan_only or as_json or skill) and not frozen))
     if as_json:
         console.print_json(data=plan)
         return
@@ -1216,6 +1597,8 @@ def sync(lock: str, plan_only: bool, as_json: bool, yes: bool, install: bool, pu
              "docker": f"[path]{docker_dir}[/]"}[plan["mode"]]
     console.print(f"[bold]Sync plan[/] for {plan['harness_name']} {plan.get('version') or ''} → {where}")
     console.print(_plan_table(plan, verbose))
+    for note in plan.get("notes") or []:
+        console.print(f"[muted]{escape(note)}[/]")
 
     if skill:
         path = Path(skill_dir) / "SKILL.md"
@@ -1237,6 +1620,7 @@ def sync(lock: str, plan_only: bool, as_json: bool, yes: bool, install: bool, pu
             sys.exit(1)
     sync_ignore_env(json.dumps(plan))  # an isolated root is restored from the lock: keep it out of git
     failed = 0
+    wrote_mcp: set[str] = set()
     groups: dict[str, list[dict]] = {}
     for st in auto:
         groups.setdefault(st["kind"], []).append(st)
@@ -1252,6 +1636,8 @@ def sync(lock: str, plan_only: bool, as_json: bool, yes: bool, install: bool, pu
                     err_console.print(f"[fail]✗[/] {st['title']}\n  [muted]{e}[/]")
                     continue
             done += 1
+            if (st.get("action") or {}).get("type") == "write-mcp":
+                wrote_mcp.add(st["action"]["dest"]["file"])
             if not quiet:
                 notes = []
                 if "previous:" in msg:
@@ -1264,6 +1650,10 @@ def sync(lock: str, plan_only: bool, as_json: bool, yes: bool, install: bool, pu
         if quiet and done:
             console.print(f"[ok]✓[/] restored {done} {kind}s")
 
+    if wrote_mcp and stored is None and Path(lock).resolve() == _Project.lock.resolve():
+        # the project files those servers went into are pinned; record what they are now
+        with _friendly_errors():
+            _deps_record_configs(sorted(wrote_mcp), lock=_l(), manifest=_m())
     if docker:
         files = json.loads(sync_dockerfile(json.dumps(plan), lock, manifest=_m()))
         ctx = Path(docker_dir)
@@ -1360,12 +1750,19 @@ def check(prefix: str | None) -> None:
         with _friendly_errors():
             drift += _decider_drift(_l())
         which = f"the {lf.harness} setup in [path]{prefix}[/]" if prefix else f"your {lf.harness} setup"
+        issues = _dep_issues()
+        # what's reported as a dependency isn't drift twice
+        named = {i["name"] for i in issues if i["problem"] == "undeclared"}
+        drift = [line for line in drift if not any(f" {n} " in f" {line} " for n in named)]
+        failed = _print_dep_issues(issues)
         if drift:
             err_console.print(f"[fail]✗ drift:[/] {which} changed since {_ld()} was pinned")
             for line in drift:
                 err_console.print(f"  {line}")
             restore = f"hlock sync --prefix {prefix}" if prefix else "hlock sync --in-place"
             err_console.print(f"  [muted]hint:[/] re-pin with [cmd]{escape(_pin_cmd(lf))}[/], or restore it with [cmd]{restore}[/]")
+            sys.exit(1)
+        if failed:
             sys.exit(1)
         _ok(f"{which} matches [path]{_ld()}[/]")
         return
@@ -1394,6 +1791,8 @@ def check(prefix: str | None) -> None:
         if probe and probe["installed"] and probe.get("version") and probe["version"] != lf.harness_version:
             _fail(f"installed {lf.harness} is {probe['version']}, {_ld()} pins {lf.harness_version}",
                   f"install {lf.harness} {lf.harness_version}, or re-lock with [cmd]hlock resolve[/]")
+    if _print_dep_issues(_dep_issues()):
+        sys.exit(1)
     with _friendly_errors():
         decider_drift = _decider_drift(_l())
     if decider_drift:
@@ -1627,14 +2026,29 @@ def _print_prep(prep: dict) -> None:
 
 
 @main.command()
+@click.argument("target", required=False, metavar="[dep:NAME]")
 @click.option("--to", default=None, help="Target model/version to upgrade to.")
 @click.option("--all", "all_", is_flag=True, help="Upgrade every upgradeable component.")
 @click.option("--apply", is_flag=True, help="Perform the upgrade (default is plan-only).")
 @click.option("--rollback", is_flag=True, help="Restore harness.lock from harness.lock.prev.")
 @click.option("--force", is_flag=True, help="Apply even if the success rate regresses.")
 @click.option("--workdir", default=None, help="Where to put trial artifacts.")
-def upgrade(to: str | None, all_: bool, apply: bool, rollback: bool, force: bool, workdir: str | None) -> None:
-    """Plan, apply, or roll back upgrades to locked components."""
+@click.option("--eval", "measure", is_flag=True, help="With dep:NAME: measure the new version on the eval pack first.")
+@click.option("-y", "--yes", is_flag=True, help="With dep:NAME --eval: apply without asking.")
+def upgrade(target: str | None, to: str | None, all_: bool, apply: bool, rollback: bool, force: bool,
+            workdir: str | None, measure: bool, yes: bool) -> None:
+    """Plan, apply, or roll back upgrades to locked components.
+
+    [cmd]hlock upgrade dep:NAME[/] moves a declared dependency to the newest commit, tag or
+    version its declaration allows ([cmd]--eval[/] measures it first).
+    """
+    if target is not None:
+        if not target.startswith("dep:") or len(target) == 4:
+            _fail(f"{target!r} isn't something to upgrade", "use [cmd]hlock upgrade dep:NAME[/] for a declared dependency")
+        _upgrade_dep(target[4:], apply, measure, yes)
+        return
+    if measure:
+        _fail("--eval goes with dep:NAME", "e.g. [cmd]hlock upgrade dep:pdf --eval[/]")
     if not rollback and Path(_l()).exists():
         with _friendly_errors():
             if Lockfile.load(_l()).kind == "pin":

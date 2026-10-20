@@ -13,6 +13,8 @@ version = { args = ["--version"] }
 active-env = ["CURSOR_AGENT", "CURSOR_AGENT_CHAT_ID"]
 config-root = { env = "CURSOR_CONFIG_DIR", default = "~/.cursor" }
 instructions = ["AGENTS.md", "CLAUDE.md", ".cursorrules"]
+# where `hlock add instructions` installs a file (APM's cursor target uses the same)
+rules = { dir = ".cursor/rules", ext = ".mdc" }
 
 [[install]]
 method = "script"

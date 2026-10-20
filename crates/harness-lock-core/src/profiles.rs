@@ -235,6 +235,15 @@ pub struct SkillsSpec {
     pub builtin_manifest: Option<String>,
 }
 
+/// A directory of instruction files (`.claude/rules`), and the extension a file there needs.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default, rename_all = "kebab-case")]
+pub struct RulesSpec {
+    pub dir: String,
+    /// `.md`, `.mdc` (Cursor), `.instructions.md` (Copilot).
+    pub ext: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(default, rename_all = "kebab-case")]
 pub struct BundleSpec {
@@ -407,6 +416,10 @@ pub struct HarnessProfile {
     pub active_env: Vec<String>,
     pub config_root: ConfigRoot,
     pub instructions: Vec<String>,
+    /// A project directory the harness reads every instruction file in, where
+    /// `hlock add instructions` installs one. Without it, a declared instruction file
+    /// becomes the project's own instruction file.
+    pub rules: Option<RulesSpec>,
     pub install: Vec<InstallMethod>,
     pub files: BTreeMap<String, FileSpec>,
     pub model: ModelSpec,

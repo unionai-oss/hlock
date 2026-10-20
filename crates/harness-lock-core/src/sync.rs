@@ -46,6 +46,9 @@ pub struct SyncOptions {
     /// `env-ref`) instead of their values, for a caller that passes the values in
     /// the harness's environment ([`secret_env`]). `hlock launch` sets it.
     pub inject: bool,
+    /// More harnesses to install the lock's portable declared dependencies (skills, MCP
+    /// servers, instruction files) into: `[target] also` in `harness.toml`.
+    pub also: Vec<String>,
 }
 
 /// One concrete thing an `auto` step does.
@@ -88,6 +91,11 @@ pub enum Action {
     },
     /// Write a file hlock owns (a decider plugin, Copilot's hook file).
     WriteFile { path: PathBuf, content: String },
+    /// Fetch a declared dependency at its locked commit (through the shared git cache and
+    /// the project's store), check its digest, and put it in place.
+    FetchDep { entry: Box<crate::deps::Entry>, to: PathBuf, project: PathBuf },
+    /// Set one MCP server in a harness's config.
+    WriteMcp { dest: crate::deps::McpDest, name: String, entry: Value },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -149,6 +157,9 @@ pub struct Plan {
     /// [`ignore_env`] marks as not for version control.
     pub env: Option<PathBuf>,
     pub steps: Vec<Step>,
+    /// Things to know about the plan that aren't steps (what `[target] also` leaves out).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub notes: Vec<String>,
 }
 
 impl Plan {
@@ -725,6 +736,9 @@ pub fn plan(lock: &Lockfile, lock_path: &Path, reg: &Registry, ctx: &Ctx, opts: 
         let mut step = Step { id: format!("skill:{}", s.name), kind: "skill".into(), title: format!("{} → {shown}", s.name), ..Default::default() };
         if ok {
             step.reason = "matches the lock".into();
+        } else if s.dep.declared && s.dep.commit.is_some() {
+            // a declared dependency is fetched at its commit, never vendored
+            step = fetch_dep_step(step, crate::deps::Entry::Skill(s.clone()), dest, &lock_dir, lock, ctx);
         } else if let Some(v) = &s.vendored {
             match vendored_path(&lock_dir, v) {
                 Some(from) => {
@@ -782,10 +796,13 @@ pub fn plan(lock: &Lockfile, lock_path: &Path, reg: &Registry, ctx: &Ctx, opts: 
     // ---- instructions ----
     // where a lock may put an instruction file: exactly where the harness reads them
     let instruction_files: Vec<PathBuf> = profile.instructions.iter().map(|tpl| fsutil::normalize(&expand(tpl, &root, &t))).collect();
+    // and, for a declared instruction file, the harness's rules directory
+    let rules_dir = profile.rules.as_ref().map(|r| fsutil::normalize(&t.cwd.join(&r.dir)));
     for i in &lock.instructions {
         let dest = expand(&i.name, &root, &t);
         let id = format!("instructions:{}", i.name);
-        if !instruction_files.contains(&fsutil::normalize(&dest)) {
+        let in_rules = i.dep.declared && rules_dir.as_ref().is_some_and(|d| fsutil::normalize(&dest).parent() == Some(d.as_path()));
+        if !instruction_files.contains(&fsutil::normalize(&dest)) && !in_rules {
             steps.push(refused(id, "instructions", format!("Write {}", pretty(&dest, ctx)), format!("{} isn't a file {} reads instructions from", i.name, profile.name)));
             continue;
         }
@@ -793,6 +810,8 @@ pub fn plan(lock: &Lockfile, lock_path: &Path, reg: &Registry, ctx: &Ctx, opts: 
         let mut step = Step { id, kind: "instructions".into(), title: pretty(&dest, ctx), ..Default::default() };
         if ok {
             step.reason = "matches the lock".into();
+        } else if i.dep.declared && i.dep.commit.is_some() {
+            step = fetch_dep_step(step, crate::deps::Entry::Instructions(i.clone()), dest, &lock_dir, lock, ctx);
         } else if let Some(v) = &i.vendored {
             match vendored_path(&lock_dir, v) {
                 Some(from) => {
@@ -844,6 +863,75 @@ pub fn plan(lock: &Lockfile, lock_path: &Path, reg: &Registry, ctx: &Ctx, opts: 
         }
     }
 
+    // ---- declared MCP servers ----
+    for tool in lock.tool.iter().filter(|x| x.kind == "mcp" && x.dep.declared && x.enabled != Some(false)) {
+        steps.push(mcp_dep_step(tool, profile, &t, ctx, ""));
+    }
+
+    // ---- [target] also: the portable declared dependencies, in more harnesses ----
+    let mut notes = Vec::new();
+    for other in &opts.also {
+        let Some(op) = reg.harness(other).filter(|p| p.id != profile.id) else {
+            if reg.harness(other).is_none() {
+                notes.push(format!("[target] also names {other:?}, which isn't a harness hlock knows"));
+            }
+            continue;
+        };
+        let (ot, _, _) = target_ctx(op, ctx, opts);
+        let tag = format!("{}: ", op.name);
+        for s in lock.skill.iter().filter(|s| s.dep.declared && s.enabled) {
+            let scope = s.scope.as_deref().unwrap_or("project");
+            match crate::deps::skill_dest(op, scope, &s.name, &ot) {
+                Ok((dest, _)) => {
+                    let ok = dest.join("SKILL.md").is_file() && Some(tree_digest(&dest)) == s.digest;
+                    let mut step = Step { id: format!("also:{}:skill:{}", op.id, s.name), kind: "skill".into(), title: format!("{tag}{} → {}", s.name, pretty(&dest, ctx)), ..Default::default() };
+                    if ok {
+                        step.reason = "matches the lock".into();
+                    } else if s.dep.commit.is_some() || s.vendored.is_none() {
+                        step = fetch_dep_step(step, crate::deps::Entry::Skill(s.clone()), dest, &lock_dir, lock, ctx);
+                        step.title = format!("{tag}{}", step.title);
+                    } else if let Some(from) = s.vendored.as_deref().and_then(|v| vendored_path(&lock_dir, v)) {
+                        step.status = "auto".into();
+                        step.action = Some(Action::CopyDir { from, to: dest });
+                    }
+                    steps.push(step);
+                }
+                Err(e) => notes.push(format!("{tag}skill {}: {e}", s.name)),
+            }
+        }
+        for i in lock.instructions.iter().filter(|i| i.dep.declared) {
+            let name = crate::deps::decl_name_of(i);
+            match crate::deps::instructions_dest(op, &i.scope, &name, &ot) {
+                Ok((dest, _)) => {
+                    let ok = std::fs::read(&dest).map(|b| Some(crate::hash::sha256_bytes(&b)) == i.digest).unwrap_or(false);
+                    let mut step = Step { id: format!("also:{}:instructions:{name}", op.id), kind: "instructions".into(), title: format!("{tag}{}", pretty(&dest, ctx)), ..Default::default() };
+                    if ok {
+                        step.reason = "matches the lock".into();
+                    } else if dest.is_file() && op.rules.is_none() {
+                        step.status = "manual".into();
+                        step.reason = format!("{} reads instructions only from this file, which already exists", op.name);
+                    } else {
+                        step = fetch_dep_step(step, crate::deps::Entry::Instructions(i.clone()), dest, &lock_dir, lock, ctx);
+                        step.title = format!("{tag}{}", step.title);
+                    }
+                    steps.push(step);
+                }
+                Err(e) => notes.push(format!("{tag}instructions {name}: {e}")),
+            }
+        }
+        for tool in lock.tool.iter().filter(|x| x.kind == "mcp" && x.dep.declared && x.enabled != Some(false)) {
+            let mut step = mcp_dep_step(tool, op, &ot, ctx, &tag);
+            step.id = format!("also:{}:{}", op.id, step.id);
+            steps.push(step);
+        }
+        if lock.native.iter().any(|n| n.dep.declared) || lock.config.iter().any(|c| c.restore != "record") {
+            notes.push(format!("{}: plugins, settings and hooks stay with {}; only skills, MCP servers and instruction files are installed here", op.name, profile.name));
+        }
+        if lock.evidence.trials > 0 {
+            notes.push(format!("{}: the lock's evidence was measured on {}, not here", op.name, profile.name));
+        }
+    }
+
     // ---- runtimes and models ----
     let used: BTreeSet<(String, String)> = lock.llm.iter().filter_map(|l| l.runtime.clone().map(|r| (r, l.model.clone()))).collect();
     for rt in &lock.runtime {
@@ -891,7 +979,95 @@ pub fn plan(lock: &Lockfile, lock_path: &Path, reg: &Registry, ctx: &Ctx, opts: 
         prefix,
         env,
         steps,
+        notes,
     })
+}
+
+/// A step that fetches a declared dependency at its commit into `dest`. A lock pulled
+/// from someone else may only name an http(s), ssh or git remote.
+fn fetch_dep_step(mut step: Step, entry: crate::deps::Entry, dest: PathBuf, lock_dir: &Path, lock: &Lockfile, ctx: &Ctx) -> Step {
+    let kind = if entry.kind() == crate::deps::Kind::Instructions { crate::deps::Kind::Instructions } else { crate::deps::Kind::Skill };
+    let src = entry.source().map(|s| crate::deps::parse(s, kind));
+    let commit = entry.dep().commit.clone().unwrap_or_default();
+    let name = match &entry {
+        crate::deps::Entry::Instructions(i) => crate::deps::decl_name_of(i),
+        e => e.name().to_string(),
+    };
+    let what = format!("{} {name}", entry.kind());
+    step.title = format!("Fetch {what} → {}", pretty(&dest, ctx));
+    match src {
+        Some(Ok(crate::deps::Source::Git(g))) => {
+            step.command = Some(format!("git clone -- {} <clone> && git -C <clone> checkout {}", fsutil::shell_quote(&g.url), fsutil::shell_quote(&commit)));
+            if lock.pulled.is_some() {
+                if let Some(why) = git_source_problem(&g.url, &commit, g.subpath.as_deref().unwrap_or("")) {
+                    step.status = "manual".into();
+                    step.reason = why;
+                    return step;
+                }
+            }
+            let stored = entry.digest().and_then(|d| crate::deps::stored(lock_dir, d)).is_some();
+            if !stored && ctx.which("git").is_none() {
+                step.status = "manual".into();
+                step.reason = "needs git".into();
+                return step;
+            }
+            step.status = "auto".into();
+            step.reason = if stored { "from the store".into() } else { format!("at {}", entry.dep().resolved_tag.clone().unwrap_or_else(|| fsutil::prefix_chars(&commit, 10).to_string())) };
+            step.action = Some(Action::FetchDep { entry: Box::new(entry), to: dest, project: lock_dir.to_path_buf() });
+        }
+        Some(Ok(_)) => {
+            step.status = "manual".into();
+            step.reason = "comes from a path; it comes with the project".into();
+        }
+        Some(Err(e)) => {
+            step.status = "manual".into();
+            step.reason = format!("its source can't be fetched: {e}");
+        }
+        None => {
+            step.status = "manual".into();
+            step.reason = "has no source to fetch it from".into();
+        }
+    }
+    step
+}
+
+/// A step that configures a declared MCP server in `profile`'s config for `t`.
+fn mcp_dep_step(tool: &crate::lockfile::Tool, profile: &HarnessProfile, t: &Ctx, ctx: &Ctx, tag: &str) -> Step {
+    let id = format!("mcp-dep:{}", tool.name);
+    let scope = tool.scope.as_deref().unwrap_or("project");
+    let mut step = Step { id, kind: "mcp".into(), title: format!("{tag}MCP server {}", tool.name), ..Default::default() };
+    if let Some(pkg) = tool.dep.required_by.last() {
+        // it starts a process, from a file the project didn't write
+        step.status = "manual".into();
+        step.optional = true;
+        step.reason = format!("{pkg} brings it; hlock doesn't configure servers a package brings. If you trust it, configure it yourself");
+        return step;
+    }
+    if tool.command.is_none() && tool.url.is_none() {
+        step.status = "manual".into();
+        step.reason = format!("{} names a server hlock can't configure by itself; add it by hand", tool.source.as_deref().unwrap_or("its source"));
+        return step;
+    }
+    match crate::deps::mcp_dest(profile, scope, t) {
+        Ok(dest) => {
+            let entry = crate::deps::mcp_entry(tool, &dest.shape);
+            let have = read_config(&dest.path, &dest.format).ok().flatten().and_then(|d| d.pointer(&format!("{}/{}", dest.pointer, crate::capture::escape_pointer(&tool.name))).cloned());
+            // the same server with a secret filled in is still the same server
+            let same = have.as_ref().is_some_and(|h| h == &entry || crate::capture::mcp_tool(&tool.name, h, scope).is_some_and(|x| x.command == tool.command && x.args == tool.args && x.url == tool.url));
+            step.title = format!("{tag}MCP server {} in {}", tool.name, pretty(&dest.path, ctx));
+            if same {
+                step.reason = "configured".into();
+            } else {
+                step.status = "auto".into();
+                step.action = Some(Action::WriteMcp { dest, name: tool.name.clone(), entry });
+            }
+        }
+        Err(e) => {
+            step.status = "manual".into();
+            step.reason = e.to_string();
+        }
+    }
+    step
 }
 
 /// Steps for a lock's deciders: write the hooks hlock wires them in with (and remove
@@ -1456,6 +1632,24 @@ pub fn run_step(step: &Step, ctx: &Ctx) -> Result<String> {
             let bak = backup(path)?;
             Ok(format!("moved {} aside to {}", path.display(), bak.map(|b| b.display().to_string()).unwrap_or_default()))
         }
+        Action::FetchDep { entry, to, project } => {
+            let content = crate::deps::fetch_locked(entry, project, ctx)?;
+            // what's there is set aside under .hlock/bak, where the harness doesn't read it
+            let bak = if std::fs::symlink_metadata(to).is_ok() { Some(crate::deps::set_aside(to, project)?) } else { None };
+            if content.is_dir() {
+                copy_tree(&content, to)?;
+            } else {
+                fsutil::write_atomic(to, std::fs::read(&content)?)?;
+            }
+            Ok(match bak {
+                Some(b) => format!("fetched {} {} into {} (previous: {})", entry.kind(), entry.name(), to.display(), b.display()),
+                None => format!("fetched {} {} into {}", entry.kind(), entry.name(), to.display()),
+            })
+        }
+        Action::WriteMcp { dest, name, entry } => {
+            crate::deps::write_mcp(dest, name, Some(entry))?;
+            Ok(format!("configured MCP server {name} in {}", dest.path.display()))
+        }
     }
 }
 
@@ -1693,10 +1887,10 @@ mod tests {
         Lockfile {
             harness: Harness { name: "claude-code".into(), version: Some("1; curl x|sh".into()), source: Some("script@1".into()), ..Default::default() },
             instructions: vec![
-                Instructions { name: "~/.zshrc".into(), digest: None, scope: "user".into(), vendored: Some(".hlock/vendor/rc".into()) },
-                Instructions { name: "{root}/settings.json".into(), digest: None, scope: "user".into(), vendored: Some(".hlock/vendor/rc".into()) },
-                Instructions { name: "{root}/CLAUDE.md".into(), digest: None, scope: "user".into(), vendored: Some("../../etc/passwd".into()) },
-                Instructions { name: "CLAUDE.md".into(), digest: None, scope: "project".into(), vendored: Some(".hlock/vendor/rc".into()) },
+                Instructions { name: "~/.zshrc".into(), digest: None, scope: "user".into(), vendored: Some(".hlock/vendor/rc".into()), ..Default::default() },
+                Instructions { name: "{root}/settings.json".into(), digest: None, scope: "user".into(), vendored: Some(".hlock/vendor/rc".into()), ..Default::default() },
+                Instructions { name: "{root}/CLAUDE.md".into(), digest: None, scope: "user".into(), vendored: Some("../../etc/passwd".into()), ..Default::default() },
+                Instructions { name: "CLAUDE.md".into(), digest: None, scope: "project".into(), vendored: Some(".hlock/vendor/rc".into()), ..Default::default() },
             ],
             skill: vec![
                 skill("../evil", "{root}/skills/evil"),

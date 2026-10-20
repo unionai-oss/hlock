@@ -117,6 +117,16 @@ pub struct Manifest {
     pub skills: BTreeMap<String, serde_json::Value>,
     #[serde(default)]
     pub instructions: BTreeMap<String, serde_json::Value>,
+    /// MCP servers the project declares (`[mcp]`): a source each, or a table with one.
+    #[serde(default)]
+    pub mcp: BTreeMap<String, serde_json::Value>,
+    /// Harness plugins the project declares (`[plugins]`, `plugin:MARKETPLACE/NAME`).
+    #[serde(default)]
+    pub plugins: BTreeMap<String, serde_json::Value>,
+    /// APM packages (`[packages]`, `apm:OWNER/REPO`): each brings its own skills,
+    /// instructions and MCP servers, and the packages it depends on.
+    #[serde(default)]
+    pub packages: BTreeMap<String, serde_json::Value>,
     #[serde(default)]
     pub context: BTreeMap<String, serde_json::Value>,
     #[serde(default)]
@@ -292,6 +302,20 @@ impl Manifest {
             .and_then(|v| v.get("search"))
             .and_then(|v| v.as_f64())
             .unwrap_or(0.7)
+    }
+
+    /// Hash of the dependency sections only (`[skills]`, `[mcp]`, `[instructions]`,
+    /// `[plugins]`, `[packages]`, `[tools]`): what a pinned lock's `manifest-hash`
+    /// records, so editing `[candidates]` in the same file doesn't invalidate a pin.
+    pub fn deps_hash(&self) -> String {
+        crate::hash::content_hash(&serde_json::json!({
+            "skills": self.skills,
+            "mcp": self.mcp,
+            "instructions": self.instructions,
+            "plugins": self.plugins,
+            "packages": self.packages,
+            "tools": self.tools,
+        }))
     }
 
     /// Hash of the manifest: of the text it was parsed from (so it matches what the run

@@ -175,6 +175,38 @@ Compare the pack's judge (or `model`) with `against`, like
 [`hlock evals calibrate`](cli.md#evals-calibrate). Returns JSON with `a`, `b`, `rows`
 (each with `task`, `run`, `grader`, `criterion`, `a`, `b`, and `agree`), and `agreement`.
 
+### Dependencies
+
+The functions behind [`hlock add`, `remove`, `outdated` and `export`](../guides/dependencies.md).
+Each takes `manifest` and `lock` paths (default `harness.toml` and `harness.lock`) and returns
+JSON.
+
+```python
+import json
+import hlock as hl
+
+prepared = hl.deps_prepare("github:acme/skills/skills/sql@^1.2", kind="skill")
+entry = json.loads(prepared)["resolved"][0]["entry"]["skill"]
+print(entry["resolved-tag"], entry["path"])   # v1.3.0 .claude/skills/sql
+
+out = json.loads(hl.deps_commit(prepared))
+print(out["installed"])                         # ['copied skill sql → .claude/skills/sql']
+print(json.loads(hl.deps_check()))              # []
+```
+
+| Function | Does |
+|---|---|
+| `deps_prepare(source, kind=None, name=None, scope=None, harness=None, manifest=…, lock=…)` | Resolve and fetch a dependency into the store; nothing in the project changes (`--dry-run`) |
+| `deps_commit(prepared, install=True, measurement=None)` | Declare, pin and install a prepared dependency, with `deps_measure`'s result as its evidence |
+| `deps_measure(prepared)` | Run the eval pack with and without it (`--eval`) |
+| `deps_adopt(name, …)` | Declare something `pin` recorded (`add --adopt`) |
+| `deps_remove(kind, name, …, uninstall=True)` | Undeclare, unpin and uninstall (`remove`) |
+| `deps_check(lock=…, manifest=…)` | How the declared dependencies differ from the lock and the harness: a list of `{problem, kind, name, detail, fix, fails}` |
+| `deps_refresh(lock=…, manifest=…, frozen=False, write=True)` | Lock what's newly declared or changed (what `sync` does first): `{"changes": […]}` |
+| `deps_outdated(lock=…, manifest=…, kind=None)` | Newer commits, tags and versions upstream |
+| `deps_upgrade(name, …)` | Prepare a declared dependency at the newest it allows (`upgrade dep:NAME`), for `deps_commit` |
+| `export_apm_lock(lock=…, out=None, force=False, manifest=…)` | `apm.lock.yaml` from the lock: written to `out`, or only returned (`text`) |
+
 ### Decision models
 
 The functions behind [`hlock decide`](cli.md#decide). Each returns JSON, except
@@ -313,6 +345,7 @@ kind:
 | `ProfileError` | A harness or runtime profile, harness selection, or a sync or launch step that failed |
 | `WorkerError` | The Python worker failed |
 | `PullError` | A [`pull`](../guides/pull.md) source hlock can't read or won't fetch, or `git` failed |
+| `DependencyError` | A [declared dependency](../guides/dependencies.md) hlock can't read, resolve, fetch or install |
 
 Messages keep their prefix (`manifest error:`, `lockfile error:`, …). A file hlock can't
 read or write raises the matching `OSError` (`FileNotFoundError`, `PermissionError`, …),
