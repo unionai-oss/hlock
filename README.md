@@ -6,7 +6,7 @@
 
 ### Your agent harness<br>made portable.
 
-**Pin your harness, models, MCP servers, skills, and config in a `harness.lock`, version it, and rehydrate it anywhere.**
+**Pin your harness, models, MCP servers, skills, and config in<br>a `harness.lock`, version it, and rehydrate it anywhere.**
 
 [![PyPI](https://img.shields.io/pypi/v/hlock?label=pypi&color=3775A9&logo=pypi&logoColor=white)](https://pypi.org/project/hlock/)
 [![crates.io](https://img.shields.io/crates/v/hlock?color=E6532D&logo=rust&logoColor=white)](https://crates.io/crates/hlock)
