@@ -129,13 +129,16 @@ you've approved each executable's digest on this machine:
 - A hook's covers its event, its matcher and its command; a setting's, its value.
 - A plugin's covers its version and source, and where its marketplace is and the revision it's
   pinned at.
-- A script a command names (`~/.claude/hooks/guard.sh`, `$CLAUDE_PROJECT_DIR/hooks/a.py`,
-  `node ./server.js`) is part of the digest when it's on this machine, so editing the script
-  asks again.
+- The script a command runs (`~/.claude/hooks/guard.sh`, `$CLAUDE_PROJECT_DIR/hooks/a.py`, the
+  `./server.js` of `node ./server.js`) is part of the digest when it's on this machine, so
+  editing the script asks again. Files it's only passed (`--db-path ./data.db`) and system
+  programs (`/usr/bin/env`) aren't.
 - A skill's scripts are approved as the lock pins the skill, by its digest, which `sync` checks
-  what it fetches or copies against. The lock lists each skill's `scripts`, so a declared
-  skill's upgrade that brings new scripts asks again before it's fetched, and a skill that
-  carries scripts its entry doesn't list isn't placed.
+  what it fetches or copies against: a vendored copy edited after it was pinned isn't placed.
+  The lock lists each skill's `scripts`, so a declared skill's upgrade that brings new scripts
+  asks again before it's fetched, and a skill that carries scripts its entry doesn't list isn't
+  placed. Only `scripts/` counts: a skill whose `SKILL.md` tells the agent to run a file
+  elsewhere in it isn't listed as an executable, so review such a skill's text.
 
 - **`hlock pin` approves what it captures.** Those executables already run here, so pinning and
   then syncing on the same machine never asks.
@@ -152,7 +155,8 @@ you've approved each executable's digest on this machine:
   other: `hlock trust` lists the trusted list (kind `policy`) like an executable, and a changed
   list asks again. A source counts only where it's what runs: an MCP server whose command runs
   the package its entry names (`npx -y PKG` for `npm:PKG`), a skill fetched from its source,
-  or a remote server's URL. An entry that claims `source = "npm:@acme/x"` but runs `sh` isn't
+  a remote server's URL, or a `NAME@MARKETPLACE` plugin's marketplace (by the source of the
+  lock's marketplace entry, not by what the plugin's own entry says). An entry that claims `source = "npm:@acme/x"` but runs `sh` isn't
   trusted by it.
 
 Approvals stay on the machine. `~/.hlock/trust.toml` isn't synced: a synced trust store would
@@ -189,8 +193,8 @@ max-cost-usd-per-task = 0.50
 max-age-days = 90
 ```
 
-A denied source, MCP server, provider, model or harness stops `pin`, `add`, `pull` and
-`sync` under `enforcement = "block"`, before anything is written:
+A denied source, MCP server, provider, model or harness stops `pin`, `add`, `pull`, `sync`
+and `launch` under `enforcement = "block"`, before anything is written:
 
 ```console
 $ hlock sync --plan

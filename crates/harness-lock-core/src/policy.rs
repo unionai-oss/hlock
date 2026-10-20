@@ -131,8 +131,8 @@ pub fn matches(pat: &str, subject: &str) -> bool {
 /// Where an MCP server really comes from: its URL, or the package its command runs when that's
 /// the source its lock entry names (`npx -y PKG` for `npm:PKG`). `None` for any other command.
 pub fn mcp_source(t: &crate::lockfile::Tool) -> Option<String> {
-    if let (Some(url), None) = (&t.url, &t.command) {
-        return Some(url.clone());
+    if crate::trust::is_remote(t) || t.command.is_none() {
+        return t.url.clone();
     }
     let (cmd, src) = (t.command.as_deref()?, t.source.as_deref()?);
     crate::trust::runs_source(cmd, &t.args, src).then(|| src.to_string())
@@ -321,7 +321,7 @@ impl Policy {
         let sub = mcp_source(t).as_deref().and_then(subject).unwrap_or_else(|| t.name.clone());
         // a deny matches what it runs or where it connects, and what the lock says it is
         let claimed = t.source.as_deref().and_then(subject);
-        let transport = t.transport.clone().or_else(|| if t.url.is_some() { Some("http".into()) } else { t.command.as_ref().map(|_| "stdio".into()) });
+        let transport = t.transport.clone().or_else(|| if t.command.is_some() { Some("stdio".into()) } else { t.url.as_ref().map(|_| "http".into()) });
         for (l, file) in self.levels.iter().zip(&self.files) {
             if let (Some(ts), Some(tr)) = (&l.mcp.transports, &transport) {
                 if !ts.contains(tr) {

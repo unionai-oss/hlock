@@ -1863,7 +1863,8 @@ def sync(lock: str, plan_only: bool, as_json: bool, yes: bool, install: bool, pu
         asking = not (plan_only or skill or docker or yes) and sys.stdin.isatty()
         if asking and click.confirm(f"Trust {'these' if len(untrusted) > 1 else 'this'} on this machine?", default=False):
             with _friendly_errors():
-                _trust_approve(lock=lock, manifest=_m())
+                # exactly what was shown, not whatever is untrusted by now
+                _trust_approve(lock=lock, only=[e["digest"] for e in untrusted], manifest=_m())
             plan = make_plan()
             console.print(_plan_table(plan, verbose))
 
@@ -2265,7 +2266,9 @@ def launch(args: tuple[str, ...], lock: str | None, prefix: str | None, in_place
     # what the lock would run here is approved first (once), as for sync
     if not in_place:
         with _friendly_errors():
-            untrusted = [e for e in json.loads(_trust_list(lock=lock or _l(), manifest=_m()))["executables"] if e["status"] == "untrusted"]
+            # the policy's trusted list isn't something launch runs: `hlock trust` asks about it
+            untrusted = [e for e in json.loads(_trust_list(lock=lock or _l(), manifest=_m()))["executables"]
+                         if e["status"] == "untrusted" and e["kind"] != "policy"]
         if untrusted and not trust:
             if as_json or not sys.stdin.isatty():
                 _fail(f"{len(untrusted)} executable{'s' if len(untrusted) != 1 else ''} the lock would run aren't trusted on this machine",
@@ -2276,7 +2279,7 @@ def launch(args: tuple[str, ...], lock: str | None, prefix: str | None, in_place
             trust = True
         if untrusted and trust:
             with _friendly_errors():
-                _trust_approve(lock=lock or _l(), manifest=_m())
+                _trust_approve(lock=lock or _l(), only=[e["digest"] for e in untrusted], manifest=_m())
     with _working("Preparing the locked environment…"):
         prep = json.loads(launch_prepare(lock or _l(), harness=harness, prefix=prefix,
                                          allow_version_mismatch=allow_version_mismatch,

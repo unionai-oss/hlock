@@ -90,7 +90,7 @@ fn model_arg(lock: &Lockfile, target: &HarnessProfile, notes: &mut Vec<String>) 
 
 /// One MCP server in a target harness's config shape.
 pub fn mcp_entry(t: &Tool, shape: &str) -> Value {
-    let remote = matches!(t.transport.as_deref(), Some("http") | Some("sse")) && t.url.is_some();
+    let remote = crate::trust::is_remote(t);
     let env = json!(t.env);
     let headers = json!(t.headers);
     let enabled = t.enabled != Some(false);
@@ -283,6 +283,10 @@ fn translate(lock: &Lockfile, lock_path: &Path, source: Option<&HarnessProfile>,
             if !gate.lets("script", &s.name, prep) || !gate.lets("hidden", &format!("skill {}", s.name), prep) || !gate.clean(&src, &format!("skill {}", s.name), s.scan.as_deref(), prep) {
                 continue;
             }
+            if let Some(why) = sync::tampered(&src, s.digest.as_ref()).filter(|_| s.vendored.as_ref().is_some_and(|v| src == lock_dir.join(v))) {
+                prep.notes.push(format!("left out skill {}: {why}", s.name));
+                continue;
+            }
             let dest = dir.join(&s.name);
             if dest.join("SKILL.md").is_file() && Some(tree_digest(&dest)) == s.digest {
                 continue;
@@ -308,6 +312,10 @@ fn translate(lock: &Lockfile, lock_path: &Path, source: Option<&HarnessProfile>,
         let src = ins.vendored.as_ref().map(|v| lock_dir.join(v)).or_else(|| Some(ctx.expand(&ins.name, source_root.as_deref()))).filter(|p| p.is_file());
         let what = format!("instructions {}", ins.name);
         if src.as_ref().is_some_and(|p| !gate.lets("hidden", &what, prep) || !gate.clean(p, &what, ins.scan.as_deref(), prep)) {
+            continue;
+        }
+        if let Some(why) = src.as_ref().filter(|p| ins.vendored.as_ref().is_some_and(|v| **p == lock_dir.join(v))).and_then(|p| sync::tampered(p, ins.digest.as_ref())) {
+            prep.notes.push(format!("left out {what}: {why}"));
             continue;
         }
         match (dest_tpl, src) {
@@ -408,7 +416,9 @@ impl Gate {
 
     /// Whether the `kind` executable `name` may be placed; a note says why not.
     fn lets(&self, kind: &str, name: &str, prep: &mut LaunchPrep) -> bool {
-        let Some(e) = self.blocked.iter().find(|e| e.kind == kind && e.name == name) else { return true };
+        // names are listed with hidden characters made visible
+        let shown = crate::scan::visible(name);
+        let Some(e) = self.blocked.iter().find(|e| e.kind == kind && e.name == shown) else { return true };
         let why = if e.status == "denied" { "you denied it on this machine" } else { "not yet trusted: approve with hlock trust, or launch --trust" };
         prep.notes.push(format!("left out {kind} {name}: {why}"));
         false

@@ -587,17 +587,14 @@ pub fn localize(source: &Lockfile, source_path: &Path, reg: &Registry, ctx: &Ctx
         let body = Value::Object(sets.clone());
         let rel = format!("{vroot}/{file}.pointers.json");
         vendor.push(VendorFile { rel: rel.clone(), bytes: render_config(&body, "json").map_err(Error::Profile)?.into_bytes(), executable: false });
-        let mut check = json!({});
-        for (p, v) in &sets {
-            set_pointer(&mut check, p, v.clone());
-        }
         lock.config.push(ConfigFile {
             id: file.clone(),
             path: spec.path.clone(),
             format: spec.format.clone(),
             restore: "pointers".into(),
             pointers: sets.keys().cloned().collect(),
-            digest: Some(crate::hash::content_hash(&check)),
+            // what's vendored, as pin digests a pointer-restored file
+            digest: Some(crate::hash::content_hash(&body)),
             vendored: Some(rel),
             scan: None,
         });

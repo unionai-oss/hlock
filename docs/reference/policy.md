@@ -35,7 +35,7 @@ only when the skill is fetched from its source rather than copied from a vendore
 
 | Key | Description |
 |---|---|
-| `transports` | The transports MCP servers may use: `stdio`, `http`, `sse`. A server with no `transport` is `http` when it has a URL and `stdio` when it has a command |
+| `transports` | The transports MCP servers may use: `stdio`, `http`, `sse`. A server with no `transport` is `stdio` when it has a command (even with a URL too) and `http` when it has only a URL |
 | `deny` | Patterns no MCP server's source may match |
 
 ## `[models]`

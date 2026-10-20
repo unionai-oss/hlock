@@ -1650,7 +1650,7 @@ pub fn install(r: &mut Resolved, env: &Env) -> Result<Installed> {
             let scope = t.scope.clone().unwrap_or_else(|| "project".into());
             if let Some(pkg) = t.dep.required_by.last() {
                 // it starts a process, from a file the project didn't write: not until it's trusted here
-                let trusted = crate::trust::mcp_executable(t).or_else(|| crate::trust::executables(&Lockfile { tool: vec![t.clone()], ..Default::default() }, &env.project, None, ctx).into_iter().next()).is_some_and(|e| crate::trust::TrustStore::load(ctx).ok().and_then(|s| s.status(&e.digest)) == Some("trusted"));
+                let trusted = crate::trust::executables(&Lockfile { tool: vec![t.clone()], ..Default::default() }, &env.project, None, ctx).into_iter().next().is_some_and(|e| crate::trust::TrustStore::load(ctx).ok().and_then(|s| s.status(&e.digest)) == Some("trusted"));
                 if !trusted {
                     out.warnings.push(format!("mcp {}: {pkg} brings this MCP server; it isn't configured until you trust it (hlock trust, then hlock sync)", t.name));
                     return Ok(out);
