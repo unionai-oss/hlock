@@ -20,7 +20,7 @@ from click.testing import CliRunner
 from rich.console import Console
 from rich.terminal_theme import MONOKAI
 
-from harness_lock import cli
+from hlock import cli
 
 REPO = Path(__file__).resolve().parent.parent
 OUT = REPO / "docs" / "assets" / "quickstart.svg"

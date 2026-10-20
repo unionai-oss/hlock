@@ -89,7 +89,7 @@ fn tune_writes_a_resolve() {
     let pack = make_pack(&base);
     let manifest = make_manifest(&pack);
     let mh = manifest.manifest_hash();
-    let mut resolver = Resolver::new(manifest, base.join(".harnesslock"));
+    let mut resolver = Resolver::new(manifest, base.join(".hlock"));
     let lock = resolver.resolve().unwrap();
 
     // lock is written at cwd
@@ -163,17 +163,17 @@ fn content_graders_pass_on_the_reference_harness_and_judges_reach_the_evidence()
         let mut m = make_manifest(&pack);
         m.candidates.llm.get_mut("planner").unwrap().any_of = vec!["reference:qwen-32b".into()];
         m.candidates.decision = vec!["none".into()];
-        let mut resolver = Resolver::new(m, root.join(".harnesslock"));
+        let mut resolver = Resolver::new(m, root.join(".hlock"));
         let lock = resolver.resolve_lock().unwrap();
         if judge {
             assert_eq!(lock.evidence.judge.as_ref().map(|j| j.model.as_str()), Some("local:judge-1"));
             assert_eq!(lock.evidence.success_rate["mean"], 0.0, "the unreachable judge fails every trial");
-            assert!(files_containing(&root.join(".harnesslock/store"), "cannot reach") > 0, "grade details go in the traces");
+            assert!(files_containing(&root.join(".hlock/store"), "cannot reach") > 0, "grade details go in the traces");
         } else {
             assert_eq!(lock.evidence.judge, None);
             // the reference harness left the solution, so `equals = "9"` passed
             assert_eq!(lock.evidence.success_rate["mean"], 1.0);
-            assert!(files_containing(&root.join(".harnesslock/store"), "\"grader\":\"artifact:count.txt\"") > 0);
+            assert!(files_containing(&root.join(".hlock/store"), "\"grader\":\"artifact:count.txt\"") > 0);
         }
     }
     let _ = fs::remove_dir_all(&base);
@@ -233,11 +233,11 @@ fn deciders_are_searched_locked_and_judge_the_evidence() {
     m.source_path = Some(root.join("harness.toml"));
     // any-of multiplies the stacks; `none` leaves the use out
     m.deciders.insert("approve".into(), serde_json::json!({"any-of": ["none", "system-one:kev-4b"], "base-url": url}));
-    let resolver = Resolver::new(m.clone(), root.join(".harnesslock"));
+    let resolver = Resolver::new(m.clone(), root.join(".hlock"));
     assert_eq!(resolver.enumerate_stacks().len(), 2);
 
     m.deciders.insert("approve".into(), serde_json::json!({"model": "system-one:kev-4b", "base-url": url, "policy": "policy.md"}));
-    let mut resolver = Resolver::new(m, root.join(".harnesslock"));
+    let mut resolver = Resolver::new(m, root.join(".hlock"));
     let lock = resolver.resolve_lock().unwrap();
     assert_eq!(lock.decider.len(), 1, "{:?}", lock.decider);
     let d = &lock.decider[0];
@@ -269,17 +269,17 @@ fn thresholds_multiply_the_stacks_and_judging_costs_reach_the_evidence() {
     m.candidates.decision = vec!["none".into()];
     m.source_path = Some(root.join("harness.toml"));
     m.deciders.insert("stop".into(), serde_json::json!({"model": "system-one:kev-4b", "base-url": url, "min-probability": [0.6, 0.9]}));
-    let resolver = Resolver::new(m.clone(), root.join(".harnesslock"));
+    let resolver = Resolver::new(m.clone(), root.join(".hlock"));
     let stacks = resolver.enumerate_stacks();
     let tried: Vec<&String> = stacks.iter().map(|s| &s.deciders["stop"]).collect();
     assert_eq!(tried, ["system-one:kev-4b@0.6", "system-one:kev-4b@0.9"]);
     // candidates keep the manifest's order (it decides which stacks a 200-stack cap keeps)
     let mut m2 = m.clone();
     m2.deciders.insert("stop".into(), serde_json::json!({"any-of": ["system-one:kev-9b", "none", "system-one:kev-4b"], "base-url": url}));
-    let order: Vec<String> = Resolver::new(m2, root.join(".harnesslock")).enumerate_stacks().iter().map(|s| s.deciders.get("stop").cloned().unwrap_or_else(|| "none".into())).collect();
+    let order: Vec<String> = Resolver::new(m2, root.join(".hlock")).enumerate_stacks().iter().map(|s| s.deciders.get("stop").cloned().unwrap_or_else(|| "none".into())).collect();
     assert_eq!(order, ["system-one:kev-9b", "none", "system-one:kev-4b"]);
 
-    let mut resolver = Resolver::new(m, root.join(".harnesslock"));
+    let mut resolver = Resolver::new(m, root.join(".hlock"));
     let lock = resolver.resolve_lock().unwrap();
     let d = &lock.decider[0];
     assert!(d.min_probability == serde_json::json!(0.6) || d.min_probability == serde_json::json!(0.9), "{d:?}");

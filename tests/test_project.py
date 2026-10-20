@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 from click.testing import CliRunner
 
-from harness_lock.cli import main
+from hlock.cli import main
 
 REPO = Path(__file__).resolve().parent.parent
 
@@ -37,7 +37,7 @@ def test_commands_find_the_project_from_a_subdirectory(project, monkeypatch):
     r = invoke("resolve")
     assert r.exit_code == 0, r.output  # ./evals resolved against the project root
     assert (project / "harness.lock").exists() and not (sub / "harness.lock").exists()
-    assert (project / ".harnesslock").is_dir() and not (sub / ".harnesslock").exists()
+    assert (project / ".hlock").is_dir() and not (sub / ".hlock").exists()
     assert invoke("check").exit_code == 0
     assert json.loads(invoke("show", "--json").output)["lock-version"] == 1
 

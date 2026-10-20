@@ -60,7 +60,7 @@
 
   <rect x="540" y="374" width="300" height="84" rx="14" fill="#3b82f6" fill-opacity=".08" stroke="#3b82f6" stroke-opacity=".7"/>
   <text x="690" y="408" class="t" text-anchor="middle">Python worker</text>
-  <text x="690" y="433" class="ms" text-anchor="middle">harness_lock.tasks.worker</text>
+  <text x="690" y="433" class="ms" text-anchor="middle">hlock.tasks.worker</text>
 
   <!-- worker fan-out -->
   <path class="wire" d="M690 458V482H560V512" marker-end="url(#arrow)"/>

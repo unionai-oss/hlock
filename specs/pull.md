@@ -316,12 +316,12 @@ others, warnings, diff}`, where each of `others` is `{path, source}`.
 ### 4.6 Python API
 
 ```python
-harness_lock.pull(source, out=None, name=None, force=False) -> str  # JSON, as --json
-harness_lock.pull_find(name) -> str | None    # a stored lock's path
-harness_lock.pull_list() -> str                # JSON, as hlock list --json
-harness_lock.pull_remove(name) -> str
-harness_lock.pull_env(name) -> str             # launch's prefix for a stored lock
-harness_lock.is_pull_source(arg) -> bool
+hlock.pull(source, out=None, name=None, force=False) -> str  # JSON, as --json
+hlock.pull_find(name) -> str | None    # a stored lock's path
+hlock.pull_list() -> str                # JSON, as hlock list --json
+hlock.pull_remove(name) -> str
+hlock.pull_env(name) -> str             # launch's prefix for a stored lock
+hlock.is_pull_source(arg) -> bool
 ```
 
 ## 5. Tests

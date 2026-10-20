@@ -10,8 +10,8 @@ from pathlib import Path
 import pytest
 from click.testing import CliRunner
 
-from harness_lock import is_pull_source
-from harness_lock.cli import MANUAL_EXIT, main
+from hlock import is_pull_source
+from hlock.cli import MANUAL_EXIT, main
 
 GH_TOKEN = "ghp_0123456789abcdefABCDEF0123456789"
 

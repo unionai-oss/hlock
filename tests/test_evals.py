@@ -7,9 +7,9 @@ import re
 import pytest
 from click.testing import CliRunner
 
-import harness_lock as hl
-from harness_lock import evals
-from harness_lock.cli import main
+import hlock as hl
+from hlock import evals
+from hlock.cli import main
 
 HARNESS_ENV_PREFIXES = ("CLAUDE", "CODEX_", "PI_", "OPENCODE", "HERMES_", "CURSOR_AGENT", "GEMINI_CLI", "HLOCK_")
 

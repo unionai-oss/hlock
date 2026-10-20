@@ -9,8 +9,8 @@ from pathlib import Path
 import pytest
 from click.testing import CliRunner
 
-from harness_lock import Lockfile
-from harness_lock.cli import main
+from hlock import Lockfile
+from hlock.cli import main
 
 REPO = Path(__file__).resolve().parent.parent
 

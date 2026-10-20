@@ -1,4 +1,4 @@
-//! Bridge from the Rust core to the Python worker (`harness_lock.tasks.worker`).
+//! Bridge from the Rust core to the Python worker (`hlock.tasks.worker`).
 //!
 //! The Rust core stays the orchestrator and aggregator — manifests, search
 //! planning, trial bookkeeping, evidence, and lock construction. The
@@ -10,7 +10,7 @@
 //!
 //! On `local` the resolver uses the deterministic in-process reference harness (no
 //! Python). On `devbox`/`cluster` the [`PythonAdapter`] takes over and calls
-//! `python -m harness_lock.tasks.worker <request.json> <response.json>`; that
+//! `python -m hlock.tasks.worker <request.json> <response.json>`; that
 //! worker may in turn lift each body to a real Flyte task via the Python `flyte`
 //! / `flyteplugins-rs` packages, but returns the identical response shape either
 //! way — so the Rust core never changes based on where the work actually ran.
@@ -154,7 +154,7 @@ impl HarnessAdapter for PythonAdapter {
 /// for the data / prompt / fine-tune stages of the pipeline.
 ///
 /// The interpreter is taken from `HL_PYTHON` (falling back to `python3`) so it can
-/// be pinned to the interpreter that actually has `harness_lock` installed (e.g. a
+/// be pinned to the interpreter that actually has `hlock` installed (e.g. a
 /// project venv), independent of the interpreter the Rust wheel itself runs inside.
 pub struct PythonWorker {
     interp: String,
@@ -166,7 +166,7 @@ impl PythonWorker {
         let interp = std::env::var("HL_PYTHON").unwrap_or_else(|_| "python3".to_string());
         PythonWorker {
             interp,
-            module: "harness_lock.tasks.worker".to_string(),
+            module: "hlock.tasks.worker".to_string(),
         }
     }
 

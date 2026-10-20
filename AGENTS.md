@@ -7,7 +7,7 @@ Instructions for coding agents working in this repository. Humans: see the
 
 hlock (published as `hlock`, with `harness-lock` as an alias) tunes an agent stack against a task
 pack and pins the winner in `harness.lock`. A Rust core (`crates/harness-lock-core`)
-does the deterministic work. A Python package (`harness_lock/`) provides PyO3
+does the deterministic work. A Python package (`hlock/`) provides PyO3
 bindings, the `hlock` CLI, and a worker for heavy stages. See
 `docs/concepts/architecture.md`.
 
@@ -32,10 +32,10 @@ you report a change as done, and report failures as they are.
 | `crates/harness-lock-core/` | Rust core: manifest, lockfile, store, eval packs, search, resolver |
 | `crates/harness-lock-py/` | PyO3 bindings (ships only in the wheel) |
 | `crates/hlock/`, `crates/harness-lock/` | Re-export crates (`harness-lock` is the alias) |
-| `hlock/` | Shim re-exporting `harness_lock`, shipped in the `hlock` wheel |
+| `harness_lock/` | Shim re-exporting `hlock`, shipped in the `hlock` wheel |
 | `packaging/harness-lock/` | The code-free `harness-lock` PyPI alias (pins `hlock`) |
-| `harness_lock/cli.py` | The `hlock` CLI (rich + rich-click) |
-| `harness_lock/tasks/worker.py` | Worker for the `devbox` and `cluster` backends (versioned JSON contract) |
+| `hlock/cli.py` | The `hlock` CLI (rich + rich-click) |
+| `hlock/tasks/worker.py` | Worker for the `devbox` and `cluster` backends (versioned JSON contract) |
 | `tests/` | pytest suites |
 | `docs/`, `zensical.toml` | Documentation site |
 | `evals/` | Demo eval pack |
@@ -57,5 +57,5 @@ you report a change as done, and report failures as they are.
 - Don't bump versions or edit release workflows unless asked. Versions are set with
   `scripts/set_version.py`.
 - Keep the worker contract in sync: `CONTRACT_VERSION` in
-  `harness_lock/tasks/worker.py` and `crates/harness-lock-core/src/worker.rs`.
+  `hlock/tasks/worker.py` and `crates/harness-lock-core/src/worker.rs`.
 - In pull requests, say that an agent made the change.

@@ -28,7 +28,7 @@ from rich.text import Text
 from rich.theme import Theme
 from rich.tree import Tree
 
-from harness_lock import (
+from hlock import (
     LOCK_VERSION,
     Lockfile,
     Manifest,
@@ -56,27 +56,27 @@ from harness_lock import (
     sync_run_step,
     sync_skill,
 )
-from harness_lock import calibrate_eval_pack as _calibrate_eval_pack
-from harness_lock import check_eval_pack as _check_eval_pack
-from harness_lock import check_pin as _check_pin
-from harness_lock import decide as _decide
-from harness_lock import decide_hook as _decide_hook
-from harness_lock import decider_drift as _decider_drift
-from harness_lock import evals as _evals
-from harness_lock import grade_eval_task as _grade_eval_task
-from harness_lock import jobs as _jobs
-from harness_lock import localize as _localize
-from harness_lock import pin as _pin
-from harness_lock import pull as _pull
-from harness_lock import pull_env as _pull_env
-from harness_lock import pull_find as _pull_find
-from harness_lock import pull_list as _pull_list
-from harness_lock import pull_remove as _pull_remove
-from harness_lock import resolve as _resolve
-from harness_lock import select_harness as _select_harness
-from harness_lock import traces as _traces
-from harness_lock import tune as al_tune
-from harness_lock import upgrade as al_upgrade
+from hlock import calibrate_eval_pack as _calibrate_eval_pack
+from hlock import check_eval_pack as _check_eval_pack
+from hlock import check_pin as _check_pin
+from hlock import decide as _decide
+from hlock import decide_hook as _decide_hook
+from hlock import decider_drift as _decider_drift
+from hlock import evals as _evals
+from hlock import grade_eval_task as _grade_eval_task
+from hlock import jobs as _jobs
+from hlock import localize as _localize
+from hlock import pin as _pin
+from hlock import pull as _pull
+from hlock import pull_env as _pull_env
+from hlock import pull_find as _pull_find
+from hlock import pull_list as _pull_list
+from hlock import pull_remove as _pull_remove
+from hlock import resolve as _resolve
+from hlock import select_harness as _select_harness
+from hlock import traces as _traces
+from hlock import tune as al_tune
+from hlock import upgrade as al_upgrade
 
 MANIFEST = "harness.toml"
 LOCK = "harness.lock"
@@ -793,7 +793,7 @@ def decide_hook(use_: str, fmt: str, event: str | None, input_: str | None, verb
               help="Override the manifest's \\[backend] target.")
 @click.option("--harness", "harness", default=None,
               help="Target harness, overriding \\[target] harness (e.g. claude, codex, pi, opencode).")
-@click.option("--workdir", default=None, help="Where to put trial artifacts.  [dim]\\[default: .harnesslock][/]")
+@click.option("--workdir", default=None, help="Where to put trial artifacts.  [dim]\\[default: .hlock][/]")
 def resolve(backend: str | None, harness: str | None, workdir: str | None) -> None:
     """Search the space and pin the winner in [path]harness.lock[/]."""
     with _working(f"Resolving {_md()} on the {backend or 'configured'} backend…"):

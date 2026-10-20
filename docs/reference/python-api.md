@@ -50,7 +50,7 @@ Run the resolver and write the lock.
 |---|---|
 | `manifest` | A `Manifest`, a `SearchSpace`, a path to a TOML file, or TOML text. Defaults to the nearest `harness.toml` at or above the working directory. |
 | `backend` | `"local"`, `"devbox"`, or `"cluster"`. Overrides the manifest. |
-| `workdir` | Where trial artifacts go. Defaults to `.harnesslock` in the project root (the manifest's directory). |
+| `workdir` | Where trial artifacts go. Defaults to `.hlock` in the project root (the manifest's directory). |
 | `harness` | Target harness, overriding `[target] harness` |
 | `lock` | Where to write the lock. Defaults to `harness.lock` in the project root. |
 
@@ -98,14 +98,14 @@ Run tuning, like [`hlock tune`](cli.md#tune). Returns JSON with `path`
 
 ### Tune jobs
 
-`harness_lock.jobs` runs a tune in the background, like
+`hlock.jobs` runs a tune in the background, like
 [`hlock tune --detach`](../guides/tune.md#running-in-the-background). Job records are
 plain dicts with `id`, `status` (`queued`, `running`, `succeeded`, `failed`, or
 `cancelled`), timestamps, `options`, and, once the job succeeds, `report` and `result`
 (the path of its tune lock).
 
 ```python
-from harness_lock import jobs
+from hlock import jobs
 
 job = jobs.submit("harness.toml", lock="harness.lock", options={"depth": "probe"})
 jobs.wait(".", job["id"])                   # block until it finishes

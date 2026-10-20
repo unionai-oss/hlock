@@ -220,7 +220,11 @@ __marimo__/
 .streamlit/secrets.toml
 
 # harness-lock local run artifacts (store, runs, caches) — commit harness.lock, not these
-.harnesslock/
+.hlock/store/
+.hlock/runs/
+.hlock/tune/
+.hlock/localize/
+.hlock/report.md
 
 # Rust build artifacts
 /target

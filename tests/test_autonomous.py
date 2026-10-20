@@ -9,8 +9,8 @@ from pathlib import Path
 import pytest
 from click.testing import CliRunner
 
-from harness_lock import Lockfile, launch_prepare
-from harness_lock.cli import main
+from hlock import Lockfile, launch_prepare
+from hlock.cli import main
 
 GH_TOKEN = "ghp_0123456789abcdefABCDEF0123456789"
 
