@@ -16,7 +16,7 @@ role = "default"
 provider = "dgx-spark"
 model = "deepseek-v4-flash-0731"
 resolved-from = "settings#/defaultModel"
-endpoint = "http://100.70.69.103:8888/v1"
+endpoint = "http://flint-dgx:8888/v1"
 
 [llm.params]
 
