@@ -51,9 +51,11 @@ you report a change as done, and report failures as they are.
   today; planned features belong in `specs/`.
 - Run any command or code example you add to the docs, and use its real output.
 - After changing CLI output, run `uv run python scripts/cli_screenshot.py`.
+- After changing the home page terminal (`docs/javascripts/terminal.js`), build the docs and
+  run `uv run --with playwright python scripts/demo_video.py`.
 - After changing a built-in profile, run `uv run python scripts/harness_table.py`.
 - Don't hand-edit generated files: `harness.lock`, `uv.lock`,
-  `docs/assets/quickstart.svg`, the tables in `docs/reference/harnesses.md`.
+  `docs/assets/quickstart.svg`, `docs/assets/demo.{webp,mp4}`, the tables in `docs/reference/harnesses.md`.
 - Don't bump versions or edit release workflows unless asked. Versions are set with
   `scripts/set_version.py`.
 - Keep the worker contract in sync: `CONTRACT_VERSION` in

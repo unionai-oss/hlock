@@ -38,6 +38,10 @@ better one.
 | 📦 `uv sync` / `npm ci` | **`hlock sync`**: rehydrate the locked setup on any machine |
 | ▶️ `uv run` | **`hlock launch`** and **`hlock run`**: start sessions and run prompts on the locked setup |
 
+<p align="center">
+  <img src="https://raw.githubusercontent.com/unionai-oss/hlock/main/docs/assets/demo.webp" alt="An hlock session: pin a Claude Code setup into harness.lock and push it to GitHub, then pull and sync it on another machine" width="852">
+</p>
+
 ## Install
 
 ```bash
