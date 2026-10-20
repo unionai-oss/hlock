@@ -80,6 +80,21 @@ See the [Quickstart](https://docs.hlock.ai/getting-started/quickstart/),
 [Rehydrating with sync](https://docs.hlock.ai/guides/sync/), and
 [Launching a locked harness](https://docs.hlock.ai/guides/launch/).
 
+### Manage your team's agents
+
+Contributors to one repository rarely share an agent setup. Each person can commit their own
+lock to `.hlock/locks/harness.<handle>.lock`, next to the code it was used on, and anyone
+with a clone can try a teammate's setup in isolation:
+
+```bash
+hlock pin -o .hlock/locks/harness.alice.lock         # commit your setup with the code
+hlock launch --lock .hlock/locks/harness.bob.lock    # try a teammate's, isolated from yours
+```
+
+Add the [hlock badge](https://docs.hlock.ai/project/badge/) to your README to point readers
+at the locks. See [Team repositories](https://docs.hlock.ai/guides/teams/) for the layout,
+the conventions, and pulling a teammate's lock from outside the repository.
+
 ### Then make it better
 
 **Optimize your harness.** Draft an eval pack from the requests you've already made to your
