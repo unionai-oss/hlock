@@ -51,7 +51,7 @@ def machine(tmp_path, monkeypatch):
     m = home / ".ollama/models/manifests/registry.ollama.ai/library/qwen3/8b"
     m.parent.mkdir(parents=True)
     m.write_text(json.dumps({"config": {"size": 1}, "layers": [{"size": 5_200_000_000}]}))
-    assert invoke("pin", "--harness", "claude").exit_code == 0
+    assert invoke("pin", "--user", "--harness", "claude").exit_code == 0
     return home
 
 

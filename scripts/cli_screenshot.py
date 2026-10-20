@@ -29,7 +29,7 @@ SECRET = "HLOCK_SECRET_GITHUB_GITHUB_TOKEN"
 
 # (comment shown above the command, home it runs in, args)
 SESSION = [
-    ("on your laptop", "laptop", ["pin"]),
+    ("on your laptop", "laptop", ["pin", "--user"]),
     (None, "laptop", ["check"]),
     ("on another machine, after git clone", "fresh", ["sync", "--yes"]),
 ]

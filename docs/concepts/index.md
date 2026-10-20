@@ -31,9 +31,11 @@ flowchart LR
 ## Pinning
 
 [`hlock pin`](../guides/pin.md) finds the harness you use, reads it through its
-[profile](../guides/harness-profiles.md), and writes everything into the lock with a
-digest: the harness version and install source, models and the local runtimes serving
-them, MCP servers, skills, plugins, instruction files, and config. Secrets become
+[profile](../guides/harness-profiles.md), and writes it into the lock with a digest: the
+harness version and install source, models and the local runtimes serving them, and the
+project's MCP servers, skills, plugins, instruction files, and config. `hlock pin --user`
+adds the ones in your home directory (`~/.claude`, `~/.pi/agent`, …); see
+[Project and user scope](../guides/pin.md#project-and-user-scope). Secrets become
 `HLOCK_SECRET_*` placeholders, and anything another machine can't download is vendored
 into `.hlock/vendor/`.
 

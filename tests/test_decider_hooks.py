@@ -82,7 +82,7 @@ def wired_file(plan: dict) -> Path:
 @pytest.mark.parametrize("harness, uses, name, needle", CASES, ids=[c[0] for c in CASES])
 def test_sync_wires_deciders_into(project, deny, harness, uses, name, needle):
     write_manifest(deny.url, uses)
-    r = invoke("pin", "--harness", harness)
+    r = invoke("pin", "--user", "--harness", harness)
     assert r.exit_code == 0, r.output
     lock = json.loads(Lockfile.load("harness.lock").to_json())
     assert sorted(d["use"] for d in lock["decider"]) == sorted(uses)
@@ -100,7 +100,7 @@ def test_sync_wires_deciders_into(project, deny, harness, uses, name, needle):
     assert all(s["status"] == "satisfied" for s in plan["steps"] if s["id"].startswith("decider:")), plan["steps"]
     # dropping the deciders removes what hlock wrote (plugins are moved aside)
     Path("harness.toml").unlink()
-    assert invoke("pin", "--harness", harness).exit_code == 0
+    assert invoke("pin", "--user", "--harness", harness).exit_code == 0
     assert invoke("sync", "--yes").exit_code == 0
     assert not path.is_file() or "decide hook" not in path.read_text()
 
@@ -145,7 +145,7 @@ console.log(JSON.stringify(results));
 def test_plugins_ask_hlock_and_act_on_its_answer(project, deny, tmp_path, harness, kind):
     uses = ("approve", "stop") if kind == "amp" else ("approve",)
     write_manifest(deny.url, uses)
-    assert invoke("pin", "--harness", harness).exit_code == 0
+    assert invoke("pin", "--user", "--harness", harness).exit_code == 0
     plan = json.loads(invoke("sync", "--plan", "--json").output)
     plugin = wired_file(plan)
     assert invoke("sync", "--yes").exit_code == 0
@@ -171,7 +171,7 @@ def test_plugins_ask_hlock_and_act_on_its_answer(project, deny, tmp_path, harnes
 def test_a_plugin_defers_when_hlock_isnt_there(project, deny, tmp_path, monkeypatch):
     write_manifest(deny.url)
     monkeypatch.setenv("HLOCK_BIN", str(tmp_path / "no-such-hlock"))
-    assert invoke("pin", "--harness", "pi").exit_code == 0
+    assert invoke("pin", "--user", "--harness", "pi").exit_code == 0
     plan = json.loads(invoke("sync", "--plan", "--json").output)
     plugin = wired_file(plan)
     assert invoke("sync", "--yes").exit_code == 0

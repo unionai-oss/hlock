@@ -65,7 +65,7 @@ def world(tmp_path, monkeypatch):
     }))
     monkeypatch.setenv("HOME", str(alice))
     monkeypatch.chdir(repo)
-    assert invoke("pin", "--harness", "claude").exit_code == 0
+    assert invoke("pin", "--user", "--harness", "claude").exit_code == 0
     git(repo, "init", "-q", "-b", "main")
     git(repo, "config", "uploadpack.allowFilter", "true")  # like GitHub: lazy blob fetches
     head = commit(repo)

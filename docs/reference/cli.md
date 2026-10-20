@@ -229,21 +229,26 @@ hlock resolve [--backend local|devbox|cluster] [--harness NAME] [--workdir DIR]
 
 ## `pin`
 
-Capture the live setup of one harness (version, models, local runtimes, MCP servers, skills,
-plugins, instruction files, config) into a pinned lock. Secrets become
-`${HLOCK_SECRET_…}` placeholders. See [Pinning your setup](../guides/pin.md).
+Capture the live setup of one harness (version, models, local runtimes, and the project's
+MCP servers, skills, plugins, instruction files and config) into a pinned lock. `--user`
+adds the user-level ones from the harness's config root in your home directory, and `-i GLOB`
+adds only those matching a pattern. Secrets
+become `${HLOCK_SECRET_…}` placeholders. See [Pinning your setup](../guides/pin.md) and
+[Project and user scope](../guides/pin.md#project-and-user-scope).
 
 ```bash
-hlock pin [--harness NAME] [-o FILE] [--no-vendor] [--force] [--json]
+hlock pin [--harness NAME] [-o FILE] [--user | -i GLOB ...] [--no-vendor] [--force] [--json]
 ```
 
 | Option | Default | Description |
 |---|---|---|
 | `--harness` | `[target]`, else the harness you're running inside | Harness to pin |
 | `-o`, `--out` | `harness.lock` | Where to write the lock |
+| `--user` | | Also pin your user-level skills, MCP servers, plugins, instructions and config (`~/.claude`, `~/.pi/agent`, …) |
+| `-i`, `--include-user-scope` | | Also pin the user-level items whose path matches this glob, relative to the harness's config root (or `~/…`, absolute). Repeatable; not with `--user`. See [Pick parts of your user setup](../guides/pin.md#pick-parts-of-your-user-setup) |
 | `--no-vendor` | | Record digests only; don't copy files into `.hlock/vendor/` |
 | `--force` | | Replace a resolved lock (one with evidence) |
-| `--json` | | Print the lock, the diff from the previous pin, vendored files, and warnings as JSON |
+| `--json` | | Print the lock, the diff from the previous pin, vendored files, warnings, and what a project-only pin left out (`skipped`) as JSON |
 
 ## `check`
 
