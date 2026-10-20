@@ -1,0 +1,32 @@
+{
+  "compaction": {
+    "enabled": true,
+    "keepRecentTokens": 20000,
+    "reserveTokens": 200000
+  },
+  "defaultModel": "deepseek-v4-flash-0731",
+  "defaultProvider": "dgx-spark",
+  "defaultThinkingLevel": "medium",
+  "extensions": [
+    "-builtin:mcp"
+  ],
+  "lastChangelogVersion": "1.0.0",
+  "packages": [
+    "npm:pi-free",
+    {
+      "extensions": [
+        "extensions/alibaba.ts"
+      ],
+      "source": "npm:pi-models-access"
+    },
+    "npm:pi-sessions",
+    {
+      "extensions": [
+        "+src/index.ts"
+      ],
+      "source": "npm:pi-claude-auth"
+    },
+    "npm:pi-browser-use"
+  ],
+  "theme": "dark"
+}

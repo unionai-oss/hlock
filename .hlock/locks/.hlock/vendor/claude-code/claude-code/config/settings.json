@@ -1,0 +1,80 @@
+{
+  "agentPushNotifEnabled": true,
+  "autoMode": {
+    "environment": [
+      "### Org-wide",
+      "**Organization**: unionai (GitHub org for this repo's remote; this is a meta-repo aggregating Flyte/Union submodules)",
+      "**Cloud provider(s)**: None configured",
+      "**Repository visibility**: Private (unionai/union-fullstack, verified via gh)",
+      "**Internal sharing / snippet hosting**: None configured — treat public paste/gist services as outside the trust boundary",
+      "**Secrets management**: None configured",
+      "**Default / protected branches**: main (default); no rulesets or protected-branch rules listed via gh",
+      "**CI/CD deploy targets**: None configured",
+      "**Network posture**: None configured",
+      "**Host containment**: None configured — assume Claude Code runs on an ordinary developer machine with open internet",
+      "**Source control**: The trusted repo (unionai/union-fullstack) and its origin remote only — as scoped by Trusted repo and Repository visibility above",
+      "**Trusted internal domains**: *.hosted.unionai.cloud (seen contacted repeatedly in this project's transcripts: localhost.demo.hosted.unionai.cloud, demo.hosted.unionai.cloud, niels-testing-12.hosted.unionai.cloud, niels-testing-11.hosted.unionai.cloud)",
+      "**Trusted cloud buckets**: None configured",
+      "**Key internal services**: None configured",
+      "**Internal package registry**: None configured",
+      "**Sensitive data locations & audiences**: cloud/.union/selfserve/*secrets*, cloud/.union/shared/secret_helpers.sh, cloud/dataproxy/service/secret*.go, cloud/operator/dataproxy/*secret*manager*.go, cloud/idl/secret/secret.proto, cloud/clients/.env.example, cloud/clientsv2/.env.local, cloud/infra/.env-python, cloud/infra/scripts/bk-secrets-scan.sh, cloud/billing/omnistrate/credentials*.go, cloud/deploy/dataplane/secrets-policy.json — confidential/credential-handling code within the closed-source cloud/ submodule; share only with audiences cleared for Union closed-source internals",
+      "**Data retention / declassification**: None configured",
+      "**Sensitive remote targets**: any namespace, host, or container whose name carries prod or production as a whole word or name segment (e.g. union-us-west-2-wpna-iad-prod)",
+      "**Protected deployment namespaces / environments**: None configured — fall back to the Sensitive remote targets heuristic",
+      "**Protected IaC scopes**: IAM, RBAC, networking, quota, and node-pool resources; anything whose name or tag carries prod or production as a whole word or name segment",
+      "### User-specific",
+      "**Primary use of Claude Code**: software development (Flyte/Union full-stack planning and cross-repo change work)",
+      "**Trusted repo**: /Users/nielsbantilan/git/union-fullstack (unionai/union-fullstack, private) and its origin remote; submodules (flyte, flyte-sdk, flytekit, flyte2-ui, cloud, unionai, prds, gtm) inherit this only insofar as they are checked out here — routine edits under this working tree are trusted",
+      "**Org-specific CLIs**: None configured"
+    ],
+    "soft_deny": [
+      "$defaults",
+      "Bash(kubectl delete:*) in devbox-development/testproject-development namespaces — frequent kubectl use (55×) in this project but destructive subcommands should stay gated",
+      "Bash(nc:*) — unusually frequent for this project (12×) and commonly used for exfil/reverse-shell patterns; keep gated pending confirmation of intent"
+    ]
+  },
+  "enabledPlugins": {
+    "flyte-benchmark@flyte-benchmarks": true,
+    "flyte-deploy-aws@flyte-skills": true,
+    "flyte-deploy-kind@flyte-skills": true,
+    "flyte@flyte-agent-plugins": true,
+    "gopls-lsp@claude-plugins-official": true,
+    "rust-analyzer-lsp@claude-plugins-official": true,
+    "webflow-skills@webflow-skills": true
+  },
+  "extraKnownMarketplaces": {
+    "flyte-agent-plugins": {
+      "source": {
+        "repo": "flyteorg/flyte-agent-plugins",
+        "source": "github"
+      }
+    },
+    "flyte-benchmarks": {
+      "source": {
+        "repo": "flyteorg/flyte-benchmarks",
+        "source": "github"
+      }
+    },
+    "flyte-skills": {
+      "source": {
+        "ref": "v0.0.3",
+        "source": "git",
+        "url": "https://github.com/flyteorg/skills.git"
+      }
+    },
+    "webflow-skills": {
+      "source": {
+        "repo": "webflow/webflow-skills",
+        "source": "github"
+      }
+    }
+  },
+  "model": "opus",
+  "theme": "dark-ansi",
+  "tui": "fullscreen",
+  "voice": {
+    "enabled": true,
+    "mode": "hold"
+  },
+  "voiceEnabled": true
+}

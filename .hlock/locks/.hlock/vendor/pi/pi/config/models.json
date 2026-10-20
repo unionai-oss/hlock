@@ -1,0 +1,165 @@
+{
+  "providers": {
+    "dgx-spark": {
+      "api": "openai-completions",
+      "apiKey": "EMPTY",
+      "baseUrl": "http://100.70.69.103:8888/v1",
+      "models": [
+        {
+          "contextWindow": 1000000,
+          "cost": {
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "input": 0,
+            "output": 0
+          },
+          "id": "deepseek-v4-flash-0731",
+          "input": [
+            "text"
+          ],
+          "maxTokens": 384000,
+          "name": "deepseek-v4-flash-0731",
+          "reasoning": true
+        }
+      ]
+    },
+    "llama-cpp-dgx": {
+      "api": "openai-completions",
+      "apiKey": "${HLOCK_SECRET_PI_MODELS_PROVIDERS_LLAMA_CPP_DGX_APIKEY}",
+      "baseUrl": "http://100.70.69.103:8080/v1",
+      "models": [
+        {
+          "id": "qwen/qwen3.8-flash-next"
+        }
+      ]
+    },
+    "llama-cpp-unionai": {
+      "api": "openai-completions",
+      "apiKey": "${HLOCK_SECRET_PI_MODELS_PROVIDERS_LLAMA_CPP_UNIONAI_APIKEY}",
+      "baseUrl": "https://minimax-m3-llm-service-development.apps.demo.hosted.unionai.cloud/v1",
+      "models": [
+        {
+          "id": "minimax-m3"
+        }
+      ]
+    },
+    "lmstudio": {
+      "api": "openai-completions",
+      "apiKey": "lm-studio",
+      "baseUrl": "http://100.70.69.103:1234/v1",
+      "models": [
+        {
+          "id": "qwen/qwen3-next-80b"
+        },
+        {
+          "id": "qwen/qwen3.6-35b-a3b"
+        },
+        {
+          "id": "qwen/qwen3.8-27b"
+        }
+      ]
+    },
+    "qwen-token-plan": {
+      "api": "openai-completions",
+      "apiKey": "env:QWEN_TOKEN_PLAN_API_KEY",
+      "baseUrl": "https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1",
+      "models": [
+        {
+          "contextWindow": 1000000,
+          "cost": {
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "input": 0,
+            "output": 0
+          },
+          "id": "deepseek-v4-flash-0731",
+          "input": [
+            "text"
+          ],
+          "maxTokens": 384000,
+          "name": "DeepSeek V4 Flash 0731",
+          "reasoning": true
+        },
+        {
+          "contextWindow": 1000000,
+          "cost": {
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "input": 0,
+            "output": 0
+          },
+          "id": "deepseek-v4-pro",
+          "input": [
+            "text"
+          ],
+          "maxTokens": 384000,
+          "name": "DeepSeek V4 Pro",
+          "reasoning": true
+        },
+        {
+          "contextWindow": 1000000,
+          "cost": {
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "input": 0,
+            "output": 0
+          },
+          "id": "deepseek-v4-pro-0813",
+          "input": [
+            "text"
+          ],
+          "maxTokens": 384000,
+          "name": "DeepSeek V4 Pro 0813",
+          "reasoning": true
+        },
+        {
+          "contextWindow": 1000000,
+          "cost": {
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "input": 0,
+            "output": 0
+          },
+          "id": "glm-5.2",
+          "input": [
+            "text"
+          ],
+          "maxTokens": 131072,
+          "name": "GLM-5.2",
+          "reasoning": true
+        },
+        {
+          "contextWindow": 1000000,
+          "cost": {
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "input": 0,
+            "output": 0
+          },
+          "id": "qwen3.8-max",
+          "input": [
+            "text",
+            "image"
+          ],
+          "maxTokens": 131072,
+          "name": "Qwen3.8 Max",
+          "reasoning": true
+        }
+      ],
+      "supportsDeveloperRole": false,
+      "supportsReasoningEffort": true,
+      "supportsStore": false,
+      "thinkingFormat": "qwen"
+    },
+    "vllm": {
+      "api": "openai-completions",
+      "apiKey": "${HLOCK_SECRET_PI_MODELS_PROVIDERS_VLLM_APIKEY}",
+      "baseUrl": "http://100.70.69.103:8000/v1",
+      "models": [
+        {
+          "id": "unsloth/Qwen3.8-27B-NVFP4"
+        }
+      ]
+    }
+  }
+}

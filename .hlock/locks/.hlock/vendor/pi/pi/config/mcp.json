@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "composio": {
+      "directTools": true,
+      "url": "https://connect.composio.dev/mcp"
+    }
+  }
+}
