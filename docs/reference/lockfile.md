@@ -83,6 +83,7 @@ vendored = ".hlock/vendor/claude-code/instructions/CLAUDE.md"
 
 [provenance]
 backend = "pin"
+scopes = ["project", "user"]
 
 [[config]]
 id = "settings"
@@ -189,12 +190,17 @@ strategy = "grid"
 | `[evidence]` | The eval pack and split measured, the trial count, and success-rate, cost, and latency statistics. `[evidence.judge]` records the judge of [`judge` and `trace` graders](../guides/eval-packs.md#judges): its `model`, the model that `answered`, its `protocol`, a `fallback`, the share of `uncertain-grades`, and `cost-usd-per-task` when
 the provider publishes a price. |
 | `[verify]` | Runtime verification thresholds: `canary-tasks`, `min-success-rate`, `fingerprint-tolerance` |
-| `[provenance]` | The backend that produced the lock, and the search settings |
+| `[provenance]` | The backend that produced the lock, the search settings, and for a pinned lock the `scopes` it captured and any `user-include` patterns |
 
 ## Pinned locks
 
 [`hlock pin`](../guides/pin.md) writes a lock with `kind = "pin"`, no `manifest-hash`, and
-no evidence. Its `[[llm]]` entries may carry `endpoint` and `runtime`; `[[tool]]` entries for
+no evidence. `[provenance] scopes` says what it captured: `["project"]` by default, or
+`["project", "user"]` with `hlock pin --user` or `-i` (see
+[Project and user scope](../guides/pin.md#project-and-user-scope)). With `-i`,
+`[provenance] user-include` lists the patterns that picked the user-level items.
+`hlock check` re-captures the same selection. A pinned lock without `scopes` was written before scopes existed and
+captured both. Its `[[llm]]` entries may carry `endpoint` and `runtime`; `[[tool]]` entries for
 MCP servers carry `transport`, `command`, `args`, `url`, `env`, `headers`, `scope` and
 `enabled`; `[[skill]]` entries carry `scope`, `path` and `vendored`. It adds:
 

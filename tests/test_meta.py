@@ -240,7 +240,7 @@ def test_install_job(project, monkeypatch):
     (home / ".claude/skills/my-skill").mkdir(parents=True)
     (home / ".claude/skills/my-skill/SKILL.md").write_text("---\nname: my-skill\ndescription: d\n---\nbody\n")
     (home / ".claude/settings.json").write_text(json.dumps({"model": "opus"}))
-    assert invoke("pin", "--harness", "claude").exit_code == 0
+    assert invoke("pin", "--user", "--harness", "claude").exit_code == 0
     monkeypatch.setenv("ANTHROPIC_API_KEY", "k")
     assert invoke("meta", "init", "--harness", "pi").exit_code == 0
     # the setup is restored into an isolated root, which doesn't have the skill yet
@@ -259,7 +259,7 @@ def test_update_job_reports_and_repins(project, monkeypatch):
     home = project["home"]
     (home / ".claude").mkdir()
     (home / ".claude/settings.json").write_text(json.dumps({"model": "opus"}))
-    assert invoke("pin", "--harness", "claude").exit_code == 0
+    assert invoke("pin", "--user", "--harness", "claude").exit_code == 0
     monkeypatch.setenv("ANTHROPIC_API_KEY", "k")
     assert invoke("meta", "init", "--harness", "pi").exit_code == 0
     r = invoke("meta", "run", "update", "--dry-run", "--headless", "--json")
@@ -285,7 +285,7 @@ def test_install_and_update_verify_ask_a_decider(project, monkeypatch):
     (home / ".claude/skills/my-skill").mkdir(parents=True)
     (home / ".claude/skills/my-skill/SKILL.md").write_text("---\nname: my-skill\ndescription: d\n---\nbody\n")
     (home / ".claude/settings.json").write_text(json.dumps({"model": "opus"}))
-    assert invoke("pin", "--harness", "claude").exit_code == 0
+    assert invoke("pin", "--user", "--harness", "claude").exit_code == 0
     monkeypatch.setenv("ANTHROPIC_API_KEY", "k")
     assert invoke("meta", "init", "--harness", "pi").exit_code == 0
     fake = Fake(lambda path, body: systemone(body, noul=0.8, choice="the network", p=0.7))
@@ -349,7 +349,7 @@ def test_meta_and_project_locks_vendor_apart(project, monkeypatch):
     pi_home = project["home"] / ".pi/agent"
     pi_home.mkdir(parents=True)
     (pi_home / "settings.json").write_text(json.dumps({"defaultProvider": "openai", "defaultModel": "gpt-5"}))
-    assert invoke("pin", "--harness", "pi").exit_code == 0
+    assert invoke("pin", "--user", "--harness", "pi").exit_code == 0
     monkeypatch.setenv("ANTHROPIC_API_KEY", "k")
     assert invoke("meta", "init", "--harness", "pi").exit_code == 0
     r = invoke("meta", "pin")

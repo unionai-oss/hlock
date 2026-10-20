@@ -55,7 +55,7 @@ def pinned(tmp_path, monkeypatch, clean_env):
     (home / ".claude/CLAUDE.md").write_text("be terse\n")
     (home / ".claude.json").write_text(json.dumps({"mcpServers": {"github": {
         "command": "npx", "args": ["-y", "@modelcontextprotocol/server-github"], "env": {"GITHUB_TOKEN": GH_TOKEN}}}}))
-    assert invoke("pin", "--harness", "claude").exit_code == 0
+    assert invoke("pin", "--user", "--harness", "claude").exit_code == 0
     return {"home": home, "bin": bindir}
 
 

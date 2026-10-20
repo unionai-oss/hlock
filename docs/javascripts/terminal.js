@@ -72,6 +72,7 @@
   function scenesFor(h) {
     const setup = [
       kv("harness", `${h.id} ${h.version}`),
+      kv("scope", "project + user"),
       kv("llm · default", h.llm),
       kv("mcp", "github (stdio), linear (http)"),
       kv("skills", "2  (2 local)"),
@@ -85,7 +86,7 @@
         title: "laptop — ~/projects/my-app",
         caption: `On your laptop: pin your ${h.name} setup into harness.lock, then push it to GitHub.`,
         steps: [
-          { cmd: "hlock pin" },
+          { cmd: "hlock pin --user" },
           { out: [ok("✓") + " pinned " + hi(`${h.id} ${h.version}`) + " → harness.lock  " + dim("(running inside it)")] },
           { out: box(hi("harness.lock · pinned"), setup), gap: 45 },
           { out: [mut(`vendored ${done.length} files into .hlock/vendor/${h.id}/  · review before committing`)] },

@@ -101,7 +101,7 @@ def test_pin_locks_deciders_and_sync_wires_hooks(project, fake):
     # the user's own hook is part of their setup, and pinned with it
     lint = {"matcher": "Bash", "hooks": [{"type": "command", "command": "./lint.sh"}]}
     (project["home"] / ".claude/settings.json").write_text(json.dumps({"model": "opus", "hooks": {"PreToolUse": [lint]}}))
-    r = invoke("pin", "--harness", "claude")
+    r = invoke("pin", "--user", "--harness", "claude")
     assert r.exit_code == 0, r.output
     assert "decider · approve" in r.output and "hook: PermissionRequest" in r.output
     deciders = {d["use"]: d for d in lock_json()["decider"]}
@@ -135,7 +135,7 @@ def test_pin_locks_deciders_and_sync_wires_hooks(project, fake):
 
     # dropping a decider removes its hook, and leaves the user's own hooks alone
     Path("harness.toml").write_text(Path("harness.toml").read_text().split("[deciders.stop]")[0])
-    assert invoke("pin", "--harness", "claude").exit_code == 0
+    assert invoke("pin", "--user", "--harness", "claude").exit_code == 0
     assert invoke("sync", "--yes").exit_code == 0
     hooks = json.loads(ENV_SETTINGS.read_text())["hooks"]
     assert "Stop" not in hooks and hooks["PermissionRequest"] and hooks["PreToolUse"] == [lint]
@@ -144,7 +144,7 @@ def test_pin_locks_deciders_and_sync_wires_hooks(project, fake):
 def test_check_reports_a_changed_policy(project, fake):
     f = fake(lambda path, body: systemone(body))
     write_deciders(f.url)
-    assert invoke("pin", "--harness", "claude").exit_code == 0
+    assert invoke("pin", "--user", "--harness", "claude").exit_code == 0
     assert invoke("check").exit_code == 0
     Path(".hlock/approve.md").write_text("Never push anywhere.\n")
     r = invoke("check")
@@ -163,7 +163,7 @@ def test_pin_records_hermes_native_approvals(project):
     (home / ".hermes/config.yaml").write_text(
         "model:\n  default: qwen3\n  provider: ollama\nauxiliary:\n  approval:\n    provider: typesafe-jev\n"
         "    model: jev-latest\napprovals:\n  mode: smart\n")
-    r = invoke("pin", "--harness", "hermes")
+    r = invoke("pin", "--user", "--harness", "hermes")
     assert r.exit_code == 0, r.output
     (d,) = lock_json()["decider"]
     assert (d["use"], d["via"], d["provider"], d["model"]) == ("approve", "native", "typesafe-jev", "jev-latest")
@@ -173,7 +173,7 @@ def test_pin_records_hermes_native_approvals(project):
 def test_localize_moves_hosted_deciders_to_kev(project, fake):
     Path("harness.toml").write_text('[deciders.approve]\nmodel = "typesafe:jev-1.13.0"\n')
     executable(project["home"].parent / "bin" / "ollama", "#!/bin/sh\necho 'ollama version is 0.40.4'\n")
-    assert invoke("pin", "--harness", "claude").exit_code == 0
+    assert invoke("pin", "--user", "--harness", "claude").exit_code == 0
     assert lock_json()["decider"][0]["key-env"] == "TYPESAFE_API_KEY"
     r = invoke("localize", "--memory-gb", "8", "--harness", "claude")
     assert r.exit_code == 0, r.output
@@ -284,7 +284,7 @@ def test_codex_hooks_go_in_its_config_toml(project, fake):
     (home / ".codex").mkdir()
     (home / ".codex/config.toml").write_text('model = "gpt-5.5"\n')
     Path("harness.toml").write_text(f'[deciders.stop]\nmodel = "system-one:kev-4b"\nbase-url = "{f.url}"\n')
-    assert invoke("pin", "--harness", "codex").exit_code == 0
+    assert invoke("pin", "--user", "--harness", "codex").exit_code == 0
     r = invoke("sync", "--yes")
     assert r.exit_code == 0, r.output
     text = Path(".hlock/env/codex/config/config.toml").read_text()

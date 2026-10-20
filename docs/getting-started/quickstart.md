@@ -10,14 +10,18 @@ Gemini CLI, and the [other supported harnesses](../reference/harnesses.md).
 
 ## 1. Pin your setup
 
-Run `hlock pin` in the repository where you want to keep the lock:
+Run `hlock pin --user` in the repository where you want to keep the lock. `--user` pins
+the setup in your home directory (`~/.claude`), which is where a setup made by hand lives.
+Without it, `pin` records only the project's own skills, MCP servers and config (see
+[Project and user scope](../guides/pin.md#project-and-user-scope)).
 
 ```console
-$ hlock pin
+$ hlock pin --user
 ✓ pinned claude-code 2.1.0 → harness.lock  (the only installed harness)
 ╭─ 📌 harness.lock · pinned ─────────────────────────────────────────────╮
 │                                                                        │
 │  harness        claude-code 2.1.0                                      │
+│  scope          project + user                                         │
 │  llm · default  anthropic:opus                                         │
 │  mcp            github (stdio)                                         │
 │  skills         1  (1 local)                                           │
@@ -66,18 +70,19 @@ $ hlock check
   + mcp linear
   + skill write-tests (user)
   ~ config ~/.claude.json: ad825f266f → b33482f12e
-  hint: re-pin with hlock pin, or restore it with hlock sync --in-place
+  hint: re-pin with hlock pin --user, or restore it with hlock sync --in-place
 ```
 
-Run `hlock pin` again to lock the new pieces. It prints the same diff, and the change
-becomes a reviewable diff of `harness.lock` in git:
+Run `hlock pin --user` again to lock the new pieces. It prints the same diff, and the
+change becomes a reviewable diff of `harness.lock` in git:
 
 ```console
-$ hlock pin
+$ hlock pin --user
 ✓ pinned claude-code 2.1.0 → harness.lock  (the only installed harness)
 ╭─ 📌 harness.lock · pinned ─────────────────────────────────────────────╮
 │                                                                        │
 │  harness        claude-code 2.1.0                                      │
+│  scope          project + user                                         │
 │  llm · default  anthropic:opus                                         │
 │  mcp            github (stdio), linear (http)                          │
 │  skills         2  (2 local)                                           │

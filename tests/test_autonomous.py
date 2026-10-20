@@ -102,7 +102,7 @@ def test_harness_list_groups_autonomous_agents(home):
 
 
 def test_pin_openclaw(home):
-    r = invoke("pin", "--harness", "openclaw")
+    r = invoke("pin", "--user", "--harness", "openclaw")
     assert r.exit_code == 0, r.output
     assert "pinned openclaw 2026.10.14" in r.output
     lock = load("harness.lock")
@@ -131,7 +131,7 @@ def test_pin_openclaw(home):
 
 
 def test_launch_and_run_openclaw(home):
-    assert invoke("pin", "--harness", "openclaw").exit_code == 0
+    assert invoke("pin", "--user", "--harness", "openclaw").exit_code == 0
     r = invoke("launch", "--dry-run", "--json")
     assert r.exit_code == 0, r.output
     prep = json.loads(r.output)
@@ -157,7 +157,7 @@ def test_launch_translates_into_openclaw(home):
     (home / ".claude/CLAUDE.md").write_text("be terse\n")
     (home / ".claude.json").write_text(json.dumps({"mcpServers": {
         "remote": {"type": "sse", "url": "https://x.example.com/sse"}}}))
-    assert invoke("pin", "--harness", "claude").exit_code == 0
+    assert invoke("pin", "--user", "--harness", "claude").exit_code == 0
     r = invoke("launch", "openclaw", "--dry-run", "--json")
     assert r.exit_code == 0, r.output
     prep = json.loads(r.output)
@@ -186,7 +186,7 @@ def test_pin_nanobot_picoclaw_zeroclaw_ironclaw(home):
         "tools": {"mcpServers": {"github": {"command": "npx", "args": ["-y", "@modelcontextprotocol/server-github"]}}},
     }))
     (nb / "workspace/SOUL.md").write_text("helpful\n")
-    r = invoke("pin", "--harness", "nanobot", "-o", "nanobot.lock")
+    r = invoke("pin", "--user", "--harness", "nanobot", "-o", "nanobot.lock")
     assert r.exit_code == 0, r.output
     lock = load("nanobot.lock")
     assert lock["llm"][0]["model"] == "anthropic/claude-opus-4-5"
@@ -202,7 +202,7 @@ def test_pin_nanobot_picoclaw_zeroclaw_ironclaw(home):
         "tools": {"mcp": {"enabled": True, "servers": {"fs": {"command": "npx", "args": ["-y", "server-fs"]}}}},
     }))
     (pc / "workspace/AGENT.md").write_text("---\nname: pico\n---\nbe small\n")
-    r = invoke("pin", "--harness", "picoclaw", "-o", "picoclaw.lock")
+    r = invoke("pin", "--user", "--harness", "picoclaw", "-o", "picoclaw.lock")
     assert r.exit_code == 0, r.output
     lock = load("picoclaw.lock")
     assert lock["harness"]["version"] == "0.4.2" and lock["llm"][0]["model"] == "fast"
@@ -224,7 +224,7 @@ def test_pin_nanobot_picoclaw_zeroclaw_ironclaw(home):
         '[[mcp.servers]]\nname = "filesystem"\ncommand = "npx"\nargs = ["-y", "@modelcontextprotocol/server-filesystem"]\n'
         '[[mcp.servers]]\nname = "search"\ntransport = "http"\nurl = "https://search.example.com/mcp"\n')
     (zc / "agents/assistant/workspace/IDENTITY.md").write_text("Zed\n")
-    r = invoke("pin", "--harness", "zeroclaw", "-o", "zeroclaw.lock")
+    r = invoke("pin", "--user", "--harness", "zeroclaw", "-o", "zeroclaw.lock")
     assert r.exit_code == 0, r.output
     lock = load("zeroclaw.lock")
     tools = {t["name"]: t for t in lock["tool"]}
@@ -235,7 +235,7 @@ def test_pin_nanobot_picoclaw_zeroclaw_ironclaw(home):
     ic.mkdir(parents=True)
     (ic / "config.toml").write_text('[llm.default]\nprovider_id = "anthropic"\nmodel = "claude-sonnet-4-20250514"\n'
                                     'api_key_env = "ANTHROPIC_API_KEY"\n')
-    r = invoke("pin", "--harness", "ironclaw", "-o", "ironclaw.lock")
+    r = invoke("pin", "--user", "--harness", "ironclaw", "-o", "ironclaw.lock")
     assert r.exit_code == 0, r.output
     (llm,) = load("ironclaw.lock")["llm"]
     assert (llm["provider"], llm["model"]) == ("anthropic", "claude-sonnet-4-20250514")
@@ -248,7 +248,7 @@ def local(home):
     m = home / ".ollama/models/manifests/registry.ollama.ai/library/qwen3/8b"
     m.parent.mkdir(parents=True)
     m.write_text(json.dumps({"config": {"size": 1}, "layers": [{"size": 5_200_000_000}]}))
-    assert invoke("pin", "--harness", "openclaw").exit_code == 0
+    assert invoke("pin", "--user", "--harness", "openclaw").exit_code == 0
     return home
 
 

@@ -440,7 +440,8 @@ pub fn pin(reg: &Registry, ctx: &Ctx, meta: &MetaManifest, out: &Path, project: 
         model.base_url = local_base_url(reg, &model);
     }
     configure(profile, &model, &tctx)?;
-    crate::capture::pin(reg, &tctx, Some(&profile.id), None, project, out, vendor, force)
+    // the meta harness lives in its own config root, which is user scope by construction
+    crate::capture::pin(reg, &tctx, Some(&profile.id), None, project, out, vendor, force, crate::capture::UserScope::All)
 }
 
 /// The lock for the built-in agent: hlock's version, the model, and what it may do.
@@ -494,6 +495,7 @@ fn pin_builtin(reg: &Registry, meta: &MetaManifest, out: &Path, project: Option<
         previous: previous.is_some(),
         vendored: Vec::new(),
         warnings: Vec::new(),
+        skipped: Default::default(),
     })
 }
 

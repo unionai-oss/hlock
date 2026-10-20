@@ -374,6 +374,14 @@ pub struct Provenance {
     pub run: Option<String>,
     #[serde(default)]
     pub search: BTreeMap<String, serde_json::Value>,
+    /// What a pin captured: `["project"]`, or `["project", "user"]` with `--user`. Empty
+    /// in locks pinned before scopes existed, which captured both.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub scopes: Vec<String>,
+    /// The `--include-user-scope` patterns that chose which user-level items were pinned.
+    /// Empty when the user scope was pinned whole (`--user`) or not at all.
+    #[serde(default, rename = "user-include", skip_serializing_if = "Vec::is_empty")]
+    pub user_include: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -504,6 +512,12 @@ impl Lockfile {
     /// True for locks written by `hlock pin` (no manifest, no evidence).
     pub fn is_pin(&self) -> bool {
         self.kind.as_deref() == Some("pin")
+    }
+
+    /// Whether this pin captured any user-level setup (`--user` or `--include-user-scope`).
+    /// Locks pinned before scopes were recorded captured everything, so they count too.
+    pub fn pins_user_scope(&self) -> bool {
+        self.provenance.scopes.is_empty() || self.provenance.scopes.iter().any(|s| s == "user")
     }
 
     pub fn default_path(&self) -> &str {

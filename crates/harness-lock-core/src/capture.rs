@@ -40,6 +40,9 @@ pub struct Capture {
     pub lock: Lockfile,
     pub vendor: Vec<VendorFile>,
     pub warnings: Vec<String>,
+    /// User-level items left out because the capture was project-only, by kind
+    /// (`skills`, `mcp`, `instructions`, `config`, `plugins`, `providers`).
+    pub skipped: BTreeMap<String, usize>,
 }
 
 // --------------------------------------------------------------------------- //
@@ -591,6 +594,153 @@ fn is_project_path(p: &Path, root: &Path, ctx: &Ctx) -> bool {
     p.starts_with(&ctx.cwd) && !ctx.home.starts_with(&ctx.cwd) && !p.starts_with(root)
 }
 
+/// Whether a profile source lives in the project: a `file#/pointer` source by its file,
+/// a path template by the path it expands to. Claude Code's per-project entries in
+/// `~/.claude.json` (`#/projects/{cwd}/…`) are the user's own, not the repository's.
+fn source_is_project(profile: &HarnessProfile, source: &str, root: &Path, ctx: &Ctx) -> bool {
+    source_path(profile, source, root, ctx).is_some_and(|p| is_project_path(&p, root, ctx))
+}
+
+/// The file a profile source reads: a `file#/pointer` source's file, or a path template.
+fn source_path(profile: &HarnessProfile, source: &str, root: &Path, ctx: &Ctx) -> Option<PathBuf> {
+    match source.split_once('#') {
+        Some((file, _)) => profile.file_path(file, ctx),
+        None => Some(ctx.expand(source, Some(root))),
+    }
+}
+
+/// How much of the user scope a pin captures, besides the project's setup.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum UserScope {
+    /// The project's setup only (`hlock pin`).
+    #[default]
+    None,
+    /// Everything in the user scope (`hlock pin --user`).
+    All,
+    /// User-level items whose path matches one of these globs (`--include-user-scope`).
+    /// Relative patterns are relative to the harness's config root.
+    Matching(Vec<String>),
+}
+
+impl UserScope {
+    /// The user scope a pinned lock was captured with, so `check` captures the same.
+    pub fn of(lock: &Lockfile) -> UserScope {
+        if !lock.provenance.user_include.is_empty() {
+            UserScope::Matching(lock.provenance.user_include.clone())
+        } else if lock.pins_user_scope() {
+            UserScope::All
+        } else {
+            UserScope::None
+        }
+    }
+
+    /// The `hlock pin` flags that select this scope.
+    pub fn flags(&self) -> String {
+        match self {
+            UserScope::None => String::new(),
+            UserScope::All => "--user".into(),
+            UserScope::Matching(pats) => pats.iter().map(|p| format!("-i {}", shell_quote(p))).collect::<Vec<_>>().join(" "),
+        }
+    }
+}
+
+/// Quote `s` for a POSIX shell the way Python's `shlex.quote` does.
+fn shell_quote(s: &str) -> String {
+    if !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric() || "@%+=:,./-_".contains(c)) {
+        return s.to_string();
+    }
+    format!("'{}'", s.replace('\'', "'\"'\"'"))
+}
+
+/// [`UserScope`] resolved against one harness's paths, remembering which patterns matched.
+struct UserFilter<'a> {
+    scope: &'a UserScope,
+    patterns: Vec<String>,
+    hit: RefCell<BTreeSet<usize>>,
+}
+
+impl<'a> UserFilter<'a> {
+    fn new(scope: &'a UserScope, root: &Path, ctx: &Ctx) -> Self {
+        let patterns = match scope {
+            UserScope::Matching(pats) => pats.iter().map(|p| expand_pattern(p, root, ctx)).collect(),
+            _ => Vec::new(),
+        };
+        UserFilter { scope, patterns, hit: RefCell::new(BTreeSet::new()) }
+    }
+
+    /// Whether a user-level item at `path` is captured. A pattern that matches a directory
+    /// takes everything under it.
+    fn allows(&self, path: Option<&Path>) -> bool {
+        match self.scope {
+            UserScope::None => false,
+            UserScope::All => true,
+            UserScope::Matching(_) => {
+                let Some(path) = path else { return false };
+                let mut any = false;
+                for (i, pat) in self.patterns.iter().enumerate() {
+                    if path.ancestors().any(|a| glob_match(pat.as_bytes(), a.to_string_lossy().as_bytes())) {
+                        self.hit.borrow_mut().insert(i);
+                        any = true;
+                    }
+                }
+                any
+            }
+        }
+    }
+
+    /// Patterns that matched nothing.
+    fn unmatched(&self) -> Vec<String> {
+        let UserScope::Matching(pats) = self.scope else { return Vec::new() };
+        let hit = self.hit.borrow();
+        pats.iter().enumerate().filter(|(i, _)| !hit.contains(i)).map(|(_, p)| p.clone()).collect()
+    }
+}
+
+/// An `--include-user-scope` pattern as an absolute glob: `~/` is the home directory,
+/// `{root}` and relative patterns are the harness's config root.
+fn expand_pattern(pat: &str, root: &Path, ctx: &Ctx) -> String {
+    let full = if let Some(rest) = pat.strip_prefix("{root}") {
+        format!("{}{rest}", root.display())
+    } else if pat == "~" {
+        ctx.home.display().to_string()
+    } else if let Some(rest) = pat.strip_prefix("~/") {
+        ctx.home.join(rest).display().to_string()
+    } else if Path::new(pat).is_absolute() {
+        pat.to_string()
+    } else {
+        root.join(pat).display().to_string()
+    };
+    full.trim_end_matches('/').to_string()
+}
+
+/// Glob match over a path: `*` and `?` stay within one segment, `**` crosses segments
+/// (and `**/` also matches no directory at all).
+fn glob_match(pat: &[u8], text: &[u8]) -> bool {
+    match pat.first() {
+        None => text.is_empty(),
+        Some(b'*') if pat.get(1) == Some(&b'*') => {
+            let rest = &pat[2..];
+            if rest.first() == Some(&b'/') && glob_match(&rest[1..], text) {
+                return true;
+            }
+            (0..=text.len()).any(|i| glob_match(rest, &text[i..]))
+        }
+        Some(b'*') => {
+            for i in 0..=text.len() {
+                if glob_match(&pat[1..], &text[i..]) {
+                    return true;
+                }
+                if i < text.len() && text[i] == b'/' {
+                    break;
+                }
+            }
+            false
+        }
+        Some(b'?') => text.first().is_some_and(|c| *c != b'/') && glob_match(&pat[1..], &text[1..]),
+        Some(c) => text.first() == Some(c) && glob_match(&pat[1..], &text[1..]),
+    }
+}
+
 /// Files under `dir` (sorted, relative), skipping VCS metadata and OS litter.
 fn walk_files(dir: &Path) -> Vec<PathBuf> {
     fn rec(base: &Path, dir: &Path, out: &mut Vec<PathBuf>) {
@@ -1113,12 +1263,25 @@ fn npm_list(profile: &HarnessProfile, kind: &str, list: &Value, out: &mut Vec<Na
 
 /// Capture `profile`'s live setup. Nothing is written; `vendor` holds the files
 /// [`pin`] would place under [`VENDOR_DIR`].
-pub fn capture(profile: &HarnessProfile, reg: &Registry, ctx: &Ctx, project: Option<&str>) -> Result<Capture> {
+///
+/// Skills, MCP servers, plugins, instruction files and config come from the project, plus
+/// what `user` selects from the harness's user-level config (`~/.claude`, `~/.pi/agent`,
+/// …): nothing, everything, or the items matching its patterns. The harness, its models and
+/// runtimes, and its decision models are always captured: they say what the stack *is*,
+/// wherever they're set.
+pub fn capture(profile: &HarnessProfile, reg: &Registry, ctx: &Ctx, project: Option<&str>, user: &UserScope) -> Result<Capture> {
     let src = Sources::new(profile, ctx);
     let root = profile.config_root(ctx);
+    let users = UserFilter::new(user, &root, ctx);
     let mut secrets = Secrets::default();
     let mut vendor: Vec<VendorFile> = Vec::new();
     let mut warnings: Vec<String> = Vec::new();
+    let mut skipped: BTreeMap<String, usize> = BTreeMap::new();
+    let mut skip = |kind: &str, n: usize| {
+        if n > 0 {
+            *skipped.entry(kind.to_string()).or_default() += n;
+        }
+    };
     let vroot = format!("{VENDOR_DIR}/{}", profile.id);
 
     // ---- harness ----
@@ -1182,6 +1345,12 @@ pub fn capture(profile: &HarnessProfile, reg: &Registry, ctx: &Ctx, project: Opt
     if let Some(spec) = &profile.providers {
         for s in &spec.source {
             let Some(Value::Object(providers)) = src.get(s) else { continue };
+            if !source_is_project(profile, s, &root, ctx) && !users.allows(source_path(profile, s, &root, ctx).as_deref()) {
+                // the active model's runtime is already recorded above; the rest of a
+                // user-level provider list is personal configuration
+                skip("providers", providers.len());
+                continue;
+            }
             for (name, entry) in &providers {
                 let base = spec.base_url.iter().find_map(|p| entry.pointer(p).and_then(Value::as_str).map(str::to_string));
                 let Some((rt, location)) = match_runtime(reg, Some(name), base.as_deref()) else { continue };
@@ -1199,13 +1368,14 @@ pub fn capture(profile: &HarnessProfile, reg: &Registry, ctx: &Ctx, project: Opt
     // ---- MCP servers ----
     let mut tools: Vec<Tool> = Vec::new();
     for s in &profile.mcp.sources {
-        let file = s.split_once('#').map(|(f, _)| f).unwrap_or(s);
-        let scope = match profile.file_path(file, ctx) {
-            Some(p) if is_project_path(&p, &root, ctx) || s.contains("{cwd}") => "project",
-            _ => "user",
-        };
+        let scope = if source_is_project(profile, s, &root, ctx) { "project" } else { "user" };
+        let file = source_path(profile, s, &root, ctx);
         for (name, cfg) in &named_servers(src.get(s)) {
             if tools.iter().any(|t| &t.name == name) {
+                continue;
+            }
+            if scope == "user" && !users.allows(file.as_deref()) {
+                skip("mcp", 1);
                 continue;
             }
             if let Some(t) = normalize_mcp(name, cfg, scope, &mut secrets) {
@@ -1233,8 +1403,14 @@ pub fn capture(profile: &HarnessProfile, reg: &Registry, ctx: &Ctx, project: Opt
                 continue;
             }
             let name = skill_name(&sk);
-            let digest = tree_digest(&sk);
             let project = is_project_path(&sk, &root, ctx);
+            let builtin = is_builtin_dir || builtin_dirs.iter().any(|b| sk.starts_with(b)) || builtins.contains(&name);
+            // a harness's built-in skills come with its version, so they're always recorded
+            if !project && !builtin && !users.allows(Some(&sk)) {
+                skip("skills", 1);
+                continue;
+            }
+            let digest = tree_digest(&sk);
             let mut s = Skill {
                 name: name.clone(),
                 digest: Some(digest),
@@ -1244,7 +1420,7 @@ pub fn capture(profile: &HarnessProfile, reg: &Registry, ctx: &Ctx, project: Opt
                 ..Default::default()
             };
             let realstr = real.to_string_lossy();
-            if is_builtin_dir || builtin_dirs.iter().any(|b| sk.starts_with(b)) || builtins.contains(&name) {
+            if builtin {
                 s.origin = "harness-builtin".into();
                 s.provided_by = Some(format!("harness:{}", profile.id));
             } else if realstr.contains("/plugins/") || realstr.contains("/node_modules/") {
@@ -1272,14 +1448,20 @@ pub fn capture(profile: &HarnessProfile, reg: &Registry, ctx: &Ctx, project: Opt
     // ---- bundles ----
     let mut natives: Vec<Native> = Vec::new();
     for b in &profile.bundles {
+        let mut found = Vec::new();
         match b.extractor.as_str() {
-            "claude-plugins" => claude_plugins(profile, &src, &ctx.expand(&b.source, Some(&root)), &mut natives),
+            "claude-plugins" => claude_plugins(profile, &src, &ctx.expand(&b.source, Some(&root)), &mut found),
             "pi-packages" => {
                 let lock = b.lockfile.as_ref().map(|l| ctx.expand(l, Some(&root)));
-                pi_packages(profile, &src.get(&b.source).unwrap_or(json!([])), lock.as_deref(), &mut natives)
+                pi_packages(profile, &src.get(&b.source).unwrap_or(json!([])), lock.as_deref(), &mut found)
             }
-            "npm-list" => npm_list(profile, &b.kind, &src.get(&b.source).unwrap_or(json!([])), &mut natives),
+            "npm-list" => npm_list(profile, &b.kind, &src.get(&b.source).unwrap_or(json!([])), &mut found),
             other => warnings.push(format!("unknown bundle extractor {other:?} in the {} profile", profile.id)),
+        }
+        if source_is_project(profile, &b.source, &root, ctx) || users.allows(source_path(profile, &b.source, &root, ctx).as_deref()) {
+            natives.extend(found);
+        } else {
+            skip("plugins", found.iter().filter(|n| !n.kind.ends_with(".marketplace")).count());
         }
     }
     // code harnesses pin their packages
@@ -1300,6 +1482,10 @@ pub fn capture(profile: &HarnessProfile, reg: &Registry, ctx: &Ctx, project: Opt
         let p = ctx.expand(tpl, Some(&root));
         let Ok(bytes) = std::fs::read(&p) else { continue };
         let project = is_project_path(&p, &root, ctx);
+        if !project && !users.allows(Some(&p)) {
+            skip("instructions", 1);
+            continue;
+        }
         let name = portable_path(&p, Some(&root), ctx);
         let mut ins = Instructions { name: name.clone(), digest: Some(sha256_bytes(&bytes)), scope: if project { "project" } else { "user" }.into(), vendored: None };
         if !project {
@@ -1316,6 +1502,10 @@ pub fn capture(profile: &HarnessProfile, reg: &Registry, ctx: &Ctx, project: Opt
         let Some(path) = profile.file_path(id, ctx) else { continue };
         let Ok(raw) = std::fs::read(&path) else { continue };
         let project = is_project_path(&path, &root, ctx);
+        if !project && !users.allows(Some(&path)) {
+            skip("config", 1);
+            continue;
+        }
         let mut cf = ConfigFile {
             id: id.clone(),
             path: portable_path(&path, Some(&root), ctx),
@@ -1403,6 +1593,9 @@ pub fn capture(profile: &HarnessProfile, reg: &Registry, ctx: &Ctx, project: Opt
         }
     }
     warnings.extend(src.warnings.borrow().iter().cloned());
+    for pat in users.unmatched() {
+        warnings.push(format!("--include-user-scope {pat:?} matched nothing in {}'s user config ({})", profile.name, portable_path(&root, None, ctx)));
+    }
 
     // ---- assemble ----
     let config_digest = content_hash(&json!(configs.iter().map(|c| (&c.id, &c.digest)).collect::<Vec<_>>()));
@@ -1427,14 +1620,22 @@ pub fn capture(profile: &HarnessProfile, reg: &Registry, ctx: &Ctx, project: Opt
         skill: skills,
         instructions,
         context: Context { isolation: "locked-only".into(), ..Default::default() },
-        provenance: Provenance { backend: "pin".into(), ..Default::default() },
+        provenance: Provenance {
+            backend: "pin".into(),
+            scopes: if *user == UserScope::None { vec!["project".into()] } else { vec!["project".into(), "user".into()] },
+            user_include: match user {
+                UserScope::Matching(pats) => pats.clone(),
+                _ => Vec::new(),
+            },
+            ..Default::default()
+        },
         native: natives,
         runtime: runtimes.into_values().collect(),
         config: configs,
         secret: secrets.refs,
         ..Default::default()
     };
-    Ok(Capture { lock, vendor, warnings })
+    Ok(Capture { lock, vendor, warnings, skipped })
 }
 
 fn vendor_skill(dir: &Path, vroot: &str, name: &str, s: &mut Skill, vendor: &mut Vec<VendorFile>, warnings: &mut Vec<String>) {
@@ -1579,11 +1780,14 @@ pub struct PinOutcome {
     pub previous: bool,
     pub vendored: Vec<String>,
     pub warnings: Vec<String>,
+    /// User-level items left out of a project-only pin, by kind.
+    pub skipped: BTreeMap<String, usize>,
 }
 
 /// Capture the target harness and write a pinned lock to `out`, vendoring into
-/// `<out dir>/.hlock/vendor/<harness>/` unless `vendor` is false. Refuses to
-/// replace a resolved lock (one with evidence) unless `force`.
+/// `<out dir>/.hlock/vendor/<harness>/` unless `vendor` is false. Captures the
+/// project's setup, plus the user-level config root when `user` is set (see
+/// [`capture`]). Refuses to replace a resolved lock (one with evidence) unless `force`.
 pub fn pin(
     reg: &Registry,
     ctx: &Ctx,
@@ -1593,6 +1797,7 @@ pub fn pin(
     out: &Path,
     vendor: bool,
     force: bool,
+    user: UserScope,
 ) -> Result<PinOutcome> {
     let selection = reg.select(harness, manifest_target, ctx)?;
     let profile = reg.require_harness(&selection.id)?;
@@ -1611,7 +1816,13 @@ pub fn pin(
     } else {
         None
     };
-    let mut cap = capture(profile, reg, ctx, project)?;
+    let mut cap = capture(profile, reg, ctx, project, &user)?;
+    // the user scope doesn't carry over from the previous pin; say so when it changes
+    if let Some(prev) = previous.as_ref().filter(|p| p.is_pin()).map(UserScope::of) {
+        if prev != UserScope::None && prev != user {
+            cap.warnings.push(format!("the previous pin included user-level setup; pass {} to keep it", prev.flags()));
+        }
+    }
     let ns = vendor_namespace(out);
     if let Some(ns) = &ns {
         relocate_vendored(&mut cap, &profile.id, ns);
@@ -1658,6 +1869,7 @@ pub fn pin(
         previous: previous.is_some_and(|p| p.is_pin()),
         vendored,
         warnings: cap.warnings,
+        skipped: cap.skipped,
     })
 }
 
@@ -1671,12 +1883,14 @@ pub fn check_pin(lock: &Lockfile, reg: &Registry, ctx: &Ctx) -> Result<Vec<Strin
 pub fn check_pin_at(lock: &Lockfile, reg: &Registry, ctx: &Ctx, prefix: Option<&Path>) -> Result<Vec<String>> {
     let profile = reg.require_harness(&lock.harness.name)?;
     let project = lock.stack.get("name").and_then(Value::as_str);
+    // re-capture what the pin captured, so a project-only lock ignores your user config
+    let user = UserScope::of(lock);
     let Some(prefix) = prefix else {
-        let cap = capture(profile, reg, ctx, project)?;
+        let cap = capture(profile, reg, ctx, project, &user)?;
         return Ok(diff_locks(lock, &cap.lock));
     };
     let target = crate::sync::target_ctx(profile, ctx, &crate::sync::SyncOptions { prefix: Some(prefix.to_path_buf()), ..Default::default() }).0;
-    let mut cap = capture(profile, reg, &target, project)?;
+    let mut cap = capture(profile, reg, &target, project, &user)?;
     // a file outside the root normally (`~/.claude.json`) lives inside an isolated one:
     // the same file, so compare it under the lock's path
     for c in cap.lock.config.iter_mut() {
@@ -1690,6 +1904,35 @@ pub fn check_pin_at(lock: &Lockfile, reg: &Registry, ctx: &Ctx, prefix: Option<&
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn globs_stay_within_a_segment_unless_doubled() {
+        let m = |p: &str, t: &str| glob_match(p.as_bytes(), t.as_bytes());
+        assert!(m("/h/.claude/skills/review-*", "/h/.claude/skills/review-pr"));
+        assert!(!m("/h/.claude/skills/*", "/h/.claude/skills/a/b"));
+        assert!(m("/h/.claude/skills/**", "/h/.claude/skills/a/b"));
+        assert!(m("/h/**/SKILL.md", "/h/SKILL.md") && m("/h/**/SKILL.md", "/h/a/b/SKILL.md"));
+        assert!(m("/h/.claude/CLAUDE.?d", "/h/.claude/CLAUDE.md") && !m("/h/x?y", "/h/x/y"));
+        assert!(!m("/h/.claude/skills/review-*", "/h/.claude/skills/write-tests"));
+    }
+
+    #[test]
+    fn user_scope_patterns_resolve_against_the_config_root() {
+        let ctx = Ctx { home: "/h".into(), cwd: "/work".into(), env: BTreeMap::new(), path: Vec::new() };
+        let root = Path::new("/h/.claude");
+        assert_eq!(expand_pattern("skills/review-*", root, &ctx), "/h/.claude/skills/review-*");
+        assert_eq!(expand_pattern("{root}/CLAUDE.md", root, &ctx), "/h/.claude/CLAUDE.md");
+        assert_eq!(expand_pattern("~/.claude.json", root, &ctx), "/h/.claude.json");
+        assert_eq!(expand_pattern("/opt/skills/", root, &ctx), "/opt/skills");
+
+        let scope = UserScope::Matching(vec!["skills".into(), "nothing-*".into()]);
+        let f = UserFilter::new(&scope, root, &ctx);
+        // a directory pattern takes what's under it
+        assert!(f.allows(Some(Path::new("/h/.claude/skills/review-pr"))));
+        assert!(!f.allows(Some(Path::new("/h/.claude/CLAUDE.md"))));
+        assert_eq!(f.unmatched(), vec!["nothing-*".to_string()]);
+        assert_eq!(scope.flags(), "-i skills -i 'nothing-*'");
+    }
 
     #[test]
     fn placeholder_keys_stay() {
