@@ -107,6 +107,21 @@ If you've used `uv`, `cargo`, or `npm`, you already know the shape of `hlock`:
 
 </div>
 
+## Manage your team's agents
+
+Contributors to one repository rarely share an agent setup: one uses Claude Code with
+hand-written skills, another uses Codex with a different model. Each person can commit their own
+lock to `.hlock/locks/harness.<handle>.lock`, next to the code it was used on. Anyone with a clone
+can then try a teammate's setup in isolation with `hlock launch --lock`, or
+[`hlock pull`](guides/pull.md) it from outside the repository. Add the
+[hlock badge](project/badge.md) to your README to point readers at the locks. See
+[Team repositories](guides/teams.md) for the layout and the commands.
+
+```bash
+hlock pin -o .hlock/locks/harness.alice.lock         # commit your setup with the code
+hlock launch --lock .hlock/locks/harness.bob.lock    # try a teammate's, isolated from yours
+```
+
 ## Go local
 
 [`hlock localize`](guides/localize.md) turns any lock into an equivalent on an open-source
@@ -167,6 +182,7 @@ The tools will look familiar:
 - **New here?** Start with [Installation](getting-started/installation.md) and the
   [Quickstart](getting-started/quickstart.md).
 - **Want the mental model?** Read [How it works](concepts/index.md).
+- **Sharing a repository?** See [Team repositories](guides/teams.md).
 - **Want an agent to do the setup?** See [Delegating to the meta harness](guides/meta.md).
 - **Looking something up?** See the [CLI](reference/cli.md),
   [Python API](reference/python-api.md), or [`harness.toml`](reference/manifest.md) reference.

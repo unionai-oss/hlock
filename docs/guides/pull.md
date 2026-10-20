@@ -127,7 +127,8 @@ next → hlock launch --lock harness.alice.lock  ·  hlock sync harness.alice.lo
 
 A named lock file gets its own vendor directory, so it never mixes with your
 `harness.lock`. `hlock pull` with no source refreshes these too, and
-`hlock pull harness.alice.lock` refreshes one.
+`hlock pull harness.alice.lock` refreshes one. For a repository where several contributors
+keep their locks, see [Team repositories](teams.md).
 
 ## Sources
 

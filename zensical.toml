@@ -32,6 +32,7 @@ nav = [
       "guides/sync.md",
       "guides/launch.md",
       "guides/pull.md",
+      "guides/teams.md",
       "guides/secrets.md",
     ] },
     { "Optimize your harness" = [
@@ -67,6 +68,7 @@ nav = [
     "project/development.md",
     "project/contributing.md",
     "project/releasing.md",
+    "project/badge.md",
     { "Design specs" = "https://github.com/unionai-oss/hlock/tree/main/specs" },
   ] },
 ]
