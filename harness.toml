@@ -1,0 +1,6 @@
+# The project's agent setup. `hlock add` declares dependencies here; harness.lock pins them.
+[project]
+name = "harness-lock"
+
+[skills]
+hlock = "./skills/hlock"

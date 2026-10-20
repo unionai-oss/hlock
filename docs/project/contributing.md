@@ -32,6 +32,7 @@ looks like. For setting up a working copy, see [Development](development.md).
     | CLI output | Also run `uv run python scripts/cli_screenshot.py` |
     | The home page terminal (`docs/javascripts/terminal.js`) | Also build the docs and run `uv run --with playwright python scripts/demo_video.py` |
     | A built-in harness or runtime profile | Also run `uv run python scripts/harness_table.py` |
+    | The hlock Agent Skill (`skills/hlock/`) | `tests/test_skill.py`, then refresh its installed copies with `hlock --lock .hlock/locks/harness.<name>.lock upgrade dep:hlock --apply` for each lock in `.hlock/locks/` |
 
 4.  Run the same checks CI runs:
 

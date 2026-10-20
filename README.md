@@ -14,6 +14,7 @@
 [![Docs](https://img.shields.io/badge/docs-docs.hlock.ai-7C3AED?logo=readthedocs&logoColor=white)](https://docs.hlock.ai/)
 [![Python](https://img.shields.io/pypi/pyversions/hlock?logo=python&logoColor=white)](https://pypi.org/project/hlock/)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue)](https://github.com/unionai-oss/hlock/blob/main/LICENSE)
+[![hlock](https://img.shields.io/endpoint?url=https://docs.hlock.ai/badge.json)](https://github.com/unionai-oss/hlock/tree/main/.hlock/locks)
 
 [**Documentation**](https://docs.hlock.ai/) ·
 [Quickstart](https://docs.hlock.ai/getting-started/quickstart/) ·

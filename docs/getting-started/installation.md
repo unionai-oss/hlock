@@ -48,6 +48,21 @@ hlock, version 0.1.2
 hlock works with Claude Code, Codex, Pi, OpenCode, Cursor, Gemini CLI and more; see
 [Supported harnesses](../reference/harnesses.md).
 
+## Teach your agent hlock
+
+The hlock repository ships an [Agent Skill](https://agentskills.io),
+[`skills/hlock`](https://github.com/unionai-oss/hlock/tree/main/skills/hlock), that tells
+your agent which `hlock` command does what, what to check before running one, and where in
+these docs to find answers. Add it like any other skill:
+
+```bash
+hlock add skill github:unionai-oss/hlock/skills/hlock
+```
+
+This installs it into the project (`.claude/skills/hlock` for Claude Code) and pins the
+commit in `harness.lock`. Without a ref it follows `main`. Add a tag or range after `@`
+to follow releases instead (see [Declaring dependencies](../guides/dependencies.md#what-you-can-add)).
+
 !!! info "`harness-lock` is an alias for `hlock`"
 
     [`harness-lock`](https://pypi.org/project/harness-lock/) is published as an alias:
