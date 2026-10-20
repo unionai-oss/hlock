@@ -17,6 +17,12 @@ any of them. It has different devex goals:
   and locks the winner with its success rate, cost and latency; `hlock tune` goes further
   into prompts and hyperparameters. A lock diff in a PR shows what changed in the agent
   *and* the evidence for it.
+- **Let agents do the busywork.** Some packaging and syncing work needs judgment rather
+  than deterministic code: installing what a lock needs on a machine you've never seen,
+  filling in an eval pack with tasks from your repository, moving skills and MCP servers
+  to their newest releases. [`hlock meta`](../guides/meta.md) hands those jobs to an
+  agent, pinned in its own lock and kept out of your agent's config, then checks the
+  result itself: a job verifies or exits non-zero.
 
 Most of the tools below are good at things hlock doesn't attempt, and several work well
 underneath or next to it. This page says what each one is good for and how hlock's goals
