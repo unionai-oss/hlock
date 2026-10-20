@@ -19,7 +19,9 @@ use serde_json::{json, Map, Value};
 
 use crate::adapters::{HarnessAdapter, RunOutcome};
 use crate::error::{Error, Result};
+use crate::fsutil;
 use crate::lockfile::{Lockfile, Tool};
+use crate::process::{self, Limits};
 use crate::profiles::{python_for, Ctx, HarnessProfile};
 use crate::search::Stack;
 use crate::tasks::Task;
@@ -54,8 +56,9 @@ fn subst(s: &str, vars: &[(&str, &str)]) -> String {
     vars.iter().fold(s.to_string(), |acc, (k, v)| acc.replace(&format!("{{{k}}}"), v))
 }
 
-/// Replace `${VAR}` placeholders in a string with environment values, when set;
-/// `${HLOCK_SECRET_…}` also comes from the user's secret sources ([`crate::secrets`]).
+/// Replace `${HLOCK_SECRET_…}` placeholders in a string with their values, from the
+/// environment or the user's secret sources ([`crate::secrets`]). Any other `${…}` is
+/// left as it is, so a lock can't copy arbitrary variables into a config file.
 fn fill_env(s: &str, ctx: &Ctx) -> String {
     let mut out = s.to_string();
     let mut start = 0;
@@ -63,11 +66,7 @@ fn fill_env(s: &str, ctx: &Ctx) -> String {
         let i = start + i;
         let Some(j) = out[i..].find('}') else { break };
         let name = out[i + 2..i + j].to_string();
-        let found = match ctx.var(&name) {
-            Some(v) => Some(v.to_string()),
-            None if name.starts_with(crate::secrets::PREFIX) => crate::secrets::lookup(&name, ctx).map(|f| f.value),
-            None => None,
-        };
+        let found = if name.starts_with(crate::secrets::PREFIX) { crate::secrets::lookup(&name, ctx).map(|f| f.value) } else { None };
         match found {
             Some(v) => {
                 out.replace_range(i..i + j + 1, &v);
@@ -123,6 +122,7 @@ pub fn invocation(
     // the harness runs inside the workspace, so every path it gets must be absolute
     let workspace = &if workspace.is_absolute() { workspace.to_path_buf() } else { ctx.cwd.join(workspace) };
     let hl = workspace.join(".hlock");
+    fsutil::clear_symlink(&hl)?;
     std::fs::create_dir_all(&hl)?;
     let output = hl.join("result.json");
     let _ = std::fs::remove_file(&output);
@@ -142,7 +142,7 @@ pub fn invocation(
         env.insert("HLOCK_LLM_BASE_URL".into(), b.clone());
     }
     if let Some(l) = lock {
-        let deciders: Vec<(String, crate::decide::DeciderConfig)> = l.decider.iter().map(|d| (d.use_.clone(), crate::decide::entry_config(d))).collect();
+        let deciders: Vec<(String, crate::decide::DeciderConfig)> = l.decider.iter().map(|d| (d.use_.clone(), crate::decide::entry_config_for(d, crate::decide::own_spec(&ctx.cwd, &d.use_).as_ref()))).collect();
         let var = |k: &str| ctx.var(k).map(str::to_string);
         env.extend(crate::decide::decider_env(&deciders, &profile.decider_env, &var));
         if let (false, Some(p)) = (l.decider.is_empty(), lock_path) {
@@ -159,23 +159,24 @@ pub fn invocation(
     if let Some(l) = lock {
         if l.tool.iter().any(|t| t.kind == "mcp") {
             let path = hl.join("mcp.json");
-            std::fs::write(&path, serde_json::to_string_pretty(&mcp_config(&l.tool, ctx))?)?;
+            // it holds filled-in secrets
+            fsutil::write_private(&path, serde_json::to_string_pretty(&mcp_config(&l.tool, ctx))?)?;
             env.insert("HLOCK_MCP_CONFIG".into(), path.to_string_lossy().into_owned());
         }
         let lock_dir = lock_path.and_then(Path::parent).map(|d| if d.is_absolute() { d.to_path_buf() } else { ctx.cwd.join(d) }).unwrap_or_else(|| ctx.cwd.clone());
-        let skills: Vec<(String, PathBuf)> = l
-            .skill
-            .iter()
-            .filter_map(|s| {
-                let dir = s.vendored.as_ref().map(|v| lock_dir.join(v)).or_else(|| s.path.as_ref().map(|p| ctx.expand(p, None)))?;
-                dir.join("SKILL.md").is_file().then(|| (s.name.clone(), dir))
-            })
-            .collect();
+        let mut skills: Vec<(String, PathBuf)> = Vec::new();
+        for s in &l.skill {
+            let Some(dir) = s.vendored.as_ref().map(|v| lock_dir.join(v)).or_else(|| s.path.as_ref().map(|p| ctx.expand(p, None))) else { continue };
+            if dir.join("SKILL.md").is_file() {
+                fsutil::check_plain_name("skill name", &s.name)?;
+                skills.push((s.name.clone(), dir));
+            }
+        }
         if !skills.is_empty() {
             let dir = hl.join("skills");
             let _ = std::fs::remove_dir_all(&dir);
             for (name, src) in skills {
-                copy_dir(&src, &dir.join(name));
+                fsutil::copy_tree(&src, &dir.join(name))?;
             }
             env.insert("HLOCK_SKILLS_DIR".into(), dir.to_string_lossy().into_owned());
         }
@@ -206,41 +207,24 @@ pub fn invocation(
 /// Run an invocation to completion, capturing output, with a timeout.
 pub fn run(inv: &Invocation, ctx: &Ctx, timeout: Duration) -> Result<RunResult> {
     let start = Instant::now();
-    let mut child = Command::new(&inv.argv[0])
-        .args(&inv.argv[1..])
-        .current_dir(&inv.cwd)
-        .env_clear()
-        .envs(&ctx.env)
-        .envs(&inv.env)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|e| Error::Profile(format!("cannot run {}: {e}", inv.argv[0])))?;
-    let mut timed_out = false;
-    loop {
-        if child.try_wait()?.is_some() {
-            break;
-        }
-        if start.elapsed() > timeout {
-            let _ = child.kill();
-            timed_out = true;
-            break;
-        }
-        std::thread::sleep(Duration::from_millis(20));
-    }
-    let out = child.wait_with_output()?;
-    let mut log = String::from_utf8_lossy(&out.stdout).into_owned();
-    log.push_str(&String::from_utf8_lossy(&out.stderr));
-    let parsed: Option<Value> = std::fs::read_to_string(&inv.output).ok().and_then(|t| serde_json::from_str(&t).ok());
-    let exit_ok = out.status.success() && !timed_out;
+    let Some((prog, args)) = inv.argv.split_first() else {
+        return Err(Error::Profile("the harness invocation has no command".into()));
+    };
+    let mut cmd = Command::new(prog);
+    cmd.args(args).current_dir(&inv.cwd).env_clear().envs(&ctx.env).envs(&inv.env).stdin(Stdio::null());
+    let out = process::run(cmd, &Limits::timeout(timeout)).map_err(|e| Error::Profile(format!("cannot run {prog}: {e}")))?;
+    let timed_out = out.timed_out;
+    let mut log = out.text();
+    // the harness wrote it into its workspace: read it as a plain file, never through a symlink
+    let parsed: Option<Value> = fsutil::read_regular_text(&inv.output, MAX_RESULT_FILE).ok().and_then(|t| serde_json::from_str(&t).ok());
+    let exit_ok = out.success && !timed_out;
     let success = parsed.as_ref().and_then(|v| v.get("success")).and_then(Value::as_bool).unwrap_or(exit_ok) && !timed_out;
     if timed_out {
         log.push_str(&format!("\n[hlock] timed out after {}s", timeout.as_secs()));
     }
     Ok(RunResult {
         success,
-        exit_code: out.status.code(),
+        exit_code: out.code,
         cost_usd: parsed.as_ref().and_then(|v| v["cost_usd"].as_f64()).unwrap_or(0.0),
         steps: parsed.as_ref().and_then(|v| v["steps"].as_u64()).unwrap_or(1),
         trace: parsed.as_ref().and_then(|v| v.get("trace").cloned()).unwrap_or_else(|| json!([])),
@@ -250,17 +234,8 @@ pub fn run(inv: &Invocation, ctx: &Ctx, timeout: Duration) -> Result<RunResult> 
     })
 }
 
-fn copy_dir(src: &Path, dst: &Path) {
-    let _ = std::fs::create_dir_all(dst);
-    for e in std::fs::read_dir(src).into_iter().flatten().flatten() {
-        let (from, to) = (e.path(), dst.join(e.file_name()));
-        if from.is_dir() {
-            copy_dir(&from, &to);
-        } else {
-            let _ = std::fs::copy(&from, &to);
-        }
-    }
-}
+/// The most of a harness's JSON result hlock reads.
+const MAX_RESULT_FILE: usize = 16 << 20;
 
 /// Runs trials through a code harness's entrypoint, for `resolve` and `tune`.
 pub struct CommandAdapter {
@@ -290,7 +265,7 @@ impl HarnessAdapter for CommandAdapter {
         if let (Some(fixtures), Some(pack_dir)) = (&task.fixtures, &task.pack_dir) {
             let src = pack_dir.join(fixtures);
             if src.exists() {
-                copy_dir(&src, workspace);
+                fsutil::copy_tree(&src, workspace)?;
             }
         }
         let model = stack.llm.get("planner").or_else(|| stack.llm.values().next()).cloned();
@@ -304,22 +279,23 @@ impl HarnessAdapter for CommandAdapter {
         inv.env.extend(crate::decide::decider_env(&deciders, &self.profile.decider_env, &var));
         if !stack.deciders.is_empty() {
             // a lock holding just this trial's deciders, for `hlock decide hook --format plugin`
+            // a decider that can't be locked fails the trial: running without it would
+            // measure a different stack than the one being scored
             let entries: Vec<crate::lockfile::Decider> = stack
                 .deciders
                 .iter()
-                .filter_map(|(u, m)| {
+                .map(|(u, m)| {
                     let spec = self.deciders.get(u).cloned().unwrap_or_default();
-                    crate::decide::lock_entry(u, m, &spec, "env", vec![], &self.ctx.cwd).ok()
+                    crate::decide::lock_entry(u, m, &spec, "env", vec![], &self.ctx.cwd).map_err(|e| Error::Profile(format!("decider {u}: {e}")))
                 })
-                .collect();
+                .collect::<Result<_>>()?;
             // absolute: the harness runs in the workspace, so a relative path would miss
             let ws = if inv.cwd.is_absolute() { inv.cwd.clone() } else { self.ctx.cwd.join(&inv.cwd) };
             let path = ws.join(".hlock").join("deciders.lock");
             let lock = Lockfile { decider: entries, ..Default::default() };
-            if lock.save(&path).is_ok() {
-                inv.env.insert("HLOCK_DECIDE_LOCK".into(), path.to_string_lossy().into_owned());
-                inv.env.insert("HLOCK_BIN".into(), self.ctx.var("HLOCK_BIN").unwrap_or("hlock").to_string());
-            }
+            lock.save(&path)?;
+            inv.env.insert("HLOCK_DECIDE_LOCK".into(), path.to_string_lossy().into_owned());
+            inv.env.insert("HLOCK_BIN".into(), self.ctx.var("HLOCK_BIN").unwrap_or("hlock").to_string());
         }
         let r = run(&inv, &self.ctx, Duration::from_secs(task.timeout_seconds.max(1)))?;
         let mut trace = r.trace.clone();
@@ -338,8 +314,62 @@ mod tests {
     #[test]
     fn substitution_and_env_fill() {
         assert_eq!(subst("--model={model} {prompt}", &[("model", "a:b"), ("prompt", "hi")]), "--model=a:b hi");
-        let ctx = Ctx { home: "/h".into(), cwd: "/w".into(), env: [("TOK".to_string(), "x".to_string())].into(), path: vec![] };
-        assert_eq!(fill_env("Bearer ${TOK} ${MISSING}", &ctx), "Bearer x ${MISSING}");
+        let env = [("HLOCK_SECRET_TOK", "x"), ("HOME_TOKEN", "leak"), ("HLOCK_KEYCHAIN", "0")].map(|(k, v)| (k.to_string(), v.to_string()));
+        let ctx = Ctx { home: "/h".into(), cwd: "/w".into(), env: env.into(), path: vec![] };
+        // only secret placeholders are filled; other variables stay as written
+        assert_eq!(fill_env("Bearer ${HLOCK_SECRET_TOK} ${HOME_TOKEN} ${HLOCK_SECRET_MISSING}", &ctx), "Bearer x ${HOME_TOKEN} ${HLOCK_SECRET_MISSING}");
+    }
+
+    fn tmp(tag: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("hlock-contract-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    fn inv(argv: &[&str], cwd: &Path) -> Invocation {
+        Invocation { argv: argv.iter().map(|s| s.to_string()).collect(), env: BTreeMap::new(), cwd: cwd.into(), output: cwd.join("result.json") }
+    }
+
+    #[test]
+    fn an_empty_command_is_an_error() {
+        let d = tmp("empty");
+        assert!(run(&inv(&[], &d), &Ctx::at(&d), Duration::from_secs(5)).unwrap_err().to_string().contains("no command"));
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn big_output_doesnt_hang() {
+        let d = tmp("run");
+        let ctx = Ctx::at(&d);
+        let r = run(&inv(&["sh", "-c", "head -c 300000 /dev/zero | tr '\\0' x; exit 2"], &d), &ctx, Duration::from_secs(20)).unwrap();
+        assert_eq!((r.success, r.exit_code), (false, Some(2)));
+        assert!(r.log.len() >= 300_000);
+        // the timeout is tested in tests/bounded.rs, away from process::stop_all's test
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn mcp_config_is_private_and_skill_names_are_checked() {
+        use std::os::unix::fs::PermissionsExt;
+        let d = tmp("inv");
+        std::fs::create_dir_all(d.join("skill")).unwrap();
+        std::fs::write(d.join("skill/SKILL.md"), "x").unwrap();
+        let ctx = Ctx { env: [("HLOCK_SECRET_T".to_string(), "s3".to_string())].into(), ..Ctx::at(&d) };
+        let profile = HarnessProfile { id: "h".into(), run: crate::profiles::RunSpec { command: vec!["true".into()], ..Default::default() }, ..Default::default() };
+        let tool = Tool { name: "gh".into(), kind: "mcp".into(), command: Some("npx".into()), env: [("T".to_string(), "${HLOCK_SECRET_T}".to_string())].into(), ..Default::default() };
+        let skill = |name: &str| crate::lockfile::Skill { name: name.into(), path: Some(d.join("skill").to_string_lossy().into_owned()), ..Default::default() };
+        let mut lock = Lockfile { tool: vec![tool], skill: vec![skill("ok")], ..Default::default() };
+        let ws = d.join("ws");
+        let i = invocation(&profile, Some(&lock), None, None, "hi", &ws, 0, &ctx).unwrap();
+        let mcp = PathBuf::from(&i.env["HLOCK_MCP_CONFIG"]);
+        assert_eq!(std::fs::metadata(&mcp).unwrap().permissions().mode() & 0o777, 0o600);
+        assert!(ws.join(".hlock/skills/ok/SKILL.md").is_file());
+        lock.skill = vec![skill("../../escape")];
+        assert!(invocation(&profile, Some(&lock), None, None, "hi", &ws, 0, &ctx).unwrap_err().to_string().contains("plain name"));
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     #[test]

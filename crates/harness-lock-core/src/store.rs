@@ -25,11 +25,12 @@ impl Store {
 
     /// Store bytes; returns `sha256:<hex>`.
     pub fn put_bytes(&self, data: &[u8]) -> Result<String> {
-        fs::create_dir_all(&self.root)?;
+        fs::create_dir_all(&self.root).map_err(|e| crate::error::io_at(&self.root, e))?;
         let digest = sha256_bytes(data);
         let target = self.path_for(&digest);
         if !target.exists() {
-            fs::write(&target, data)?;
+            // by rename, so a crash can't leave a partial blob under the digest's name
+            crate::fsutil::write_atomic(&target, data).map_err(|e| crate::error::at(&target, e))?;
         }
         Ok(digest)
     }
@@ -47,7 +48,7 @@ impl Store {
         if !p.exists() {
             return Err(Error::Store(format!("blob not in store: {reference}")));
         }
-        Ok(fs::read(p)?)
+        fs::read(&p).map_err(|e| crate::error::io_at(&p, e))
     }
 
     pub fn get_text(&self, reference: &str) -> Result<String> {

@@ -64,7 +64,7 @@ What the built-in agent may do. Other harnesses use their own permission setting
 
 | Key | Default | Description |
 |---|---|---|
-| `allow` | `["@hlock", "git log", "git show", "git diff", "git status"]` | Commands that run without asking. Each entry matches a plain command (no pipes, redirects, `;`, `&&`, `$(…)`) whose first words are the entry's words. An entry starting with `!` refuses commands that start with its words and have all of its flags. `@hlock` is the hlock commands that don't run project code or install software; see [the built-in agent](../guides/meta.md#the-built-in-agent). |
+| `allow` | `["@hlock", "git log", "git show", "git diff", "git status"]` | Commands that run without asking. Each entry matches a plain command (no pipes, redirects, `;`, `&&`, `$(…)`) whose first words are the entry's words. The program must be a bare name found on `PATH`; one named by path (`./git`, `/usr/bin/git`) never matches. An entry starting with `!` refuses commands that start with its words and have all of its flags. `@hlock` is the hlock commands that don't run project code or install software; see [the built-in agent](../guides/meta.md#the-built-in-agent). |
 | `max-steps` | `60` | Model turns per job |
 | `timeout-seconds` | `300` | Time limit for each command |
 
@@ -88,7 +88,7 @@ For a custom job:
 |---|---|
 | `description` | One line for `hlock meta jobs` |
 | `prompt` | The prompt. `{lock}`, `{manifest}`, `{project}` and `{meta_lock}` are replaced with paths. |
-| `verify` | A shell command run in the project after the agent exits. Exit 0 means verified. Without it, the run is reported as unverified. |
+| `verify` | A shell command run in the project after the agent exits. Exit 0 means verified. Without it, the run is reported as unverified. `{lock}`, `{manifest}`, `{project}` and `{meta_lock}` are replaced with shell-quoted paths, so don't quote them yourself. It's stopped after 10 minutes. |
 | `instructions` | Text added to the prompt |
 
 ## `[deciders.default]`

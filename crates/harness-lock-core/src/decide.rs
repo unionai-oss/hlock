@@ -7,21 +7,66 @@
 //! `gpt-6-luna`). [`decide`] takes one request shape and speaks either.
 
 use std::collections::BTreeMap;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 
-/// `(provider, protocol, default base URL, base-URL variable, key variable)`.
-pub const PROVIDERS: &[(&str, &str, &str, &str, &str)] = &[
-    ("typesafe", "systemone", "https://api.typesafe.ai", "TYPESAFE_BASE_URL", "TYPESAFE_API_KEY"),
-    ("openai-decisions", "decisions", "https://api.openai.com/v1", "", "OPENAI_API_KEY"),
-    ("openrouter", "systemone", "https://openrouter.ai/api", "", "OPENROUTER_API_KEY"),
-    ("ollama", "systemone", "http://localhost:11434", "OLLAMA_HOST", ""),
-    ("ollaya", "systemone", "http://127.0.0.1:11435", "OLLAYA_HOST", "OLLAYA_API_KEY"),
-    ("cloudflare", "systemone", "", "", "CLOUDFLARE_API_TOKEN"),
-    ("system-one", "systemone", "", "SYSTEM_ONE_BASE_URL", "SYSTEM_ONE_API_KEY"),
+/// One decider provider: `(provider, protocol, default base URL, base-URL variable, key
+/// variable, traits)`. Base URLs end where the API's own paths start (`/v1` included
+/// when the provider puts it there); [`Endpoint`] adds `/v1/<protocol>` as needed.
+#[derive(Debug, Clone, Copy)]
+pub struct Provider(pub &'static str, pub &'static str, pub &'static str, pub &'static str, pub &'static str, pub Traits);
+
+/// What kind of provider it is.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Traits {
+    /// A hosted API that needs a key.
+    pub needs_key: bool,
+    /// A server the user runs (a local runtime or a self-hosted System One server): no
+    /// key is required.
+    pub self_hosted: bool,
+    /// A local runtime that pulls and serves models (`ollama pull kev:4b`).
+    pub runtime: bool,
+    /// It serves only decision models, so any of its models is a decider.
+    pub decider_only: bool,
+}
+
+const HOSTED: Traits = Traits { needs_key: true, self_hosted: false, runtime: false, decider_only: true };
+const RUNTIME: Traits = Traits { needs_key: false, self_hosted: true, runtime: true, decider_only: false };
+
+pub const PROVIDERS: &[Provider] = &[
+    Provider("typesafe", "systemone", "https://api.typesafe.ai", "TYPESAFE_BASE_URL", "TYPESAFE_API_KEY", HOSTED),
+    Provider("openai-decisions", "decisions", "https://api.openai.com/v1", "", "OPENAI_API_KEY", HOSTED),
+    // also serves LLMs: only its decision-model families are deciders
+    Provider("openrouter", "systemone", "https://openrouter.ai/api/v1", "", "OPENROUTER_API_KEY", Traits { decider_only: false, ..HOSTED }),
+    Provider("ollama", "systemone", "http://localhost:11434", "OLLAMA_HOST", "", RUNTIME),
+    Provider("ollaya", "systemone", "http://127.0.0.1:11435", "OLLAYA_HOST", "OLLAYA_API_KEY", Traits { decider_only: true, ..RUNTIME }),
+    Provider("cloudflare", "systemone", "", "", "CLOUDFLARE_API_TOKEN", HOSTED),
+    Provider("system-one", "systemone", "", "SYSTEM_ONE_BASE_URL", "SYSTEM_ONE_API_KEY", Traits { needs_key: false, self_hosted: true, runtime: false, decider_only: true }),
 ];
+
+impl Provider {
+    fn default_url(&self) -> Option<&'static str> {
+        Some(self.2).filter(|u| !u.is_empty())
+    }
+    fn base_var(&self) -> Option<&'static str> {
+        Some(self.3).filter(|v| !v.is_empty())
+    }
+    fn key_var(&self) -> Option<&'static str> {
+        Some(self.4).filter(|v| !v.is_empty())
+    }
+}
+
+/// Whether `url` is on this machine (`localhost`, `127.0.0.1`, `::1`).
+pub fn is_loopback(url: &str) -> bool {
+    let url = if url.contains("://") { url.to_string() } else { format!("http://{url}") };
+    crate::capture::host_port(&url).is_some_and(|(h, _)| matches!(h.to_ascii_lowercase().as_str(), "localhost" | "127.0.0.1" | "::1"))
+}
+
+fn same_url(a: &str, b: &str) -> bool {
+    a.trim_end_matches('/').eq_ignore_ascii_case(b.trim_end_matches('/'))
+}
 
 /// Input price per million tokens, where it's published (output is free everywhere).
 const PRICES: &[(&str, f64)] = &[("typesafe", 0.042), ("openai-decisions", 0.10), ("cloudflare", 0.24), ("ollama", 0.0), ("ollaya", 0.0)];
@@ -54,6 +99,8 @@ pub struct DeciderConfig {
     /// `systemone` or `decisions`; inferred from the provider when it's known.
     pub protocol: Option<String>,
     pub base_url: Option<String>,
+    /// The variable the API key is read from (default: the provider's own). An empty
+    /// name sends no key.
     pub key_env: Option<String>,
     /// TypeSafe's long-context mode (262k tokens; slower and less accurate).
     pub long_context: bool,
@@ -61,7 +108,8 @@ pub struct DeciderConfig {
     pub timeout_seconds: Option<u64>,
 }
 
-fn provider(name: &str) -> Option<&'static (&'static str, &'static str, &'static str, &'static str, &'static str)> {
+/// A provider hlock knows, by name.
+pub fn provider(name: &str) -> Option<&'static Provider> {
     PROVIDERS.iter().find(|p| p.0 == name)
 }
 
@@ -82,8 +130,8 @@ pub fn split_ref(reference: &str) -> Option<(&str, &str)> {
 
 /// Whether a provider's API needs a key (self-hosted System One servers and local
 /// runtimes don't).
-pub fn needs_key(provider: &str) -> bool {
-    matches!(provider, "typesafe" | "openai-decisions" | "openrouter" | "cloudflare")
+pub fn needs_key(name: &str) -> bool {
+    provider(name).is_some_and(|p| p.5.needs_key)
 }
 
 /// Whether a `provider:model` reference (with an optional explicit protocol) names a
@@ -92,7 +140,7 @@ pub fn is_decider(reference: &str, protocol: Option<&str>) -> bool {
     match protocol {
         Some(p) => p == "systemone" || p == "decisions",
         None => match split_ref(reference) {
-            Some(("typesafe" | "openai-decisions" | "ollaya" | "cloudflare" | "system-one", _)) => true,
+            Some((p, _)) if provider(p).is_some_and(|p| p.5.decider_only) => true,
             Some((_, model)) => {
                 let m = model.to_ascii_lowercase();
                 let base = m.rsplit('/').next().unwrap_or(&m);
@@ -133,17 +181,17 @@ impl DeciderConfig {
         if protocol != "systemone" && protocol != "decisions" {
             return Err(format!("unknown decider protocol {protocol:?} (use systemone or decisions)"));
         }
-        let from_env = known.map(|p| p.3).filter(|v| !v.is_empty()).and_then(|v| var(v));
+        let from_env = known.and_then(Provider::base_var).and_then(|v| var(v));
         let base_url = self
             .base_url
             .clone()
             .or(from_env)
-            .or_else(|| known.map(|p| p.2.to_string()).filter(|u| !u.is_empty()))
+            .or_else(|| known.and_then(Provider::default_url).map(str::to_string))
             .ok_or_else(|| format!("hlock doesn't know where {prov:?} is; set the decider's base-url"))?;
         let base_url = if base_url.contains("://") { base_url } else { format!("http://{base_url}") };
-        let key_env = self.key_env.clone().or_else(|| known.map(|p| p.4.to_string()).filter(|k| !k.is_empty()));
-        let api_key = key_env.as_deref().and_then(|k| var(k)).filter(|v| !v.is_empty());
-        let local = matches!(prov, "ollama" | "ollaya" | "system-one") || self.base_url.is_some();
+        let key_env = self.key_env.clone().or_else(|| known.and_then(Provider::key_var).map(str::to_string));
+        let api_key = key_env.as_deref().filter(|k| !k.is_empty()).and_then(|k| var(k)).filter(|v| !v.is_empty());
+        let local = known.is_some_and(|p| p.5.self_hosted) || self.base_url.is_some();
         if api_key.is_none() && !local {
             return Err(format!("{} isn't set; the decider reads its {prov} API key from it", key_env.unwrap_or_default()));
         }
@@ -226,6 +274,7 @@ pub struct Answer {
     pub value: Value,
     pub probabilities: BTreeMap<String, f64>,
     pub confidence: Option<f64>,
+    /// The decider refused, or its answer had no usable value (`value` is then null).
     #[serde(default)]
     pub refused: bool,
 }
@@ -308,15 +357,20 @@ fn decisions_body(ep: &Endpoint, state: &Value, questions: &[Question]) -> Value
     json!({"model": ep.model, "input": state_text(state), "questions": qs})
 }
 
+/// A probability from a response: a finite number, clamped to 0–1.
+fn prob(v: &Value) -> Option<f64> {
+    v.as_f64().filter(|p| p.is_finite()).map(|p| p.clamp(0.0, 1.0))
+}
+
 fn num_map(v: &Value) -> BTreeMap<String, f64> {
     match v {
-        Value::Object(m) => m.iter().filter_map(|(k, p)| p.as_f64().map(|p| (k.clone(), p))).collect(),
+        Value::Object(m) => m.iter().filter_map(|(k, p)| prob(p).map(|p| (k.clone(), p))).collect(),
         // Decisions: [{value|label, probability}]
         Value::Array(a) => a
             .iter()
             .filter_map(|e| {
                 let key = e.get("label").or_else(|| e.get("value")).map(|k| k.as_str().map(str::to_string).unwrap_or_else(|| k.to_string()))?;
-                Some((key, e["probability"].as_f64()?))
+                Some((key, prob(&e["probability"])?))
             })
             .collect(),
         _ => BTreeMap::new(),
@@ -332,21 +386,22 @@ fn weighted(probabilities: &BTreeMap<String, f64>) -> Option<f64> {
     Some(s / total)
 }
 
-/// Read one answer from either protocol's shape.
+/// Read one answer from either protocol's shape. A refusal, or an answer without its
+/// value (a noul with no probability, a choice with no option, a score with neither
+/// level probabilities nor a score), comes back `refused`, with a null value.
 fn read_answer(q: &Question, a: &Value) -> Answer {
     let probabilities = num_map(&a["probabilities"]);
-    let confidence = a["confidence"].as_f64();
-    let refused = a["type"].as_str() == Some("refusal");
+    let confidence = prob(&a["confidence"]);
     let value = match q.kind {
-        Kind::Noul => json!(a.get("noul").or_else(|| a.get("probability")).and_then(Value::as_f64).unwrap_or(0.5)),
-        Kind::Choice => a["choice"].clone(),
-        Kind::Score => json!(weighted(&probabilities).or_else(|| a["score"].as_f64()).unwrap_or(0.0)),
+        Kind::Noul => a.get("noul").or_else(|| a.get("probability")).and_then(prob).map(|p| json!(p)),
+        Kind::Choice => a["choice"].as_str().map(|c| json!(c)),
+        Kind::Score => weighted(&probabilities).or_else(|| a["score"].as_f64().filter(|s| s.is_finite())).map(|s| json!(s)),
     };
-    let probabilities = match q.kind {
-        Kind::Noul => {
-            let p = value.as_f64().unwrap_or(0.5);
-            BTreeMap::from([("true".to_string(), p), ("false".to_string(), 1.0 - p)])
-        }
+    let refused = a["type"].as_str() == Some("refusal") || value.is_none();
+    let value = if refused { Value::Null } else { value.unwrap_or_default() };
+    let probabilities = match (q.kind, value.as_f64()) {
+        (Kind::Noul, Some(p)) => BTreeMap::from([("true".to_string(), p), ("false".to_string(), 1.0 - p)]),
+        (Kind::Noul, None) => BTreeMap::new(),
         _ => probabilities,
     };
     Answer { id: q.id.clone(), kind: q.kind, value, probabilities, confidence, refused }
@@ -360,7 +415,9 @@ fn read_response(ep: &Endpoint, questions: &[Question], v: &Value) -> Result<(St
     for (i, q) in questions.iter().enumerate() {
         let a = match answers {
             Value::Object(m) => m.get(&q.id),
-            Value::Array(arr) => arr.iter().find(|a| a["name"].as_str() == Some(&q.id)).or_else(|| arr.get(i)),
+            // by name; by position only when no answer carries a name
+            Value::Array(arr) if arr.iter().any(|a| a.get("name").is_some()) => arr.iter().find(|a| a["name"].as_str() == Some(&q.id)),
+            Value::Array(arr) => arr.get(i),
             _ => None,
         };
         let a = a.ok_or_else(|| format!("the decider didn't answer {:?}", q.id))?;
@@ -379,11 +436,20 @@ fn agent(timeout: Duration) -> ureq::Agent {
         .into()
 }
 
-fn post(ep: &Endpoint, body: &Value) -> Result<Value, String> {
+/// POST `body`, retrying a busy provider twice. With a `deadline`, every attempt and
+/// every wait between them ends by it.
+fn post(ep: &Endpoint, body: &Value, deadline: Option<Instant>) -> Result<Value, String> {
     let url = ep.url();
     let mut wait = Duration::from_millis(250);
     for attempt in 0..3 {
-        let mut req = agent(ep.timeout).post(&url).header("content-type", "application/json");
+        let timeout = match deadline {
+            Some(d) => match d.checked_duration_since(Instant::now()).filter(|left| !left.is_zero()) {
+                Some(left) => left.min(ep.timeout),
+                None => return Err(format!("no answer from {url} in time")),
+            },
+            None => ep.timeout,
+        };
+        let mut req = agent(timeout).post(&url).header("content-type", "application/json");
         if let Some(k) = &ep.api_key {
             req = req.header("authorization", &format!("Bearer {k}"));
         }
@@ -394,6 +460,9 @@ fn post(ep: &Endpoint, body: &Value) -> Result<Value, String> {
         let status = resp.status().as_u16();
         let text = resp.body_mut().read_to_string().map_err(|e| format!("bad response from {url}: {e}"))?;
         if matches!(status, 429 | 503 | 529) && attempt < 2 {
+            if deadline.is_some_and(|d| Instant::now() + wait >= d) {
+                return Err(format!("{url} returned {status}, with no time left to retry"));
+            }
             std::thread::sleep(wait);
             wait *= 4;
             continue;
@@ -413,11 +482,16 @@ fn post(ep: &Endpoint, body: &Value) -> Result<Value, String> {
 /// Ask `questions` about `state`. Batches over a provider's limit are split into
 /// several requests.
 pub fn decide(ep: &Endpoint, state: &Value, questions: &[Question]) -> Result<Decided, String> {
+    decide_by(ep, state, questions, None)
+}
+
+/// [`decide`], finishing by `deadline` (retries included) or failing.
+pub fn decide_by(ep: &Endpoint, state: &Value, questions: &[Question], deadline: Option<Instant>) -> Result<Decided, String> {
     let limit = MAX_QUESTIONS.iter().find(|(p, _)| *p == ep.protocol).map(|(_, n)| *n).unwrap_or(64);
     let mut out = Decided { model: ep.model.clone(), ..Default::default() };
     for chunk in questions.chunks(limit.max(1)) {
         let body = if ep.protocol == "decisions" { decisions_body(ep, state, chunk) } else { systemone_body(ep, state, chunk) };
-        let v = post(ep, &body)?;
+        let v = post(ep, &body, deadline)?;
         let (model, answers, tokens) = read_response(ep, chunk, &v)?;
         out.model = model;
         out.answers.extend(answers);
@@ -529,9 +603,11 @@ pub fn min_probability(use_: &str, setting: &Value, answer: &str) -> f64 {
         ("route", _) => 0.6,
         _ => 0.9,
     };
+    // a lock's setting outside 0–1 is ignored
+    let ok = |p: &f64| (0.0..=1.0).contains(p);
     match setting {
-        Value::Number(n) => n.as_f64().unwrap_or(default),
-        Value::Object(m) => m.get(answer).and_then(Value::as_f64).unwrap_or(default),
+        Value::Number(n) => n.as_f64().filter(ok).unwrap_or(default),
+        Value::Object(m) => m.get(answer).and_then(Value::as_f64).filter(ok).unwrap_or(default),
         _ => default,
     }
 }
@@ -593,9 +669,9 @@ pub fn lock_entry(
         provider: prov.into(),
         model: model.into(),
         protocol,
-        endpoint: spec.base_url.clone().or_else(|| known.map(|p| p.2.to_string()).filter(|u| !u.is_empty())),
-        key_env: spec.key_env.clone().or_else(|| known.map(|p| p.4.to_string()).filter(|k| !k.is_empty())),
-        runtime: matches!(prov, "ollama" | "ollaya").then(|| prov.to_string()),
+        endpoint: spec.base_url.clone().or_else(|| known.and_then(Provider::default_url).map(str::to_string)),
+        key_env: spec.key_env.clone().or_else(|| known.and_then(Provider::key_var).map(str::to_string)),
+        runtime: known.is_some_and(|p| p.5.runtime).then(|| prov.to_string()),
         resolved_from: Some(reference.into()),
         via: via.into(),
         wiring,
@@ -608,15 +684,52 @@ pub fn lock_entry(
 }
 
 /// A lock entry as a [`DeciderConfig`], to call it.
+///
+/// A lock may come from someone else (`hlock pull`), so its endpoint and key variable
+/// aren't trusted with this machine's keys:
+///
+/// - the key is always read from the provider's own variable (`TYPESAFE_API_KEY`), never
+///   from a `key-env` the lock names;
+/// - an endpoint on this machine (`localhost`, `127.0.0.1`, `::1`) or the provider's
+///   default is used as written;
+/// - any other endpoint is dropped, and the decider goes where this machine says
+///   (the provider's base-URL variable, else its default).
+///
+/// [`entry_config_for`] also trusts what your own `harness.toml` says.
 pub fn entry_config(d: &crate::lockfile::Decider) -> DeciderConfig {
+    entry_config_for(d, None)
+}
+
+/// [`entry_config`], also trusting the lock's endpoint and key variable where they're
+/// what `own` (the `[deciders.<use>]` of your own `harness.toml`) sets.
+pub fn entry_config_for(d: &crate::lockfile::Decider, own: Option<&DeciderSpec>) -> DeciderConfig {
+    let known = provider(&d.provider);
+    let mine = |v: Option<&String>, own: Option<&String>| v.is_some() && v == own;
+    let trusted = |u: &&String| is_loopback(u) || known.and_then(Provider::default_url).is_some_and(|def| same_url(u, def)) || mine(Some(u), own.and_then(|s| s.base_url.as_ref()));
+    let key_env = match d.key_env.as_ref() {
+        Some(k) if mine(Some(k), own.and_then(|s| s.key_env.as_ref())) => k.clone(),
+        // the provider's own variable, or none at all for a provider hlock doesn't know
+        _ => known.and_then(Provider::key_var).unwrap_or_default().to_string(),
+    };
     DeciderConfig {
         model: format!("{}:{}", d.provider, d.model),
         protocol: Some(d.protocol.clone()),
-        base_url: d.endpoint.clone(),
-        key_env: d.key_env.clone(),
+        base_url: d.endpoint.as_ref().filter(trusted).cloned(),
+        key_env: Some(key_env),
         long_context: false,
         timeout_seconds: d.timeout_ms.map(|ms| ms.div_ceil(1000)),
     }
+}
+
+/// The `[deciders.<use_>]` of the `harness.toml` in or above `root`, if there is one.
+pub fn own_spec(root: &std::path::Path, use_: &str) -> Option<DeciderSpec> {
+    let path = crate::manifest::find_manifest(root)?;
+    crate::manifest::Manifest::load(&path).ok()?.deciders().ok()?.remove(use_)
+}
+
+/// The variable a locked decider's key is read from, as [`entry_config_for`] reads it.
+pub fn entry_key_env(d: &crate::lockfile::Decider, own: Option<&DeciderSpec>) -> Option<String> {
+    entry_config_for(d, own).key_env.filter(|k| !k.is_empty())
 }
 
 /// The environment a code harness gets for its deciders: `HLOCK_DECIDER_<USE>` (the
@@ -654,14 +767,30 @@ pub fn drift(lock: &crate::lockfile::Lockfile, root: &std::path::Path) -> Vec<St
             out.push(format!("decider {}: hlock's questions for {} changed since the lock was written; re-resolve or re-pin to lock them", d.use_, d.use_));
         }
         if let Some(p) = &d.policy {
-            match std::fs::read_to_string(root.join(&p.path)) {
+            match policy_text(root, &p.path) {
                 Ok(text) if crate::hash::sha256_text(&text) != p.digest => out.push(format!("decider {}: policy {} changed since the lock was written", d.use_, p.path)),
                 Ok(_) => {}
-                Err(_) => out.push(format!("decider {}: policy {} is missing", d.use_, p.path)),
+                Err(e) => out.push(format!("decider {}: {e}", d.use_)),
             }
         }
     }
     out
+}
+
+/// The most of a policy file hlock reads.
+const MAX_POLICY: usize = 64 * 1024;
+
+/// A locked policy file's text. Its path comes from the lock, so it must be a relative
+/// path inside the project, and a regular file (not a symlink).
+fn policy_text(root: &std::path::Path, path: &str) -> Result<String, String> {
+    let p = root.join(path);
+    if !crate::fsutil::safe_rel(path) || !crate::fsutil::within(root, &p) {
+        return Err(format!("policy {path:?} isn't a path inside the project; not read"));
+    }
+    crate::fsutil::read_regular_text(&p, MAX_POLICY).map_err(|e| match e.kind() {
+        std::io::ErrorKind::NotFound => format!("policy {path} is missing"),
+        _ => format!("policy {path}: {e}"),
+    })
 }
 
 // --------------------------------------------------------------------------- //
@@ -822,6 +951,47 @@ mod tests {
     }
 
     #[test]
+    fn answers_are_matched_by_name_and_checked() {
+        let ep = Endpoint { provider: "x".into(), model: "m".into(), protocol: "decisions".into(), base_url: String::new(), api_key: None, long_context: false, timeout: Duration::from_secs(1) };
+        let qs = vec![Question::noul("a", "A?"), Question::noul("b", "B?")];
+        // named answers are never matched by position: `a` isn't answered here
+        let v = json!({"answers": [{"name": "zzz", "probability": 0.9}, {"name": "b", "probability": 0.2}]});
+        assert!(read_response(&ep, &qs, &v).unwrap_err().contains("didn't answer \"a\""));
+        // with no names at all, position it is
+        let (_, a, _) = read_response(&ep, &qs, &json!({"answers": [{"probability": 0.9}, {"probability": 0.2}]})).unwrap();
+        assert_eq!((a[0].probability(), a[1].probability()), (0.9, 0.2));
+        // out of range, not a number, missing, refused
+        let q = Question::noul("a", "A?");
+        assert_eq!(read_answer(&q, &json!({"noul": 1.7})).probability(), 1.0);
+        for bad in [json!({"noul": "0.9"}), json!({}), json!({"type": "refusal", "noul": 0.9})] {
+            let a = read_answer(&q, &bad);
+            assert!(a.refused && a.value.is_null() && a.probabilities.is_empty(), "{bad}");
+        }
+        let c = read_answer(&Question::choice("c", "?", &[("x", "")]), &json!({"choice": "x", "probabilities": {"x": f64::MAX, "y": -1}, "confidence": 3}));
+        assert_eq!((c.probabilities["x"], c.probabilities["y"], c.confidence), (1.0, 0.0, Some(1.0)));
+        assert!(read_answer(&Question::choice("c", "?", &[]), &json!({"choice": 3})).refused);
+    }
+
+    #[test]
+    fn hook_commands_are_recognized_only_as_written() {
+        let cmd = hook_command("/opt/my hlock/bin/hlock", "approve", "claude-code", Some("PreToolUse"), std::path::Path::new("/p/it's/harness.lock"));
+        assert!(is_hook_command(&cmd), "{cmd}");
+        assert!(is_hook_command(&hook_command_powershell("C:\\h\\hlock.exe", "stop", "copilot", None, std::path::Path::new("C:\\p\\harness.lock"))));
+        for not in ["./decide hook approve", "hlock decide hook approve --format x --lock y && rm -rf ~", "hlock decide hook judge --format x --lock y", "echo 'unclosed", "my-decide hook runner"] {
+            assert!(!is_hook_command(not), "{not}");
+        }
+    }
+
+    #[test]
+    fn one_provider_table() {
+        assert!(needs_key("typesafe") && !needs_key("ollama") && !needs_key("system-one") && !needs_key("nope"));
+        assert!(provider("ollama").unwrap().5.runtime && !provider("system-one").unwrap().5.runtime);
+        assert!(is_decider("system-one:anything", None) && !is_decider("openrouter:qwen3", None));
+        assert!(is_loopback("http://localhost:11434") && is_loopback("127.0.0.1:9") && is_loopback("http://[::1]:8000/v1"));
+        assert!(!is_loopback("https://localhost.evil.example") && !is_loopback("http://10.0.0.1"));
+    }
+
+    #[test]
     fn decisions_requests_use_its_own_names() {
         let ep = Endpoint { provider: "openai-decisions".into(), model: "gpt-6-luna".into(), protocol: "decisions".into(), base_url: String::new(), api_key: None, long_context: false, timeout: Duration::from_secs(1) };
         let mut q = Question::noul("ok", "Is it ok?");
@@ -871,22 +1041,57 @@ pub const HOOK_MARK: &str = "decide hook";
 /// which the plugins hlock writes for Amp, OpenCode and Pi read.
 pub const HOOK_FORMATS: &[&str] = &["claude-code", "codex", "gemini", "cursor", "copilot", "plugin"];
 
-fn shell_quote(s: &str) -> String {
-    if s.chars().any(|c| c.is_whitespace() || "'\"$`\\".contains(c)) { format!("'{}'", s.replace('\'', "'\\''")) } else { s.to_string() }
+/// The harness events `hlock decide hook` answers, per hook format. A lock that wires a
+/// decider to anything else gets no hook.
+pub const HOOK_EVENTS: &[(&str, &[&str])] = &[
+    ("claude-code", &["PreToolUse", "PermissionRequest", "Stop"]),
+    ("codex", &["PreToolUse", "PermissionRequest", "Stop"]),
+    ("gemini", &["BeforeTool", "AfterAgent", "BeforeToolSelection"]),
+    ("cursor", &["preToolUse", "beforeShellExecution"]),
+    ("copilot", &["preToolUse"]),
+];
+
+/// The hook command `sync` writes for `use_` on `event`, for `sh`. Every word is quoted.
+pub fn hook_command(bin: &str, use_: &str, format: &str, event: Option<&str>, lock: &std::path::Path) -> String {
+    use crate::fsutil::shell_quote as q;
+    let event = event.map(|e| format!(" --event {}", q(e))).unwrap_or_default();
+    format!("{} {HOOK_MARK} {} --format {}{event} --lock {}", q(bin), q(use_), q(format), q(&lock.to_string_lossy()))
 }
 
-/// The hook command `sync` writes for `use_` on `event`.
-pub fn hook_command(bin: &str, use_: &str, format: &str, event: Option<&str>, lock: &std::path::Path) -> String {
-    let event = event.map(|e| format!(" --event {e}")).unwrap_or_default();
-    format!("{} {HOOK_MARK} {use_} --format {format}{event} --lock {}", shell_quote(bin), shell_quote(&lock.to_string_lossy()))
+/// [`hook_command`] for PowerShell (Copilot on Windows): its own quoting, and `&` to
+/// call a quoted path.
+pub fn hook_command_powershell(bin: &str, use_: &str, format: &str, event: Option<&str>, lock: &std::path::Path) -> String {
+    let q = |s: &str| if !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric() || "-_./:\\".contains(c)) { s.to_string() } else { format!("'{}'", s.replace('\'', "''")) };
+    let event = event.map(|e| format!(" --event {}", q(e))).unwrap_or_default();
+    format!("& {} {HOOK_MARK} {} --format {}{event} --lock {}", q(bin), q(use_), q(format), q(&lock.to_string_lossy()))
+}
+
+/// Why a lock's hook-wired decider can't be written as a hook for `format`, if it can't:
+/// its use isn't one the agent has, or its event isn't one the hook answers.
+pub fn hook_problem(d: &crate::lockfile::Decider, event: &str, format: &str) -> Option<String> {
+    if !AGENT_USES.contains(&d.use_.as_str()) {
+        return Some(format!("decider {:?}: not a use hlock answers in a hook ({})", d.use_, AGENT_USES.join(", ")));
+    }
+    let known = HOOK_EVENTS.iter().find(|(f, _)| *f == format).map(|(_, e)| *e);
+    match known {
+        Some(events) if !events.contains(&event) => Some(format!("decider {}: {event:?} isn't a {format} hook event hlock answers ({})", d.use_, events.join(", "))),
+        // plugin formats name no event in a command, but the name still has to be plain
+        None if !crate::fsutil::plain_token(event) => Some(format!("decider {}: {event:?} isn't an event name", d.use_)),
+        _ => None,
+    }
+}
+
+/// What `hook_entries` and `owned_hook_file` leave out of `file` for a lock, and why.
+pub fn hook_problems(lock: &crate::lockfile::Lockfile, file: &str, format: &str) -> Vec<String> {
+    lock.decider.iter().filter(|d| d.via == "hook").flat_map(|d| d.wiring.iter().filter(|w| w.file == file).filter_map(move |w| hook_problem(d, &w.event, format))).collect()
 }
 
 /// The `{event: [entries]}` hooks for a lock's hook-wired deciders in `file`, laid out
-/// the way `format`'s harness reads them.
+/// the way `format`'s harness reads them. Wiring with a [`hook_problem`] is left out.
 pub fn hook_entries(lock: &crate::lockfile::Lockfile, file: &str, format: &str, bin: &str, lock_path: &std::path::Path) -> Map<String, Value> {
     let mut events = Map::new();
     for d in lock.decider.iter().filter(|d| d.via == "hook") {
-        for w in d.wiring.iter().filter(|w| w.file == file) {
+        for w in d.wiring.iter().filter(|w| w.file == file && hook_problem(d, &w.event, format).is_none()) {
             let ms = d.timeout_ms.unwrap_or(DEFAULT_TIMEOUT_MS);
             let secs = ms.div_ceil(1000) + 1;
             let cmd = hook_command(bin, &d.use_, format, Some(&w.event), lock_path);
@@ -897,7 +1102,10 @@ pub fn hook_entries(lock: &crate::lockfile::Lockfile, file: &str, format: &str, 
                     if w.event == "BeforeTool" { json!({"matcher": ".*", "hooks": [handler]}) } else { json!({"hooks": [handler]}) }
                 }
                 "cursor" => json!({"command": cmd, "timeout": secs}),
-                "copilot" => json!({"type": "command", "bash": cmd, "powershell": cmd, "timeoutSec": secs}),
+                "copilot" => {
+                    let ps = hook_command_powershell(bin, &d.use_, format, Some(&w.event), lock_path);
+                    json!({"type": "command", "bash": cmd, "powershell": ps, "timeoutSec": secs})
+                }
                 // Claude Code and Codex
                 _ => {
                     let handler = json!({"type": "command", "command": cmd, "timeout": secs});
@@ -910,34 +1118,98 @@ pub fn hook_entries(lock: &crate::lockfile::Lockfile, file: &str, format: &str, 
     events
 }
 
+/// The words of a command line hlock wrote: plain words, and `'…'` with `'\''` (sh) or
+/// `''` (PowerShell) for a quote inside. `None` for an unclosed quote.
+fn command_words(s: &str) -> Option<Vec<String>> {
+    let mut words = Vec::new();
+    let mut cur: Option<String> = None;
+    let mut it = s.chars().peekable();
+    while let Some(c) = it.next() {
+        match c {
+            ' ' | '\t' => words.extend(cur.take()),
+            '\'' => {
+                let w = cur.get_or_insert_with(String::new);
+                loop {
+                    match it.next()? {
+                        '\'' if it.peek() == Some(&'\'') => {
+                            it.next();
+                            w.push('\'');
+                        }
+                        '\'' => break,
+                        ch => w.push(ch),
+                    }
+                }
+            }
+            '\\' if it.peek() == Some(&'\'') => {
+                it.next();
+                cur.get_or_insert_with(String::new).push('\'');
+            }
+            ch => cur.get_or_insert_with(String::new).push(ch),
+        }
+    }
+    words.extend(cur);
+    Some(words)
+}
+
+/// Whether a hook command is one [`hook_command`] wrote: `<bin> decide hook <use>
+/// --format <f> [--event <e>] --lock <path>`, and nothing else. A user's own hook that
+/// merely mentions `decide hook` isn't.
+fn is_hook_command(cmd: &str) -> bool {
+    let Some(mut w) = command_words(cmd) else { return false };
+    if w.first().map(String::as_str) == Some("&") {
+        w.remove(0);
+    }
+    let w: Vec<&str> = w.iter().map(String::as_str).collect();
+    match w.as_slice() {
+        [_, "decide", "hook", u, "--format", _, rest @ ..] if AGENT_USES.contains(u) => matches!(rest, ["--lock", _] | ["--event", _, "--lock", _]),
+        _ => false,
+    }
+}
+
 fn is_ours(entry: &Value) -> bool {
-    ["command", "bash"].iter().any(|k| entry[*k].as_str().is_some_and(|c| c.contains(HOOK_MARK)))
+    ["command", "bash", "powershell"].iter().any(|k| entry[*k].as_str().is_some_and(is_hook_command))
 }
 
 /// Remove hlock's own hook entries from a config document: any `hooks` object laid out
 /// as event → groups → handlers (Claude Code, Codex, Gemini CLI) or event → entries
-/// (Cursor, Copilot), dropping groups and events left empty.
+/// (Cursor, Copilot), dropping the groups and events that removing them left empty.
+/// Groups and events that were already empty are the user's, and stay.
 pub fn strip_hooks(doc: &mut Value) -> bool {
     let mut changed = false;
     match doc {
         Value::Object(m) => {
             if let Some(Value::Object(events)) = m.get_mut("hooks") {
-                for entries in events.values_mut() {
+                let mut emptied = Vec::new();
+                for (event, entries) in events.iter_mut() {
                     if let Value::Array(es) = entries {
-                        for g in es.iter_mut() {
-                            if let Some(Value::Array(hs)) = g.get_mut("hooks") {
-                                let before = hs.len();
-                                hs.retain(|h| !is_ours(h));
-                                changed |= hs.len() != before;
+                        let was_empty = es.is_empty();
+                        let mut removed = false;
+                        es.retain_mut(|g| {
+                            if is_ours(g) {
+                                removed = true;
+                                return false;
                             }
+                            match g.get_mut("hooks") {
+                                Some(Value::Array(hs)) if !hs.is_empty() => {
+                                    let before = hs.len();
+                                    hs.retain(|h| !is_ours(h));
+                                    removed |= hs.len() != before;
+                                    // a group is dropped only when it held nothing but ours
+                                    !hs.is_empty()
+                                }
+                                _ => true,
+                            }
+                        });
+                        changed |= removed;
+                        if !was_empty && es.is_empty() {
+                            emptied.push(event.clone());
                         }
-                        let before = es.len();
-                        es.retain(|g| !is_ours(g) && !g.get("hooks").and_then(Value::as_array).is_some_and(|hs| hs.is_empty()));
-                        changed |= es.len() != before;
                     }
                 }
-                events.retain(|_, es| !es.as_array().is_some_and(|a| a.is_empty()));
-                if events.is_empty() && changed {
+                for e in &emptied {
+                    events.remove(e);
+                }
+                if events.is_empty() && !emptied.is_empty() {
                     m.remove("hooks");
                 }
             }
@@ -985,7 +1257,12 @@ pub fn merge_hooks(doc: &mut Value, pointer: &str, entries: &Map<String, Value>)
 /// (Copilot's `.github/hooks/hlock.json`) or in a plugin (Amp, OpenCode, Pi), or
 /// `None` when the lock wires nothing into it.
 pub fn owned_hook_file(lock_file: &crate::lockfile::Lockfile, file: &str, format: &str, bin: &str, lock_path: &std::path::Path) -> Option<String> {
-    let uses: Vec<String> = lock_file.decider.iter().filter(|d| d.via == "hook" && d.wiring.iter().any(|w| w.file == file)).map(|d| d.use_.clone()).collect();
+    let uses: Vec<String> = lock_file
+        .decider
+        .iter()
+        .filter(|d| d.via == "hook" && d.wiring.iter().any(|w| w.file == file && hook_problem(d, &w.event, format).is_none()))
+        .map(|d| d.use_.clone())
+        .collect();
     if uses.is_empty() {
         return None;
     }
@@ -1117,8 +1394,10 @@ fn first_user_message(path: &str) -> Option<String> {
 
 /// Answer one hook event for the locked decider of `use_`: ask it, and print the
 /// harness's own answer when it's sure enough, else defer. Never fails: an error,
-/// a timeout or a low probability defers.
+/// a refusal, a timeout or a low probability defers. The whole call, retries included,
+/// finishes within the decider's `timeout-ms`, before the harness gives up on the hook.
 pub fn hook(use_: &str, format: &str, event: Option<&str>, input: &Value, lock: &crate::lockfile::Lockfile, root: &std::path::Path, var: &dyn Fn(&str) -> Option<String>) -> HookOutput {
+    let start = Instant::now();
     let Some(d) = lock.decider.iter().find(|d| d.use_ == use_) else {
         return HookOutput::defer(format!("no {use_} decider in the lock"));
     };
@@ -1141,7 +1420,11 @@ pub fn hook(use_: &str, format: &str, event: Option<&str>, input: &Value, lock: 
     if (ev.kind == "tools" && ev.tools.len() < 2) || (ev.kind == "route" && ev.options.len() < 2) {
         return HookOutput::defer("nothing to choose between");
     }
-    let policy = d.policy.as_ref().and_then(|p| std::fs::read_to_string(root.join(&p.path)).ok());
+    let policy = match d.policy.as_ref().map(|p| policy_text(root, &p.path)) {
+        Some(Err(e)) => return HookOutput::defer(e),
+        Some(Ok(t)) => Some(t),
+        None => None,
+    };
     let options = if ev.kind == "route" { &ev.options } else { &ev.tools };
     let questions = use_questions(use_, policy.as_deref(), options);
     let state = match ev.kind {
@@ -1150,21 +1433,29 @@ pub fn hook(use_: &str, format: &str, event: Option<&str>, input: &Value, lock: 
         "route" => ev.state.clone(),
         _ => json!({"tools": ev.tools, "recent_messages": ev.messages}),
     };
-    let mut cfg = entry_config(d);
-    cfg.timeout_seconds = Some(d.timeout_ms.unwrap_or(DEFAULT_TIMEOUT_MS).div_ceil(1000));
-    let decided = match cfg.endpoint(var).and_then(|ep| decide(&ep, &state, &questions)) {
+    let ms = d.timeout_ms.unwrap_or(DEFAULT_TIMEOUT_MS);
+    let mut cfg = entry_config_for(d, own_spec(root, use_).as_ref());
+    cfg.timeout_seconds = Some(ms.div_ceil(1000));
+    let deadline = start + Duration::from_millis(ms);
+    let decided = match cfg.endpoint(var).and_then(|ep| decide_by(&ep, &state, &questions, Some(deadline))) {
         Ok(x) => x,
         Err(e) => return HookOutput::defer(format!("decider unavailable: {e}")),
+    };
+    // one answer for approve, stop and route; a refusal or an answer without its value
+    // makes no decision (for `tool`, an unanswered tool is kept)
+    let first = match decided.answers.first() {
+        Some(a) if a.refused && use_ != "tool" => return HookOutput::defer(format!("the decider refused or gave no answer for {}", a.id)),
+        a => a,
     };
     let who = format!("hlock {use_} decider ({}:{})", d.provider, decided.model);
     let out = |v: Value, note: String| HookOutput { stdout: v.to_string(), exit: 0, note };
     match use_ {
         "approve" => {
-            let Some(a) = decided.answers.first() else { return HookOutput::defer("no answer") };
+            let Some(a) = first else { return HookOutput::defer("no answer") };
             let choice = a.value.as_str().unwrap_or_default().to_string();
             let p = a.probability();
             let need = min_probability("approve", &d.min_probability, &choice);
-            if !d.may.contains(&choice) || p < need {
+            if !["allow", "ask", "deny"].contains(&choice.as_str()) || !d.may.contains(&choice) || p < need {
                 return HookOutput::defer(format!("{choice} at P={p:.2}: not allowed or below {need}"));
             }
             let reason = format!("{who}: {choice} at P={p:.2}");
@@ -1188,7 +1479,7 @@ pub fn hook(use_: &str, format: &str, event: Option<&str>, input: &Value, lock: 
             }
         }
         "stop" => {
-            let Some(a) = decided.answers.first() else { return HookOutput::defer("no answer") };
+            let Some(a) = first else { return HookOutput::defer("no answer") };
             let p = a.probability();
             let need = min_probability("stop", &d.min_probability, "done");
             if p >= need {
@@ -1203,8 +1494,11 @@ pub fn hook(use_: &str, format: &str, event: Option<&str>, input: &Value, lock: 
             }
         }
         "route" => {
-            let Some(a) = decided.answers.first() else { return HookOutput::defer("no answer") };
+            let Some(a) = first else { return HookOutput::defer("no answer") };
             let choice = a.value.as_str().unwrap_or_default().to_string();
+            if !ev.options.contains(&choice) {
+                return HookOutput::defer(format!("{choice:?} isn't one of the options ({})", ev.options.join(", ")));
+            }
             let p = a.probability();
             let need = min_probability("route", &d.min_probability, &choice);
             if p < need {
@@ -1216,7 +1510,7 @@ pub fn hook(use_: &str, format: &str, event: Option<&str>, input: &Value, lock: 
         _ => {
             // tool: keep the tools the next step may need
             let need = min_probability("tool", &d.min_probability, "keep");
-            let keep: Vec<&String> = ev.tools.iter().enumerate().filter(|(i, _)| decided.get(&format!("t{}", i + 1)).is_none_or(|a| a.probability() >= need)).map(|(_, t)| t).collect();
+            let keep: Vec<&String> = ev.tools.iter().enumerate().filter(|(i, _)| decided.get(&format!("t{}", i + 1)).is_none_or(|a| a.refused || a.probability() >= need)).map(|(_, t)| t).collect();
             if keep.is_empty() || keep.len() == ev.tools.len() {
                 return HookOutput::defer(format!("keeps {} of {} tools", keep.len(), ev.tools.len()));
             }

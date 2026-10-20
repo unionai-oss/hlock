@@ -171,7 +171,7 @@ workspace:
 | `HLOCK_MODEL` | The model as `provider:model` |
 | `HLOCK_LLM_BASE_URL` | The model's base URL, when the lock or `HL_LLM_BASE_URL` sets one |
 | `HLOCK_WORKSPACE` | The working directory for artifacts (also the current directory) |
-| `HLOCK_MCP_CONFIG` | A `{"mcpServers": …}` file for the lock's MCP servers, secrets filled from the environment |
+| `HLOCK_MCP_CONFIG` | A `{"mcpServers": …}` file for the lock's MCP servers, readable only by you. Its `${HLOCK_SECRET_…}` placeholders are filled from the environment and your [secret sources](secrets.md); other `${…}` are left as written. |
 | `HLOCK_SKILLS_DIR` | A directory holding the lock's skills |
 | `HLOCK_LOCK` | The lockfile |
 | `HLOCK_OUTPUT` | Where the harness may write a JSON result |

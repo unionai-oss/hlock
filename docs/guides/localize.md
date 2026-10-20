@@ -54,7 +54,9 @@ lists them.
 
 The new lock also configures the harness to use the local endpoint. For OpenCode, it adds an
 `ollama` OpenAI-compatible provider and sets `model = "ollama/gemma3:12b"`. These settings are
-merged into the harness's config when you sync or launch.
+merged into the harness's config when you sync or launch. When the harness stays the same,
+they go into the config file the source lock already restores, so the new lock has one entry
+per file, however many times you localize.
 
 ## Evaluate instead of guess
 

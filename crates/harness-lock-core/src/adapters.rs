@@ -6,6 +6,7 @@ use std::path::Path;
 use serde_json::json;
 
 use crate::error::Result;
+use crate::fsutil::copy_tree;
 use crate::providers::ReferenceProvider;
 use crate::search::Stack;
 use crate::tasks::Task;
@@ -47,11 +48,15 @@ impl HarnessAdapter for ReferenceAdapter {
     fn run(&self, stack: &Stack, task: &Task, workspace: &Path, seed: u64) -> Result<RunOutcome> {
         // copy fixtures into the workspace
         if let (Some(fixtures), Some(pack_dir)) = (&task.fixtures, &task.pack_dir) {
-            let src = pack_dir.join(fixtures);
+            let src = pack_dir.join(pack_rel("fixtures", fixtures)?);
             if src.exists() {
-                copy_dir(&src, workspace);
+                copy_tree(&src, workspace)?;
             }
         }
+        let solution = match (&task.solution, &task.pack_dir) {
+            (Some(s), Some(d)) => Some(d.join(pack_rel("solution", s)?)).filter(|p| p.is_dir()),
+            _ => None,
+        };
         let model_spec = stack
             .llm
             .get("planner")
@@ -72,8 +77,8 @@ impl HarnessAdapter for ReferenceAdapter {
             // agent-level retries: attempt this step up to 1+retries times
             let max_attempts = (stack.retries + 1) as usize;
             let mut any_ok = false;
-            for _attempt in 0..max_attempts {
-                let r = provider.complete(&model, 1);
+            for attempt in 0..max_attempts {
+                let r = provider.complete_for(&model, &task.id, step as u64, attempt as u64);
                 cost += r.cost_usd;
                 latency += r.latency_ms / 1000.0;
                 events.push(json!({
@@ -91,16 +96,16 @@ impl HarnessAdapter for ReferenceAdapter {
             }
             if any_ok {
                 // a simulated success leaves the task's solution, when it has one
-                let solution = task.solution.as_ref().zip(task.pack_dir.as_ref()).map(|(s, d)| d.join(s)).filter(|p| p.is_dir());
                 if let Some(sol) = &solution {
-                    copy_dir(sol, workspace);
+                    copy_tree(sol, workspace)?;
                 }
                 for art in expected.iter().filter(|_| solution.is_none()) {
-                    let out = workspace.join(art);
+                    let out = workspace.join(pack_rel("expected artifact", Path::new(art))?);
                     if let Some(parent) = out.parent() {
-                        let _ = fs::create_dir_all(parent);
+                        fs::create_dir_all(parent)?;
                     }
-                    let _ = fs::write(&out, format!("artifact for {}", task.id));
+                    crate::fsutil::clear_symlink(&out)?;
+                    fs::write(&out, format!("artifact for {}", task.id))?;
                 }
                 success = true;
                 steps = step as u64 + 1;
@@ -125,17 +130,8 @@ impl HarnessAdapter for ReferenceAdapter {
     }
 }
 
-pub(crate) fn copy_dir(src: &Path, dst: &Path) {
-    let _ = fs::create_dir_all(dst);
-    if let Ok(rd) = fs::read_dir(src) {
-        for entry in rd.flatten() {
-            let from = entry.path();
-            let to = dst.join(entry.file_name());
-            if from.is_dir() {
-                copy_dir(&from, &to);
-            } else if let Ok(data) = fs::read(&from) {
-                let _ = fs::write(&to, data);
-            }
-        }
-    }
+/// A path a task names in the pack or the workspace, checked to stay inside it.
+fn pack_rel<'a>(what: &str, p: &'a Path) -> Result<&'a Path> {
+    crate::fsutil::check_safe_rel(what, &p.to_string_lossy())?;
+    Ok(p)
 }

@@ -591,8 +591,8 @@ dependencies = [
 name = "harness-lock-core"
 version = "0.3.1"
 dependencies = [
- "anyhow",
  "flyte",
+ "libc",
  "serde",
  "serde_json",
  "serde_norway",

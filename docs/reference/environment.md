@@ -34,6 +34,7 @@ The variables below are used by the worker (the `devbox` and `cluster`
 | Variable | Default | Description |
 |---|---|---|
 | `HL_PYTHON` | the interpreter running `hlock` | Interpreter the Rust core uses to launch the worker, and the default for [code harnesses](../guides/harnesses.md#how-hlock-runs-a-code-harness). Point it at one with `hlock` installed. |
+| `HLOCK_WORKER_TIMEOUT` | `3600` | Seconds one worker call may take before hlock stops it (and what it started) and reports a timeout |
 
 ## LLM calls
 

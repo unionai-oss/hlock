@@ -100,7 +100,7 @@ $ hlock resolve
 │  Evidence                                │
 │  success rate  100%                      │
 │  cost / task   $0.0001                   │
-│  latency       p50 0.26s  ·  p95 0.40s   │
+│  latency       p50 0.59s  ·  p95 1.28s   │
 │  trials        4                         │
 │                                          │
 │  lock-version 1 · manifest 2216eb06dca5  │
@@ -137,13 +137,16 @@ was written, which makes it a [CI gate](ci.md). `hlock show` prints the same pan
 ## 5. Run the locked agent
 
 ```console
-$ hlock run "count the words in words.txt"
+$ hlock run "clean ./data/orders.csv"
 ✓ success  model qwen-7b  cost $0.0001
+$ hlock run "count the words in words.txt"
+✗ failed  model qwen-7b  cost $0.0001
 ```
 
 `hlock run` loads `harness.lock` and runs the pinned stack. It exits `0` on success and
 `1` on failure, and takes `--json` for scripting. Here it runs the locked model on the
-offline reference provider. When the lock is for an agent CLI it runs that harness for
+offline reference provider, which succeeds as often as the model's simulated quality
+(75% for `qwen-7b`) and answers the same prompt the same way every time. When the lock is for an agent CLI it runs that harness for
 real, and for a [code harness](harnesses.md#your-own-agent-frameworks-and-custom-scripts)
 it runs your agent.
 

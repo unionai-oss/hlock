@@ -285,7 +285,7 @@ pub fn choose_local(reg: &Registry, ctx: &Ctx, runtime: Option<&str>, model: Opt
         host: format!("http://localhost:{port}"),
         model: best.id.clone(),
         present: best.present,
-        pull: (!best.present).then(|| rt.pull.as_ref().map(|p| p.replace("{model}", &best.id))).flatten(),
+        pull: (!best.present).then(|| rt.pull.as_ref().map(|p| p.replace("{model}", &crate::fsutil::shell_quote(&best.id)))).flatten(),
         usable_gb: usable,
     })
 }
@@ -547,11 +547,43 @@ pub fn localize(source: &Lockfile, source_path: &Path, reg: &Registry, ctx: &Ctx
         }
     }
     let vroot = format!("{VENDOR_DIR}/{}/localize", target.id);
-    for (file, sets) in per_file {
+    let source_dir = match source_path.parent().filter(|p| !p.as_os_str().is_empty()) {
+        Some(p) if p.is_absolute() => p.to_path_buf(),
+        Some(p) => ctx.cwd.join(p),
+        None => ctx.cwd.clone(),
+    };
+    for (file, mut sets) in per_file {
         let Some(spec) = target.files.get(&file) else {
             notes.push(format!("the {} profile has no file {file:?}", target.id));
             continue;
         };
+        // the source lock's entry for the same file (the harness didn't change, or this
+        // lock was localized before) is merged into, never duplicated
+        if let Some(i) = lock.config.iter().position(|c| c.id == file) {
+            let prev = lock.config.remove(i);
+            let fmt = if prev.restore == "pointers" || prev.format == "jsonc" { "json" } else { prev.format.as_str() };
+            let doc = prev.vendored.as_deref().and_then(|v| read_vendored(&source_dir, v)).and_then(|t| crate::capture::parse_config(&t, fmt).ok());
+            match (prev.restore.as_str(), doc) {
+                // earlier pointers stay, under ours
+                ("pointers", Some(Value::Object(m))) => {
+                    for (p, v) in m {
+                        sets.entry(p).or_insert(v);
+                    }
+                }
+                // a whole file: ours are set inside it
+                ("record", _) => {}
+                (_, Some(mut doc)) => {
+                    for (p, v) in &sets {
+                        set_pointer(&mut doc, p, v.clone());
+                    }
+                    let rel = format!("{vroot}/{file}.{fmt}");
+                    vendor.push(VendorFile { rel: rel.clone(), bytes: render_config(&doc, fmt).map_err(Error::Profile)?.into_bytes(), executable: false });
+                    lock.config.insert(i, ConfigFile { digest: Some(crate::hash::content_hash(&doc)), vendored: Some(rel), ..prev });
+                    continue;
+                }
+                (_, None) => notes.push(format!("can't read the source lock's vendored {file}; only the local model settings are restored")),
+            }
+        }
         let body = Value::Object(sets.clone());
         let rel = format!("{vroot}/{file}.pointers.json");
         vendor.push(VendorFile { rel: rel.clone(), bytes: render_config(&body, "json").map_err(Error::Profile)?.into_bytes(), executable: false });
@@ -594,6 +626,12 @@ pub fn localize(source: &Lockfile, source_path: &Path, reg: &Registry, ctx: &Ctx
     let report = drop_nulls(&report); // TOML has no null
     lock.localize = Some(report.clone());
     Ok(LocalizeOutcome { lock, vendor, report })
+}
+
+/// A vendored file of a lock in `dir`, when its path is inside `dir`.
+fn read_vendored(dir: &Path, rel: &str) -> Option<String> {
+    let p = dir.join(rel);
+    (crate::fsutil::safe_rel(rel) && crate::fsutil::within(dir, &p)).then(|| crate::fsutil::read_regular_text(&p, 20 << 20).ok()).flatten()
 }
 
 /// Localize and write the lock to `out`, with its vendored files beside it.
@@ -640,6 +678,35 @@ mod tests {
         let v = json!({"/provider/{provider}": {"options": {"baseURL": "{base_url}"}, "models": {"{model}": {}}}});
         let out = subst_value(&v, &[("provider", "ollama"), ("model", "qwen3:8b"), ("base_url", "http://localhost:11434/v1")]);
         assert_eq!(out, json!({"/provider/ollama": {"options": {"baseURL": "http://localhost:11434/v1"}, "models": {"qwen3:8b": {}}}}));
+    }
+
+    #[test]
+    fn relocalizing_merges_into_the_config_entry_it_already_has() {
+        let d = std::env::temp_dir().join(format!("hlock-localize-merge-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(d.join("proj/.hlock/vendor/opencode/config")).unwrap();
+        let ctx = Ctx { home: d.join("home"), cwd: d.join("proj"), env: BTreeMap::new(), path: vec![] };
+        std::fs::write(ctx.cwd.join(".hlock/vendor/opencode/config/config.json"), "{\"theme\": \"dark\"}").unwrap();
+        let source = Lockfile {
+            harness: Harness { name: "opencode".into(), ..Default::default() },
+            config: vec![ConfigFile { id: "config".into(), path: "{root}/opencode.json".into(), format: "jsonc".into(), restore: "whole".into(), vendored: Some(".hlock/vendor/opencode/config/config.json".into()), ..Default::default() }],
+            ..Default::default()
+        };
+        let reg = Registry::builtin();
+        let opts = LocalizeOptions { runtime: Some("ollama".into()), memory_gb: Some(64.0), workdir: d.join("work"), ..Default::default() };
+        let src = ctx.cwd.join("harness.lock");
+        source.save(&src).unwrap();
+        let out = ctx.cwd.join("local.lock");
+        let first = localize_to(&src, &out, &reg, &ctx, &opts).unwrap();
+        let entries: Vec<&ConfigFile> = first.lock.config.iter().filter(|c| c.id == "config").collect();
+        assert_eq!(entries.len(), 1, "{:?}", first.lock.config);
+        let doc: Value = serde_json::from_str(&std::fs::read_to_string(ctx.cwd.join(entries[0].vendored.as_ref().unwrap())).unwrap()).unwrap();
+        assert_eq!(doc["theme"], "dark", "the file's own settings stay");
+        assert!(doc["model"].as_str().unwrap().starts_with("ollama/"), "{doc}");
+        // again, from the localized lock: still one entry
+        let again = localize_to(&out, &ctx.cwd.join("local2.lock"), &reg, &ctx, &opts).unwrap();
+        assert_eq!(again.lock.config.iter().filter(|c| c.id == "config").count(), 1);
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     #[test]

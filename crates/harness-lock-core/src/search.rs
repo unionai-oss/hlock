@@ -4,6 +4,7 @@ use std::collections::BTreeMap;
 
 use serde_json::json;
 
+use crate::error::{Error, Result};
 use crate::hash::content_hash;
 
 /// One concrete agent configuration (an axis of the search space).
@@ -99,6 +100,23 @@ pub struct TrialResult {
     pub cost_usd: f64,
     pub latency_s: f64,
     pub steps: u64,
+    /// Why the harness couldn't run the trial (it counts as failed).
+    pub error: Option<String>,
+    /// What judged the trial's `judge` and `trace` graders, when any ran.
+    pub judging: Option<TrialJudging>,
+}
+
+/// The judging of one trial: for the lock's `evidence.judge`, from the winner's trials.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct TrialJudging {
+    /// The judge configured for the task's pack.
+    pub configured: Option<String>,
+    /// The models that answered, as the provider named them.
+    pub answered: Vec<String>,
+    pub grades: usize,
+    pub uncertain: usize,
+    /// What judging cost, `None` when a price is unknown.
+    pub cost_usd: Option<f64>,
 }
 
 /// Aggregated metrics for one stack.
@@ -127,7 +145,7 @@ impl StackScore {
 
     pub fn p95_latency(&self) -> f64 {
         let mut v: Vec<f64> = self.trials.iter().map(|t| t.latency_s).collect();
-        v.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        v.sort_by(f64::total_cmp);
         if v.is_empty() {
             return 0.0;
         }
@@ -157,61 +175,91 @@ pub fn pareto_front(mut scores: Vec<StackScore>) -> Vec<StackScore> {
             front.push(s);
         }
     }
-    front.sort_by(|a, b| {
-        b.success_rate()
-            .partial_cmp(&a.success_rate())
-            .unwrap()
-            .then(a.mean_cost().partial_cmp(&b.mean_cost()).unwrap())
-    });
+    front.sort_by(|a, b| b.success_rate().total_cmp(&a.success_rate()).then(a.mean_cost().total_cmp(&b.mean_cost())));
     front
 }
 
-/// Select winner from the Pareto front honoring objective constraints + select rule.
-pub fn select_winner(scores: Vec<StackScore>, _primary: &str, constraints: &BTreeMap<String, String>, select: &str) -> Option<StackScore> {
-    let front = pareto_front(scores);
-    if front.is_empty() {
-        return None;
-    }
-    fn ok(s: &StackScore, constraints: &BTreeMap<String, String>) -> bool {
-        for (metric, expr) in constraints {
-            let val = match metric.as_str() {
-                "success-rate" => Some(s.success_rate()),
-                "cost-usd-per-task" => Some(s.mean_cost()),
-                _ => None,
-            };
-            if let Some(v) = val {
-                if let Some(op) = expr.strip_prefix(">=") {
-                    if !(v >= op.trim().parse::<f64>().unwrap_or(-1.0)) {
-                        return false;
-                    }
-                } else if let Some(op) = expr.strip_prefix("<=") {
-                    if !(v <= op.trim().parse::<f64>().unwrap_or(f64::MAX)) {
-                        return false;
-                    }
-                } else if let Some(op) = expr.strip_prefix('>') {
-                    if !(v > op.trim().parse::<f64>().unwrap_or(-1.0)) {
-                        return false;
-                    }
-                } else if let Some(op) = expr.strip_prefix('<') {
-                    if !(v < op.trim().parse::<f64>().unwrap_or(f64::MAX)) {
-                        return false;
-                    }
-                }
-            }
+/// The metrics `[objective.constraints]` can limit.
+pub const CONSTRAINT_METRICS: [&str; 2] = ["success-rate", "cost-usd-per-task"];
+
+/// One `[objective.constraints]` entry, parsed: `metric op bound`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Constraint {
+    pub metric: String,
+    pub op: String,
+    pub bound: f64,
+}
+
+impl Constraint {
+    fn value(&self, s: &StackScore) -> f64 {
+        match self.metric.as_str() {
+            "success-rate" => s.success_rate(),
+            _ => s.mean_cost(),
         }
-        true
     }
-    let eligible: Vec<StackScore> = front.iter().filter(|s| ok(s, constraints)).cloned().collect();
-    let pool = if eligible.is_empty() { front } else { eligible };
-    if pool.is_empty() {
-        return None;
+
+    pub fn holds(&self, s: &StackScore) -> bool {
+        let v = self.value(s);
+        match self.op.as_str() {
+            ">=" => v >= self.bound,
+            "<=" => v <= self.bound,
+            ">" => v > self.bound,
+            _ => v < self.bound,
+        }
     }
-    match select {
-        "max-quality" => pool
-            .into_iter()
-            .max_by(|a, b| a.success_rate().partial_cmp(&b.success_rate()).unwrap()),
-        _ => pool.into_iter().min_by(|a, b| a.mean_cost().partial_cmp(&b.mean_cost()).unwrap()),
+}
+
+impl std::fmt::Display for Constraint {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{} {}{}", self.metric, self.op, self.bound)
     }
+}
+
+/// Parse `[objective.constraints]`: each a known metric and a comparison (`>=`, `<=`,
+/// `>`, `<`) with a number. An entry that doesn't parse is an error naming it.
+pub fn parse_constraints(constraints: &BTreeMap<String, String>) -> Result<Vec<Constraint>> {
+    constraints
+        .iter()
+        .map(|(metric, expr)| {
+            let bad = |why: String| Error::Manifest(format!("[objective.constraints] {metric} = {expr:?}: {why}"));
+            if !CONSTRAINT_METRICS.contains(&metric.as_str()) {
+                return Err(bad(format!("unknown metric (use {})", CONSTRAINT_METRICS.join(" or "))));
+            }
+            let e = expr.trim();
+            let op = [">=", "<=", ">", "<"].into_iter().find(|op| e.starts_with(op)).ok_or_else(|| bad("write a comparison like \">=0.8\" (>=, <=, >, or <)".into()))?;
+            let bound = e[op.len()..].trim().parse::<f64>().ok().filter(|b| b.is_finite()).ok_or_else(|| bad(format!("{:?} isn't a number", e[op.len()..].trim())))?;
+            Ok(Constraint { metric: metric.clone(), op: op.into(), bound })
+        })
+        .collect()
+}
+
+/// Select the winner: drop the stacks that miss a constraint, keep the Pareto front of
+/// the rest, and apply the select rule. Errors when a constraint doesn't parse, and when
+/// no stack meets every constraint (naming the closest one), rather than picking a
+/// stack that misses one.
+pub fn select_winner(scores: Vec<StackScore>, _primary: &str, constraints: &BTreeMap<String, String>, select: &str) -> Result<StackScore> {
+    let constraints = parse_constraints(constraints)?;
+    let no_stack = || Error::Tuning("no viable stack found".into());
+    let (eligible, missed): (Vec<StackScore>, Vec<StackScore>) = scores.into_iter().partition(|s| constraints.iter().all(|c| c.holds(s)));
+    if eligible.is_empty() {
+        // the closest: fewest constraints missed, then the best success rate
+        let missing = |s: &StackScore| constraints.iter().filter(|c| !c.holds(s)).count();
+        let best = missed.iter().min_by(|a, b| missing(a).cmp(&missing(b)).then(b.success_rate().total_cmp(&a.success_rate()))).ok_or_else(no_stack)?;
+        let failed: Vec<String> = constraints.iter().filter(|c| !c.holds(best)).map(Constraint::to_string).collect();
+        return Err(Error::Tuning(format!(
+            "no stack meets [objective.constraints]; the closest, {}, has success-rate {:.4} and cost-usd-per-task {:.6}, missing {}",
+            best.stack.label(),
+            best.success_rate(),
+            best.mean_cost(),
+            failed.join(", ")
+        )));
+    }
+    let pool = pareto_front(eligible);
+    let winner = match select {
+        "max-quality" => pool.into_iter().max_by(|a, b| a.success_rate().total_cmp(&b.success_rate())),
+        _ => pool.into_iter().min_by(|a, b| a.mean_cost().total_cmp(&b.mean_cost())),
+    };
+    winner.ok_or_else(no_stack)
 }
 
 fn roundn(v: f64, n: i32) -> f64 {

@@ -202,8 +202,8 @@ It works through six tools:
 
 | Tool | What it does |
 |---|---|
-| `list_dir`, `read_file`, `search` | Look around the project, or anywhere it's pointed |
-| `write_file`, `edit_file` | Create and change files, only inside the project |
+| `list_dir`, `read_file`, `search` | Look around the project; anywhere else needs your approval |
+| `write_file`, `edit_file` | Create and change files in the project; anywhere else needs your approval |
 | `run` | Run a shell command in the project |
 
 What it may run is up to you:
@@ -213,21 +213,39 @@ What it may run is up to you:
 - **Headless runs** run only allowlisted commands and refuse the rest. The agent is told
   why, and says in its summary what it couldn't do.
 
+The file tools work the same way. Reading or writing outside the project, through a
+symlink that leads out of it, or writing hlock's own files (`harness.toml`,
+`harness.meta.toml`, `harness.lock` and other `harness.*.lock` files) or anything under
+`.git/` or `.hlock/`, is put to you in an interactive run and refused in a headless one.
+`search` skips files over 2 MB, binary files, and symlinks.
+
 The allowlist matches whole words at the start of a plain command: `git log` allows
 `git log -5` but not `git push`, and a command with pipes, redirects, `;`, `&&` or `$(…)`
-never matches. An entry starting with `!` refuses a command that starts with its words
-and has all of its flags: `!npm install --global` refuses `npm install --global x`.
+never matches. The program must be a bare name found on `PATH`: `./git log` or
+`/usr/bin/git log` isn't allowlisted, since a file with that name could be anything. An
+entry starting with `!` refuses a command that starts with its words and has all of its
+flags: `!npm install --global` refuses `npm install --global x`.
 
-The default allows `@hlock` and read-only `git`. `@hlock` stands for the hlock commands
-the jobs need that don't run code from the project or install software:
+The default allows `@hlock` and read-only `git`. A `git` command with an option that
+writes a file, runs a program, or points git elsewhere (`--output`, `--ext-diff`,
+`--textconv`, `--no-index`, `-c`, `--config-env`, `--exec-path`, `--git-dir`,
+`--work-tree`) isn't allowlisted. `@hlock` stands for the hlock commands the jobs need
+that don't run code from the project or install software:
 
 - `hlock check`, `show`, `tree`, `harness list`, `harness show`, `runtime list`, and
   `backend status`
-- `hlock evals init` (but not with `--skill-dir`, which writes outside the project),
-  `evals templates`, and `evals check`, but not `evals check --run` or `evals grade`,
-  which run the pack's test scripts
-- `hlock meta check`, `meta show`, `meta jobs`, and `meta verify`
-- `hlock sync`, but not with `--install`, `--pull`, `--build`, `--in-place`, or `--prefix`
+- `hlock evals init` (but not with `--skill-dir`, which writes outside the project, or
+  `--force`), `evals templates`, and `evals check`, but not `evals check --run` or
+  `evals grade`, which run the pack's test scripts
+- `hlock meta check`, `meta show`, `meta jobs`, and `meta verify` for the built-in jobs
+  (`install`, `bootstrap-evals`, `update`). A custom job's `verify` runs a shell command
+  from `harness.meta.toml`, so the agent asks you before it runs `hlock meta verify` for
+  one; hlock runs the check itself after the agent finishes either way.
+- `hlock sync`, but not with `--install`, `--pull`, `--build`, `--in-place`, `--prefix`,
+  or `--skill-dir`
+
+An `@hlock` command with a path argument that's absolute, starts with `~`, or climbs out
+with `..` isn't allowlisted either.
 
 The agent can edit files in the project, so a command that runs what's written there,
 such as `hlock resolve` (code harnesses) or `hlock evals check --run` (test graders), would

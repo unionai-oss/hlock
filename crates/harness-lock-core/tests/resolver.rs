@@ -163,6 +163,12 @@ fn content_graders_pass_on_the_reference_harness_and_judges_reach_the_evidence()
         let mut m = make_manifest(&pack);
         m.candidates.llm.get_mut("planner").unwrap().any_of = vec!["reference:qwen-32b".into()];
         m.candidates.decision = vec!["none".into()];
+        if judge {
+            // every trial fails, so no stack meets `success-rate >= 0.5`: that's an error
+            let err = Resolver::new(m.clone(), root.join(".harnesslock")).resolve_lock().unwrap_err().to_string();
+            assert!(err.contains("no stack meets [objective.constraints]") && err.contains("missing success-rate >=0.5"), "{err}");
+            m.objective.constraints.clear();
+        }
         let mut resolver = Resolver::new(m, root.join(".harnesslock"));
         let lock = resolver.resolve_lock().unwrap();
         if judge {
@@ -234,7 +240,7 @@ fn deciders_are_searched_locked_and_judge_the_evidence() {
     // any-of multiplies the stacks; `none` leaves the use out
     m.deciders.insert("approve".into(), serde_json::json!({"any-of": ["none", "system-one:kev-4b"], "base-url": url}));
     let resolver = Resolver::new(m.clone(), root.join(".harnesslock"));
-    assert_eq!(resolver.enumerate_stacks().len(), 2);
+    assert_eq!(resolver.enumerate_stacks().unwrap().len(), 2);
 
     m.deciders.insert("approve".into(), serde_json::json!({"model": "system-one:kev-4b", "base-url": url, "policy": "policy.md"}));
     let mut resolver = Resolver::new(m, root.join(".harnesslock"));
@@ -270,13 +276,13 @@ fn thresholds_multiply_the_stacks_and_judging_costs_reach_the_evidence() {
     m.source_path = Some(root.join("harness.toml"));
     m.deciders.insert("stop".into(), serde_json::json!({"model": "system-one:kev-4b", "base-url": url, "min-probability": [0.6, 0.9]}));
     let resolver = Resolver::new(m.clone(), root.join(".harnesslock"));
-    let stacks = resolver.enumerate_stacks();
+    let stacks = resolver.enumerate_stacks().unwrap();
     let tried: Vec<&String> = stacks.iter().map(|s| &s.deciders["stop"]).collect();
     assert_eq!(tried, ["system-one:kev-4b@0.6", "system-one:kev-4b@0.9"]);
     // candidates keep the manifest's order (it decides which stacks a 200-stack cap keeps)
     let mut m2 = m.clone();
     m2.deciders.insert("stop".into(), serde_json::json!({"any-of": ["system-one:kev-9b", "none", "system-one:kev-4b"], "base-url": url}));
-    let order: Vec<String> = Resolver::new(m2, root.join(".harnesslock")).enumerate_stacks().iter().map(|s| s.deciders.get("stop").cloned().unwrap_or_else(|| "none".into())).collect();
+    let order: Vec<String> = Resolver::new(m2, root.join(".harnesslock")).enumerate_stacks().unwrap().iter().map(|s| s.deciders.get("stop").cloned().unwrap_or_else(|| "none".into())).collect();
     assert_eq!(order, ["system-one:kev-9b", "none", "system-one:kev-4b"]);
 
     let mut resolver = Resolver::new(m, root.join(".harnesslock"));
@@ -287,5 +293,115 @@ fn thresholds_multiply_the_stacks_and_judging_costs_reach_the_evidence() {
     // 10 input tokens a judging at $0.042 per million
     let judge = lock.evidence.judge.unwrap();
     assert_eq!(judge.cost_usd_per_task, Some(0.00000042));
+    let _ = fs::remove_dir_all(&root);
+}
+
+fn tmp(name: &str) -> PathBuf {
+    let root = std::env::temp_dir().join(format!("hlock-resolver-{name}-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(&root).unwrap();
+    root
+}
+
+#[test]
+fn the_judge_evidence_describes_only_this_resolve() {
+    let url = fake_systemone(0.95);
+    let root = tmp("judge-again");
+    fs::create_dir_all(root.join("t/solution")).unwrap();
+    fs::write(root.join("t/prompt.md"), "Write s.md.\n").unwrap();
+    fs::write(root.join("t/solution/s.md"), "x\n").unwrap();
+    fs::write(root.join("pack.toml"), format!(
+        "[pack]\nname = \"t/j\"\nversion = \"0.1.0\"\ndomain = \"demo\"\n\n[pack.judge]\nmodel = \"system-one:kev-4b\"\nbase-url = \"{url}\"\n\n[[task]]\nid = \"t\"\nprompt = \"t/prompt.md\"\nsolution = \"t/solution/\"\nexpected = {{ artifacts = [\"s.md\"] }}\ngraders = [{{ type = \"judge\", criteria = [\"Is there\"] }}]\n"
+    )).unwrap();
+    let mut m = make_manifest(&root);
+    m.candidates.llm.get_mut("planner").unwrap().any_of = vec!["reference:qwen-32b".into()];
+    m.candidates.decision = vec!["none".into()];
+    let mut resolver = Resolver::new(m, root.join(".harnesslock"));
+    assert_eq!(resolver.resolve_lock().unwrap().evidence.judge.unwrap().model, "system-one:kev-4b");
+    // a second resolve with another judge doesn't carry the first one's over
+    resolver.manifest.evals.insert("judge".into(), serde_json::json!({"model": "system-one:kev-9b", "base-url": url}));
+    assert_eq!(resolver.resolve_lock().unwrap().evidence.judge.unwrap().model, "system-one:kev-9b");
+    let _ = fs::remove_dir_all(&root);
+}
+
+#[test]
+fn a_bad_deciders_table_or_an_unlockable_decider_is_an_error() {
+    let root = tmp("bad-deciders");
+    let pack = make_pack(&root);
+    let mut m = make_manifest(&pack);
+    m.source_path = Some(root.join("harness.toml"));
+    m.deciders.insert("approve".into(), serde_json::json!({"model": 42}));
+    let err = Resolver::new(m.clone(), root.join(".harnesslock")).resolve_lock().unwrap_err().to_string();
+    assert!(err.contains("[deciders.approve]"), "{err}");
+    // a policy file that isn't there can't be locked, so it can't be dropped from the lock either
+    m.deciders.insert("approve".into(), serde_json::json!({"model": "system-one:kev-4b", "base-url": "http://127.0.0.1:9", "policy": "missing.md"}));
+    let err = Resolver::new(m, root.join(".harnesslock")).resolve_lock().unwrap_err().to_string();
+    assert!(err.contains("policy missing.md"), "{err}");
+    let _ = fs::remove_dir_all(&root);
+}
+
+#[test]
+fn max_trials_is_spread_across_the_stacks() {
+    let root = tmp("budget");
+    let pack = make_pack(&root);
+    let mut m = make_manifest(&pack);
+    m.candidates.decision = vec!["none".into()];
+    m.objective.constraints.clear();
+    // 2 stacks x 1 task x 2 seeds is 4 trials; the budget allows 3
+    m.budget.max_trials = Some(3);
+    let mut resolver = Resolver::new(m, root.join(".harnesslock"));
+    let hashes: Vec<String> = resolver.enumerate_stacks().unwrap().iter().map(|s| s.hash()).collect();
+    resolver.resolve_lock().unwrap();
+    let store = root.join(".harnesslock/store");
+    let per_stack: Vec<usize> = hashes.iter().map(|h| files_containing(&store, &format!("\"stack\":\"{h}\""))).collect();
+    assert_eq!(per_stack.iter().sum::<usize>(), 3, "no trial runs past the budget: {per_stack:?}");
+    assert!(per_stack.iter().all(|n| *n >= 1), "every stack gets trials: {per_stack:?}");
+    let _ = fs::remove_dir_all(&root);
+}
+
+#[test]
+fn a_pack_with_no_tasks_is_an_error() {
+    let root = tmp("empty");
+    fs::write(root.join("pack.toml"), "[pack]\nname = \"t/e\"\nversion = \"0.1.0\"\ndomain = \"demo\"\n").unwrap();
+    let err = Resolver::new(make_manifest(&root), root.join(".harnesslock")).resolve_lock().unwrap_err().to_string();
+    assert!(err.contains("no tasks to measure the stacks on"), "{err}");
+    let _ = fs::remove_dir_all(&root);
+}
+
+#[test]
+fn bad_constraints_are_an_error() {
+    let root = tmp("constraints");
+    let pack = make_pack(&root);
+    let mut m = make_manifest(&pack);
+    m.objective.constraints.insert("success-rate".into(), ">= high".into());
+    let err = Resolver::new(m.clone(), root.join(".harnesslock")).resolve_lock().unwrap_err().to_string();
+    assert!(err.contains("success-rate = \">= high\"") && err.contains("isn't a number"), "{err}");
+    m.objective.constraints.clear();
+    m.objective.constraints.insert("latency".into(), "<1".into());
+    let err = Resolver::new(m, root.join(".harnesslock")).resolve_lock().unwrap_err().to_string();
+    assert!(err.contains("unknown metric"), "{err}");
+    let _ = fs::remove_dir_all(&root);
+}
+
+#[cfg(unix)]
+#[test]
+fn a_stack_whose_every_trial_fails_to_run_fails_the_resolve() {
+    use std::os::unix::fs::PermissionsExt;
+    let root = tmp("broken");
+    let pack = make_pack(&root);
+    let text = fs::read_to_string(root.join("pack.toml")).unwrap().replace("tools = [\"filesystem\"]", "fixtures = \"t1/ws/\"");
+    fs::write(root.join("pack.toml"), text).unwrap();
+    // a fixture the harness can't copy
+    fs::create_dir_all(root.join("t1/ws")).unwrap();
+    fs::write(root.join("t1/ws/locked.txt"), "x").unwrap();
+    fs::set_permissions(root.join("t1/ws/locked.txt"), fs::Permissions::from_mode(0o000)).unwrap();
+    if fs::read(root.join("t1/ws/locked.txt")).is_ok() {
+        return; // running as root: nothing is unreadable
+    }
+    let err = Resolver::new(make_manifest(&pack), root.join(".harnesslock")).resolve_lock().unwrap_err().to_string();
+    assert!(err.contains("every trial of") && err.contains("failed to run"), "{err}");
+    let store = root.join(".harnesslock/store");
+    assert!(files_containing(&store, "\"error\":") > 0, "the error is in the trial's trace");
+    fs::set_permissions(root.join("t1/ws/locked.txt"), fs::Permissions::from_mode(0o644)).unwrap();
     let _ = fs::remove_dir_all(&root);
 }

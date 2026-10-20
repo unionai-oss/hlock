@@ -76,7 +76,7 @@ The search space. The resolver tries every combination.
 |---|---|
 | `llm.<role>.any_of` | Candidate models for a role, as `"provider:model"`. v0.1 tunes the `planner` role. |
 | `decision` | Candidate decision models, e.g. `"none"`, `"rules:default"` |
-| `harness` | Candidate harnesses: names, or tables with `name`, `pattern`, and `config` |
+| `harness` | Candidate harnesses: a list of names, or tables with `name`, `pattern`, and `config` |
 | `policy.<key>` | Policy values, e.g. `retries = [1]`, `temperature = [0.2]`. `resolve` uses the first value. [`tune`](../guides/tune.md) searches retries and temperature itself. |
 
 v0.1 ships the `reference` provider (models `qwen-1.5b`, `qwen-7b`, `qwen-32b`) and the
@@ -92,8 +92,9 @@ v0.1 ships the `reference` provider (models `qwen-1.5b`, `qwen-7b`, `qwen-32b`) 
 | `constraints` | `{}` | Hard limits, as a table of metric to comparison |
 
 Constraint metrics are `success-rate` and `cost-usd-per-task`. Comparisons are `>=`,
-`<=`, `>`, and `<` followed by a number. When no stack satisfies every constraint, the
-resolver selects from the whole Pareto front instead of failing; see
+`<=`, `>`, and `<` followed by a number. Any other metric, or a value that isn't a
+comparison with a number, is an error. When no stack satisfies every constraint,
+`resolve` fails and names the closest stack and what it missed; see
 [Selection](../concepts/index.md#selection).
 
 ## `[budget]`
@@ -101,7 +102,7 @@ resolver selects from the whole Pareto front instead of failing; see
 | Key | Default | Description |
 |---|---|---|
 | `strategy` | `"grid"` | Search strategy. v0.1 supports `grid`. |
-| `max_trials` | | Upper bound on trials |
+| `max_trials` | | Upper bound on trials, spread round-robin across the stacks before any run ([The resolver](../concepts/index.md#the-resolver)) |
 | `max_spend_usd` | | Upper bound on spend |
 | `random_seed` | `0` | Seed for the search/holdout split |
 
@@ -149,8 +150,9 @@ the v0.1 resolver doesn't search over them yet.
 ## The manifest hash
 
 The lock records a SHA-256 hash of the manifest file exactly as written, comments and
-whitespace included. [`hlock check`](../guides/ci.md) compares it to the live file, so
-any edit to `harness.toml` needs a fresh `hlock resolve`.
+whitespace included: the text the run read, even if the file changes during it.
+[`hlock check`](../guides/ci.md) compares it to the live file, so any edit to
+`harness.toml` needs a fresh `hlock resolve`.
 
 ## `[deciders.<use>]`
 
@@ -174,3 +176,7 @@ policy = ".hlock/approve.md"
 | `hooks` | the harness profile's | Harness events to wire it to |
 | `timeout-ms` | `2000` | How long a hook waits |
 | `base-url`, `key-env`, `protocol`, `long-context` | the provider's | Where and how it's reached |
+
+hlock checks `[deciders]` when it reads `harness.toml`: an unknown use or key, or a model
+that isn't a decision model, is an error rather than ignored. A use with only `any-of`
+falls back to `[deciders.default]`'s `model` outside `resolve`.

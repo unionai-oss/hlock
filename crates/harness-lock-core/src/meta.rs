@@ -723,13 +723,24 @@ pub fn render(job: &str, input: &JobInput, meta: Option<&MetaManifest>, reg: &Re
 }
 
 fn substitute(template: &str, input: &JobInput) -> String {
+    substitute_with(template, input, str::to_string)
+}
+
+/// [`substitute`], passing each value through `quote` (for a shell command).
+fn substitute_with(template: &str, input: &JobInput, quote: impl Fn(&str) -> String) -> String {
     let manifest = input.manifest_path.as_deref().map(|p| input.show(p)).unwrap_or_else(|| crate::MANIFEST_PATH.into());
     template
-        .replace("{lock}", &input.show(&input.lock_path))
-        .replace("{meta_lock}", &input.show(&input.meta_lock_path))
-        .replace("{manifest}", &manifest)
-        .replace("{project}", &input.project.to_string_lossy())
+        .replace("{lock}", &quote(&input.show(&input.lock_path)))
+        .replace("{meta_lock}", &quote(&input.show(&input.meta_lock_path)))
+        .replace("{manifest}", &quote(&manifest))
+        .replace("{project}", &quote(&input.project.to_string_lossy()))
 }
+
+/// How long a custom job's `verify` command may run.
+const VERIFY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(600);
+
+/// The most of each solution file `review_tasks` reads.
+const MAX_SOLUTION_READ: usize = 64 * 1024;
 
 fn install_goal(input: &JobInput, reg: &Registry, ctx: &Ctx) -> Result<(String, Option<String>)> {
     let lock = input.load_lock()?;
@@ -962,7 +973,8 @@ fn review_tasks(pack: &EvalPack, cfg: &crate::decide::DeciderConfig) -> Vec<Stri
         let mut solution = serde_json::Map::new();
         if let Some(dir) = t.solution.as_ref().map(|s| pack.path.join(s)).filter(|p| p.is_dir()) {
             for e in std::fs::read_dir(&dir).into_iter().flatten().flatten().take(3) {
-                if let Ok(text) = std::fs::read_to_string(e.path()) {
+                // a regular file only (no symlinks out of the pack, no FIFOs), and only its start
+                if let Ok(text) = crate::fsutil::read_regular_text(&e.path(), MAX_SOLUTION_READ) {
                     solution.insert(e.file_name().to_string_lossy().into_owned(), json!(text.chars().take(4000).collect::<String>()));
                 }
             }
@@ -1075,21 +1087,20 @@ pub fn verify(job: &str, input: &JobInput, meta: Option<&MetaManifest>, reg: &Re
             let Some(cmd) = &spec.verify else {
                 return Ok(Verdict::new(job, "unverified", "this job has no `verify` command"));
             };
-            let cmd = substitute(cmd, input);
-            let out = std::process::Command::new("sh")
-                .args(["-c", &cmd])
-                .current_dir(&input.project)
-                .env_clear()
-                .envs(&ctx.env)
-                .stdin(std::process::Stdio::null())
-                .output()
+            // the paths go into a shell command, so they're quoted
+            let cmd = substitute_with(cmd, input, crate::fsutil::shell_quote);
+            let mut c = std::process::Command::new("sh");
+            c.args(["-c", &cmd]).current_dir(&input.project).env_clear().envs(&ctx.env).stdin(std::process::Stdio::null());
+            let out = crate::process::run(c, &crate::process::Limits::timeout(VERIFY_TIMEOUT))
                 .map_err(|e| Error::Profile(format!("cannot run `{cmd}`: {e}")))?;
-            let text = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+            let text = out.text();
             let tail: Vec<String> = text.lines().rev().take(8).collect::<Vec<_>>().into_iter().rev().map(str::to_string).collect();
-            let mut v = if out.status.success() {
+            let mut v = if out.success {
                 Verdict::new(job, "verified", format!("`{cmd}` passed"))
+            } else if out.timed_out {
+                Verdict::new(job, "failed", format!("`{cmd}` timed out after {}s", VERIFY_TIMEOUT.as_secs()))
             } else {
-                Verdict::new(job, "failed", format!("`{cmd}` exited with {}", out.status.code().unwrap_or(-1)))
+                Verdict::new(job, "failed", format!("`{cmd}` exited with {}", out.code.unwrap_or(-1)))
             };
             v.details = tail;
             Ok(v)
@@ -1331,5 +1342,37 @@ mod tests {
         assert!(MetaManifest::from_str("[jobs.notes]\nverify = \"true\"\n").is_err());
         assert!(MetaManifest::from_str("[run]\nmode = \"yolo\"\n").is_err());
         assert!(job_spec("nope", Some(&m)).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn verify_quotes_the_paths_it_substitutes() {
+        let dir = std::env::temp_dir().join(format!("hlock-meta-verify-{}", std::process::id()));
+        // a project path with shell syntax in it
+        let project = dir.join("p $(touch pwned); x");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::write(project.join("NOTES.md"), "notes").unwrap();
+        let m = MetaManifest::from_str("[jobs.notes]\nprompt = \"write notes\"\nverify = \"test -s {project}/NOTES.md\"\n").unwrap();
+        let input = JobInput { project: project.clone(), lock_path: project.join("harness.lock"), ..Default::default() };
+        let ctx = Ctx::at(&project);
+        let v = verify("notes", &input, Some(&m), &Registry::builtin(), &ctx).unwrap();
+        assert_eq!(v.status, "verified", "{v:?}");
+        assert!(!project.join("pwned").exists() && !dir.join("pwned").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn review_reads_only_regular_solution_files() {
+        let dir = std::env::temp_dir().join(format!("hlock-meta-review-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("sol")).unwrap();
+        std::fs::write(dir.join("secret"), "s3cret").unwrap();
+        std::os::unix::fs::symlink(dir.join("secret"), dir.join("sol/leak")).unwrap();
+        std::fs::write(dir.join("sol/big.txt"), "x".repeat(MAX_SOLUTION_READ * 4)).unwrap();
+        assert!(crate::fsutil::read_regular_text(&dir.join("sol/leak"), MAX_SOLUTION_READ).is_err());
+        assert_eq!(crate::fsutil::read_regular_text(&dir.join("sol/big.txt"), MAX_SOLUTION_READ).unwrap().len(), MAX_SOLUTION_READ);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

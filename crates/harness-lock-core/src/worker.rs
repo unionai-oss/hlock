@@ -16,12 +16,14 @@
 //! way — so the Rust core never changes based on where the work actually ran.
 
 use std::path::Path;
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use crate::adapters::{HarnessAdapter, RunOutcome};
 use crate::error::{Error, Result};
+use crate::process::{self, Limits};
 use crate::search::Stack;
 use crate::tasks::Task;
 
@@ -113,12 +115,20 @@ pub struct TaskResponse {
 /// Thin wrapper over [`PythonWorker`] for the trial path (kind `llm.run_trial`).
 pub struct PythonAdapter {
     worker: PythonWorker,
+    backend: Backend,
 }
 
 impl PythonAdapter {
+    /// An adapter for the `cluster` backend. Prefer [`PythonAdapter::with_backend`].
     pub fn new() -> Self {
+        Self::with_backend(Backend::Cluster)
+    }
+
+    /// An adapter that tells the worker which backend to run trials under.
+    pub fn with_backend(backend: Backend) -> Self {
         PythonAdapter {
             worker: PythonWorker::new(),
+            backend,
         }
     }
 }
@@ -137,7 +147,7 @@ impl HarnessAdapter for PythonAdapter {
     fn run(&self, stack: &Stack, task: &Task, workspace: &Path, seed: u64) -> Result<RunOutcome> {
         let r = self
             .worker
-            .call("llm.run_trial", "cluster", Some(stack), Some(task), seed, workspace, &json!({}))?;
+            .call("llm.run_trial", self.backend.as_str(), Some(stack), Some(task), seed, workspace, &json!({}))?;
         Ok(RunOutcome {
             success: r.success,
             cost_usd: r.cost_usd,
@@ -159,14 +169,21 @@ impl HarnessAdapter for PythonAdapter {
 pub struct PythonWorker {
     interp: String,
     module: String,
+    /// How long one call may take (`HLOCK_WORKER_TIMEOUT` seconds, default an hour).
+    timeout: Duration,
 }
+
+/// The default for `HLOCK_WORKER_TIMEOUT`, in seconds.
+pub const DEFAULT_WORKER_TIMEOUT: u64 = 3600;
 
 impl PythonWorker {
     pub fn new() -> Self {
         let interp = std::env::var("HL_PYTHON").unwrap_or_else(|_| "python3".to_string());
+        let secs = std::env::var("HLOCK_WORKER_TIMEOUT").ok().and_then(|s| s.trim().parse::<u64>().ok()).filter(|s| *s > 0).unwrap_or(DEFAULT_WORKER_TIMEOUT);
         PythonWorker {
             interp,
             module: "harness_lock.tasks.worker".to_string(),
+            timeout: Duration::from_secs(secs),
         }
     }
 
@@ -208,26 +225,32 @@ impl PythonWorker {
             plan: plan.clone(),
         };
         std::fs::write(&req_path, serde_json::to_vec(&request)?)?;
+        // a response left from an earlier call must not pass for this one's
+        match std::fs::remove_file(&out_path) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(e.into()),
+            _ => {}
+        }
 
-        let out = std::process::Command::new(&self.interp)
-            .arg("-m")
-            .arg(&self.module)
-            .arg(&req_path)
-            .arg(&out_path)
-            .output()
-            .map_err(|e| {
-                Error::Worker(format!(
-                    "could not start Python worker ({}) — is harness-lock installed for `{}`? ({e})",
-                    self.module, self.interp
-                ))
-            })?;
+        let mut cmd = std::process::Command::new(&self.interp);
+        cmd.arg("-m").arg(&self.module).arg(&req_path).arg(&out_path).stdin(std::process::Stdio::null());
+        let out = process::run(cmd, &Limits::timeout(self.timeout)).map_err(|e| {
+            Error::Worker(format!(
+                "could not start Python worker ({}) — is harness-lock installed for `{}`? ({e})",
+                self.module, self.interp
+            ))
+        })?;
 
-        if !out.status.success() {
-            let stderr = String::from_utf8_lossy(&out.stderr);
+        if out.timed_out {
             return Err(Error::Worker(format!(
-                "python worker failed ({}): {}",
-                out.status,
-                stderr.trim()
+                "python worker timed out after {}s (set HLOCK_WORKER_TIMEOUT to allow longer)",
+                self.timeout.as_secs()
+            )));
+        }
+        if !out.success {
+            let status = out.code.map(|c| format!("exit status: {c}")).unwrap_or_else(|| "killed by a signal".into());
+            return Err(Error::Worker(format!(
+                "python worker failed ({status}): {}",
+                out.stderr_text().trim()
             )));
         }
         let text = std::fs::read_to_string(&out_path).map_err(|e| {
@@ -246,5 +269,46 @@ impl PythonWorker {
 impl Default for PythonWorker {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    /// A worker whose "interpreter" is a shell script ignoring `-m module` and taking
+    /// the request and response paths as `$3` and `$4`.
+    fn fake(dir: &Path, body: &str, timeout: Duration) -> PythonWorker {
+        let script = dir.join("fake-python");
+        std::fs::write(&script, format!("#!/bin/sh\n{body}\n")).unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        PythonWorker { interp: script.to_string_lossy().into_owned(), module: "m".into(), timeout }
+    }
+
+    fn tmp(tag: &str) -> std::path::PathBuf {
+        let d = std::env::temp_dir().join(format!("hlock-worker-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    #[test]
+    fn a_stale_response_is_not_reused() {
+        let d = tmp("stale");
+        std::fs::write(d.join("_al_response.json"), r#"{"version": 1, "ok": true, "result": {"success": true}}"#).unwrap();
+        let w = fake(&d, "exit 0", Duration::from_secs(10));
+        let err = w.call("grade", "devbox", None, None, 0, &d, &json!({})).unwrap_err().to_string();
+        assert!(err.contains("did not write a response"), "{err}");
+        // a real response is read, and the request carries the backend
+        let w = fake(&d, r#"grep -q '"backend":"devbox"' "$3" && echo '{"version": 1, "ok": true, "result": {"success": true, "steps": 3}}' > "$4""#, Duration::from_secs(10));
+        assert_eq!(w.call("grade", "devbox", None, None, 0, &d, &json!({})).unwrap().steps, 3);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn the_adapter_passes_its_backend() {
+        assert_eq!(PythonAdapter::new().backend, Backend::Cluster);
+        assert_eq!(PythonAdapter::with_backend(Backend::Devbox).backend, Backend::Devbox);
     }
 }

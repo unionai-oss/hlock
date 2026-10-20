@@ -64,16 +64,25 @@ Each trial records whether the task succeeded, what it cost, and how long it too
 stack, those roll up into a success rate, a mean cost per task, and latency
 percentiles.
 
+A trial the harness couldn't run at all counts as failed, and its error goes in the
+trial's trace with a warning. If every trial of a stack fails that way, the stack is
+broken rather than weak, and `resolve` stops with that error instead of writing a lock.
+
+`[budget] max_trials` caps the trials before they run: they go round-robin across the
+stacks (each stack's in task order, every task once before any second seed), so a small
+budget spends evenly rather than measuring some stacks fully and others not at all.
+
 ### Selection
 
 Picking the winner happens in three steps:
 
-1. **Pareto front.** Drop every stack that another stack beats on both success rate
-   and cost. What's left is the set of stacks that are each the best trade-off at
-   some price point.
-2. **Constraints.** Keep the stacks on the front that satisfy `[objective.constraints]`,
-   such as `success-rate = ">=0.8"`. If none do, `hlock` falls back to the whole front
-   rather than failing, so check the evidence in the lock.
+1. **Constraints.** Keep the stacks that satisfy `[objective.constraints]`, such as
+   `success-rate = ">=0.8"`. If none do, `resolve` fails and names the closest stack
+   and the constraints it missed, rather than locking a stack that misses one. A
+   constraint that doesn't parse is an error before any trial runs.
+2. **Pareto front.** Of those, drop every stack that another stack beats on both
+   success rate and cost. What's left is the set of stacks that are each the best
+   trade-off at some price point.
 3. **Select rule.** `select = "min-cost"` takes the cheapest remaining stack.
    `select = "max-quality"` takes the one with the highest success rate.
 

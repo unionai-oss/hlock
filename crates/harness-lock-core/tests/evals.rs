@@ -84,6 +84,39 @@ fixtures = "c/nope/"
 }
 
 #[test]
+fn task_ids_and_pack_paths_must_stay_inside() {
+    let pack_with = |name: &str, task: &str| {
+        let root = tmp(name);
+        write(&root, "pack.toml", &format!("[pack]\nname = \"t/x\"\nversion = \"0.1.0\"\ndomain = \"test\"\n\n[[task]]\n{task}\n"));
+        write(&root, "a/prompt.md", "Do it.\n");
+        EvalPack::load(root.to_str().unwrap(), None).map(|_| ()).map_err(|e| e.to_string())
+    };
+    for (n, id) in ["/tmp/x", "../x", "..", "a/b", "a b", "a\\\\b"].iter().enumerate() {
+        let err = pack_with(&format!("id{n}"), &format!("id = \"{id}\"\nprompt = \"a/prompt.md\"")).unwrap_err();
+        assert!(err.contains("may only have letters, digits"), "{id}: {err}");
+    }
+    assert!(pack_with("idok", "id = \"fix_off-by-one.v2\"\nprompt = \"a/prompt.md\"").is_ok());
+    for (n, line) in ["prompt = \"/etc/passwd\"", "prompt = \"../outside.md\"", "prompt = \"a/prompt.md\"\nfixtures = \"/\"", "prompt = \"a/prompt.md\"\nsolution = \"a/../../x\"", "prompt = \"a/prompt.md\"\nexpected = { artifacts = [\"/etc/hosts\"] }"].iter().enumerate() {
+        let err = pack_with(&format!("path{n}"), &format!("id = \"a\"\n{line}")).unwrap_err();
+        assert!(err.contains("must be a relative path inside"), "{line}: {err}");
+    }
+}
+
+#[test]
+fn split_handles_empty_packs_and_out_of_range_fractions() {
+    let root = &tmp("split");
+    write(root, "pack.toml", "[pack]\nname = \"t/s\"\nversion = \"0.1.0\"\ndomain = \"test\"\n");
+    let empty = EvalPack::load(root.to_str().unwrap(), None).unwrap();
+    assert_eq!(empty.split(0.7, 0).0.len() + empty.split(0.7, 0).1.len(), 0);
+    let mut pack = empty.clone();
+    pack.tasks = (0..4).map(|i| harness_lock_core::tasks::Task { id: format!("t{i}"), ..Default::default() }).collect();
+    for (frac, search) in [(1.5, 4), (-1.0, 1), (f64::NAN, 4), (0.5, 2)] {
+        let (s, h) = pack.split(frac, 7);
+        assert_eq!((s.len(), h.len()), (search, 4 - search), "{frac}");
+    }
+}
+
+#[test]
 fn the_old_names_still_load() {
     let m = Manifest::from_str("[tasks]\npacks = [\"./evals\"]\nseeds = 4\n").unwrap();
     assert_eq!(m.eval_packs(), vec!["./evals".to_string()]);

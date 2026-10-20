@@ -31,19 +31,6 @@ pub struct Resolver {
     code_harnesses: BTreeMap<String, crate::profiles::HarnessProfile>,
     /// Profiles of the candidate harnesses, for how each reaches a decider.
     profiles: BTreeMap<String, crate::profiles::HarnessProfile>,
-    /// What judged the trials: answered models, and how many grades were uncertain.
-    judging: std::cell::RefCell<JudgeTally>,
-}
-
-#[derive(Default)]
-struct JudgeTally {
-    configured: std::collections::BTreeSet<String>,
-    answered: std::collections::BTreeSet<String>,
-    grades: usize,
-    uncertain: usize,
-    /// Trials with judge grades, and what their judging cost (`None` once a price is unknown).
-    trials: usize,
-    cost: Option<f64>,
 }
 
 impl Resolver {
@@ -59,7 +46,7 @@ impl Resolver {
         let workdir: PathBuf = workdir.into();
         let store = Store::new(workdir.join("store"));
         let adapter: Box<dyn HarnessAdapter> = if backend.needs_worker() {
-            Box::new(PythonAdapter::new())
+            Box::new(PythonAdapter::with_backend(backend))
         } else {
             Box::new(ReferenceAdapter::default())
         };
@@ -74,7 +61,6 @@ impl Resolver {
             harness_override: None,
             code_harnesses: BTreeMap::new(),
             profiles: BTreeMap::new(),
-            judging: Default::default(),
         }
     }
 
@@ -107,8 +93,9 @@ impl Resolver {
         &self.holdout
     }
 
-    /// Cartesian product over the manifest's candidate axes.
-    pub fn enumerate_stacks(&self) -> Vec<Stack> {
+    /// Cartesian product over the manifest's candidate axes. Errors when `[deciders]`
+    /// doesn't parse.
+    pub fn enumerate_stacks(&self) -> Result<Vec<Stack>> {
         let c = &self.manifest.candidates;
         let llm_combos = llm_combos(&c.llm);
         let decisions = if c.decision.is_empty() {
@@ -117,7 +104,7 @@ impl Resolver {
             c.decision.clone()
         };
         let harnesses = harness_combos(&c.harness);
-        let specs = self.manifest.deciders().unwrap_or_default();
+        let specs = self.manifest.deciders()?;
 
         let mut stacks = Vec::new();
         for llm in &llm_combos {
@@ -146,7 +133,7 @@ impl Resolver {
         if stacks.len() > 200 {
             stacks.truncate(200);
         }
-        stacks
+        Ok(stacks)
     }
 
     /// Every combination of the agent-side deciders `harness` can use: a fixed `model`,
@@ -189,38 +176,52 @@ impl Resolver {
 
     /// The manifest's `[deciders.*]` for a trial, with policy paths made absolute: the
     /// trial's lock lives in its workspace, not next to the manifest.
-    fn trial_deciders(&self) -> BTreeMap<String, crate::decide::DeciderSpec> {
+    fn trial_deciders(&self) -> Result<BTreeMap<String, crate::decide::DeciderSpec>> {
         let root = self.manifest.root();
-        let mut specs = self.manifest.deciders().unwrap_or_default();
+        let mut specs = self.manifest.deciders()?;
         for s in specs.values_mut() {
             if let Some(p) = &s.policy {
                 s.policy = Some(root.join(p).to_string_lossy().into_owned());
             }
         }
-        specs
+        Ok(specs)
     }
 
-    /// Run one trial (copying fixtures, running the harness, grading).
-    pub fn run_trial(&self, stack: &Stack, task: &crate::tasks::Task, seed: u64, ws_root: &Path) -> TrialResult {
-        let ws = ws_root.join(format!("{}_{}_{}", &stack.hash()[..10.min(stack.hash().len())], task.id, seed));
-        let _ = std::fs::remove_dir_all(&ws);
-        let _ = std::fs::create_dir_all(&ws);
+    /// An empty workspace for a trial at `ws` under `ws_root`, for task `id`: the id
+    /// must be a plain name and the path must stay under `ws_root`, since whatever is
+    /// there is removed first.
+    fn fresh_workspace(ws_root: &Path, ws: &Path, id: &str) -> Result<()> {
+        if !crate::tasks::valid_task_id(id) {
+            return Err(Error::EvalPack(format!("task id {id:?} can't name a workspace directory")));
+        }
+        crate::fsutil::check_within("trial workspace", ws_root, ws)?;
+        if std::fs::symlink_metadata(ws).is_ok() {
+            std::fs::remove_dir_all(ws)?;
+        }
+        std::fs::create_dir_all(ws)?;
+        Ok(())
+    }
 
-        let outcome = match self.code_harnesses.get(&stack.harness) {
+    /// Run one trial (copying fixtures, running the harness, grading). When the harness
+    /// can't run it, the trial fails and records why in `error` (and its stored trace).
+    pub fn run_trial(&self, stack: &Stack, task: &crate::tasks::Task, seed: u64, ws_root: &Path) -> TrialResult {
+        let hash = stack.hash();
+        let ws = ws_root.join(format!("{}_{}_{}", &hash[..10.min(hash.len())], task.id, seed));
+
+        let outcome = Self::fresh_workspace(ws_root, &ws, &task.id).and_then(|()| match self.code_harnesses.get(&stack.harness) {
             Some(p) => crate::contract::CommandAdapter::new(p.clone(), Ctx::from_process())
-                .with_deciders(self.trial_deciders())
+                .with_deciders(self.trial_deciders()?)
                 .run(stack, task, &ws, seed),
             None => self.adapter.run(stack, task, &ws, seed),
-        };
-        let outcome = outcome.unwrap_or_else(|_| {
-            crate::adapters::RunOutcome {
-                success: false,
-                cost_usd: 0.0,
-                latency_s: 0.0,
-                steps: 0,
-                trace: json!([]),
-            }
         });
+        let (outcome, error) = match outcome {
+            Ok(o) => (o, None),
+            Err(e) => {
+                eprintln!("warn: {} couldn't run task {} (seed {seed}): {e}", stack.label(), task.id);
+                let failed = crate::adapters::RunOutcome { success: false, cost_usd: 0.0, latency_s: 0.0, steps: 0, trace: json!([]) };
+                (failed, Some(e.to_string()))
+            }
+        };
         let opts = crate::tasks::GradeOptions {
             judge: self.manifest.judge(),
             default_judge: self.manifest.default_judge(),
@@ -228,40 +229,35 @@ impl Resolver {
             trace: Some(json!({"events": outcome.trace})),
             ..Default::default()
         };
-        let pack = self.pack_by_task.get(&task.id);
+        // a run that didn't happen has nothing to grade
+        let pack = self.pack_by_task.get(&task.id).filter(|_| error.is_none());
         let grades = pack.map(|p| p.grade_with(task, &ws, &opts)).unwrap_or_default();
-        {
-            let mut tally = self.judging.borrow_mut();
-            let judged: Vec<&crate::tasks::Grade> = grades.iter().filter(|g| g.grader.starts_with("judge:") || g.grader.starts_with("trace:")).collect();
-            if !judged.is_empty() {
-                if let Some(j) = pack.and_then(|p| p.judge_for(&opts)) {
-                    tally.configured.insert(j.model);
-                }
-            }
-            if !judged.is_empty() {
-                let cost = judged.iter().map(|g| g.cost_usd).sum::<Option<f64>>();
-                tally.cost = if tally.trials == 0 { cost } else { tally.cost.zip(cost).map(|(a, b)| a + b) };
-                tally.trials += 1;
-            }
-            tally.grades += judged.len();
-            tally.uncertain += judged.iter().filter(|g| g.uncertain).count();
-            tally.answered.extend(judged.iter().filter_map(|g| g.judged_by.clone()));
-        }
-        let success = outcome.success && grades.iter().all(|g| g.success);
-        let score = grades.iter().map(|g| g.score).sum::<f64>() / grades.len().max(1) as f64;
+        let judged: Vec<&crate::tasks::Grade> = grades.iter().filter(|g| g.grader.starts_with("judge:") || g.grader.starts_with("trace:")).collect();
+        let judging = (!judged.is_empty()).then(|| crate::search::TrialJudging {
+            configured: pack.and_then(|p| p.judge_for(&opts)).map(|j| j.model),
+            answered: judged.iter().filter_map(|g| g.judged_by.clone()).collect(),
+            grades: judged.len(),
+            uncertain: judged.iter().filter(|g| g.uncertain).count(),
+            cost_usd: judged.iter().map(|g| g.cost_usd).sum::<Option<f64>>(),
+        });
+        let success = error.is_none() && outcome.success && grades.iter().all(|g| g.success);
+        let score = if error.is_some() { 0.0 } else { grades.iter().map(|g| g.score).sum::<f64>() / grades.len().max(1) as f64 };
 
         // persist the trace to the store (content-addressed)
-        let trace = json!({
-            "trial": {"stack": stack.hash(), "task": task.id, "seed": seed},
+        let mut trace = json!({
+            "trial": {"stack": hash, "task": task.id, "seed": seed},
             "events": outcome.trace,
             "result": {"artifacts": task.expected_artifacts()},
             "metrics": {"steps": outcome.steps, "cost_usd": outcome.cost_usd, "latency_s": outcome.latency_s},
             "grades": grades,
         });
+        if let Some(e) = &error {
+            trace["error"] = json!(e);
+        }
         let _ = self.store.put_value(&trace);
 
         TrialResult {
-            stack_hash: stack.hash(),
+            stack_hash: hash,
             task_id: task.id.clone(),
             seed,
             success,
@@ -269,6 +265,8 @@ impl Resolver {
             cost_usd: outcome.cost_usd,
             latency_s: outcome.latency_s,
             steps: outcome.steps,
+            error,
+            judging,
         }
     }
 
@@ -290,44 +288,52 @@ impl Resolver {
             .map(|h| (h.id.clone(), h.clone()))
             .collect();
         self.profiles = self.manifest.candidates.harness.iter().filter_map(|h| registry.harness(&h.name).map(|p| (h.name.clone(), p.clone()))).collect();
+        // problems in the objective or the deciders stop the resolve before any trial runs
+        crate::search::parse_constraints(&self.manifest.objective.constraints)?;
+        let stacks = self.enumerate_stacks()?;
         let search_tasks = self.load_packs();
-        let stacks = self.enumerate_stacks();
+        if search_tasks.is_empty() {
+            return Err(Error::EvalPack(format!(
+                "no tasks to measure the stacks on: the eval packs ({}) have none, or didn't load",
+                self.manifest.eval_packs().join(", ")
+            )));
+        }
         let seeds = self.manifest.seeds();
         let ws_root = self.workdir.join("runs");
         let _ = std::fs::create_dir_all(&ws_root);
 
-        let mut results_by_stack: BTreeMap<String, Vec<TrialResult>> = BTreeMap::new();
-        for stack in &stacks {
-            for task in &search_tasks {
-                for seed in 0..seeds {
-                    let tr = self.run_trial(stack, task, seed, &ws_root);
-                    results_by_stack.entry(stack.hash()).or_default().push(tr);
+        // every (task, seed), seed by seed so a cut budget still covers each task
+        let plan: Vec<(&crate::tasks::Task, u64)> = (0..seeds).flat_map(|seed| search_tasks.iter().map(move |t| (t, seed))).collect();
+        // `max-trials` is spent round-robin across the stacks, so none is dropped whole
+        // and no trial runs that the budget then discards
+        let max = self.manifest.budget.max_trials.unwrap_or(usize::MAX);
+        let mut results: Vec<Vec<TrialResult>> = vec![Vec::new(); stacks.len()];
+        let mut n = 0usize;
+        'budget: for (task, seed) in &plan {
+            for (stack, out) in stacks.iter().zip(results.iter_mut()) {
+                if n >= max {
+                    break 'budget;
                 }
+                out.push(self.run_trial(stack, task, *seed, &ws_root));
+                n += 1;
             }
         }
-        // respect max-trials globally
-        let mut n = 0usize;
-        let max = self.manifest.budget.max_trials.unwrap_or(usize::MAX);
-        for v in results_by_stack.values_mut() {
-            if n >= max {
-                v.clear();
-            } else {
-                v.truncate(max.saturating_sub(n));
-                n += v.len();
-            }
+        if n < plan.len() * stacks.len() {
+            eprintln!("warn: budget.max-trials ({max}) ran {n} of {} trials, spread across the stacks", plan.len() * stacks.len());
         }
 
         let mut scores: Vec<StackScore> = Vec::new();
-        for stack in &stacks {
-            if let Some(trials) = results_by_stack.get(&stack.hash()) {
-                if !trials.is_empty() {
-                    scores.push(StackScore {
-                        stack: stack.clone(),
-                        trials: trials.clone(),
-                        n: trials.len(),
-                    });
-                }
+        for (stack, trials) in stacks.iter().zip(results) {
+            if trials.is_empty() {
+                eprintln!("warn: {} got no trials within budget.max-trials", stack.label());
+                continue;
             }
+            // a stack whose harness couldn't run a single trial is broken, not slow
+            if trials.iter().all(|t| t.error.is_some()) {
+                let e = trials[0].error.clone().unwrap_or_default();
+                return Err(Error::Tuning(format!("every trial of {} failed to run: {e}", stack.label())));
+            }
+            scores.push(StackScore { stack: stack.clone(), n: trials.len(), trials });
         }
 
         let winner = select_winner(
@@ -335,15 +341,14 @@ impl Resolver {
             &self.manifest.objective.primary,
             &self.manifest.objective.constraints,
             &self.manifest.objective.select,
-        )
-        .ok_or_else(|| Error::Tuning("no viable stack found".into()))?;
+        )?;
 
-        let lock = self.build_resolve(&winner, &scores);
+        let lock = self.build_resolve(&winner, &scores)?;
         let _ = self.write_report(&lock, &scores);
         Ok(lock)
     }
 
-    fn build_resolve(&self, winner: &StackScore, _scores: &[StackScore]) -> Lockfile {
+    fn build_resolve(&self, winner: &StackScore, _scores: &[StackScore]) -> Result<Lockfile> {
         let s = &winner.stack;
         let llms = s
             .llm
@@ -380,7 +385,7 @@ impl Resolver {
         search_map.insert("strategy".to_string(), serde_json::json!(self.manifest.budget.strategy));
         search_map.insert("candidates".to_string(), serde_json::json!(winner.n));
 
-        Lockfile {
+        Ok(Lockfile {
             manifest_hash: Some(self.manifest.manifest_hash()),
             stack: stack_map,
             llm: llms,
@@ -389,7 +394,7 @@ impl Resolver {
                 decisions: if s.decision == "none" { vec![] } else { vec!["retry".into(), "stop".into()] },
                 ..Default::default()
             },
-            decider: self.lock_deciders(s),
+            decider: self.lock_deciders(s)?,
             harness: self.pin_harness(&s.harness, &s.pattern),
             tool: s.tools.iter().map(|t| Tool { name: t.clone(), kind: "builtin".into(), ..Default::default() }).collect(),
             skill: s.skills.iter().map(|sk| Skill { name: sk.clone(), origin: "first-party".into(), editable: true, evidence_digest: Some(String::new()), ..Default::default() }).collect(),
@@ -408,7 +413,7 @@ impl Resolver {
                 success_rate,
                 cost_usd_per_task: cost,
                 latency_s_per_task: latency,
-                judge: self.judge_model(),
+                judge: self.judge_model(winner),
                 ..Default::default()
             },
             verify: Verify::default(),
@@ -418,48 +423,48 @@ impl Resolver {
                 ..Default::default()
             },
             ..Default::default()
-        }
+        })
     }
 
-    /// The judge that scored the trials' `judge` and `trace` graders, if any ran.
-    fn judge_model(&self) -> Option<crate::lockfile::EvidenceJudge> {
-        let t = self.judging.borrow();
-        if t.grades == 0 {
+    /// The judge that scored the winner's `judge` and `trace` graders, if any ran.
+    fn judge_model(&self, winner: &StackScore) -> Option<crate::lockfile::EvidenceJudge> {
+        let judged: Vec<&crate::search::TrialJudging> = winner.trials.iter().filter_map(|t| t.judging.as_ref()).collect();
+        let grades: usize = judged.iter().map(|j| j.grades).sum();
+        if grades == 0 {
             return None;
         }
-        let model = t.configured.iter().cloned().collect::<Vec<_>>().join(",");
-        let decider = t.configured.iter().all(|m| crate::decide::is_decider(m, None));
-        let protocol = t.configured.iter().next().and_then(|m| crate::decide::split_ref(m)).map(|(p, _)| {
+        let configured: std::collections::BTreeSet<&String> = judged.iter().filter_map(|j| j.configured.as_ref()).collect();
+        let answered: std::collections::BTreeSet<&String> = judged.iter().flat_map(|j| &j.answered).collect();
+        let uncertain: usize = judged.iter().map(|j| j.uncertain).sum();
+        let cost = judged.iter().map(|j| j.cost_usd).sum::<Option<f64>>();
+        let model = configured.iter().map(|m| m.as_str()).collect::<Vec<_>>().join(",");
+        let decider = configured.iter().all(|m| crate::decide::is_decider(m, None));
+        let protocol = configured.iter().next().and_then(|m| crate::decide::split_ref(m)).map(|(p, _)| {
             crate::decide::PROVIDERS.iter().find(|x| x.0 == p).map(|x| x.1.to_string()).unwrap_or_else(|| if decider { "systemone".into() } else { "chat".into() })
         });
         Some(crate::lockfile::EvidenceJudge {
             model,
-            answered: (!t.answered.is_empty()).then(|| t.answered.iter().cloned().collect::<Vec<_>>().join(",")),
+            answered: (!answered.is_empty()).then(|| answered.iter().map(|m| m.as_str()).collect::<Vec<_>>().join(",")),
             protocol,
             fallback: self.manifest.judge().and_then(|j| j.fallback),
-            uncertain_grades: decider.then(|| roundf(t.uncertain as f64 / t.grades as f64)),
-            cost_usd_per_task: t.cost.filter(|_| t.trials > 0).map(|c| (c / t.trials as f64 * 1e8).round() / 1e8),
+            uncertain_grades: decider.then(|| roundf(uncertain as f64 / grades as f64)),
+            cost_usd_per_task: cost.map(|c| (c / judged.len() as f64 * 1e8).round() / 1e8),
         })
     }
 
-    /// The winner's `[[decider]]` entries.
-    fn lock_deciders(&self, s: &Stack) -> Vec<crate::lockfile::Decider> {
-        let specs = self.manifest.deciders().unwrap_or_default();
+    /// The winner's `[[decider]]` entries. A decider that can't be locked is an error,
+    /// not a lock that silently leaves it out.
+    fn lock_deciders(&self, s: &Stack) -> Result<Vec<crate::lockfile::Decider>> {
+        let specs = self.manifest.deciders()?;
         let root = self.manifest.root();
-        s.deciders
-            .iter()
-            .filter_map(|(use_, reference)| {
-                let spec = specs.get(use_)?;
-                let (via, wiring) = crate::decide::wiring(use_, &s.harness, self.profiles.get(&s.harness))?;
-                match crate::decide::lock_entry(use_, reference, spec, &via, wiring, &root) {
-                    Ok(d) => Some(d),
-                    Err(e) => {
-                        eprintln!("warn: {e}");
-                        None
-                    }
-                }
-            })
-            .collect()
+        let mut out = Vec::new();
+        for (use_, reference) in &s.deciders {
+            let spec = specs.get(use_).ok_or_else(|| Error::Manifest(format!("[deciders.{use_}] is gone from the manifest")))?;
+            let (via, wiring) = crate::decide::wiring(use_, &s.harness, self.profiles.get(&s.harness))
+                .ok_or_else(|| Error::Manifest(format!("{} can't make {use_} decisions", s.harness)))?;
+            out.push(crate::decide::lock_entry(use_, reference, spec, &via, wiring, &root).map_err(|e| Error::Manifest(format!("[deciders.{use_}]: {e}")))?);
+        }
+        Ok(out)
     }
 
     /// The `[harness]` table for the winner. A harness with a profile gets the

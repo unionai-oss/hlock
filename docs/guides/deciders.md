@@ -126,19 +126,52 @@ the harness's own config, next to any hooks of yours, which hlock leaves alone:
   "hooks": {
     "PermissionRequest": [
       {"matcher": "*", "hooks": [{"type": "command", "timeout": 3,
-        "command": "hlock decide hook approve --format claude-code --lock /path/to/project/harness.lock"}]}
+        "command": "hlock decide hook approve --format claude-code --event PermissionRequest --lock /path/to/project/harness.lock"}]}
     ],
     "Stop": [
       {"hooks": [{"type": "command", "timeout": 3,
-        "command": "hlock decide hook stop --format claude-code --lock /path/to/project/harness.lock"}]}
+        "command": "hlock decide hook stop --format claude-code --event Stop --lock /path/to/project/harness.lock"}]}
     ]
   },
   "model": "opus"
 }
 ```
 
+Every word of the command is quoted for the shell when it needs to be (a project path with
+a space or a `;` stays one word). Copilot's hook file also gets a `powershell` command,
+quoted the PowerShell way.
+
 `hlock pin` leaves hlock's own hooks out of what it vendors, so a synced config isn't
-drift. A decider you remove from `harness.toml` loses its hook at the next sync.
+drift. A decider you remove from `harness.toml` loses its hook at the next sync. hlock
+knows its own hooks by their whole command (`<hlock> decide hook <use> --format … --lock …`),
+so a hook of yours that merely mentions `decide hook` is never touched, and neither is an
+empty hook group of yours.
+
+### Locks from someone else
+
+A lock you [pull](pull.md) is someone else's, so hlock doesn't let its decider entries
+choose where your keys go or what runs:
+
+- **Keys.** A decider's API key is read from its provider's own variable
+  (`TYPESAFE_API_KEY`, `OPENAI_API_KEY`, …). A `key-env` in a lock is used only when your own
+  `harness.toml` sets the same `key-env` for that use.
+- **Endpoints.** A lock's `endpoint` is used when it's on this machine (`localhost`,
+  `127.0.0.1`, `::1`), when it's the provider's own URL, or when your `harness.toml` sets
+  the same `base-url` for that use. Any other endpoint is ignored: the decider goes where
+  the provider's base-URL variable says (`SYSTEM_ONE_BASE_URL`, `OLLAMA_HOST`), else to its
+  default. A provider with no default (`system-one`, `cloudflare`) then can't be reached,
+  and the hook makes no decision.
+- **Policy files** must be relative paths inside the project, and regular files; anything
+  else isn't read, and the hook makes no decision.
+- **Hooks** are written only for `approve`, `stop`, `route` and `tool`, on the events
+  `hlock decide hook` answers for that harness (`PermissionRequest`, `PreToolUse`, `Stop`,
+  `BeforeTool`, …). `sync` lists anything else as a manual step and writes nothing for it.
+- **Settings out of range.** A `min-probability` outside 0–1 is ignored (the default
+  applies), and answers' probabilities are clamped to 0–1.
+
+A hook finishes within its `timeout-ms`, retries included, so the harness never gives up on
+it first. A refusal, an answer without a probability, or a `route` that isn't one of the
+options makes no decision.
 
 ### What each use does
 

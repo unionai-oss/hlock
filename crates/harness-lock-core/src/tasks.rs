@@ -60,7 +60,7 @@ impl Task {
         if !self.prompt_text.is_empty() {
             return;
         }
-        if let (Some(dir), false) = (&self.pack_dir, self.prompt.is_empty()) {
+        if let (Some(dir), true) = (&self.pack_dir, crate::fsutil::safe_rel(&self.prompt)) {
             let p = dir.join(&self.prompt);
             if let Ok(t) = std::fs::read_to_string(&p) {
                 self.prompt_text = t;
@@ -142,6 +142,52 @@ impl PackIssue {
 #[deprecated(note = "renamed to `EvalPack`")]
 pub type TaskPack = EvalPack;
 
+/// Whether `id` can name a task: letters, digits, `.`, `_` and `-`, and a plain name
+/// (not `.` or `..`), since it becomes a directory name in trial workspaces.
+pub fn valid_task_id(id: &str) -> bool {
+    crate::fsutil::plain_name(id) && id.chars().all(|c| c.is_ascii_alphanumeric() || "._-".contains(c))
+}
+
+/// A task's id and the paths it names in the pack and the workspace must stay inside
+/// them. An empty id is left for [`EvalPack::check`] to report.
+fn check_task_paths(t: &Task) -> Result<()> {
+    let bad = |m: String| Err(Error::EvalPack(m));
+    if !t.id.is_empty() && !valid_task_id(&t.id) {
+        return bad(format!("task id {:?} may only have letters, digits, '.', '_' and '-'", t.id));
+    }
+    let name = if t.id.is_empty() { "a task" } else { t.id.as_str() };
+    let paths = [("prompt", Some(t.prompt.clone()).filter(|p| !p.is_empty())), ("fixtures", t.fixtures.as_ref().map(|p| p.to_string_lossy().into_owned())), ("solution", t.solution.as_ref().map(|p| p.to_string_lossy().into_owned()))];
+    for (key, p) in paths {
+        if let Some(p) = p.filter(|p| !crate::fsutil::safe_rel(p)) {
+            return bad(format!("{name}: {key} {p:?} must be a relative path inside the pack (no leading '/', no '..')"));
+        }
+    }
+    if let Some(a) = t.expected_artifacts().into_iter().find(|a| !crate::fsutil::safe_rel(a)) {
+        return bad(format!("{name}: expected artifact {a:?} must be a relative path inside the workspace (no leading '/', no '..')"));
+    }
+    Ok(())
+}
+
+/// The workspace for task `id` under `root`, a directory this process made: the id
+/// must be a [`valid_task_id`] and the path must stay under `root`.
+fn task_workspace(root: &Path, id: &str) -> Result<PathBuf> {
+    if !valid_task_id(id) {
+        return Err(Error::EvalPack(format!("task id {id:?} can't name a workspace directory")));
+    }
+    let ws = root.join(id);
+    crate::fsutil::check_within("workspace", root, &ws)?;
+    Ok(ws)
+}
+
+/// Copy each directory in `sources` into `ws`, without following symlinks.
+fn fill_workspace(ws: &Path, sources: impl IntoIterator<Item = PathBuf>) -> Result<()> {
+    std::fs::create_dir_all(ws)?;
+    for src in sources {
+        crate::fsutil::copy_tree(&src, ws)?;
+    }
+    Ok(())
+}
+
 impl EvalPack {
     pub fn load(source: &str, base: Option<&Path>) -> Result<EvalPack> {
         let p = PathBuf::from(source);
@@ -159,6 +205,7 @@ impl EvalPack {
             .map_err(|e| Error::EvalPack(format!("invalid pack.toml: {e}")))?;
         let mut tasks = file.task;
         for t in tasks.iter_mut() {
+            check_task_paths(t)?;
             t.pack_dir = Some(p.clone());
             t.load_prompt_text();
         }
@@ -211,6 +258,8 @@ impl EvalPack {
             let id = Some(t.id.as_str()).filter(|s| !s.is_empty());
             if t.id.is_empty() {
                 issues.push(PackIssue::error(None, format!("a task has no id (prompt {:?})", t.prompt)));
+            } else if !valid_task_id(&t.id) {
+                issues.push(PackIssue::error(id, format!("task id {:?} may only have letters, digits, '.', '_' and '-'", t.id)));
             } else if !seen.insert(t.id.clone()) {
                 issues.push(PackIssue::error(id, format!("duplicate task id {:?}", t.id)));
             }
@@ -306,11 +355,13 @@ impl EvalPack {
         issues
     }
 
-    /// Deterministic search/holdout split over task ids.
+    /// Deterministic search/holdout split over task ids. `search_frac` is clamped to
+    /// 0–1, and the search split gets at least one task when there is one.
     pub fn split(&self, search_frac: f64, seed: u64) -> (Vec<Task>, Vec<Task>) {
         let mut tasks: Vec<&Task> = self.tasks.iter().collect();
         tasks.sort_by(|a, b| a.id.cmp(&b.id));
-        let n_search = ((tasks.len() as f64) * search_frac).round().max(1.0) as usize;
+        let frac = if search_frac.is_nan() { 1.0 } else { search_frac.clamp(0.0, 1.0) };
+        let n_search = (((tasks.len() as f64) * frac).round() as usize).max(1).min(tasks.len());
         let mut idx: Vec<usize> = (0..tasks.len()).collect();
         // xorshift-ish deterministic shuffle from seed
         let mut state = seed;
@@ -366,32 +417,20 @@ impl EvalPack {
                 task.fixtures.iter().map(|f| self.path.join(f)).filter(|p| p.is_dir()).chain([sol]).collect()
             }
         };
-        static N: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-        let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let ws = std::env::temp_dir().join(format!("hlock-grade-{}-{n}", std::process::id())).join(id);
-        let _ = std::fs::remove_dir_all(&ws);
-        std::fs::create_dir_all(&ws)?;
-        for src in &sources {
-            crate::adapters::copy_dir(src, &ws);
-        }
-        let grades = self.grade_with(task, &ws, opts);
-        let _ = std::fs::remove_dir_all(ws.parent().unwrap_or(&ws));
-        Ok(grades)
+        // a fresh directory of our own, removed (with only what's in it) when it drops
+        let scratch = crate::graders::ScratchDir::new("grade")?;
+        let ws = task_workspace(&scratch.0, id)?;
+        fill_workspace(&ws, sources)?;
+        Ok(self.grade_with(task, &ws, opts))
     }
 
     /// Grade task `t` in a fresh temporary workspace: its fixtures, plus `extra` (a
     /// solution) when given.
-    fn grade_fresh(&self, t: &Task, extra: Option<&Path>, opts: &GradeOptions) -> Vec<Grade> {
-        static N: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-        let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let ws = std::env::temp_dir().join(format!("hlock-fresh-{}-{n}", std::process::id())).join(&t.id);
-        let _ = std::fs::create_dir_all(&ws);
-        for src in t.fixtures.iter().map(|f| self.path.join(f)).chain(extra.map(Path::to_path_buf)).filter(|p| p.is_dir()) {
-            crate::adapters::copy_dir(&src, &ws);
-        }
-        let grades = self.grade_with(t, &ws, opts);
-        let _ = std::fs::remove_dir_all(ws.parent().unwrap_or(&ws));
-        grades
+    fn grade_fresh(&self, t: &Task, extra: Option<&Path>, opts: &GradeOptions) -> Result<Vec<Grade>> {
+        let scratch = crate::graders::ScratchDir::new("fresh")?;
+        let ws = task_workspace(&scratch.0, &t.id)?;
+        fill_workspace(&ws, t.fixtures.iter().map(|f| self.path.join(f)).chain(extra.map(Path::to_path_buf)).filter(|p| p.is_dir()))?;
+        Ok(self.grade_with(t, &ws, opts))
     }
 
     /// Judge each task's solution and fixtures-only run with judges `a` and `b` (a
@@ -407,8 +446,15 @@ impl EvalPack {
             let sol = t.solution.as_ref().map(|s| self.path.join(s)).filter(|p| p.is_dir());
             let runs: Vec<(&str, Option<&Path>)> = sol.as_deref().map(|p| ("solution", Some(p))).into_iter().chain([("fixtures", None)]).collect();
             for (run, extra) in runs {
-                let ga: Vec<Grade> = self.grade_fresh(t, extra, &judge_only(a)).into_iter().filter(|g| g.grader.starts_with("judge:")).collect();
-                let gb: Vec<Grade> = self.grade_fresh(t, extra, &judge_only(b)).into_iter().filter(|g| g.grader.starts_with("judge:")).collect();
+                let (ga, gb) = match (self.grade_fresh(t, extra, &judge_only(a)), self.grade_fresh(t, extra, &judge_only(b))) {
+                    (Ok(ga), Ok(gb)) => (ga, gb),
+                    (Err(e), _) | (_, Err(e)) => {
+                        rows.push(CalibrationRow { task: t.id.clone(), run: run.into(), grader: "(workspace)".into(), criterion: "(error)".into(), a: 0.0, b: 0.0, agree: false, note: e.to_string() });
+                        continue;
+                    }
+                };
+                let ga: Vec<Grade> = ga.into_iter().filter(|g| g.grader.starts_with("judge:")).collect();
+                let gb: Vec<Grade> = gb.into_iter().filter(|g| g.grader.starts_with("judge:")).collect();
                 for (x, y) in ga.iter().zip(&gb) {
                     let grader = base(&x.grader);
                     let failed = |g: &Grade| g.parts.is_empty() && !g.detail.is_empty() && g.score == 0.0 && !g.success;
@@ -442,28 +488,32 @@ impl EvalPack {
             Judges::None => false,
         };
         let opts = GradeOptions { judge: judge.clone(), auto: false, trace: None, ..opts.clone() };
-        static N: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-        let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let root = std::env::temp_dir().join(format!("hlock-check-{}-{n}", std::process::id()));
+        let root = match crate::graders::ScratchDir::new("check") {
+            Ok(d) => d,
+            Err(e) => return vec![PackIssue::error(None, format!("can't make a directory to try the graders in: {e}"))],
+        };
         for t in &self.tasks {
             let id = Some(t.id.as_str()).filter(|s| !s.is_empty());
             let graders = t.grader_list();
-            if graders.iter().any(|g| g.is_err()) || (graders.is_empty() && t.expected_artifacts().is_empty()) {
+            if graders.iter().any(|g| g.is_err()) || (graders.is_empty() && t.expected_artifacts().is_empty()) || !valid_task_id(&t.id) {
                 continue; // `check` reports these
             }
-            let ws = root.join(&t.id);
-            let fresh = |extra: Option<&Path>| {
-                let _ = std::fs::remove_dir_all(&ws);
-                let _ = std::fs::create_dir_all(&ws);
-                for src in t.fixtures.iter().map(|f| self.path.join(f)).chain(extra.map(Path::to_path_buf)).filter(|p| p.is_dir()) {
-                    crate::adapters::copy_dir(&src, &ws);
+            let Ok(ws) = task_workspace(&root.0, &t.id) else { continue };
+            // the task's workspace under our own directory, emptied and filled again
+            let fresh = |extra: Option<&Path>| -> Result<()> {
+                if std::fs::symlink_metadata(&ws).is_ok() {
+                    std::fs::remove_dir_all(&ws)?;
                 }
+                fill_workspace(&ws, t.fixtures.iter().map(|f| self.path.join(f)).chain(extra.map(Path::to_path_buf)).filter(|p| p.is_dir()))
             };
             // skipped judges might fail where the rest pass, so a judged task can only be
             // said to pass without any work when its judges ran
             let judged = graders.iter().any(|g| matches!(g, Ok(Grader::Judge { .. })));
             if !graders.is_empty() && (!judged || judges_run) {
-                fresh(None);
+                if let Err(e) = fresh(None) {
+                    issues.push(PackIssue::error(id, format!("can't set up its fixtures: {e}")));
+                    continue;
+                }
                 let grades = self.grade_with(t, &ws, &opts);
                 if !grades.is_empty() && grades.iter().all(|g| g.success) {
                     issues.push(PackIssue::warn(id, "its graders pass on the fixtures alone, so it passes without any work".into()));
@@ -471,7 +521,10 @@ impl EvalPack {
             }
             match t.solution.as_ref().map(|s| self.path.join(s)).filter(|p| p.is_dir()) {
                 Some(sol) => {
-                    fresh(Some(&sol));
+                    if let Err(e) = fresh(Some(&sol)) {
+                        issues.push(PackIssue::error(id, format!("can't set up its solution: {e}")));
+                        continue;
+                    }
                     let grades = self.grade_with(t, &ws, &opts);
                     for g in grades.iter().filter(|g| g.success && g.uncertain) {
                         let weakest = g.parts.iter().min_by(|a, b| (a.value - 0.5).abs().total_cmp(&(b.value - 0.5).abs()));
@@ -494,7 +547,7 @@ impl EvalPack {
                 None => {} // `check` reports a missing solution directory
             }
         }
-        let _ = std::fs::remove_dir_all(&root);
+        drop(root);
         issues
     }
 }

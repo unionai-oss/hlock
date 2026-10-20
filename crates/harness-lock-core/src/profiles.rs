@@ -11,7 +11,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
@@ -549,19 +549,51 @@ impl RuntimeProfile {
 pub struct Registry {
     pub harnesses: Vec<HarnessProfile>,
     pub runtimes: Vec<RuntimeProfile>,
+    /// Project profiles (or parts of them) that were skipped, and why.
+    pub notes: Vec<String>,
 }
 
 /// Profile directories, lowest precedence first: `~/.config/hlock/profiles`,
 /// each entry of `HLOCK_PROFILE_PATH`, then `./.hlock/profiles`. Each holds
 /// `harnesses/*.toml` and `runtimes/*.toml`; a later profile with the same `id`
-/// replaces an earlier one.
+/// replaces an earlier one, except that the project's own directory (the last; see
+/// [`project_profile_dir`]) may only add profiles.
 pub fn profile_dirs(ctx: &Ctx) -> Vec<PathBuf> {
     let mut dirs = vec![ctx.expand("~/.config/hlock/profiles", None)];
     if let Some(p) = ctx.var("HLOCK_PROFILE_PATH") {
         dirs.extend(std::env::split_paths(p));
     }
-    dirs.push(ctx.cwd.join(".hlock/profiles"));
+    dirs.push(project_profile_dir(ctx));
     dirs
+}
+
+/// The project's own profile directory, `./.hlock/profiles`. Whoever wrote the
+/// repository controls it, so [`Registry::extend_from_project_dir`] limits what it can do.
+pub fn project_profile_dir(ctx: &Ctx) -> PathBuf {
+    ctx.cwd.join(".hlock/profiles")
+}
+
+/// Version arguments a project profile may probe with.
+const VERSION_FLAGS: &[&str] = &["--version", "-version", "-V", "-v", "version"];
+
+/// Keep a project profile from running anything but a program on `PATH` with a
+/// version flag: `hlock check` probes every profile's binaries.
+fn confine(notes: &mut Vec<String>, origin: &Path, binaries: &mut Vec<String>, version: &mut VersionProbe, python: Option<&mut Option<String>>) {
+    let by_path = |b: &str| b.contains(['/', '\\']);
+    for b in binaries.iter().filter(|b| by_path(b)) {
+        notes.push(format!("{}: ignored binary {b:?}; a project profile names programs on PATH, not by path", origin.display()));
+    }
+    binaries.retain(|b| !by_path(b));
+    if !version.args.iter().all(|a| VERSION_FLAGS.contains(&a.as_str())) {
+        notes.push(format!("{}: ignored version args {:?}; a project profile may only probe with a version flag", origin.display(), version.args));
+        version.args.clear();
+    }
+    if let Some(py) = python {
+        if py.as_deref().is_some_and(by_path) {
+            notes.push(format!("{}: ignored python {:?}; a project profile names an interpreter on PATH, not by path", origin.display(), py.as_deref().unwrap_or_default()));
+            *py = None;
+        }
+    }
 }
 
 pub fn parse_harness(text: &str, origin: &str) -> Result<HarnessProfile> {
@@ -607,16 +639,52 @@ impl Registry {
             .iter()
             .map(|(id, text)| parse_runtime(text, "builtin").unwrap_or_else(|e| panic!("builtin profile {id}: {e}")))
             .collect();
-        Registry { harnesses, runtimes }
+        Registry { harnesses, runtimes, notes: Vec::new() }
     }
 
     /// Built-ins plus every profile found in [`profile_dirs`].
     pub fn load(ctx: &Ctx) -> Result<Registry> {
         let mut reg = Registry::builtin();
+        let project = project_profile_dir(ctx);
         for dir in profile_dirs(ctx) {
-            reg.extend_from_dir(&dir)?;
+            if dir == project {
+                reg.extend_from_project_dir(&dir)?;
+            } else {
+                reg.extend_from_dir(&dir)?;
+            }
         }
         Ok(reg)
+    }
+
+    /// Add the profiles in a project's own profile directory. They may add new ids but
+    /// not replace a profile hlock already has (put an override in
+    /// `~/.config/hlock/profiles`), and they can't name a program by path or probe it
+    /// with anything but a version flag. What's skipped is noted in `notes`.
+    pub fn extend_from_project_dir(&mut self, dir: &Path) -> Result<()> {
+        let taken = |notes: &mut Vec<String>, path: &Path, kind: &str, id: &str| {
+            notes.push(format!("{}: skipped; a project profile can't replace the {kind} profile {id:?} (override it in ~/.config/hlock/profiles)", path.display()));
+        };
+        for path in toml_files(&dir.join("harnesses")) {
+            let text = std::fs::read_to_string(&path)?;
+            let mut p = parse_harness(&text, &path.to_string_lossy())?;
+            if self.harnesses.iter().any(|h| h.id == p.id) {
+                taken(&mut self.notes, &path, "harness", &p.id);
+                continue;
+            }
+            confine(&mut self.notes, &path, &mut p.binaries, &mut p.version, Some(&mut p.run.python));
+            self.harnesses.push(p);
+        }
+        for path in toml_files(&dir.join("runtimes")) {
+            let text = std::fs::read_to_string(&path)?;
+            let mut p = parse_runtime(&text, &path.to_string_lossy())?;
+            if self.runtimes.iter().any(|r| r.id == p.id) {
+                taken(&mut self.notes, &path, "runtime", &p.id);
+                continue;
+            }
+            confine(&mut self.notes, &path, &mut p.binaries, &mut p.version, None);
+            self.runtimes.push(p);
+        }
+        Ok(())
     }
 
     /// Add (or replace by id) the profiles in `dir/harnesses` and `dir/runtimes`.
@@ -947,35 +1015,18 @@ fn npm_package_name(file: &Path) -> Option<String> {
     None
 }
 
-/// Run a command with a timeout, returning stdout+stderr on success.
+/// Run a command with a timeout, returning stdout+stderr when it exits 0. `None` when
+/// it can't start, times out, or fails.
 pub fn run_capture(bin: &Path, args: &[String], ctx: &Ctx, timeout: Duration) -> Option<String> {
-    let mut child = Command::new(bin)
-        .args(args)
-        .current_dir(&ctx.cwd)
-        .env_clear()
-        .envs(&ctx.env)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .ok()?;
-    let start = Instant::now();
-    loop {
-        match child.try_wait() {
-            Ok(Some(_)) => break,
-            Ok(None) if start.elapsed() > timeout => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return None;
-            }
-            Ok(None) => std::thread::sleep(Duration::from_millis(20)),
-            Err(_) => return None,
-        }
+    let mut cmd = Command::new(bin);
+    cmd.args(args).current_dir(&ctx.cwd).env_clear().envs(&ctx.env).stdin(Stdio::null());
+    let out = crate::process::run(cmd, &crate::process::Limits::timeout(timeout)).ok()?;
+    if !out.success {
+        return None;
     }
-    let out = child.wait_with_output().ok()?;
-    let mut text = String::from_utf8_lossy(&out.stdout).into_owned();
+    let mut text = out.stdout_text();
     text.push('\n');
-    text.push_str(&String::from_utf8_lossy(&out.stderr));
+    text.push_str(&out.stderr_text());
     Some(text)
 }
 
@@ -1196,5 +1247,51 @@ packages = ["pypi:httpx"]
         assert_eq!(r.harness("pi").unwrap().name, "Pi (fork)");
         assert_eq!(r.harnesses.iter().filter(|h| h.id == "pi").count(), 1);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn project_profiles_only_add_and_never_run_by_path() {
+        let dir = std::env::temp_dir().join(format!("hlock-prof-proj-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let pd = dir.join("proj/.hlock/profiles");
+        std::fs::create_dir_all(pd.join("harnesses")).unwrap();
+        std::fs::create_dir_all(pd.join("runtimes")).unwrap();
+        std::fs::create_dir_all(dir.join("home")).unwrap();
+        std::fs::write(pd.join("harnesses/pi.toml"), "id = \"pi\"\nname = \"Pi (repo)\"\nbinaries = [\"./evil\"]\n").unwrap();
+        std::fs::write(
+            pd.join("harnesses/mine.toml"),
+            "id = \"mine\"\nbinaries = [\"./evil\", \"mine\"]\nversion = { args = [\"-c\", \"touch pwned\"] }\n[run]\npython = \"./py\"\n",
+        )
+        .unwrap();
+        std::fs::write(pd.join("runtimes/ollama.toml"), "id = \"ollama\"\nbinaries = [\"./evil\"]\n").unwrap();
+        let ctx = Ctx { home: dir.join("home"), cwd: dir.join("proj"), env: BTreeMap::new(), path: vec![] };
+        let r = Registry::load(&ctx).unwrap();
+        // built-ins aren't replaced by the repository
+        assert_eq!(r.harness("pi").unwrap().origin, "builtin");
+        assert_eq!(r.runtime("ollama").unwrap().origin, "builtin");
+        // a new profile is added, without path-named programs or a non-version probe
+        let mine = r.harness("mine").unwrap();
+        assert_eq!(mine.binaries, ["mine"]);
+        assert!(mine.version.args.is_empty() && mine.run.python.is_none());
+        assert_eq!(r.notes.len(), 5, "{:?}", r.notes);
+        assert!(r.notes.iter().any(|n| n.contains("can't replace the harness profile \"pi\"")));
+        // the same files in a user directory keep full override power
+        let mut user = Registry::builtin();
+        user.extend_from_dir(&pd).unwrap();
+        assert_eq!(user.harness("pi").unwrap().name, "Pi (repo)");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn run_capture_is_none_on_failure() {
+        let ctx = Ctx::from_process();
+        let sh = ctx.which("sh").unwrap();
+        let s = |a: &[&str]| a.iter().map(|x| x.to_string()).collect::<Vec<_>>();
+        assert!(run_capture(&sh, &s(&["-c", "echo 1.2.3"]), &ctx, VERSION_TIMEOUT).unwrap().contains("1.2.3"));
+        assert!(run_capture(&sh, &s(&["-c", "echo 1.2.3; exit 1"]), &ctx, VERSION_TIMEOUT).is_none());
+        // more than a pipe holds, on both streams, doesn't block
+        let big = run_capture(&sh, &s(&["-c", "head -c 200000 /dev/zero; head -c 200000 /dev/zero >&2"]), &ctx, VERSION_TIMEOUT).unwrap();
+        assert_eq!(big.len(), 400_001);
     }
 }

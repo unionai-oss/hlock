@@ -76,6 +76,18 @@ self-contained. A lock named `harness.<name>.lock` or `<name>.lock` vendors into
 `.hlock/vendor/<name>/<harness>/` instead, so two locks never share vendored files. Commit both. Review the vendored files first, because a skill you wrote
 yourself is copied as it is. Pass `--no-vendor` to record digests only.
 
+`pin` builds the new vendor directory beside the old one and swaps it in, so a pin that
+fails leaves the previous files as they were. Symlinks inside a skill aren't followed: they
+aren't vendored or digested, and `pin` warns about each one. A file it can't read fails that
+skill's vendoring, with a warning, rather than being copied as an empty file. A skill whose
+`name:` isn't a plain directory name (it has a `/` or `..`) is locked under its directory's
+name. Two vendored files with the same name (two `AGENTS.md`) get `AGENTS.md` and
+`AGENTS-2.md`.
+
+Source URLs carry no credentials: a skill's git remote or a marketplace URL is recorded
+without its user name and password or token (`https://ghp_…@github.com/a/b` is locked as
+`https://github.com/a/b`); an ssh user name (`git@github.com:a/b`) stays.
+
 ## Keep it honest with `check`
 
 On a pinned lock, `hlock check` re-captures the harness and fails if anything changed:

@@ -132,6 +132,10 @@ def test_builtin_runs_a_job_openai(project, monkeypatch):
         "Wrote NOTES.md and verified it.",
     ])
     setup_builtin(project, fake, monkeypatch)
+    # a custom job's check runs a command from harness.meta.toml, so @hlock leaves it out; allow it here
+    mm = project / "harness.meta.toml"
+    mm.write_text(mm.read_text().replace('allow = ["@hlock",', 'allow = ["@hlock", "hlock meta verify notes",'))
+    assert invoke("meta", "pin").exit_code == 0
     r = invoke("meta", "run", "notes", "--headless")
     assert r.exit_code == 0, r.output
     assert "✓ verified" in r.output and "→ write file NOTES.md" in r.output and "→ $ hlock meta verify notes" in r.output
@@ -205,6 +209,31 @@ def test_builtin_stops_when_asked(project, monkeypatch):
     setup_builtin(project, fake, monkeypatch)
     out = json.loads(agent_run("go", meta_lock="harness.meta.lock", say=lambda k, t: k != "tool", project=str(project)))
     assert out["status"] == "stopped" and len(fake.requests) == 1
+
+
+def test_builtin_raises_what_a_callback_raised(project, monkeypatch):
+    fake = FakeModel([[("list_dir", {})]] * 5)
+    setup_builtin(project, fake, monkeypatch)
+
+    def say(kind, text):
+        if kind == "tool":
+            raise RuntimeError("from say")
+        return True
+
+    with pytest.raises(RuntimeError, match="from say"):
+        agent_run("go", meta_lock="harness.meta.lock", say=say, project=str(project))
+    assert len(fake.requests) == 1, "the run stopped at the exception"
+
+
+def test_builtin_raises_ctrl_c_from_ask(project, monkeypatch):
+    fake = FakeModel([[("run", {"command": "rm x"})], "ok"])
+    setup_builtin(project, fake, monkeypatch)
+
+    def ask(cmd):
+        raise KeyboardInterrupt
+
+    with pytest.raises(KeyboardInterrupt):
+        agent_run("go", meta_lock="harness.meta.lock", interactive=True, ask=ask, project=str(project))
 
 
 def test_builtin_reports_api_errors(project, monkeypatch):

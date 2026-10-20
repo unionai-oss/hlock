@@ -107,6 +107,46 @@ fn ops_end_to_end_upgrade_and_tune() {
 }
 
 #[test]
+fn a_lock_that_doesnt_load_is_an_error_not_a_zero_baseline() {
+    let dir = std::env::temp_dir().join(format!("hlock-ops-corrupt-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).unwrap();
+    make_pack(&dir);
+    let lock = dir.join("harness.lock");
+    fs::write(&lock, "this isn't = [ a lock").unwrap();
+    let tune_spec = TuneSpec { strict: true, out: dir.join("harness.tune.lock"), workdir: dir.join(".harnesslock"), lock: Some(lock.clone()), ..Default::default() };
+    assert!(tune(make_manifest(&dir), &tune_spec).is_err());
+    assert!(!dir.join("harness.tune.lock").exists());
+    let up = UpgradeSpec { all: true, apply: true, workdir: dir.join(".harnesslock"), lock: Some(lock.clone()), ..Default::default() };
+    assert!(upgrade(make_manifest(&dir), &up).is_err());
+    assert_eq!(fs::read_to_string(&lock).unwrap(), "this isn't = [ a lock", "left alone");
+    // no lock at all is no baseline, which tune may still beat
+    fs::remove_file(&lock).unwrap();
+    assert!(tune(make_manifest(&dir), &TuneSpec { lock: Some(lock), ..tune_spec }).is_ok());
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn an_upgrade_writes_each_roles_own_target() {
+    let dir = std::env::temp_dir().join(format!("hlock-ops-roles-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).unwrap();
+    make_pack(&dir);
+    let mut m = make_manifest(&dir);
+    m.objective.constraints.clear();
+    m.candidates.llm.get_mut("planner").unwrap().any_of = vec!["reference:qwen-7b".into()];
+    m.candidates.llm.insert("coder".into(), harness_lock_core::manifest::LLMCandidate { any_of: vec!["reference:qwen-1.5b".into()] });
+    let lock = dir.join("harness.lock");
+    Resolver::new(m.clone(), dir.join(".harnesslock")).resolve_lock().unwrap().save(&lock).unwrap();
+    let up = UpgradeSpec { apply: true, force: true, workdir: dir.join(".harnesslock"), lock: Some(lock.clone()), ..Default::default() };
+    let o = upgrade(m, &up).unwrap();
+    assert!(o.applied, "{}", o.message);
+    let roles: Vec<(String, String)> = Lockfile::load(&lock).unwrap().llm.iter().map(|l| (l.role.clone(), l.model.clone())).collect();
+    assert_eq!(roles, [("coder".to_string(), "qwen-7b".to_string()), ("planner".into(), "qwen-32b".into())]);
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn manifest_carries_candidate_models() {
     let m = Manifest::from_str(
         r#"
