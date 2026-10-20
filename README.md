@@ -204,6 +204,29 @@ hlock tune --backend cluster --depth ft --data user:./runs   # LoRA on a GPU wor
 See [Backends](https://docs.hlock.ai/guides/backends/) for setup and
 the `HL_*` environment variables.
 
+## Related projects
+
+hlock builds on, and borrows from, a lot of good work. Package managers install agent
+config, dotfile managers and Nix reproduce it, eval frameworks measure it, and optimizers
+generate it. hlock isn't trying to replace any of them; it has different devex goals:
+**speed** (one command pins the setup you already have), **quick portability** (the whole
+stack, from harness version and models to MCP servers, skills and config, in one lock you
+can rehydrate anywhere), and **tunability** (eval packs, the resolver and the tuner measure
+your stack against your own tasks).
+
+| If you want to… | Reach for | Where hlock fits |
+|---|---|---|
+| Install skills, instructions and MCP servers from git into many agents, with org policy | [APM](https://github.com/microsoft/apm) | APM installs; hlock pins the rest of the stack around it and measures whether it works |
+| Keep one set of rules in sync across many agents | [rulesync](https://github.com/dyoshikawa/rulesync), [Ruler](https://github.com/intellectronica/ruler) | They translate config; hlock locks it, with digests and drift checks |
+| Add skills from the open ecosystem | [`npx skills`](https://github.com/vercel-labs/skills) | `hlock pin` records them with the rest of your setup |
+| Carry your dotfiles to every machine | [chezmoi](https://github.com/twpayne/chezmoi), [yadm](https://github.com/yadm-dev/yadm) | hlock knows what a harness's files mean: versions, models, secrets, drift |
+| Reproduce a toolchain bit for bit | [Nix](https://github.com/NixOS/nix), [mise](https://github.com/jdx/mise), [Dev Containers](https://containers.dev) | Nix pins inputs; a resolved `harness.lock` also records how well the stack did |
+| Run agent evals and benchmarks at scale | [Harbor](https://github.com/harbor-framework/harbor), [Inspect](https://inspect.aisi.org.uk), [promptfoo](https://github.com/promptfoo/promptfoo) | They measure the variants you list; hlock searches, selects, and locks the winner |
+| Write better prompts and programs | [DSPy](https://github.com/stanfordnlp/dspy), [GEPA](https://github.com/gepa-ai/gepa) | They generate candidates; hlock picks among stacks and makes the pick reproducible |
+
+The [comparison page](https://docs.hlock.ai/concepts/related/) goes through each one,
+including "why not just dotfiles / chezmoi / Nix / APM?".
+
 ## Development
 
 Development uses [uv](https://docs.astral.sh/uv/) and a Rust toolchain.
