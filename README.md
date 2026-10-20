@@ -80,12 +80,11 @@ See the [Quickstart](https://docs.hlock.ai/getting-started/quickstart/),
 [Rehydrating with sync](https://docs.hlock.ai/guides/sync/), and
 [Launching a locked harness](https://docs.hlock.ai/guides/launch/).
 
-### Manage your repo's agents
+### Manage your team's agents
 
-A repository can version the agent it's built with: commit a `harness.lock` at the root for
-the setup the project recommends. When contributors use different setups, each person can
-commit their own lock to `.hlock/locks/harness.<handle>.lock`, next to the code it was used
-on, and anyone with a clone can try a teammate's setup in isolation:
+Contributors to one repository rarely share an agent setup. Each person can commit their own
+lock to `.hlock/locks/harness.<handle>.lock`, next to the code it was used on, and anyone
+with a clone can try a teammate's setup in isolation:
 
 ```bash
 hlock pin -o .hlock/locks/harness.alice.lock         # commit your setup with the code
