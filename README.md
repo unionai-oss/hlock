@@ -205,10 +205,13 @@ the `HL_*` environment variables.
 hlock builds on, and borrows from, a lot of good work. Package managers install agent
 config, dotfile managers and Nix reproduce it, eval frameworks measure it, and optimizers
 generate it. hlock isn't trying to replace any of them; it has different devex goals:
-**speed** (one command pins the setup you already have), **quick portability** (the whole
-stack, from harness version and models to MCP servers, skills and config, in one lock you
-can rehydrate anywhere), and **tunability** (eval packs, the resolver and the tuner measure
-your stack against your own tasks).
+
+- **speed**: one command pins the setup you already have
+- **quick portability**: the whole stack, from harness version and models to MCP servers,
+  skills and config, in one lock you can rehydrate anywhere
+- **tunability**: eval packs, the resolver and the tuner measure your stack against your own tasks
+- **let agents do the busy work**: some packaging and syncing work that users need to do around hlock
+  can be further automated with a meta agent.
 
 | If you want to… | Reach for | Where hlock fits |
 |---|---|---|
