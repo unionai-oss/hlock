@@ -33,6 +33,18 @@ live    sha256:d4271d0bda41886908111b7a2346bc4856c4f3355a11856230054d717a4cd483
     The manifest hash is computed over the file as written, comments and whitespace
     included. Any edit to `harness.toml` means re-running `hlock resolve`.
 
+## Declared dependencies
+
+When the project [declares dependencies](dependencies.md), `hlock sync --frozen` installs
+exactly what the lock pins and fails if `harness.toml` (or `apm.yml`) asks for something the
+lock doesn't have, rather than updating the lock. It fetches each dependency at its commit
+and checks its digest, so a CI runner gets what you got.
+
+```bash
+hlock sync --frozen --yes
+hlock check
+```
+
 ## GitHub Actions
 
 ```yaml title=".github/workflows/agent-lock.yml"

@@ -1,6 +1,6 @@
 # Declared dependencies: `hlock add`, sources, and APM interop
 
-Status: draft, not implemented · Owner: Niels Bantilan · Last updated: 2026-10-20 · Builds on [v0](v0.md) §6, §7.7 and [pull](pull.md)
+Status: implemented (see [the guide](../docs/guides/dependencies.md)) · Owner: Niels Bantilan · Last updated: 2026-10-20 · Builds on [v0](v0.md) §6, §7.7 and [pull](pull.md)
 
 > `hlock pin` records the setup you already have. `hlock add` declares a dependency you
 > want, fetches it, pins it, installs it into your harness, and can measure whether it
@@ -420,3 +420,30 @@ hlock export --format apm-lock [-o FILE] [--force]   # write apm.lock.yaml (§6.
   `hlock add … --eval` (or `hlock upgrade dep:NAME --eval` for an existing dependency).
 - **`--eval` was called `--try` in an earlier draft.** Renamed so it isn't read as a dry
   run; `add` has a real `--dry-run` (§3.3).
+
+## 11. Implementation notes
+
+Choices the implementation made where this spec left room:
+
+- **Where packages are declared.** `hlock add apm:…` writes to a `[packages]` table.
+- **Instruction files** install into the harness's rules directory, a new profile key
+  (`rules = { dir, ext }`: `.claude/rules/*.md`, `.cursor/rules/*.mdc`,
+  `.github/instructions/*.instructions.md`, the paths APM's targets use). A harness without
+  one gets the file as its own project instruction file, and only when it doesn't exist yet.
+- **Tag patterns** are APM's four (`v{version}`, `{name}--v{version}`, `{name}-v{version}`,
+  and a bare `{version}` when no other matches), not only the first two.
+- **All declared packages resolve as one graph**, so constraints from two roots on a shared
+  package are intersected; a package reached from several roots belongs to the first.
+- **A project with no lock is pinned first** by `add`, so `check` on the new lock doesn't
+  report the rest of the setup as drift.
+- **`sync` locks new or changed declarations** before planning (`--frozen` refuses to),
+  the way `cargo build` updates `Cargo.lock`.
+- **`apm.lock.yaml` export follows APM 0.34's writer**: `owner/repo` with `host`, no
+  `resolved_ref` for an unpinned declaration, the skill directory and its files in
+  `deployed_files`, and no `deployments` ledger (APM derives it). Resolution follows the
+  OpenAPM spec where APM's CLI differs (§6.2).
+- **`--eval` runs trials through the resolver's adapters.** A code harness gets each
+  side's skills and MCP servers; CLI harnesses on the `local` backend run on the reference
+  harness, which ignores them, and `add` says so.
+- **Plugins** install through `claude plugin install` and are read back from Claude Code's
+  `installed_plugins.json`; other harnesses' plugins aren't supported yet.

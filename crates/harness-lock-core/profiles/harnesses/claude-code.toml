@@ -13,6 +13,8 @@ version = { args = ["--version"] }
 active-env = ["CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT"]
 config-root = { env = "CLAUDE_CONFIG_DIR", default = "~/.claude" }
 instructions = ["CLAUDE.md", ".claude/CLAUDE.md", "{root}/CLAUDE.md"]
+# where `hlock add instructions` installs a file (APM's claude target uses the same)
+rules = { dir = ".claude/rules", ext = ".md" }
 
 [[install]]
 method = "brew-cask"

@@ -27,6 +27,10 @@ pub enum Error {
     /// `hlock pull`: a source that can't be read, or running `git` or fetching failed.
     #[error("{0}")]
     Pull(String),
+    /// A declared dependency (`hlock add`, `[skills]`, `apm.yml`) that can't be read,
+    /// resolved, fetched or installed.
+    #[error("{0}")]
+    Dependency(String),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;

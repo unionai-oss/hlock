@@ -30,6 +30,11 @@ serde_norway = "0.9.42"
 # killpg / O_NOFOLLOW for the process runner and safe file reads
 libc = "0.2"
 ureq = { version = "3", default-features = false, features = ["rustls"] }
+# Version ranges over git tags and package versions (`hlock add …@^1.2`).
+semver = "1"
+# Editing harness.toml in place (`hlock add`, `hlock remove`), keeping comments and layout.
+# Already in the build as the parser behind `toml`.
+toml_edit = "0.22"
 
 [features]
 default = []

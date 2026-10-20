@@ -443,7 +443,7 @@ pub fn prepare(lock: &Lockfile, lock_path: &Path, reg: &Registry, ctx: &Ctx, opt
         std::fs::create_dir_all(&root)?;
         if same {
             let plan = sync::plan(lock, lock_path, reg, ctx, &sopts)?;
-            for st in plan.steps.iter().filter(|s| s.status == "auto" && matches!(s.kind.as_str(), "config" | "skill" | "instructions" | "plugin")) {
+            for st in plan.steps.iter().filter(|s| s.status == "auto" && matches!(s.kind.as_str(), "config" | "skill" | "instructions" | "plugin" | "mcp")) {
                 match sync::run_step(st, ctx) {
                     Ok(_) => prep.done.push(st.title.clone()),
                     Err(e) => prep.notes.push(format!("{}: {e}", st.title)),

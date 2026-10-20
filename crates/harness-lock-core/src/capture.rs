@@ -252,7 +252,7 @@ pub(crate) fn drop_nulls(v: &Value) -> Value {
     }
 }
 
-fn escape_pointer(s: &str) -> String {
+pub(crate) fn escape_pointer(s: &str) -> String {
     s.replace('~', "~0").replace('/', "~1")
 }
 
@@ -639,12 +639,12 @@ fn is_project_path(p: &Path, root: &Path, ctx: &Ctx) -> bool {
 /// Whether a profile source lives in the project: a `file#/pointer` source by its file,
 /// a path template by the path it expands to. Claude Code's per-project entries in
 /// `~/.claude.json` (`#/projects/{cwd}/…`) are the user's own, not the repository's.
-fn source_is_project(profile: &HarnessProfile, source: &str, root: &Path, ctx: &Ctx) -> bool {
+pub(crate) fn source_is_project(profile: &HarnessProfile, source: &str, root: &Path, ctx: &Ctx) -> bool {
     source_path(profile, source, root, ctx).is_some_and(|p| is_project_path(&p, root, ctx))
 }
 
 /// The file a profile source reads: a `file#/pointer` source's file, or a path template.
-fn source_path(profile: &HarnessProfile, source: &str, root: &Path, ctx: &Ctx) -> Option<PathBuf> {
+pub(crate) fn source_path(profile: &HarnessProfile, source: &str, root: &Path, ctx: &Ctx) -> Option<PathBuf> {
     match source.split_once('#') {
         Some((file, _)) => profile.file_path(file, ctx),
         None => Some(ctx.expand(source, Some(root))),
@@ -1091,6 +1091,12 @@ fn str_map(v: Option<&Value>, secrets: &mut Secrets, context: &[&str]) -> BTreeM
     out
 }
 
+/// A server entry as `pin` would record it (secrets replaced with placeholders), for an
+/// entry hlock writes itself (`hlock add mcp`).
+pub(crate) fn mcp_tool(name: &str, v: &Value, scope: &str) -> Option<Tool> {
+    normalize_mcp(name, v, scope, &mut Secrets::default())
+}
+
 /// Normalize one MCP server entry from any harness's config shape.
 fn normalize_mcp(name: &str, v: &Value, scope: &str, secrets: &mut Secrets) -> Option<Tool> {
     let obj = v.as_object()?;
@@ -1160,7 +1166,8 @@ fn find_skills(dir: &Path, include_hidden: bool) -> Vec<PathBuf> {
             .flatten()
             .filter(|e| {
                 let n = e.file_name().to_string_lossy().into_owned();
-                (hidden || !n.starts_with('.')) && n != "node_modules" && e.path().is_dir()
+                // a copy sync set aside (`x.hlock-bak`) isn't a skill
+                (hidden || !n.starts_with('.')) && n != "node_modules" && !n.ends_with(".hlock-bak") && e.path().is_dir()
             })
             .map(|e| e.path())
             .collect();
@@ -1249,6 +1256,7 @@ fn claude_plugins(profile: &HarnessProfile, src: &Sources, path: &Path, out: &mu
                 integrity: None,
                 enabled: enabled.get(id).and_then(Value::as_bool).unwrap_or(false),
                 config: e["scope"].as_str().map(|s| json!({"scope": s})),
+                ..Default::default()
             });
         }
     }
@@ -1550,7 +1558,7 @@ pub fn capture(profile: &HarnessProfile, reg: &Registry, ctx: &Ctx, project: Opt
             continue;
         }
         let name = portable_path(&p, Some(&root), ctx);
-        let mut ins = Instructions { name: name.clone(), digest: Some(sha256_bytes(&bytes)), scope: if project { "project" } else { "user" }.into(), vendored: None };
+        let mut ins = Instructions { name: name.clone(), digest: Some(sha256_bytes(&bytes)), scope: if project { "project" } else { "user" }.into(), ..Default::default() };
         if !project {
             // by file name; a second file of the same name (two AGENTS.md) gets `-2`
             let file = Path::new(p.file_name().unwrap_or_default());
@@ -1746,7 +1754,7 @@ pub(crate) fn live_mcp_servers(profile: &HarnessProfile, ctx: &Ctx) -> BTreeMap<
 
 /// MCP servers from a config value: a map by name, or a list of servers that each
 /// carry a `name` (ZeroClaw's `[[mcp.servers]]`).
-fn named_servers(v: Option<Value>) -> Vec<(String, Value)> {
+pub(crate) fn named_servers(v: Option<Value>) -> Vec<(String, Value)> {
     match v {
         Some(Value::Object(m)) => m.into_iter().collect(),
         Some(Value::Array(a)) => a.into_iter().filter_map(|v| Some((v.get("name")?.as_str()?.to_string(), v))).collect(),
@@ -1955,6 +1963,9 @@ pub fn pin(
         None
     };
     let mut cap = capture(profile, reg, ctx, project, &user)?;
+    // declared dependencies stay declared (and fetched, not vendored)
+    let lock_dir = out.parent().filter(|p| !p.as_os_str().is_empty()).map(Path::to_path_buf).unwrap_or_else(|| ctx.cwd.clone());
+    crate::deps::carry_declared(previous.as_ref(), &mut cap, &lock_dir);
     // the user scope doesn't carry over from the previous pin; say so when it changes
     if let Some(prev) = previous.as_ref().filter(|p| p.is_pin()).map(UserScope::of) {
         if prev != UserScope::None && prev != user {
@@ -2015,12 +2026,15 @@ pub fn check_pin_at(lock: &Lockfile, reg: &Registry, ctx: &Ctx, prefix: Option<&
     let project = lock.stack.get("name").and_then(Value::as_str);
     // re-capture what the pin captured, so a project-only lock ignores your user config
     let user = UserScope::of(lock);
+    // declared dependencies are compared by `deps::check`, which says how they differ
     let Some(prefix) = prefix else {
-        let cap = capture(profile, reg, ctx, project, &user)?;
+        let mut cap = capture(profile, reg, ctx, project, &user)?;
+        crate::deps::carry_from(lock, &mut cap);
         return Ok(diff_locks(lock, &cap.lock));
     };
     let target = crate::sync::target_ctx(profile, ctx, &crate::sync::SyncOptions { prefix: Some(prefix.to_path_buf()), ..Default::default() }).0;
     let mut cap = capture(profile, reg, &target, project, &user)?;
+    crate::deps::carry_from(lock, &mut cap);
     // a file outside the root normally (`~/.claude.json`) lives inside an isolated one:
     // the same file, so compare it under the lock's path
     for c in cap.lock.config.iter_mut() {

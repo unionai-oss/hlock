@@ -80,7 +80,9 @@ first, and `hlock sync NAME` syncs one you've already pulled; see
 
 By default `sync` only does things that are local and reversible: it writes config files
 into the isolated root (keeping the old one as `<file>.hlock-bak`), copies skills and
-instruction files, and runs the harness's own plugin commands against that root. These
+instruction files, fetches [declared dependencies](dependencies.md#sync-on-another-machine)
+at their locked commits (checking each digest), and runs the harness's own plugin commands
+against that root. These
 steps need you to opt in:
 
 | Flag | Lets hlock… | Otherwise the step is manual, with |

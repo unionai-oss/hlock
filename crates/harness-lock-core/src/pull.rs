@@ -40,7 +40,7 @@ pub fn is_source(arg: &str) -> bool {
     ["github:", "gitlab:", "git:", "https://", "http://"].iter().any(|p| arg.starts_with(p))
 }
 
-fn base_url(var: &str, default: &str) -> String {
+pub(crate) fn base_url(var: &str, default: &str) -> String {
     std::env::var(var).ok().filter(|v| !v.is_empty()).unwrap_or_else(|| default.to_string()).trim_end_matches('/').to_string()
 }
 
@@ -227,7 +227,7 @@ pub fn default_name(owner: &str, remote_lock: &str) -> String {
     sanitize(&base)
 }
 
-fn sanitize(s: &str) -> String {
+pub(crate) fn sanitize(s: &str) -> String {
     let out: String = s.to_lowercase().chars().map(|c| if c.is_ascii_alphanumeric() || "._-".contains(c) { c } else { '-' }).collect();
     let out = out.trim_matches(['-', '.']).to_string();
     if out.is_empty() { "pulled".into() } else { out }
@@ -258,7 +258,7 @@ fn git(dir: &Path, args: &[&str]) -> Result<String> {
 }
 
 /// `text` with credentials taken out of every URL in it (git echoes the remote it failed on).
-fn redact_urls(text: &str) -> String {
+pub(crate) fn redact_urls(text: &str) -> String {
     let mut out = String::new();
     let mut rest = text;
     while let Some(i) = rest.find("://") {
@@ -454,7 +454,7 @@ fn swap_in(staged: &Path, vdir: &Path) -> Result<()> {
     Ok(())
 }
 
-fn now_rfc3339() -> String {
+pub(crate) fn now_rfc3339() -> String {
     let secs = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0);
     let (days, rem) = (secs.div_euclid(86_400), secs.rem_euclid(86_400));
     // Civil date from days since 1970-01-01 (Howard Hinnant's algorithm).

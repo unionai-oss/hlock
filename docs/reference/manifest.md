@@ -111,6 +111,7 @@ comparison with a number, is an error. When no stack satisfies every constraint,
 | Key | Description |
 |---|---|
 | `harness` | The harness this lock is for: an id or alias from `hlock harness list`, or a `[harnesses.<id>]` table. `resolve` narrows `[candidates] harness` to it and `check` enforces it. See [Harnesses](../guides/harnesses.md#target-a-harness). |
+| `also` | More harnesses `hlock sync` installs the declared skills, MCP servers and instruction files into, e.g. `["codex", "cursor-agent"]`. See [Mixed-harness teams](../guides/dependencies.md#mixed-harness-teams). |
 
 ## `[harnesses.<id>]`
 
@@ -140,19 +141,63 @@ entrypoint = "triage.agent:run"
 |---|---|---|
 | `target` | `"local"` | `local`, `devbox`, or `cluster`. See [Backends](../guides/backends.md). |
 
+## Dependencies
+
+`[skills]`, `[mcp]`, `[instructions]`, `[plugins]` and `[packages]` declare dependencies:
+what [`hlock add`](../guides/dependencies.md) writes, and what `hlock sync` and
+`hlock check` hold the lock to. Each entry is a name and a source:
+
+```toml title="harness.toml"
+[skills]
+sql = "github:acme/skills/skills/sql@^1.2"
+mine = { source = "./skills/mine", editable = true }
+review = { source = "github:acme/skills/skills/review", scope = "user" }
+
+[mcp]
+github = "npm:@modelcontextprotocol/server-github@^1"
+linear = "https://mcp.linear.app/mcp"
+
+[instructions]
+style = "github:acme/rules/style.md"
+
+[plugins]
+acme-tools = "plugin:acme-marketplace/acme-tools"
+
+[packages]
+context-engineering = "apm:github/awesome-copilot/plugins/context-engineering"
+```
+
+| Form | Meaning |
+|---|---|
+| `"SOURCE"` | A source, installed for the project. See [What you can add](../guides/dependencies.md#what-you-can-add) |
+| `{ source = …, scope = "user" }` | Installed for you, not the project |
+| `{ source = …, editable = true }` | A path you're working on: `check` warns, rather than fails, when it changes |
+| `{ git = URL, path = …, tag = … }` | The same as `"git+URL#path=…&tag=…"` (`rev`, `ref`, `branch`, `commit` and `version` work too) |
+| `{ gh = "OWNER/REPO/PATH" }`, `{ npm = … }`, `{ pypi = … }`, `{ url = … }`, `{ apm = … }`, `{ plugin = … }` | Shorthands for the matching source |
+
+A `[tools]` entry with an `mcp` source (`github = { mcp = "npm:…" }`, as the v0 spec
+spells it) counts as an MCP server too. `[instructions] files` and the `[skills.builtin]` and
+`[skills.trust]` tables aren't dependencies. An `apm.yml` next to the manifest declares
+dependencies as well ([APM packages](../guides/dependencies.md#a-project-that-already-uses-apm)).
+
 ## Reserved sections
 
-`[tools]`, `[skills]`, `[instructions]`, `[context]`, and `[enforce]` are parsed and
-included in the manifest hash. They're placeholders for the peripherals described in
-the [design spec](https://github.com/unionai-oss/hlock/blob/main/specs/v0.md), and
-the v0.1 resolver doesn't search over them yet.
+`[context]` and `[enforce]` are parsed and included in the manifest hash. They're
+placeholders for the peripherals described in the
+[design spec](https://github.com/unionai-oss/hlock/blob/main/specs/v0.md). The resolver
+doesn't search over dependencies yet: `hlock resolve` treats `[skills]` and `[tools]` names
+as fixed parts of every stack.
 
 ## The manifest hash
 
-The lock records a SHA-256 hash of the manifest file exactly as written, comments and
-whitespace included: the text the run read, even if the file changes during it.
+A resolved lock records a SHA-256 hash of the manifest file exactly as written, comments
+and whitespace included: the text the run read, even if the file changes during it.
 [`hlock check`](../guides/ci.md) compares it to the live file, so any edit to
 `harness.toml` needs a fresh `hlock resolve`.
+
+A pinned lock with declared dependencies records a hash of the dependency sections only
+(`[skills]`, `[mcp]`, `[instructions]`, `[plugins]`, `[packages]` and `[tools]`), so editing
+`[candidates]` or `[evals]` in the same file doesn't invalidate the pin.
 
 ## `[deciders.<use>]`
 

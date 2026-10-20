@@ -31,6 +31,9 @@ pub struct Resolver {
     code_harnesses: BTreeMap<String, crate::profiles::HarnessProfile>,
     /// Profiles of the candidate harnesses, for how each reaches a decider.
     profiles: BTreeMap<String, crate::profiles::HarnessProfile>,
+    /// Locks a code harness's trials get the skills and MCP servers of, by stack hash
+    /// (`hlock add --eval` measures the lock with and without a dependency).
+    pub trial_locks: BTreeMap<String, (Lockfile, PathBuf)>,
 }
 
 impl Resolver {
@@ -61,6 +64,7 @@ impl Resolver {
             harness_override: None,
             code_harnesses: BTreeMap::new(),
             profiles: BTreeMap::new(),
+            trial_locks: BTreeMap::new(),
         }
     }
 
@@ -211,6 +215,7 @@ impl Resolver {
         let outcome = Self::fresh_workspace(ws_root, &ws, &task.id).and_then(|()| match self.code_harnesses.get(&stack.harness) {
             Some(p) => crate::contract::CommandAdapter::new(p.clone(), Ctx::from_process())
                 .with_deciders(self.trial_deciders()?)
+                .with_lock(self.trial_locks.get(&hash).cloned())
                 .run(stack, task, &ws, seed),
             None => self.adapter.run(stack, task, &ws, seed),
         });
@@ -277,8 +282,17 @@ impl Resolver {
         Ok(lock)
     }
 
-    /// Resolve and return the winning lock without writing it.
-    pub fn resolve_lock(&mut self) -> Result<Lockfile> {
+    /// What runs a stack's trials: a code harness's id, the worker, or `reference`.
+    pub fn adapter_for(&self, stack: &Stack) -> String {
+        match self.code_harnesses.get(&stack.harness) {
+            Some(p) => format!("code harness {}", p.id),
+            None => self.adapter.name().to_string(),
+        }
+    }
+
+    /// Load the profiles trials run through (code harnesses, and how each candidate
+    /// harness reaches a decider), narrowing the candidates to the target harness.
+    pub fn prepare_trials(&mut self) -> Result<()> {
         let registry = Registry::load_for(&Ctx::from_process(), Some(&self.manifest))?;
         apply_target(&mut self.manifest, self.harness_override.as_deref(), &registry)?;
         self.code_harnesses = registry
@@ -288,6 +302,12 @@ impl Resolver {
             .map(|h| (h.id.clone(), h.clone()))
             .collect();
         self.profiles = self.manifest.candidates.harness.iter().filter_map(|h| registry.harness(&h.name).map(|p| (h.name.clone(), p.clone()))).collect();
+        Ok(())
+    }
+
+    /// Resolve and return the winning lock without writing it.
+    pub fn resolve_lock(&mut self) -> Result<Lockfile> {
+        self.prepare_trials()?;
         // problems in the objective or the deciders stop the resolve before any trial runs
         crate::search::parse_constraints(&self.manifest.objective.constraints)?;
         let stacks = self.enumerate_stacks()?;

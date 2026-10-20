@@ -90,7 +90,7 @@ fn sorted_list(v: &[String]) -> Vec<String> {
 }
 
 /// One executed trial.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct TrialResult {
     pub stack_hash: String,
     pub task_id: String,
@@ -107,7 +107,7 @@ pub struct TrialResult {
 }
 
 /// The judging of one trial: for the lock's `evidence.judge`, from the winner's trials.
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct TrialJudging {
     /// The judge configured for the task's pack.
     pub configured: Option<String>,

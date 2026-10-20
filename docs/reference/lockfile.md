@@ -172,7 +172,7 @@ strategy = "grid"
 |---|---|
 | `lock-version` | Schema version. This release reads and writes `1`. |
 | `generated-by` | The `harness-lock` version that wrote the lock |
-| `manifest-hash` | Hash of the `harness.toml` the lock was resolved from. Used by `hlock check`. |
+| `manifest-hash` | Hash of the `harness.toml` the lock was resolved from (for a pinned lock with declared dependencies, of its dependency sections only). Used by `hlock check`. |
 | `kind` | `pin` for a [pinned lock](#pinned-locks), `localized` for a [localized one](#localized-locks); absent for a resolved lock |
 
 ## Sections
@@ -190,7 +190,8 @@ strategy = "grid"
 | `[evidence]` | The eval pack and split measured, the trial count, and success-rate, cost, and latency statistics. `[evidence.judge]` records the judge of [`judge` and `trace` graders](../guides/eval-packs.md#judges): its `model`, the model that `answered`, its `protocol`, a `fallback`, the share of `uncertain-grades`, and `cost-usd-per-task` when
 the provider publishes a price. |
 | `[verify]` | Runtime verification thresholds: `canary-tasks`, `min-success-rate`, `fingerprint-tolerance` |
-| `[provenance]` | The backend that produced the lock, the search settings, and for a pinned lock the `scopes` it captured and any `user-include` patterns |
+| `[provenance]` | The backend that produced the lock, the search settings, for a pinned lock the `scopes` it captured and any `user-include` patterns, and `openapm` (`"0.1"`) when APM packages were resolved |
+| `[[package]]` | [APM packages](../guides/dependencies.md#apm-packages) declared dependencies resolved to (see below) |
 
 ## Pinned locks
 
@@ -210,6 +211,29 @@ MCP servers carry `transport`, `command`, `args`, `url`, `env`, `headers`, `scop
 | `[[runtime]]` | Inference runtimes: `name`, `location` (`local` or `network`), `version`, `source`, `endpoint`, and `[[runtime.model]]` entries with `id`, `source`, `revision`, `digest`, `size-bytes`, `present` |
 | `[[config]]` | Harness config files: `id`, `path`, `format`, `restore` (`whole`, `pointers`, `record`), `pointers`, `digest`, `vendored` |
 | `[[secret]]` | Placeholders that replaced secrets: `name` (the environment variable that supplies it) and `used-by` |
+
+## Declared dependencies
+
+A `[[skill]]`, `[[tool]]`, `[[instructions]]` or `[[native]]` entry that
+[`hlock add`](../guides/dependencies.md) wrote, or that a `harness.toml` or `apm.yml`
+declaration resolved to, has these keys besides its usual ones:
+
+| Key | Description |
+|---|---|
+| `declared` | `true`: it's declared, not only found installed |
+| `source` | The source as declared (`github:acme/skills/skills/sql@^1.2`). An `[[instructions]]` entry's `name` is where it's installed (`.claude/rules/style.md`) |
+| `constraint` | The version range asked for (`^1.2`) |
+| `resolved-tag`, `resolved-ref` | The tag a range matched, and the branch or tag the commit came from |
+| `commit` | The git commit it's pinned to. `sync` fetches this commit and checks the entry's `digest`; the entry is never vendored |
+| `version`, `integrity` | For an MCP server from npm or PyPI: the exact version and the package's integrity hash |
+| `required-by` | For what a package brought in: the packages above it, the declared one first |
+| `[skill.evidence]` (and `[tool.evidence]`, …) | What `hlock add --eval` measured: `eval-pack` (the packs' digest), `split`, `trials` per side, `baseline-success-rate`, `success-rate`, the cost of each, and the `digest` it measured. `check` reports it as stale when the digest changes |
+
+A `[[package]]` entry records an APM package: its `name`, `source`, `digest` (the package
+tree's hash, computed as APM computes `content_hash`), `depth` (1 for one the project
+declares), its `apm.yml` `version` and `license`, what it held that hlock doesn't install
+(`skipped`: prompts, agents, hooks), and the same `declared`, `constraint`,
+`resolved-tag`, `resolved-ref`, `commit` and `required-by` keys.
 
 ## Localized locks
 

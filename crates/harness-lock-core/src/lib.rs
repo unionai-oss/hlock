@@ -11,9 +11,11 @@
 
 pub mod adapters;
 pub mod agent;
+pub mod apm;
 pub mod capture;
 pub mod contract;
 pub mod decide;
+pub mod deps;
 pub mod launch;
 pub mod localize;
 pub mod error;

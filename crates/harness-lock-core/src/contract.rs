@@ -242,11 +242,19 @@ pub struct CommandAdapter {
     profile: HarnessProfile,
     ctx: Ctx,
     deciders: BTreeMap<String, crate::decide::DeciderSpec>,
+    /// A lock whose skills and MCP servers each trial gets (`hlock add --eval`).
+    lock: Option<(crate::lockfile::Lockfile, PathBuf)>,
 }
 
 impl CommandAdapter {
     pub fn new(profile: HarnessProfile, ctx: Ctx) -> Self {
-        CommandAdapter { profile, ctx, deciders: BTreeMap::new() }
+        CommandAdapter { profile, ctx, deciders: BTreeMap::new(), lock: None }
+    }
+
+    /// Give each trial a lock's skills and MCP servers, as `hlock launch` would.
+    pub fn with_lock(mut self, lock: Option<(crate::lockfile::Lockfile, PathBuf)>) -> Self {
+        self.lock = lock;
+        self
     }
 
     /// The manifest's `[deciders.*]`, for the endpoint settings of a stack's deciders.
@@ -269,7 +277,11 @@ impl HarnessAdapter for CommandAdapter {
             }
         }
         let model = stack.llm.get("planner").or_else(|| stack.llm.values().next()).cloned();
-        let mut inv = invocation(&self.profile, None, None, model.as_deref(), &task.prompt_text, workspace, seed, &self.ctx)?;
+        let (lock, lock_path) = match &self.lock {
+            Some((l, p)) => (Some(l), Some(p.as_path())),
+            None => (None, None),
+        };
+        let mut inv = invocation(&self.profile, lock, lock_path, model.as_deref(), &task.prompt_text, workspace, seed, &self.ctx)?;
         let deciders: Vec<(String, crate::decide::DeciderConfig)> = stack
             .deciders
             .iter()
