@@ -1,6 +1,6 @@
 # Audit and trust: content scanning, executable approval, and policy
 
-Status: draft, not implemented · Owner: Niels Bantilan · Last updated: 2026-10-20 · Builds on [v0](v0.md) §7.7.8, [pull](pull.md), [secrets](secrets.md), [dependencies](dependencies.md)
+Status: implemented (see [the guide](../docs/guides/audit.md)) · Owner: Niels Bantilan · Last updated: 2026-10-20 · Builds on [v0](v0.md) §7.7.8, [pull](pull.md), [secrets](secrets.md), [dependencies](dependencies.md)
 
 > A lock you pulled from someone else is a program you're about to run. hlock should look
 > at it before you do, ask before it installs anything that executes, and let a team say
@@ -259,3 +259,44 @@ answer.
   `~/.hlock/pulls/`, because people open pulled files in editors, and an editor that renders
   bidi overrides shows a reviewer different text from what the agent reads. `sync` scans
   again before placing files, since a pulled lock can be refreshed or edited in between.
+
+## 10. Implementation notes
+
+Choices the implementation made where this spec left room:
+
+- **`scan` keys** are `clean`, `warnings:N`, `critical:N` and `allowed:critical`: `critical:N`
+  records what `pin` found on your own machine (it warns rather than refuses).
+- **`hlock add` approves what you add** (you saw it and asked for it); an MCP server a package
+  brings still waits for `hlock trust`, as do executables arriving through `git pull`.
+- **Digests**: an MCP server's covers its command, arguments, environment variable names and
+  the values that aren't secret placeholders; a hook's its event, matcher and command; a
+  setting's its value; a plugin's kind, name, version, source, revision, and its marketplace's
+  source and revision; the harness's name, version and source. A script a command line names
+  is hashed in when it exists here. A remote MCP server a package brings needs approval too.
+- **Skill scripts** are approved by the skill's pinned digest, not the copy installed now (a
+  declared skill's upgrade asks again). The lock lists each skill's `scripts`; sync refuses a
+  skill that carries unlisted ones, and a lock older than the key asks about skills it can't
+  see yet.
+- **Settings that run things** beyond hooks and MCP servers come from a built-in list of JSON
+  pointers looked up in every config file (`/statusLine/command`, `/apiKeyHelper`,
+  `/env/NODE_OPTIONS`, `/enabledPlugins`, `/notify`, `/tools/discoveryCommand`, `/plugin`, …).
+- **`allowed:critical`** in a lock is an exception its author wrote: it's approved per machine
+  like an executable (kind `hidden`, by the content's digest). `--allow-hidden` on `pull` or
+  `add` approves it.
+- **`[sources] trusted`** counts on a machine only once the list itself is approved (kind
+  `policy`), since the policy sits in the repository with the lock. A source counts only where
+  it's verified: an MCP command that runs the named package, a skill fetched from its source,
+  a remote server's URL.
+- **`launch`** asks for approval on a terminal and fails without one unless `--trust`; it
+  leaves out what isn't trusted or hides text, and says so, including when translating into
+  another harness. A code harness (`launch` or `run`) needs everything trusted.
+- **Scanning** decodes what it can of a file that isn't valid UTF-8, skips only files named as
+  binary, treats a file over 20 MB as critical, and scans the parsed strings of JSON, TOML and
+  YAML files. `--strip` keeps zero-width non-joiners and bidi marks, and refuses when a vendored
+  file doesn't match its digest.
+- **Policy subjects** are sources without their ref (`github:OWNER/REPO/PATH`, `npm:PKG`, …),
+  and a pattern matching a repository matches the paths in it. Unknown policy keys are errors.
+- **`audit`** doesn't fail on untrusted executables (a CI runner approves nothing); `--ci`
+  fails on content warnings. SARIF uses APM's `apm/hidden-unicode/<category>` rule ids.
+- **SBOMs** use deterministic serial numbers derived from the lock, so the same lock exports
+  the same document.

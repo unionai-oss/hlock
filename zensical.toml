@@ -36,6 +36,7 @@ nav = [
       "guides/pull.md",
       "guides/teams.md",
       "guides/secrets.md",
+      "guides/audit.md",
     ] },
     { "Optimize your harness" = [
       "guides/eval-packs.md",
@@ -64,6 +65,7 @@ nav = [
     "reference/manifest.md",
     "reference/meta-manifest.md",
     "reference/lockfile.md",
+    "reference/policy.md",
     "reference/environment.md",
   ] },
   { "Project" = [

@@ -250,6 +250,14 @@ pub struct Skill {
     /// Copy of the skill next to the lock (`.hlock/vendor/…`), for skills with no fetchable source.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub vendored: Option<String>,
+    /// The hidden-Unicode scan of its content: `clean`, `warnings:N`, `critical:N`, or
+    /// `allowed:critical` (let through on purpose with `--allow-hidden`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scan: Option<String>,
+    /// The files in the skill's `scripts/`, which run: approved with `hlock trust` by the
+    /// skill's digest, and checked against what's fetched. Unset in a lock older than this.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scripts: Option<Vec<String>>,
     #[serde(flatten)]
     pub dep: Declared,
 }
@@ -347,6 +355,10 @@ pub struct Instructions {
     /// Where a declared instruction file comes from (`github:acme/rules/style.md`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source: Option<String>,
+    /// The hidden-Unicode scan of its content: `clean`, `warnings:N`, `critical:N`, or
+    /// `allowed:critical` (let through on purpose with `--allow-hidden`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scan: Option<String>,
     #[serde(flatten)]
     pub dep: Declared,
 }
@@ -414,6 +426,10 @@ pub struct ConfigFile {
     pub digest: Option<String>,
     /// Redacted copy next to the lock that `sync` restores from.
     pub vendored: Option<String>,
+    /// The hidden-Unicode scan of its content: `clean`, `warnings:N`, `critical:N`, or
+    /// `allowed:critical` (let through on purpose with `--allow-hidden`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scan: Option<String>,
 }
 
 /// A secret `pin` replaced with a placeholder; `sync`/`launch` fill it from the environment.

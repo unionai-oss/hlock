@@ -829,6 +829,16 @@ fn is_executable(_p: &Path) -> bool {
 
 /// Merkle-style tree digest (SPEC §7.7.2): normalized relative paths, contents,
 /// and executable bits. A vendored copy and a checkout of the same tree match.
+/// The files in a skill's `scripts/` directory, relative to it and sorted: what the skill
+/// can run.
+pub fn skill_scripts(skill: &Path) -> Vec<String> {
+    let dir = skill.join("scripts");
+    if !dir.is_dir() {
+        return Vec::new();
+    }
+    crate::scan::text_files(&dir).iter().filter_map(|p| p.strip_prefix(&dir).ok().map(|r| r.to_string_lossy().replace('\\', "/"))).collect()
+}
+
 pub fn tree_digest(dir: &Path) -> String {
     tree_digest_checked(dir).0
 }
@@ -1485,6 +1495,7 @@ pub fn capture(profile: &HarnessProfile, reg: &Registry, ctx: &Ctx, project: Opt
             let mut s = Skill {
                 name: name.clone(),
                 digest: Some(digest),
+                scripts: Some(skill_scripts(&sk)),
                 scope: Some(if project { "project" } else { "user" }.into()),
                 path: Some(portable_path(&sk, Some(&root), ctx)),
                 enabled: true,
@@ -1591,6 +1602,7 @@ pub fn capture(profile: &HarnessProfile, reg: &Registry, ctx: &Ctx, project: Opt
             pointers: spec.pointers.clone(),
             digest: Some(sha256_bytes(&raw)),
             vendored: None,
+            scan: None,
         };
         if cf.restore != "record" {
             match src.file(id) {
@@ -1966,6 +1978,9 @@ pub fn pin(
     // declared dependencies stay declared (and fetched, not vendored)
     let lock_dir = out.parent().filter(|p| !p.as_os_str().is_empty()).map(Path::to_path_buf).unwrap_or_else(|| ctx.cwd.clone());
     crate::deps::carry_declared(previous.as_ref(), &mut cap, &lock_dir);
+    // what each entry would place, scanned for characters that hide text from a reviewer
+    let scan_warnings = crate::audit::scan_capture(&mut cap.lock, profile, ctx, &cap.vendor);
+    cap.warnings.extend(scan_warnings);
     // the user scope doesn't carry over from the previous pin; say so when it changes
     if let Some(prev) = previous.as_ref().filter(|p| p.is_pin()).map(UserScope::of) {
         if prev != UserScope::None && prev != user {
@@ -2000,8 +2015,17 @@ pub fn pin(
             c.vendored = None;
         }
     }
+    // the project's policy: a denied source, server, provider or harness stops the pin
+    let policy = crate::policy::Policy::for_dir(&base)?;
+    let policy_warnings = policy.enforce(policy.check_lock(&cap.lock), &format!("the {} setup", profile.name))?;
+    cap.warnings.extend(policy_warnings);
     let diff = previous.as_ref().filter(|p| p.is_pin()).map(|p| diff_locks(p, &cap.lock)).unwrap_or_default();
     cap.lock.save(out)?;
+    // what it captured already runs on this machine: approve it, so syncing here never asks
+    let mut store = crate::trust::TrustStore::load(ctx)?;
+    if store.approve(&crate::trust::executables(&cap.lock, &base, Some(profile), ctx)) > 0 {
+        store.save(ctx)?;
+    }
     Ok(PinOutcome {
         lock: cap.lock,
         path: out.to_path_buf(),

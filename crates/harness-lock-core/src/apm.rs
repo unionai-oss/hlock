@@ -853,7 +853,7 @@ fn assemble(
                 format!("git+{}#path={sub}", n.source.url)
             };
             let entry = match kind {
-                Kind::Skill => Entry::Skill(Skill { name: prim.name.clone(), origin: "apm".into(), source: Some(source), digest: Some(digest), enabled: true, scope: Some("project".into()), dep: dep(chain.clone()), ..Default::default() }),
+                Kind::Skill => Entry::Skill(Skill { name: prim.name.clone(), origin: "apm".into(), source: Some(source), digest: Some(digest), scripts: Some(crate::capture::skill_scripts(&path)), enabled: true, scope: Some("project".into()), dep: dep(chain.clone()), ..Default::default() }),
                 _ => Entry::Instructions(Instructions { name: prim.name.clone(), digest: Some(digest), scope: "project".into(), source: Some(source), dep: Declared { declared_as: Some(prim.name.clone()), ..dep(chain.clone()) }, ..Default::default() }),
             };
             resolved.push(Resolved { kind, name: prim.name.clone(), entry, content: Some(stored), locked: false });

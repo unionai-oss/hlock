@@ -106,10 +106,16 @@ config instead.
 
 On a new laptop, a VM, or a teammate's machine, clone the repository, set the secrets the
 lock asks for (as variables, as here, or once in your keychain with
-[`hlock secret set`](../guides/secrets.md)), and run `hlock sync`:
+[`hlock secret set`](../guides/secrets.md)), approve what the lock runs on this machine, and
+run `hlock sync`:
 
 ```console
 $ export HLOCK_SECRET_GITHUB_GITHUB_TOKEN=ghp_…
+$ hlock trust --yes
+   kind  name    runs                                        digest        status
+⚑  mcp   github  npx -y @modelcontextprotocol/server-github  bd687d330ce4  not yet trusted
+✓ approved 1  (recorded in ~/.hlock/trust.toml)
+next → hlock sync
 $ hlock sync --yes
 Sync plan for Claude Code 2.1.0 → .hlock/env/claude-code/config
 ✓  harness       Claude Code 2.1.0
@@ -133,8 +139,10 @@ $ hlock check --prefix .hlock/env
 ✓ the claude-code setup in .hlock/env matches harness.lock
 ```
 
-`sync` builds a plan: `✓` steps are already true, `●` steps hlock does for you, and `○`
-steps need you, with the exact command to run. It writes into an isolated config root in
+An MCP server starts a program, so hlock installs it only once you've
+[approved it on this machine](../guides/audit.md#executables), by its command and digest; on a
+terminal, `sync` asks you itself. `sync` builds a plan: `✓` steps are already true, `●` steps
+hlock does for you, and `○` steps need you, with the exact command to run. It writes into an isolated config root in
 `.hlock/env/`, so the setup on that machine stays as it was. Pass `--in-place` to restore
 into `~/.claude` itself; `sync` keeps a backup of any file it replaces.
 Pass `--install` to let it install missing harnesses and packages, and `--pull` to

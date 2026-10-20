@@ -108,7 +108,7 @@
           { out: [warn("!") + " starts MCP servers with: npx  " + mut("· review before syncing into your own config")] },
           { wait: 900 },
           { cmd: "export HLOCK_SECRET_GITHUB_GITHUB_TOKEN=ghp_…" },
-          { cmd: "hlock sync you --in-place --yes" },
+          { cmd: "hlock sync you --in-place --trust --yes" },
           { out: [hi("Sync plan") + ` for ${h.name} ${h.version} → your config ${h.root}`] },
           {
             out: [

@@ -30,6 +30,7 @@ create_exception!(hlock, ProfileError, HarnessLockError, "A harness or runtime p
 create_exception!(hlock, WorkerError, HarnessLockError, "The Python worker failed.");
 create_exception!(hlock, PullError, HarnessLockError, "`hlock pull`: a source can't be read, or git failed.");
 create_exception!(hlock, DependencyError, HarnessLockError, "A declared dependency can't be read, resolved, fetched or installed.");
+create_exception!(hlock, AuditError, HarnessLockError, "Hidden characters, an executable not yet trusted, or a policy violation stopped a step.");
 
 fn py_err(e: core::Error) -> PyErr {
     use core::Error as E;
@@ -45,6 +46,7 @@ fn py_err(e: core::Error) -> PyErr {
         E::Worker(_) => WorkerError::new_err(msg),
         E::Pull(_) => PullError::new_err(msg),
         E::Dependency(_) => DependencyError::new_err(msg),
+        E::Audit(_) => AuditError::new_err(msg),
         E::Toml(_) | E::Json(_) => HarnessLockError::new_err(msg),
     }
 }
@@ -824,15 +826,15 @@ fn check_pin(py: Python<'_>, path: String, prefix: Option<String>, manifest: Opt
 /// Returns JSON with the lock, its path and name, the source, the commit, the diff from a
 /// lock it replaced, vendored files, other locks in the repo, and warnings.
 #[pyfunction]
-#[pyo3(signature = (source, out=None, name=None, force=false))]
-fn pull(py: Python<'_>, source: String, out: Option<String>, name: Option<String>, force: bool) -> PyResult<String> {
+#[pyo3(signature = (source, out=None, name=None, force=false, allow_hidden=None))]
+fn pull(py: Python<'_>, source: String, out: Option<String>, name: Option<String>, force: bool, allow_hidden: Option<Vec<String>>) -> PyResult<String> {
     let target = match out {
         Some(o) => core::pull::Target::File(std::env::current_dir().unwrap_or_default().join(o)),
         None => core::pull::Target::Store(name),
     };
     // fetching waits on the network
     interruptible(py, move || {
-        let o = core::pull::pull(&source, &target, force).map_err(py_err)?;
+        let o = core::pull::pull_allowing(&source, &target, force, &allow_hidden.unwrap_or_default()).map_err(py_err)?;
         Ok(json_str(serde_json::to_value(&o).map_err(|e| py_err(e.into()))?))
     })
 }
@@ -887,6 +889,8 @@ fn sync_options(prefix: Option<String>, in_place: bool, docker: Option<String>, 
         exact,
         inject: false,
         also: Vec::new(),
+        allow_hidden: Vec::new(),
+        trust: false,
     }
 }
 
@@ -921,12 +925,12 @@ fn to_json<T: serde::Serialize>(v: &T) -> PyResult<String> {
 /// Resolve and fetch a dependency for `hlock add` without changing the project: returns
 /// the prepared dependency as JSON (what `--dry-run` shows, and what `deps_commit` takes).
 #[pyfunction]
-#[pyo3(signature = (source, kind=None, name=None, scope=None, harness=None, manifest="harness.toml".to_string(), lock="harness.lock".to_string()))]
+#[pyo3(signature = (source, kind=None, name=None, scope=None, harness=None, manifest="harness.toml".to_string(), lock="harness.lock".to_string(), allow_hidden=None))]
 #[allow(clippy::too_many_arguments)]
-fn deps_prepare(py: Python<'_>, source: String, kind: Option<String>, name: Option<String>, scope: Option<String>, harness: Option<String>, manifest: String, lock: String) -> PyResult<String> {
+fn deps_prepare(py: Python<'_>, source: String, kind: Option<String>, name: Option<String>, scope: Option<String>, harness: Option<String>, manifest: String, lock: String, allow_hidden: Option<Vec<String>>) -> PyResult<String> {
     interruptible(py, move || {
         let (reg, ctx, _) = registry(Some(&manifest), Some(&lock_dir(&lock)))?;
-        let req = core::deps::AddRequest { kind, source, name, scope, harness };
+        let req = core::deps::AddRequest { kind, source, name, scope, harness, allow_hidden: allow_hidden.unwrap_or_default() };
         let p = core::deps::prepare(&req, &abs(&manifest), &abs(&lock), &reg, &ctx).map_err(py_err)?;
         to_json(&p)
     })
@@ -1022,6 +1026,113 @@ fn deps_record_configs(py: Python<'_>, files: Vec<String>, lock: String, manifes
     })
 }
 
+/// What a lock would run on this machine, each with its trust status, as JSON.
+#[pyfunction]
+#[pyo3(signature = (lock="harness.lock".to_string(), manifest=None))]
+fn trust_list(py: Python<'_>, lock: String, manifest: Option<String>) -> PyResult<String> {
+    interruptible(py, move || {
+        let (reg, ctx, _) = registry(manifest.as_deref(), Some(&lock_dir(&lock)))?;
+        let l = core::Lockfile::load(Path::new(&lock)).map_err(py_err)?;
+        let dir = lock_dir(&lock);
+        let store = core::trust::TrustStore::load(&ctx).map_err(py_err)?;
+        let policy = core::policy::Policy::for_lock(Path::new(&lock), &ctx).map_err(py_err)?;
+        let es = core::trust::assess(&l, &dir, reg.harness(&l.harness.name), &ctx, &policy, &store);
+        Ok(json_str(serde_json::json!({"executables": es, "store": core::trust::store_path(&ctx)})))
+    })
+}
+
+/// Approve (or, with `deny`, deny) a lock's executables on this machine: those whose
+/// digest or name is in `only`, else every one not yet trusted. Returns how many changed.
+#[pyfunction]
+#[pyo3(signature = (lock="harness.lock".to_string(), only=None, deny=false, manifest=None))]
+fn trust_approve(py: Python<'_>, lock: String, only: Option<Vec<String>>, deny: bool, manifest: Option<String>) -> PyResult<usize> {
+    interruptible(py, move || {
+        let (reg, ctx, _) = registry(manifest.as_deref(), Some(&lock_dir(&lock)))?;
+        let l = core::Lockfile::load(Path::new(&lock)).map_err(py_err)?;
+        let mut store = core::trust::TrustStore::load(&ctx).map_err(py_err)?;
+        let policy = core::policy::Policy::for_lock(Path::new(&lock), &ctx).map_err(py_err)?;
+        let es = core::trust::assess(&l, &lock_dir(&lock), reg.harness(&l.harness.name), &ctx, &policy, &store);
+        // a name, a full digest, or at least 8 characters of one (`--only ""` names nothing)
+        let named = |n: &str, e: &core::trust::Executable| !n.is_empty() && (n == e.digest || n == e.name || (n.len() >= 8 && e.digest.ends_with(n)) || (n.len() >= 8 && e.digest.trim_start_matches("sha256:").starts_with(n)));
+        let pick: Vec<&core::trust::Executable> = es
+            .iter()
+            .filter(|e| match &only {
+                Some(names) => names.iter().any(|n| named(n, e)),
+                None => e.status == "untrusted" || (deny && e.status == "trusted"),
+            })
+            .collect();
+        if let Some(names) = &only {
+            if let Some(n) = names.iter().find(|n| !pick.iter().any(|e| named(n, e))) {
+                return Err(py_err(core::Error::Audit(format!("{lock} runs nothing named or digested {n:?}; see hlock trust"))));
+            }
+        }
+        let n = if deny { store.deny(pick) } else { store.approve(pick) };
+        store.save(&ctx).map_err(py_err)?;
+        Ok(n)
+    })
+}
+
+/// `hlock audit`: integrity, hidden characters, executables, policy and secrets, as JSON
+/// (`format="sarif"` for SARIF 2.1.0). With `strip`, cleans vendored files first.
+#[pyfunction]
+#[pyo3(signature = (lock="harness.lock".to_string(), ci=false, strip=false, verbose=false, format="json".to_string(), manifest=None))]
+fn audit(py: Python<'_>, lock: String, ci: bool, strip: bool, verbose: bool, format: String, manifest: Option<String>) -> PyResult<String> {
+    interruptible(py, move || {
+        let (reg, ctx, _) = registry(manifest.as_deref(), Some(&lock_dir(&lock)))?;
+        let r = core::audit::run(Path::new(&lock), &reg, &ctx, ci, strip, verbose).map_err(py_err)?;
+        if format == "sarif" {
+            return Ok(json_str(core::audit::sarif(&r)));
+        }
+        to_json(&r)
+    })
+}
+
+/// The hidden-Unicode findings in what a lock places (critical and warning), and whether
+/// each entry's critical findings were allowed, as JSON.
+#[pyfunction]
+#[pyo3(signature = (lock="harness.lock".to_string(), manifest=None))]
+fn scan_lock(py: Python<'_>, lock: String, manifest: Option<String>) -> PyResult<String> {
+    interruptible(py, move || {
+        let (reg, ctx, _) = registry(manifest.as_deref(), Some(&lock_dir(&lock)))?;
+        let l = core::Lockfile::load(Path::new(&lock)).map_err(py_err)?;
+        let contents = core::audit::contents(&l, &lock_dir(&lock), reg.harness(&l.harness.name), &ctx);
+        let out: Vec<serde_json::Value> = core::audit::scan_contents(&contents)
+            .into_iter()
+            .flat_map(|(c, fs)| {
+                let allowed = core::audit::allowed(c.scan.as_deref());
+                fs.into_iter().filter(|f| f.severity > core::scan::Severity::Info).map(move |f| serde_json::json!({"finding": f, "allowed": allowed, "entry": c.name, "kind": c.kind}))
+            })
+            .collect();
+        Ok(json_str(serde_json::json!(out)))
+    })
+}
+
+/// The project policy's verdict on a lock: `{"enforcement", "files", "violations"}`.
+#[pyfunction]
+#[pyo3(signature = (lock="harness.lock".to_string(), manifest=None))]
+fn policy_check(py: Python<'_>, lock: String, manifest: Option<String>) -> PyResult<String> {
+    interruptible(py, move || {
+        let (_, ctx, _) = registry(manifest.as_deref(), Some(&lock_dir(&lock)))?;
+        let l = core::Lockfile::load(Path::new(&lock)).map_err(py_err)?;
+        let p = core::policy::Policy::for_lock(Path::new(&lock), &ctx).map_err(py_err)?;
+        let v = if p.enforcement == "off" { Vec::new() } else { p.check_lock(&l) };
+        Ok(json_str(serde_json::json!({"enforcement": p.enforcement, "files": p.files, "violations": v})))
+    })
+}
+
+/// A lock as an SBOM: `format` is `cyclonedx` (CycloneDX 1.6 JSON) or `spdx` (SPDX 2.3 JSON).
+#[pyfunction]
+#[pyo3(signature = (lock="harness.lock".to_string(), format="cyclonedx".to_string()))]
+fn export_sbom(lock: String, format: String) -> PyResult<String> {
+    let l = core::Lockfile::load(Path::new(&lock)).map_err(py_err)?;
+    let doc = match format.as_str() {
+        "cyclonedx" => core::sbom::cyclonedx(&l),
+        "spdx" => core::sbom::spdx(&l),
+        other => return Err(HarnessLockError::new_err(format!("{other:?} isn't an SBOM format: cyclonedx or spdx"))),
+    };
+    serde_json::to_string_pretty(&doc).map(|t| t + "\n").map_err(|e| py_err(e.into()))
+}
+
 /// Declared dependencies with a newer upstream, as JSON (`current`, `wanted`, `latest`).
 #[pyfunction]
 #[pyo3(signature = (lock="harness.lock".to_string(), manifest="harness.toml".to_string(), kind=None))]
@@ -1064,9 +1175,9 @@ fn export_apm_lock(py: Python<'_>, lock: String, out: Option<String>, force: boo
 /// Build the `hlock sync` plan for a lock as JSON. Nothing is changed. The plan writes
 /// into an isolated root (`prefix`, default `.hlock/env`) unless `in_place` or `docker`.
 #[pyfunction]
-#[pyo3(signature = (path="harness.lock".to_string(), prefix=None, in_place=false, docker=None, install=false, pull=false, all_models=false, exact=false, manifest=None, refresh=false))]
+#[pyo3(signature = (path="harness.lock".to_string(), prefix=None, in_place=false, docker=None, install=false, pull=false, all_models=false, exact=false, manifest=None, refresh=false, allow_hidden=None, trust=false))]
 #[allow(clippy::too_many_arguments)]
-fn sync_plan(py: Python<'_>, path: String, prefix: Option<String>, in_place: bool, docker: Option<String>, install: bool, pull: bool, all_models: bool, exact: bool, manifest: Option<String>, refresh: bool) -> PyResult<String> {
+fn sync_plan(py: Python<'_>, path: String, prefix: Option<String>, in_place: bool, docker: Option<String>, install: bool, pull: bool, all_models: bool, exact: bool, manifest: Option<String>, refresh: bool, allow_hidden: Option<Vec<String>>, trust: bool) -> PyResult<String> {
     // no GIL while it waits on the network (deciders), so other Python threads keep running
     interruptible(py, move || {
         let (reg, ctx, _) = registry(manifest.as_deref(), Some(&lock_dir(&path)))?;
@@ -1078,6 +1189,8 @@ fn sync_plan(py: Python<'_>, path: String, prefix: Option<String>, in_place: boo
         }
         let mut opts = sync_options(prefix, in_place, docker, install, pull, all_models, exact);
         opts.also = also_harnesses(manifest.as_deref(), &path);
+        opts.allow_hidden = allow_hidden.unwrap_or_default();
+        opts.trust = trust;
         let plan = core::sync::plan(&lock, Path::new(&path), &reg, &ctx, &opts).map_err(py_err)?;
         Ok(json_str(serde_json::json!(plan)))
     })
@@ -1165,7 +1278,7 @@ fn sync_dockerfile(plan: &str, path: String, manifest: Option<String>) -> PyResu
 /// Prepare `hlock launch`: verify, materialize the isolated root, and return
 /// JSON with the argv and environment to exec, plus what was done and notes.
 #[pyfunction]
-#[pyo3(signature = (path="harness.lock".to_string(), harness=None, prefix=None, allow_version_mismatch=false, in_place=false, args=Vec::new(), manifest=None, prompt=None))]
+#[pyo3(signature = (path="harness.lock".to_string(), harness=None, prefix=None, allow_version_mismatch=false, in_place=false, args=Vec::new(), manifest=None, prompt=None, trust=false, allow_hidden=None))]
 #[allow(clippy::too_many_arguments)]
 fn launch_prepare(
     py: Python<'_>,
@@ -1177,6 +1290,8 @@ fn launch_prepare(
     args: Vec<String>,
     manifest: Option<String>,
     prompt: Option<String>,
+    trust: bool,
+    allow_hidden: Option<Vec<String>>,
 ) -> PyResult<String> {
     interruptible(py, move || {
         let (reg, ctx, _) = registry(manifest.as_deref(), Some(&lock_dir(&path)))?;
@@ -1188,6 +1303,8 @@ fn launch_prepare(
             allow_version_mismatch,
             in_place,
             workspace: std::env::current_dir().ok(),
+            trust,
+            allow_hidden: allow_hidden.unwrap_or_default(),
             ..Default::default()
         };
         let prep = core::launch::prepare(&lock, Path::new(&path), &reg, &ctx, &opts, &args).map_err(py_err)?;
@@ -1198,8 +1315,8 @@ fn launch_prepare(
 /// Run a locked code harness (`[harnesses.<id>]`) on a prompt through the
 /// execution contract. Returns JSON with success, output, cost, latency and log.
 #[pyfunction]
-#[pyo3(signature = (prompt, path="harness.lock".to_string(), workspace=None, timeout=600, manifest=None))]
-fn run_code_harness(py: Python<'_>, prompt: String, path: String, workspace: Option<String>, timeout: u64, manifest: Option<String>) -> PyResult<String> {
+#[pyo3(signature = (prompt, path="harness.lock".to_string(), workspace=None, timeout=600, manifest=None, trust=false))]
+fn run_code_harness(py: Python<'_>, prompt: String, path: String, workspace: Option<String>, timeout: u64, manifest: Option<String>, trust: bool) -> PyResult<String> {
     interruptible(py, move || {
         let (reg, ctx, _) = registry(manifest.as_deref(), Some(&lock_dir(&path)))?;
         let lock = core::Lockfile::load(Path::new(&path)).map_err(py_err)?;
@@ -1207,6 +1324,7 @@ fn run_code_harness(py: Python<'_>, prompt: String, path: String, workspace: Opt
         if profile.kind != "custom" {
             return Err(ProfileError::new_err(format!("{} isn't a code harness", profile.id)));
         }
+        core::launch::require_trusted(&lock, Path::new(&path), &reg, &ctx, trust).map_err(py_err)?;
         // the agent works where the user is; the project root stays on PYTHONPATH
         let ws = workspace.map(PathBuf::from).or_else(|| std::env::current_dir().ok()).unwrap_or_else(|| ctx.cwd.clone());
         let inv = core::contract::invocation(profile, Some(&lock), Some(Path::new(&path)), None, &prompt, &ws, 0, &ctx).map_err(py_err)?;
@@ -1746,6 +1864,12 @@ fn _hlock(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(deps_refresh, m)?)?;
     m.add_function(wrap_pyfunction!(deps_outdated, m)?)?;
     m.add_function(wrap_pyfunction!(deps_record_configs, m)?)?;
+    m.add_function(wrap_pyfunction!(trust_list, m)?)?;
+    m.add_function(wrap_pyfunction!(trust_approve, m)?)?;
+    m.add_function(wrap_pyfunction!(audit, m)?)?;
+    m.add_function(wrap_pyfunction!(scan_lock, m)?)?;
+    m.add_function(wrap_pyfunction!(policy_check, m)?)?;
+    m.add_function(wrap_pyfunction!(export_sbom, m)?)?;
     m.add_function(wrap_pyfunction!(deps_upgrade, m)?)?;
     m.add_function(wrap_pyfunction!(export_apm_lock, m)?)?;
     m.add_function(wrap_pyfunction!(sync_plan, m)?)?;
@@ -1784,6 +1908,7 @@ fn _hlock(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("WorkerError", py.get_type::<WorkerError>())?;
     m.add("PullError", py.get_type::<PullError>())?;
     m.add("DependencyError", py.get_type::<DependencyError>())?;
+    m.add("AuditError", py.get_type::<AuditError>())?;
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
     m.add("LOCK_VERSION", core::LOCK_VERSION)?;
     Ok(())

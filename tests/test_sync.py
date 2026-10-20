@@ -62,6 +62,8 @@ def machines(tmp_path, monkeypatch):
     monkeypatch.setenv("HOME", str(a))
     assert invoke("pin", "--user", "--harness", "claude").exit_code == 0
     monkeypatch.setenv("HOME", str(b))  # now we're on the new machine
+    # which approves what the lock runs, once (test_a_new_machine_approves_executables_once tests that)
+    assert invoke("trust", "--yes").exit_code == 0
     return {"a": a, "b": b, "bin": bindir}
 
 
@@ -81,7 +83,7 @@ def test_sync_is_isolated_by_default(machines, monkeypatch):
     assert state["mcpServers"]["github"]["env"]["GITHUB_TOKEN"] == "${HLOCK_SECRET_GITHUB_GITHUB_TOKEN}"
     assert (ENV_ROOT / "skills/my-skill/SKILL.md").is_file()
     assert json.loads((ENV_ROOT / "settings.json").read_text())["model"] == "opus"
-    assert not any(b.iterdir())  # the global config is untouched
+    assert [p.name for p in b.iterdir()] == [".hlock"]  # the global config is untouched (hlock's own trust store aside)
     log = (machines["bin"] / "claude.log").read_text()
     assert f"{ENV_ROOT.resolve()}|plugin install lsp@market" in log
 
@@ -90,7 +92,7 @@ def test_sync_is_isolated_by_default(machines, monkeypatch):
     assert r.exit_code == 0, r.output
     assert "CLAUDE_CONFIG_DIR=.hlock/env/claude-code/config claude" in r.output and "hlock sync --in-place" in r.output
     assert json.loads((ENV_ROOT / ".claude.json").read_text())["mcpServers"]["github"]["env"]["GITHUB_TOKEN"] == GH_TOKEN
-    assert not any(b.iterdir())
+    assert [p.name for p in b.iterdir()] == [".hlock"]
 
 
 def test_isolated_env_is_kept_out_of_git(machines):
@@ -220,3 +222,35 @@ def test_docker_context(machines):
 def test_sync_refuses_without_yes_when_not_a_tty(machines):
     r = invoke("sync")
     assert r.exit_code == 1 and "--yes" in r.output
+
+
+def test_a_new_machine_approves_executables_once(machines, tmp_path, monkeypatch):
+    """Trust follows digests, not locks: a fresh machine sees every executable once, and a
+    changed MCP server command needs approving again (specs/audit.md §4.3)."""
+    fresh = tmp_path / "home-c"
+    fresh.mkdir()
+    monkeypatch.setenv("HOME", str(fresh))
+    plan = json.loads(invoke("sync", "--json").output)
+    untrusted = {(e["kind"], e["name"]) for e in plan["executables"] if e["status"] == "untrusted"}
+    assert ("mcp", "github") in untrusted and ("plugin", "lsp@market") in untrusted, untrusted
+    gated = [s for s in plan["steps"] if "not yet trusted" in s["reason"]]
+    assert gated and all(s["status"] == "manual" and not s.get("action") for s in gated), gated
+    # --yes isn't approval
+    r = invoke("sync", "--yes")
+    assert r.exit_code == 3 and "⚑" in r.output and "hlock trust" in r.output, r.output
+    assert not (fresh / ".claude.json").exists() and not Path(".hlock/env/claude-code/config/.claude.json").exists()
+    # one answer approves them all, recorded by digest
+    r = invoke("trust", "--yes")
+    assert r.exit_code == 0 and "approved" in r.output, r.output
+    assert "github" in (fresh / ".hlock/trust.toml").read_text()
+    assert not [e for e in json.loads(invoke("sync", "--json").output)["executables"] if e["status"] == "untrusted"]
+    # a teammate's change to the server's command is new: it's asked about again, alone
+    lock = Path("harness.lock").read_text()
+    Path("harness.lock").write_text(lock.replace('"-y"', '"-y", "--evil"', 1))
+    again = [e for e in json.loads(invoke("sync", "--json").output)["executables"] if e["status"] == "untrusted"]
+    assert [(e["kind"], e["name"]) for e in again] == [("mcp", "github")], again
+    assert invoke("trust", "--json").exit_code == 0
+    r = invoke("trust", "--deny", "github")
+    assert r.exit_code == 0 and "denied" in r.output
+    step = next(s for s in json.loads(invoke("sync", "--json").output)["steps"] if "denied" in s["reason"])
+    assert step["status"] == "manual"

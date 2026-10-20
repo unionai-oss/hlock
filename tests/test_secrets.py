@@ -83,6 +83,8 @@ def pinned(tmp_path, monkeypatch):
     monkeypatch.setenv("HOME", str(a))
     assert invoke("pin", "--user", "--harness", "claude").exit_code == 0
     monkeypatch.setenv("HOME", str(b))
+    # a new machine approves what the lock runs once (tests/test_sync.py tests the prompt itself)
+    assert invoke("trust", "--yes").exit_code == 0
     return {"home": b, "keychain": tmp_path / "keychain", "tmp": tmp_path}
 
 

@@ -366,7 +366,11 @@ def test_apm_yml_mcp_servers_are_the_projects_own(world, tmp_path):
     Path("apm.yml").write_text("name: proj\nversion: 0.1.0\ndependencies:\n  mcp:\n    - name: local\n      registry: false\n"
                                "      transport: stdio\n      command: my-server\n")
     assert invoke("pin").exit_code == 0
+    # a server declared by a change to apm.yml runs a program: not until it's trusted here
     r = invoke("sync", "--yes")
+    assert r.exit_code == 3 and "not yet trusted" in r.output, r.output
+    assert not Path(".mcp.json").exists()
+    r = invoke("sync", "--yes", "--trust")
     assert r.exit_code == 0, r.output
     assert json.loads(Path(".mcp.json").read_text())["mcpServers"]["local"]["command"] == "my-server"
     assert invoke("check").exit_code == 0, invoke("check").output

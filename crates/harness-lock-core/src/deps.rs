@@ -1401,7 +1401,7 @@ fn content_entry(d: &Decl, content: &Path, digest: String, dep: Declared, origin
             if !is_dir || !content.join("SKILL.md").is_file() {
                 return Err(err(format!("skill {}: {} has no SKILL.md", d.name, d.spec)));
             }
-            Ok(Entry::Skill(Skill { name: d.name.clone(), origin: origin.into(), source: Some(d.spec.clone()), digest: Some(digest), enabled: true, editable: d.editable, scope: Some(d.scope.clone()), dep, ..Default::default() }))
+            Ok(Entry::Skill(Skill { name: d.name.clone(), origin: origin.into(), source: Some(d.spec.clone()), digest: Some(digest), scripts: Some(crate::capture::skill_scripts(content)), enabled: true, editable: d.editable, scope: Some(d.scope.clone()), dep, ..Default::default() }))
         }
         _ => {
             if is_dir {
@@ -1649,9 +1649,12 @@ pub fn install(r: &mut Resolved, env: &Env) -> Result<Installed> {
         Entry::Tool(t) => {
             let scope = t.scope.clone().unwrap_or_else(|| "project".into());
             if let Some(pkg) = t.dep.required_by.last() {
-                // it starts a process, from a file the project didn't write: not without asking
-                out.warnings.push(format!("mcp {}: {pkg} brings this MCP server; hlock records it but doesn't configure servers a package brings. If you trust it, configure it yourself", t.name));
-                return Ok(out);
+                // it starts a process, from a file the project didn't write: not until it's trusted here
+                let trusted = crate::trust::executables(&Lockfile { tool: vec![t.clone()], ..Default::default() }, &env.project, None, ctx).into_iter().next().is_some_and(|e| crate::trust::TrustStore::load(ctx).ok().and_then(|s| s.status(&e.digest)) == Some("trusted"));
+                if !trusted {
+                    out.warnings.push(format!("mcp {}: {pkg} brings this MCP server; it isn't configured until you trust it (hlock trust, then hlock sync)", t.name));
+                    return Ok(out);
+                }
             }
             let dest = mcp_dest(profile, &scope, ctx)?;
             if t.command.is_none() && t.url.is_none() {
@@ -2021,6 +2024,8 @@ pub struct AddRequest {
     pub scope: Option<String>,
     /// The harness to install into when there's no lock yet.
     pub harness: Option<String>,
+    /// Files whose hidden characters are let through (`--allow-hidden FILE`).
+    pub allow_hidden: Vec<String>,
 }
 
 /// A dependency resolved and fetched into the store, nothing else changed yet: what
@@ -2102,6 +2107,38 @@ pub fn prepare(req: &AddRequest, manifest_path: &Path, lock_path: &Path, reg: &c
             warnings.push(e.to_string());
         }
     }
+    // what it would place, scanned before anything is declared or installed
+    let mut findings = Vec::new();
+    for r in resolved.iter_mut() {
+        let Some(content) = r.content.clone() else { continue };
+        let label = match &r.entry {
+            Entry::Skill(s) => s.path.clone().unwrap_or_else(|| s.name.clone()),
+            Entry::Instructions(i) => i.name.clone(),
+            _ => continue,
+        };
+        let f = crate::scan::scan_path(&content, &label);
+        let allowed = f.iter().filter(|x| x.severity == crate::scan::Severity::Critical).all(|x| crate::audit::allows(&req.allow_hidden, x));
+        let scan = Some(crate::scan::record(&f, allowed));
+        match &mut r.entry {
+            Entry::Skill(s) => s.scan = scan,
+            Entry::Instructions(i) => i.scan = scan,
+            _ => {}
+        }
+        let warn = f.iter().filter(|x| x.severity == crate::scan::Severity::Warning).count();
+        if warn > 0 {
+            warnings.push(format!("{} {}: {warn} invisible character{} (zero-width or bidi marks); see `hlock audit`", r.kind, r.name, if warn == 1 { "" } else { "s" }));
+        }
+        findings.extend(f);
+    }
+    crate::audit::blocking(&findings, &req.allow_hidden, &format!("{} {}", decl.kind, decl.name))?;
+    // the project's policy, on what it declares and what that brought in
+    let policy = crate::policy::Policy::for_lock(lock_path, ctx)?;
+    let mut probe = Lockfile::default();
+    apply(&mut probe, decl.kind, &decl.name, &resolved, packages.as_deref());
+    let mut violations = policy.check_source(&decl.spec);
+    violations.extend(policy.check_lock(&Lockfile { harness: Default::default(), ..probe }));
+    violations.dedup();
+    warnings.extend(policy.enforce(violations, &format!("{} {}", decl.kind, decl.name))?);
     Ok(Prepared { decl, harness, resolved, packages, manifest: manifest_path.to_path_buf(), lock: lock_path.to_path_buf(), replaces, warnings })
 }
 
@@ -2185,6 +2222,16 @@ pub fn commit(p: &Prepared, reg: &crate::profiles::Registry, ctx: &Ctx, install_
         lock.manifest_hash = Some(crate::manifest::Manifest::load(&p.manifest)?.deps_hash());
     }
     lock.save(&p.lock)?;
+    // you asked for it and saw what it is: what it runs is approved on this machine (one a
+    // package brings still waits for `hlock trust`, unless it was trusted already)
+    if install_it {
+        let mut store = crate::trust::TrustStore::load(ctx)?;
+        let mine = Lockfile { tool: resolved.iter().filter_map(|r| match &r.entry { Entry::Tool(t) if t.dep.required_by.is_empty() => Some(t.clone()), _ => None }).collect(), native: resolved.iter().filter_map(|r| match &r.entry { Entry::Native(n) => Some(n.clone()), _ => None }).collect(), skill: resolved.iter().filter_map(|r| match &r.entry { Entry::Skill(s) => Some(s.clone()), _ => None }).collect(), instructions: resolved.iter().filter_map(|r| match &r.entry { Entry::Instructions(i) => Some(i.clone()), _ => None }).collect(), ..Default::default() };
+        let dir = crate::sync::lock_dir_of(&p.lock, ctx);
+        if store.approve(&crate::trust::executables(&mine, &dir, Some(profile), ctx)) > 0 {
+            store.save(ctx)?;
+        }
+    }
     Ok(AddOutcome {
         kind: p.decl.kind,
         name: p.decl.name.clone(),
@@ -2783,7 +2830,7 @@ pub fn prepare_upgrade(name: &str, manifest_path: &Path, lock_path: &Path, reg: 
     if d.from != crate::MANIFEST_PATH {
         return Err(err(format!("{name} is declared in {}; upgrade it with APM, or declare it in harness.toml", d.from)));
     }
-    let req = AddRequest { kind: Some(d.kind.as_str().into()), source: d.spec.clone(), name: Some(d.name.clone()), scope: Some(d.scope.clone()), harness: None };
+    let req = AddRequest { kind: Some(d.kind.as_str().into()), source: d.spec.clone(), name: Some(d.name.clone()), scope: Some(d.scope.clone()), ..Default::default() };
     prepare(&req, manifest_path, lock_path, reg, ctx)
 }
 

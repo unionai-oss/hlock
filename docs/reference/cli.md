@@ -19,7 +19,9 @@ Failures print a one-line error with a hint and exit `1`.
 | [`add`](#add) | Declare a dependency, pin it, and install it into your harness |
 | [`remove`](#remove) | Undeclare a dependency, unpin it, and take it out of your harness |
 | [`outdated`](#outdated) | List declared dependencies with a newer commit, tag or version upstream |
-| [`export`](#export) | Write the lock as `apm.lock.yaml` for APM |
+| [`export`](#export) | Write the lock as `apm.lock.yaml` for APM, or as a CycloneDX or SPDX SBOM |
+| [`audit`](#audit) | Check a lock's integrity, hidden characters, executables, policy and secrets |
+| [`trust`](#trust) | List what a lock would run on this machine, and approve or deny it |
 | [`sync`](#sync) | Rehydrate the setup in a lock on this machine, in a prefix, or in a Docker image |
 | [`launch`](#launch) | Start a harness session that matches the lock |
 | [`pull`](#pull) | Pull someone else's lock from a git repository |
@@ -272,7 +274,11 @@ harness isn't installed).
 When the project declares dependencies (in `harness.toml` or `apm.yml`), `check` also fails
 when one is missing, changed, unlocked or no longer declared, or when a skill in the
 harness's project skill directory is neither declared nor pinned. It warns, without
-failing, about stale `--eval` evidence and an out-of-date exported `apm.lock.yaml`. See
+failing, about stale `--eval` evidence and an out-of-date exported `apm.lock.yaml`.
+
+`check` also scans what the lock places for [hidden characters](../guides/audit.md#hidden-characters)
+(failing on a critical one the lock didn't allow), and reports the project's
+[policy](../guides/audit.md#policy) violations (failing under `enforcement = "block"`). See
 [Check what's declared](../guides/dependencies.md#check-whats-declared).
 
 ```bash
@@ -304,6 +310,7 @@ hlock add --adopt NAME
 | `--no-install` | Declare and pin it, but don't install it (`hlock sync` does) |
 | `--adopt NAME` | Declare something `hlock pin` already recorded, from the source the lock knows for it |
 | `--harness` | The harness to install into when there's no lock yet |
+| `--allow-hidden FILE` | Let through hidden characters in FILE, as the error names it. Repeatable |
 | `--json` | Print the result as JSON |
 
 ## `remove`
@@ -331,17 +338,60 @@ Write the lock for another tool. `--format apm-lock` writes `apm.lock.yaml` as A
 it, so `apm install --frozen` gets the same dependencies as `hlock sync`. What APM has no
 field for (the harness, models, runtimes, config, evidence, plugins) is left out, and the
 summary says so. See [Teammates who use APM](../guides/dependencies.md#teammates-who-use-apm).
+`--format cyclonedx` and `--format spdx` write an [SBOM](../guides/audit.md#sbom) of the
+lock (CycloneDX 1.6 or SPDX 2.3 JSON), with each model as a machine-learning-model component.
 
 ```bash
-hlock export --format apm-lock [-o FILE] [--force] [--json]
+hlock export --format apm-lock|cyclonedx|spdx [-o FILE] [--force] [--json]
 ```
 
 | Option | Description |
 |---|---|
-| `--format` | `apm-lock` |
-| `-o`, `--out` | Where to write it (default `apm.lock.yaml` next to the lock; `-` for stdout) |
+| `--format` | `apm-lock`, `cyclonedx`, or `spdx` |
+| `-o`, `--out` | Where to write it (default `apm.lock.yaml`, `sbom.cdx.json` or `sbom.spdx.json` next to the lock; `-` for stdout) |
 | `--force` | Overwrite an `apm.lock.yaml` that pins a commit `harness.lock` doesn't know |
 | `--json` | Print a summary as JSON |
+
+## `audit`
+
+Check a lock: its vendored and fetched files match their digests, nothing it places hides
+text from a reviewer, what it would run and whether it's trusted here, the project's policy,
+and no vendored file holds a secret value. See [Audit and trust](../guides/audit.md#hlock-audit).
+
+```bash
+hlock audit [LOCK] [--ci] [--format table|json|sarif] [-o FILE] [--strip] [-v]
+```
+
+| Option | Description |
+|---|---|
+| `LOCK` | Lock to audit (default `harness.lock`): a path, a pulled lock's name, or a source to pull first |
+| `--ci` | Also fail on warnings about the lock's own content |
+| `--format` | `table` (default), `json`, or `sarif` (SARIF 2.1.0, for code scanning) |
+| `-o`, `--out` | Write the JSON or SARIF report to FILE |
+| `--strip` | Remove hidden characters from vendored files first, and update their digests. Refuses when a vendored file doesn't match its digest |
+| `-v`, `--verbose` | Also list info-level characters |
+
+Exits `0` when it passes and `1` when it doesn't.
+
+## `trust`
+
+List what a lock would make this machine run (MCP servers, plugins, hooks and other settings
+that run a command, skill scripts, the harness install), content it lets through with hidden
+characters, and the project policy's `[sources] trusted` list, with each one's digest and
+status, and approve or deny them.
+Approvals are kept in `~/.hlock/trust.toml` by digest. See
+[Executables](../guides/audit.md#executables).
+
+```bash
+hlock trust [LOCK] [-y] [--only NAME|DIGEST ...] [--deny NAME|DIGEST ...] [--json]
+```
+
+| Option | Description |
+|---|---|
+| `-y`, `--yes` | Approve every executable not yet trusted, without asking |
+| `--only` | Approve only these: a name, a full digest, or at least 8 characters of one. Repeatable |
+| `--deny` | Deny these: `sync` won't install them, and won't ask again. Repeatable |
+| `--json` | Print the executables and their status as JSON; change nothing |
 
 ## `sync`
 
@@ -370,6 +420,8 @@ hlock sync [LOCK] [OPTIONS]
 | `--skill-dir DIR` | Where `--skill` writes `SKILL.md` (default `.agents/skills/hlock-rehydrate`) |
 | `--exact` | Also move aside skills that aren't in the lock |
 | `--frozen` | Fail if the declared dependencies would change the lock, instead of updating it (for CI) |
+| `--trust` | Approve every executable the lock would run (it was reviewed another way). Without it, an executable that isn't trusted here isn't installed; on a terminal, `sync` asks once |
+| `--allow-hidden FILE` | Let through hidden characters in FILE. Repeatable |
 | `-v`, `--verbose` | List every step, including optional ones |
 
 For the project's own lock, `sync` first locks what `harness.toml` or `apm.yml` newly
@@ -398,6 +450,8 @@ hlock launch [HARNESS] [OPTIONS] [-- HARNESS_ARGS...]
 | `--in-place` | Use your own config instead of an isolated root (same harness only) |
 | `--allow-version-mismatch` | Start even if the installed version differs from the lock |
 | `--dry-run` | Prepare everything and print the command without starting it |
+| `--trust` | Approve every executable the lock would run. Without it, `launch` asks on a terminal, and fails without one |
+| `--allow-hidden FILE` | Let through hidden characters in FILE |
 | `--json` | With `--dry-run`, print the launch plan as JSON |
 
 Other arguments are passed to the harness. hlock's own options count anywhere before `--`.
@@ -429,7 +483,7 @@ any project by name. Nothing from the lock runs. With no source, refresh every p
 See [Pulling someone else's lock](../guides/pull.md).
 
 ```bash
-hlock pull SOURCE [--as NAME | -o FILE] [--force] [--json]
+hlock pull SOURCE [--as NAME | -o FILE] [--force] [--allow-hidden FILE ...] [--json]
 hlock pull [NAME | LOCK ...] [--json]
 ```
 
@@ -440,6 +494,7 @@ hlock pull [NAME | LOCK ...] [--json]
 | `--as NAME` | the repository owner | Store the lock as `NAME` |
 | `-o`, `--out FILE` | | Write the lock into the project as `FILE` (its vendored files go in `.hlock/vendor/<name>/`) instead of the store |
 | `--force` | | Replace a lock of that name that wasn't pulled from the same repository |
+| `--allow-hidden FILE` | | Let through [hidden characters](../guides/audit.md#hidden-characters) in FILE (a file or directory the lock vendors); the lock records the exception. Repeatable |
 | `--json` | | Print the lock, its path, the source, the commit, the diff from the lock it replaced, vendored files, other locks in the repository, and warnings as JSON |
 
 `HLOCK_HOME` moves the store (default `~/.hlock`). `HLOCK_GITHUB_URL` and
@@ -536,11 +591,12 @@ Load `harness.lock` and run the locked agent on `PROMPT`. Exits `0` when it succ
 | `reference` | Runs the locked model on the offline reference provider. `--json` prints `success`, `model` and `cost_usd`. |
 
 ```bash
-hlock run PROMPT [--json]
+hlock run PROMPT [--trust] [--json]
 ```
 
 | Option | Description |
 |---|---|
+| `--trust` | Approve every executable the lock would run. Without it, an agent CLI starts without what isn't [trusted](../guides/audit.md#executables) here, and a code harness doesn't start |
 | `--json` | Capture the outcome and print it as JSON |
 
 ## `upgrade`

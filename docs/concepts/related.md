@@ -212,9 +212,9 @@ Several of these projects do things hlock should do too:
 - [Declared dependencies](../guides/dependencies.md): APM's `install`-and-lock flow for
   skills and MCP servers, with a dependency resolver compatible with APM's `apm.yml` and
   `apm.lock.yaml`, plus measuring a dependency before you keep it.
-- [Audit and trust](https://github.com/unionai-oss/hlock/blob/main/specs/audit.md):
-  APM's hidden-Unicode gate, executable approval and org policy, extended to models and
-  evidence.
+- [Audit and trust](../guides/audit.md): APM's hidden-Unicode gate (the same tiers, and
+  SARIF with APM's rule ids), executable approval and org policy, extended to models,
+  providers, harness versions and evidence.
 
 If you maintain one of these projects and something here is out of date or unfair,
 [open an issue](https://github.com/unionai-oss/hlock/issues) and we'll fix it.

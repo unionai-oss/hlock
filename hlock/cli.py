@@ -64,6 +64,7 @@ from hlock import (
     sync_run_step,
     sync_skill,
 )
+from hlock import audit as _audit
 from hlock import calibrate_eval_pack as _calibrate_eval_pack
 from hlock import check_eval_pack as _check_eval_pack
 from hlock import check_pin as _check_pin
@@ -82,10 +83,12 @@ from hlock import deps_remove as _deps_remove
 from hlock import deps_upgrade as _deps_upgrade
 from hlock import evals as _evals
 from hlock import export_apm_lock as _export_apm_lock
+from hlock import export_sbom as _export_sbom
 from hlock import grade_eval_task as _grade_eval_task
 from hlock import jobs as _jobs
 from hlock import localize as _localize
 from hlock import pin as _pin
+from hlock import policy_check as _policy_check
 from hlock import pull as _pull
 from hlock import pull_env as _pull_env
 from hlock import pull_find as _pull_find
@@ -93,8 +96,11 @@ from hlock import pull_list as _pull_list
 from hlock import pull_parse as _pull_parse
 from hlock import pull_remove as _pull_remove
 from hlock import resolve as _resolve
+from hlock import scan_lock as _scan_lock
 from hlock import select_harness as _select_harness
 from hlock import traces as _traces
+from hlock import trust_approve as _trust_approve
+from hlock import trust_list as _trust_list
 from hlock import tune as al_tune
 from hlock import upgrade as al_upgrade
 
@@ -189,6 +195,7 @@ click.rich_click.COMMAND_GROUPS = {
     "hlock": [
         {"name": "Lock", "commands": ["pin", "check"]},
         {"name": "Dependencies", "commands": ["add", "remove", "outdated", "export"]},
+        {"name": "Audit", "commands": ["audit", "trust"]},
         {"name": "Rehydrate & run", "commands": ["sync", "launch", "run"]},
         {"name": "Optimize", "commands": ["evals", "init", "resolve", "tune", "upgrade", "decide"]},
         {"name": "Go local", "commands": ["localize"]},
@@ -1025,8 +1032,11 @@ def _lock_ref(arg: str, as_json: bool = False) -> tuple[str, str | None]:
 @click.option("-o", "--out", default=None, metavar="FILE",
               help="Write the lock into the project as FILE (e.g. harness.alice.lock) instead of the store.")
 @click.option("--force", is_flag=True, help="Replace an existing lock of that name that came from somewhere else.")
+@click.option("--allow-hidden", "allow_hidden", multiple=True, metavar="FILE",
+              help="Let through hidden characters in FILE (a file or directory the lock vendors). Repeatable.")
 @click.option("--json", "as_json", is_flag=True, help="Print the result as JSON.")
-def pull(sources: tuple[str, ...], name: str | None, out: str | None, force: bool, as_json: bool) -> None:
+def pull(sources: tuple[str, ...], name: str | None, out: str | None, force: bool, allow_hidden: tuple[str, ...],
+         as_json: bool) -> None:
     """Pull someone else's [path]harness.lock[/] from a git repository.
 
     SOURCE is [cmd]github:OWNER/REPO\\[/PATH]\\[@REF][/], [cmd]gitlab:GROUP/REPO\\[//PATH]\\[@REF][/],
@@ -1044,7 +1054,7 @@ def pull(sources: tuple[str, ...], name: str | None, out: str | None, force: boo
         _fail("--as and -o both name the lock", "use [cmd]--as NAME[/] for the store, or [cmd]-o FILE[/] for the project")
     if remote:
         with _working(f"Pulling {remote[0]}…"):
-            result = json.loads(_pull(remote[0], out=out, name=name, force=force))
+            result = json.loads(_pull(remote[0], out=out, name=name, force=force, allow_hidden=list(allow_hidden)))
         if as_json:
             console.print_json(data=result)
             return
@@ -1086,7 +1096,8 @@ def pull(sources: tuple[str, ...], name: str | None, out: str | None, force: boo
     results = []
     for path, stored, spec in jobs:
         with _working(f"Refreshing {stored or _show(path)} from {spec}…"):
-            results.append(json.loads(_pull(spec, out=None if stored else path, name=stored, force=force)))
+            results.append(json.loads(_pull(spec, out=None if stored else path, name=stored, force=force,
+                                            allow_hidden=list(allow_hidden))))
     if as_json:
         console.print_json(data=results)
         return
@@ -1223,9 +1234,11 @@ def _print_measurement(name: str, m: dict) -> None:
 @click.option("--adopt", default=None, metavar="NAME", help="Declare something hlock pin already recorded, as it is.")
 @click.option("--harness", default=None, help="Harness to install into when there's no lock yet.")
 @click.option("-y", "--yes", is_flag=True, help="With --eval: keep it without asking.")
+@click.option("--allow-hidden", "allow_hidden", multiple=True, metavar="FILE",
+              help="Let through hidden characters in FILE (as the error names it). Repeatable.")
 @click.option("--json", "as_json", is_flag=True, help="Print the result as JSON.")
 def add(args: tuple[str, ...], name: str | None, scope: str | None, measure: bool, dry_run: bool, no_install: bool,
-        adopt: str | None, harness: str | None, yes: bool, as_json: bool) -> None:
+        adopt: str | None, harness: str | None, yes: bool, allow_hidden: tuple[str, ...], as_json: bool) -> None:
     """Declare a dependency, pin it, and install it into your harness.
 
     KIND is [cmd]skill[/], [cmd]mcp[/], [cmd]instructions[/] or [cmd]plugin[/]; an [cmd]apm:[/] source needs none.
@@ -1265,7 +1278,7 @@ def add(args: tuple[str, ...], name: str | None, scope: str | None, measure: boo
         _fail("--eval measures on the project's eval pack, and there isn't one", "create one with [cmd]hlock evals init[/]")
     with _working(f"Resolving {source}…"):
         prepared = json.loads(_deps_prepare(source, kind=kind, name=name, scope=scope, harness=harness, manifest=_m(),
-                                            lock=_l()))
+                                            lock=_l(), allow_hidden=list(allow_hidden)))
     decl = prepared["decl"]
     if dry_run:
         if as_json:
@@ -1381,9 +1394,9 @@ def outdated(kind: str | None, as_json: bool) -> None:
 
 
 @main.command("export")
-@click.option("--format", "fmt", type=click.Choice(["apm-lock"]), required=True, help="What to write.")
+@click.option("--format", "fmt", type=click.Choice(["apm-lock", "cyclonedx", "spdx"]), required=True, help="What to write.")
 @click.option("-o", "--out", default=None, metavar="FILE",
-              help="Where to write it (- for stdout).  [dim]\\[default: apm.lock.yaml next to the lock][/]")
+              help="Where to write it (- for stdout).  [dim]\\[default: apm.lock.yaml, sbom.cdx.json or sbom.spdx.json next to the lock][/]")
 @click.option("--force", is_flag=True, help="Overwrite an apm.lock.yaml that pins commits harness.lock doesn't know.")
 @click.option("--json", "as_json", is_flag=True, help="Print a summary as JSON.")
 def export(fmt: str, out: str | None, force: bool, as_json: bool) -> None:
@@ -1392,7 +1405,28 @@ def export(fmt: str, out: str | None, force: bool, as_json: bool) -> None:
     [cmd]apm-lock[/] writes [path]apm.lock.yaml[/], so teammates who run [cmd]apm install[/] get the same
     dependencies as [cmd]hlock sync[/]. What APM has no place for (the harness, models, runtimes,
     config, evidence) is left out, and the summary says so.
+
+    [cmd]cyclonedx[/] (CycloneDX 1.6) and [cmd]spdx[/] (SPDX 2.3) write an SBOM of the lock, with the
+    harness, runtimes, and each model as a machine-learning-model component.
     """
+    if fmt in ("cyclonedx", "spdx"):
+        default = "sbom.cdx.json" if fmt == "cyclonedx" else "sbom.spdx.json"
+        with _friendly_errors():
+            text = _export_sbom(lock=_l(), format=fmt)
+        if out == "-":
+            sys.stdout.write(text)
+            return
+        target = Path(out or (_Project.lock.parent / default))
+        target.write_text(text)
+        doc = json.loads(text)
+        n = len(doc.get("components") or doc.get("packages") or [])
+        models = sum(1 for c in doc.get("components") or [] if c.get("type") == "machine-learning-model")
+        if as_json:
+            console.print_json(data={"path": str(target), "format": fmt, "components": n})
+            return
+        detail = f", {models} model{'s' if models != 1 else ''}" if fmt == "cyclonedx" else ""
+        _ok(f"wrote [path]{_show(target)}[/]  [muted]({fmt}, {n} components{detail})[/]")
+        return
     target = None if out == "-" else (out or str(_Project.lock.parent / "apm.lock.yaml"))
     with _working("Exporting…"):
         result = json.loads(_export_apm_lock(lock=_l(), out=target, force=force, manifest=_m()))
@@ -1493,6 +1527,213 @@ def _refresh_deps(plan_only: bool, frozen: bool) -> None:
             console.print(f"  [{style}]{escape(line)}[/]", soft_wrap=True)
 
 
+# --------------------------------------------------------------------------- #
+# Audit and trust
+# --------------------------------------------------------------------------- #
+
+_KIND_WIDTH = 7
+
+
+def _print_untrusted(untrusted: list[dict], label: str = "") -> None:
+    """`⚑  mcp      github  npx -y …  not yet trusted`, then how to approve them."""
+    for e in untrusted:
+        via = f" (via {e['via']})" if e.get("via") else ""
+        console.print(f"[warn]⚑[/]  {e['kind']:<{_KIND_WIDTH}}  [key]{escape(e['name'])}[/]{escape(via)}  "
+                      f"[muted]{escape(e['detail'])}  {e['digest'][:15]}…  not yet trusted[/]", soft_wrap=True)
+    n = len(untrusted)
+    where = f" {label}" if label else ""
+    console.print(f"\n[warn]{n} executable{'s need' if n != 1 else ' needs'} your approval:[/] [cmd]hlock trust{escape(where)}[/]"
+                  "   [muted](or re-run with --trust)[/]")
+
+
+@main.command()
+@click.argument("lock", default=None, required=False)
+@click.option("-y", "--yes", is_flag=True, help="Approve every executable not yet trusted, without asking.")
+@click.option("--only", "only", multiple=True, metavar="NAME|DIGEST", help="Approve only these. Repeatable.")
+@click.option("--deny", "deny", multiple=True, metavar="NAME|DIGEST",
+              help="Deny these on this machine: sync won't install them, and won't ask again. Repeatable.")
+@click.option("--json", "as_json", is_flag=True, help="Print the executables and their status as JSON; change nothing.")
+def trust(lock: str | None, yes: bool, only: tuple[str, ...], deny: tuple[str, ...], as_json: bool) -> None:
+    """List what a lock would run on this machine, and approve or deny it.
+
+    MCP servers, plugins, hooks and other settings that run a command, skill scripts, the
+    harness install itself, and content the lock lets through with hidden characters.
+    Approvals are kept in [path]~/.hlock/trust.toml[/] by digest, so a changed command or a new
+    hook needs approving again, whoever's lock it's in. [cmd]hlock pin[/] approves what it
+    captures; once you approve the project policy's [key]\\[sources] trusted[/] list, executables
+    from those sources need no approval.
+    """
+    lock, stored = _lock_ref(lock, as_json) if lock else (_l(), None)
+    with _working("Listing executables…"):
+        listing = json.loads(_trust_list(lock=lock, manifest=_m()))
+    es = listing["executables"]
+    if as_json:
+        console.print_json(data=listing)
+        return
+    if deny:
+        with _friendly_errors():
+            n = _trust_approve(lock=lock, only=list(deny), deny=True, manifest=_m())
+        _ok(f"denied {n} on this machine  [muted](recorded in {_tilde(listing['store'])})[/]")
+        return
+    if not es:
+        _ok(f"{_show(lock)} runs nothing on this machine")
+        return
+    style = {"trusted": "ok", "policy": "ok", "denied": "fail", "untrusted": "warn"}
+    words = {"trusted": "trusted", "policy": "trusted by policy", "denied": "denied", "untrusted": "not yet trusted"}
+    t = Table(box=None, header_style="bold", pad_edge=False)
+    for col in ("", "kind", "name", "runs", "digest", "status"):
+        t.add_column(col, overflow="fold")
+    for e in es:
+        mark = "⚑" if e["status"] == "untrusted" else ("✗" if e["status"] == "denied" else "✓")
+        via = f"\n[muted]via {escape(e['via'])}[/]" if e.get("via") else ""
+        t.add_row(f"[{style[e['status']]}]{mark}[/]", e["kind"], f"[key]{escape(e['name'])}[/]{via}", escape(e["detail"]),
+                  f"[muted]{e['digest'][7:19]}[/]", f"[{style[e['status']]}]{words[e['status']]}[/]")
+    console.print(t)
+    pending = [e for e in es if e["status"] == "untrusted"]
+    if only:
+        pending = [e for e in pending if any(_names(o, e) for o in only)]
+        if not pending:
+            _fail("nothing not yet trusted matches --only", "see the names in the table above")
+    if not pending:
+        _ok("everything it runs is trusted here")
+        return
+    if not yes:
+        if not sys.stdin.isatty():
+            _fail(f"{len(pending)} not yet trusted, and there's no terminal to ask on", "pass [cmd]--yes[/] to approve them")
+        if not click.confirm(f"Trust {len(pending)} on this machine?", default=False):
+            sys.exit(1)
+    with _friendly_errors():
+        n = _trust_approve(lock=lock, only=[e["digest"] for e in pending], manifest=_m())
+    _ok(f"approved {n}  [muted](recorded in {_tilde(listing['store'])})[/]")
+    _next(f"hlock sync{' ' + stored if stored else ''}")
+
+
+def _names(o: str, e: dict) -> bool:
+    """Whether `--only O` names executable `e`: its name, its digest, or 8+ characters of it."""
+    digest = e["digest"].removeprefix("sha256:")
+    return bool(o) and (o in (e["name"], e["digest"]) or (len(o) >= 8 and (digest.startswith(o) or digest.endswith(o))))
+
+
+_SEV_STYLE = {"critical": "fail", "error": "fail", "warning": "warn", "info": "muted"}
+
+
+@main.command("audit")
+@click.argument("lock", default=None, required=False)
+@click.option("--ci", is_flag=True, help="Fail on warnings about the lock's own content too.")
+@click.option("--format", "fmt", type=click.Choice(["table", "json", "sarif"]), default="table", show_default=True,
+              help="How to print the report.")
+@click.option("-o", "--out", default=None, metavar="FILE", help="Write the JSON or SARIF report to FILE.")
+@click.option("--strip", is_flag=True, help="Remove hidden characters from vendored files first, and re-digest them.")
+@click.option("-v", "--verbose", is_flag=True, help="Also list info-level characters (non-breaking spaces, …).")
+def audit_cmd(lock: str | None, ci: bool, fmt: str, out: str | None, strip: bool, verbose: bool) -> None:
+    """Check a lock: integrity, hidden characters, executables, policy, and secrets.
+
+    1. every vendored and fetched file matches its digest; 2. no file the lock places has
+    characters that hide text from a reviewer; 3. what it would run, and whether it's trusted
+    here; 4. the project's [path]hlock-policy.toml[/]; 5. no vendored file holds a value
+    [cmd]pin[/]'s redaction would have replaced. Exits 1 on errors ([cmd]--ci[/]: on warnings too).
+    """
+    lock, _ = _lock_ref(lock, fmt != "table") if lock else (_l(), None)
+    with _working("Auditing…"):
+        report = json.loads(_audit(lock=lock, ci=ci, strip=strip, verbose=verbose, format="json", manifest=_m()))
+        sarif = _audit(lock=lock, ci=ci, strip=False, verbose=verbose, format="sarif", manifest=_m()) if fmt == "sarif" else None
+    if fmt != "table":
+        text = sarif if fmt == "sarif" else json.dumps(report, indent=2)
+        if out:
+            Path(out).write_text(text + "\n")
+            err_console.print(f"[ok]✓[/] wrote [path]{out}[/]")
+        else:
+            sys.stdout.write(text + "\n")
+        sys.exit(0 if report["passed"] else 1)
+    for f in report["stripped"]:
+        console.print(f"[ok]✓[/] stripped hidden characters from [path]{escape(f)}[/]")
+
+    def head(n: int, title: str, bad: int) -> None:
+        mark = "[ok]✓[/]" if bad == 0 else "[fail]✗[/]"
+        console.print(f"{mark} [bold]{n}. {title}[/]")
+
+    def problems(items: list[dict]) -> None:
+        for p in items:
+            console.print(f"   [{_SEV_STYLE[p['severity']]}]{p['severity']}[/]  {escape(p['message'])}", soft_wrap=True)
+
+    integ = report["integrity"]
+    head(1, "Integrity", sum(p["severity"] == "error" for p in integ))
+    problems(integ)
+    content = report["content"]
+    head(2, f"Content  [muted]{report['files_scanned']} files scanned[/]", sum(f["severity"] == "critical" for f in content))
+    for f in content:
+        console.print(f"   [{_SEV_STYLE[f['severity']]}]{f['severity']}[/]  {escape(_at(f))}  "
+                      f"{f['codepoint']} {escape(f['description'])}", soft_wrap=True)
+    es = report["executables"]
+    pending = [e for e in es if e["status"] in ("untrusted", "denied")]
+    console.print(f"{'[ok]✓[/]' if not pending else '[warn]⚑[/]'} [bold]3. Executables[/]  [muted]{len(es)} found, "
+                  f"{len(es) - len(pending)} trusted here[/]")
+    for e in es:
+        status = {"trusted": "[ok]trusted[/]", "policy": "[ok]trusted by policy[/]", "denied": "[fail]denied[/]",
+                  "untrusted": "[warn]not yet trusted[/]"}[e["status"]]
+        console.print(f"   {e['kind']:<{_KIND_WIDTH}}  [key]{escape(e['name'])}[/]  [muted]{escape(e['detail'])}[/]  {status}", soft_wrap=True)
+    pol = report["policy"]
+    head(4, "Policy", sum(p["severity"] == "error" for p in pol))
+    problems(pol)
+    sec = report["secrets"]
+    head(5, "Secrets", sum(p["severity"] == "error" for p in sec))
+    problems(sec)
+    errors = sum(1 for f in content if f["severity"] == "critical") + sum(1 for p in integ + pol + sec if p["severity"] == "error")
+    warnings = sum(1 for f in content if f["severity"] == "warning") + sum(1 for p in integ + pol + sec if p["severity"] == "warning")
+    if report["passed"]:
+        _ok(f"[path]{_show(lock)}[/] passed  [muted]({warnings} warning{'s' if warnings != 1 else ''})[/]")
+        if pending:
+            _next(f"hlock trust {'' if lock == _l() else escape(_show(lock))}".strip())
+        return
+    err_console.print(f"[fail]✗ audit failed:[/] {errors} error{'s' if errors != 1 else ''}, {warnings} warning{'s' if warnings != 1 else ''}"
+                      + ("  [muted](--ci counts warnings about the lock's content)[/]" if ci and warnings else ""))
+    if any(p["severity"] == "error" and p["rule"] == "hlock/integrity/digest" for p in integ):
+        err_console.print("  [muted]hint:[/] a vendored file was edited after it was pinned: restore it "
+                          "([cmd]git checkout[/]), or re-pin with [cmd]hlock pin[/]")
+    hidden = [f for f in content if f["severity"] in ("critical", "warning")]
+    if any(_vendored(f["file"]) for f in hidden) and not any(p["severity"] == "error" for p in integ):
+        err_console.print("  [muted]hint:[/] [cmd]hlock audit --strip[/] removes hidden characters from vendored files")
+    if any(not _vendored(f["file"]) for f in hidden):
+        err_console.print("  [muted]hint:[/] what isn't vendored comes from its source: fix it there and re-pin "
+                          "([cmd]hlock add[/] or [cmd]hlock pin[/]), or let it through with [cmd]--allow-hidden FILE[/]")
+    sys.exit(1)
+
+
+def _vendored(file: str) -> bool:
+    """Whether a finding is in a vendored copy, which `audit --strip` can clean."""
+    return file.startswith(".hlock/vendor/") or "/.hlock/vendor/" in file
+
+
+def _at(f: dict) -> str:
+    """A finding's file:line:column (a config value or an unscanned file has no line)."""
+    return f"{f['file']}:{f['line']}:{f['column']}" if f.get("line") else f["file"]
+
+
+def _print_scan_and_policy() -> int:
+    """`check`'s report on hidden characters and the project's policy; returns how many fail."""
+    with _friendly_errors():
+        found = json.loads(_scan_lock(lock=_l(), manifest=_m()))
+        verdict = json.loads(_policy_check(lock=_l(), manifest=_m()))
+    failing = 0
+    for x in found:
+        f = x["finding"]
+        crit = f["severity"] == "critical" and not x["allowed"]
+        failing += crit
+        line = f"{escape(_at(f))}  {f['codepoint']} {escape(f['description'])}"
+        if crit:
+            fix = "[cmd]hlock audit --strip[/]" if _vendored(f["file"]) else "fix it at its source and re-pin, or [cmd]--allow-hidden[/]"
+            err_console.print(f"[fail]✗ hidden:[/] {line}  [muted]→[/] {fix}", soft_wrap=True)
+        else:
+            console.print(f"[warn]![/] hidden: {line}" + ("  [muted](allowed in the lock)[/]" if x["allowed"] else ""), soft_wrap=True)
+    for v in verdict["violations"]:
+        if verdict["enforcement"] == "block":
+            failing += 1
+            err_console.print(f"[fail]✗ policy:[/] {escape(v['message'])}  [muted]({escape(v['file'])})[/]", soft_wrap=True)
+        else:
+            console.print(f"[warn]![/] policy: {escape(v['message'])}  [muted]({escape(v['file'])})[/]", soft_wrap=True)
+    return failing
+
+
 _STATUS = {"satisfied": "[ok]✓[/]", "auto": "[brand]●[/]", "manual": "[warn]○[/]"}
 MANUAL_EXIT = 3
 
@@ -1557,10 +1798,14 @@ def _manual_steps(plan: dict) -> list[dict]:
 @click.option("--skill-dir", default=".agents/skills/hlock-rehydrate", show_default=True, help="Where --skill writes SKILL.md.")
 @click.option("--exact", is_flag=True, help="Also remove skills that aren't in the lock (moved aside, not deleted).")
 @click.option("--frozen", is_flag=True, help="Fail if the declared dependencies would change the lock (for CI).")
+@click.option("--trust", "trust", is_flag=True,
+              help="Approve every executable the lock would run (MCP servers, plugins, hooks, scripts): it was reviewed another way.")
+@click.option("--allow-hidden", "allow_hidden", multiple=True, metavar="FILE",
+              help="Let through hidden characters in FILE. Repeatable.")
 @click.option("-v", "--verbose", is_flag=True, help="List every step, including optional ones.")
 def sync(lock: str, plan_only: bool, as_json: bool, yes: bool, install: bool, pull: bool, all_models: bool,
          prefix: str | None, in_place: bool, docker: bool, build: bool, skill: bool, skill_dir: str, exact: bool,
-         frozen: bool, verbose: bool) -> None:
+         frozen: bool, trust: bool, allow_hidden: tuple[str, ...], verbose: bool) -> None:
     """Rehydrate the setup in [path]harness.lock[/] on this machine.
 
     Builds a plan in which each step is [ok]✓ satisfied[/], [brand]● automatic[/] (hlock does it), or
@@ -1585,11 +1830,25 @@ def sync(lock: str, plan_only: bool, as_json: bool, yes: bool, install: bool, pu
         with _friendly_errors():
             harness_id = Lockfile.load(lock).harness
         docker_dir = str(Path(".hlock/docker") / harness_id)
-    with _working("Planning…"):
-        own = stored is None and Path(lock).resolve() == _Project.lock.resolve()
-        plan = json.loads(sync_plan(lock, prefix=prefix, in_place=in_place, docker=docker_dir, install=install, pull=pull,
-                                    all_models=all_models, exact=exact, manifest=_m(),
-                                    refresh=own and (plan_only or as_json or skill) and not frozen))
+    own = stored is None and Path(lock).resolve() == _Project.lock.resolve()
+
+    def make_plan() -> dict:
+        with _working("Planning…"):
+            return json.loads(sync_plan(lock, prefix=prefix, in_place=in_place, docker=docker_dir, install=install,
+                                        pull=pull, all_models=all_models, exact=exact, manifest=_m(),
+                                        refresh=own and (plan_only or as_json or skill) and not frozen,
+                                        allow_hidden=list(allow_hidden),
+                                        # a plan isn't a sync: --trust shows what it would do, recording nothing
+                                        trust=trust and (plan_only or as_json)))
+
+    plan = make_plan()
+    untrusted = [e for e in plan.get("executables") or [] if e["status"] == "untrusted"]
+    if untrusted and trust and not (plan_only or as_json):
+        # the caller reviewed the lock another way: record the approvals, then plan again
+        with _friendly_errors():
+            _trust_approve(lock=lock, manifest=_m())
+        plan = make_plan()
+        untrusted = []
     if as_json:
         console.print_json(data=plan)
         return
@@ -1599,6 +1858,15 @@ def sync(lock: str, plan_only: bool, as_json: bool, yes: bool, install: bool, pu
     console.print(_plan_table(plan, verbose))
     for note in plan.get("notes") or []:
         console.print(f"[muted]{escape(note)}[/]")
+    if untrusted:
+        _print_untrusted(untrusted)
+        asking = not (plan_only or skill or docker or yes) and sys.stdin.isatty()
+        if asking and click.confirm(f"Trust {'these' if len(untrusted) > 1 else 'this'} on this machine?", default=False):
+            with _friendly_errors():
+                # exactly what was shown, not whatever is untrusted by now
+                _trust_approve(lock=lock, only=[e["digest"] for e in untrusted], manifest=_m())
+            plan = make_plan()
+            console.print(_plan_table(plan, verbose))
 
     if skill:
         path = Path(skill_dir) / "SKILL.md"
@@ -1754,7 +2022,7 @@ def check(prefix: str | None) -> None:
         # what's reported as a dependency isn't drift twice
         named = {i["name"] for i in issues if i["problem"] == "undeclared"}
         drift = [line for line in drift if not any(f" {n} " in f" {line} " for n in named)]
-        failed = _print_dep_issues(issues)
+        failed = _print_dep_issues(issues) + _print_scan_and_policy()
         if drift:
             err_console.print(f"[fail]✗ drift:[/] {which} changed since {_ld()} was pinned")
             for line in drift:
@@ -1791,7 +2059,7 @@ def check(prefix: str | None) -> None:
         if probe and probe["installed"] and probe.get("version") and probe["version"] != lf.harness_version:
             _fail(f"installed {lf.harness} is {probe['version']}, {_ld()} pins {lf.harness_version}",
                   f"install {lf.harness} {lf.harness_version}, or re-lock with [cmd]hlock resolve[/]")
-    if _print_dep_issues(_dep_issues()):
+    if _print_dep_issues(_dep_issues()) + _print_scan_and_policy():
         sys.exit(1)
     with _friendly_errors():
         decider_drift = _decider_drift(_l())
@@ -1854,8 +2122,9 @@ def _pin_tree(lock: dict) -> Tree:
 
 @main.command()
 @click.argument("prompt")
+@click.option("--trust", "trust", is_flag=True, help="Approve every executable the lock would run.")
 @click.option("--json", "as_json", is_flag=True, help="Print the raw outcome as JSON.")
-def run(prompt: str, as_json: bool) -> None:
+def run(prompt: str, trust: bool, as_json: bool) -> None:
     """Run the locked agent on PROMPT.
 
     An agent CLI runs for real, in the locked environment [cmd]hlock launch[/] uses, through
@@ -1866,10 +2135,10 @@ def run(prompt: str, as_json: bool) -> None:
         agent = load(_l())
     kind = _harness_kind(lf.harness)
     if kind == "custom":
-        _run_code_harness(prompt, as_json)
+        _run_code_harness(prompt, as_json, trust)
         return
     if kind == "cli":
-        _run_cli_harness(prompt, as_json)
+        _run_cli_harness(prompt, as_json, trust)
         return
     with _working("Running the locked agent…"):
         raw = agent.run(prompt)
@@ -1894,9 +2163,9 @@ def _harness_kind(name: str) -> str | None:
         return None
 
 
-def _run_cli_harness(prompt: str, as_json: bool) -> None:
+def _run_cli_harness(prompt: str, as_json: bool, trust: bool = False) -> None:
     with _working("Preparing the locked environment…"):
-        prep = json.loads(launch_prepare(_l(), prompt=prompt, manifest=_m()))
+        prep = json.loads(launch_prepare(_l(), prompt=prompt, manifest=_m(), trust=trust))
     secret_env = prep.pop("secret_env", {})  # values for the config's references; never shown
     env = {**os.environ, **prep["env"], **secret_env}
     if not as_json:
@@ -1921,9 +2190,9 @@ def _run_cli_harness(prompt: str, as_json: bool) -> None:
     sys.exit(0 if ok else 1)
 
 
-def _run_code_harness(prompt: str, as_json: bool) -> None:
+def _run_code_harness(prompt: str, as_json: bool, trust: bool = False) -> None:
     with _working("Running the locked harness…"):
-        r = json.loads(run_code_harness(prompt, _l(), manifest=_m()))
+        r = json.loads(run_code_harness(prompt, _l(), manifest=_m(), trust=trust))
     if as_json:
         console.print_json(data=r)
     else:
@@ -1941,9 +2210,11 @@ def _run_code_harness(prompt: str, as_json: bool) -> None:
 @click.option("--in-place", is_flag=True, help="Use your own config instead of an isolated root (same harness only).")
 @click.option("--allow-version-mismatch", is_flag=True, help="Launch even if the installed version differs from the lock.")
 @click.option("--dry-run", is_flag=True, help="Prepare everything, print the command, and don't start it.")
+@click.option("--trust", "trust", is_flag=True, help="Approve every executable the lock would run.")
+@click.option("--allow-hidden", "allow_hidden", multiple=True, metavar="FILE", help="Let through hidden characters in FILE.")
 @click.option("--json", "as_json", is_flag=True, help="With --dry-run: print the launch plan as JSON.")
 def launch(args: tuple[str, ...], lock: str | None, prefix: str | None, in_place: bool, allow_version_mismatch: bool,
-           dry_run: bool, as_json: bool) -> None:
+           dry_run: bool, trust: bool, allow_hidden: tuple[str, ...], as_json: bool) -> None:
     """Start a session in a harness that matches the lock.
 
     [cmd]hlock launch[/] starts the lock's harness; [cmd]hlock launch pi[/] starts another one with
@@ -1972,6 +2243,11 @@ def launch(args: tuple[str, ...], lock: str | None, prefix: str | None, in_place
             in_place = True
         elif a == "--allow-version-mismatch":
             allow_version_mismatch = True
+        elif a == "--trust":
+            trust = True
+        elif a == "--allow-hidden" and i + 1 < len(items):
+            allow_hidden = (*allow_hidden, items[i + 1])
+            i += 1
         elif a in ("--lock", "--prefix") and i + 1 < len(items):
             if a == "--lock":
                 lock = items[i + 1]
@@ -1987,10 +2263,28 @@ def launch(args: tuple[str, ...], lock: str | None, prefix: str | None, in_place
         lock, stored = _lock_ref(lock, as_json)
         if stored and prefix is None:
             prefix = _pull_env(stored)  # a pulled lock's environments live with it, not in this project
+    # what the lock would run here is approved first (once), as for sync
+    if not in_place:
+        with _friendly_errors():
+            # the policy's trusted list isn't something launch runs: `hlock trust` asks about it
+            untrusted = [e for e in json.loads(_trust_list(lock=lock or _l(), manifest=_m()))["executables"]
+                         if e["status"] == "untrusted" and e["kind"] != "policy"]
+        if untrusted and not trust:
+            if as_json or not sys.stdin.isatty():
+                _fail(f"{len(untrusted)} executable{'s' if len(untrusted) != 1 else ''} the lock would run aren't trusted on this machine",
+                      "review them with [cmd]hlock trust[/], or pass [cmd]--trust[/]")
+            _print_untrusted(untrusted)
+            if not click.confirm(f"Trust {'these' if len(untrusted) > 1 else 'this'} on this machine?", default=False):
+                sys.exit(1)
+            trust = True
+        if untrusted and trust:
+            with _friendly_errors():
+                _trust_approve(lock=lock or _l(), only=[e["digest"] for e in untrusted], manifest=_m())
     with _working("Preparing the locked environment…"):
         prep = json.loads(launch_prepare(lock or _l(), harness=harness, prefix=prefix,
                                          allow_version_mismatch=allow_version_mismatch,
-                                         in_place=in_place, args=rest, manifest=_m()))
+                                         in_place=in_place, args=rest, manifest=_m(), trust=trust,
+                                         allow_hidden=list(allow_hidden)))
     secret_env = prep.pop("secret_env", {})  # values for the config's references; never shown
     if as_json:
         console.print_json(data=prep)

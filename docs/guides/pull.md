@@ -31,7 +31,12 @@ like the repository they came from. Nothing is written to your project, so you c
 `alice-fast` for a remote `harness.fast.lock`); pass `--as NAME` to choose another.
 
 Pulling runs nothing from the lock. The summary shows what's in it, and the warning lists
-the programs its MCP servers start, because those run as soon as the harness does.
+the programs its MCP servers start, because those run as soon as the harness does. Before it
+writes anything, `pull` scans the files the lock vendors for
+[characters that hide text from a reviewer](audit.md#hidden-characters), and checks the lock
+against your project's [policy](audit.md#policy). When you sync or launch it, each MCP server,
+plugin, hook and skill script needs your [approval on this machine](audit.md#executables)
+first.
 
 ## Try it, or adopt it
 
