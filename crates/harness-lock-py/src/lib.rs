@@ -683,17 +683,27 @@ fn select_harness(explicit: Option<String>, manifest_target: Option<String>, man
     Ok(json_str(serde_json::json!(sel)))
 }
 
-/// Capture the target harness's live setup into a pinned lock at `out`.
+/// Capture the target harness's live setup into a pinned lock at `out`: the project's
+/// skills, MCP servers, instructions and config, plus the user-level ones with `user`, or
+/// only those whose path matches one of the `include` globs.
 /// Returns JSON with the lock, the chosen harness, the diff from a previous pin,
-/// vendored files, and warnings.
+/// vendored files, warnings, and the user-level items the pin left out.
 #[pyfunction]
-#[pyo3(signature = (harness=None, out="harness.lock".to_string(), vendor=true, force=false, manifest=None))]
-fn pin(harness: Option<String>, out: String, vendor: bool, force: bool, manifest: Option<String>) -> PyResult<String> {
+#[pyo3(signature = (harness=None, out="harness.lock".to_string(), vendor=true, force=false, manifest=None, user=false, include=None))]
+#[allow(clippy::too_many_arguments)]
+fn pin(harness: Option<String>, out: String, vendor: bool, force: bool, manifest: Option<String>, user: bool, include: Option<Vec<String>>) -> PyResult<String> {
+    let include = include.unwrap_or_default();
+    let scope = match (user, include.is_empty()) {
+        (true, false) => return Err(PyValueError::new_err("pass user or include, not both: user already includes everything")),
+        (true, true) => core::capture::UserScope::All,
+        (false, false) => core::capture::UserScope::Matching(include),
+        (false, true) => core::capture::UserScope::None,
+    };
     let (reg, ctx, manifest) = registry(manifest.as_deref(), Some(&lock_dir(&out)))?;
     let out = if Path::new(&out).is_absolute() { out } else { std::env::current_dir().unwrap_or_default().join(&out).to_string_lossy().into_owned() };
     let target = manifest.as_ref().and_then(|m| m.target_harness());
     let project = manifest.as_ref().and_then(|m| m.project.get("name").and_then(|v| v.as_str()).map(str::to_string));
-    let o = core::capture::pin(&reg, &ctx, harness.as_deref(), target.as_deref(), project.as_deref(), Path::new(&out), vendor, force)
+    let o = core::capture::pin(&reg, &ctx, harness.as_deref(), target.as_deref(), project.as_deref(), Path::new(&out), vendor, force, scope)
         .map_err(py_err)?;
     Ok(json_str(serde_json::json!({
         "lock": o.lock,
@@ -703,6 +713,7 @@ fn pin(harness: Option<String>, out: String, vendor: bool, force: bool, manifest
         "previous": o.previous,
         "vendored": o.vendored,
         "warnings": o.warnings,
+        "skipped": o.skipped,
     })))
 }
 

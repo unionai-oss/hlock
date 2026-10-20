@@ -81,7 +81,7 @@ def pinned(tmp_path, monkeypatch):
     (a / ".claude.json").write_text(json.dumps({"mcpServers": {"github": {
         "command": "npx", "args": ["-y", "@modelcontextprotocol/server-github"], "env": {"GITHUB_TOKEN": GH_TOKEN}}}}))
     monkeypatch.setenv("HOME", str(a))
-    assert invoke("pin", "--harness", "claude").exit_code == 0
+    assert invoke("pin", "--user", "--harness", "claude").exit_code == 0
     monkeypatch.setenv("HOME", str(b))
     return {"home": b, "keychain": tmp_path / "keychain", "tmp": tmp_path}
 

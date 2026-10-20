@@ -118,7 +118,7 @@ can then try a teammate's setup in isolation with `hlock launch --lock`, or
 [Team repositories](guides/teams.md) for the layout and the commands.
 
 ```bash
-hlock pin -o .hlock/locks/harness.alice.lock         # commit your setup with the code
+hlock pin -o .hlock/locks/harness.alice.lock         # your harness and model, with the repo's setup
 hlock launch --lock .hlock/locks/harness.bob.lock    # try a teammate's, isolated from yours
 ```
 

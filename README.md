@@ -62,7 +62,7 @@ Pin the harness you already use (Claude Code, Codex, Pi, OpenCode, Cursor, Gemin
 and [more](https://docs.hlock.ai/guides/harnesses/)), then bring it back anywhere:
 
 ```bash
-hlock pin                       # lock your current setup into harness.lock
+hlock pin --user                # lock your setup (yours in ~/.claude etc., and the project's) into harness.lock
 git add harness.lock .hlock/    # version it (secrets are placeholders, never values)
 hlock check                     # see what changed since the pin; re-pin to lock it
 hlock sync                      # on another machine: rehydrate it into .hlock/env (or --in-place, --docker)
@@ -70,6 +70,9 @@ hlock launch                    # start a session on the locked setup, isolated 
 hlock run "summarize README.md"  # or run one prompt through it (claude -p, codex exec, …)
 hlock pull github:alice/agents  # get someone else's pinned setup; then hlock launch --lock alice
 ```
+
+Plain `hlock pin` records only the project's own skills, MCP servers and config, so your
+personal setup stays out of the repository; `--user` adds it.
 
 For your own work, `hlock evals init -t coding` (or `data`, `research`, `support`) writes
 an eval pack template plus an Agent Skill, so the agent you already use can fill it in
@@ -87,7 +90,7 @@ lock to `.hlock/locks/harness.<handle>.lock`, next to the code it was used on, a
 with a clone can try a teammate's setup in isolation:
 
 ```bash
-hlock pin -o .hlock/locks/harness.alice.lock         # commit your setup with the code
+hlock pin -o .hlock/locks/harness.alice.lock         # your harness and model, with the repo's setup
 hlock launch --lock .hlock/locks/harness.bob.lock    # try a teammate's, isolated from yours
 ```
 

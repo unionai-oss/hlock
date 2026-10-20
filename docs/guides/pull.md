@@ -2,7 +2,7 @@
 
 `hlock pull` gets a pinned lock from someone else's git repository, so you can try their
 agent setup with [`hlock launch`](launch.md) or adopt it with [`hlock sync`](sync.md). Say a
-teammate pinned their Claude Code setup with [`hlock pin`](pin.md) and pushed
+teammate pinned their Claude Code setup with [`hlock pin --user`](pin.md#project-and-user-scope) and pushed
 `harness.lock` and `.hlock/` to `github.com/alice/agent-setup`:
 
 ```console
@@ -11,6 +11,7 @@ $ hlock pull github:alice/agent-setup
 ╭─ 📌 alice · pinned ────────────────────────────────────────────────────╮
 │                                                                        │
 │  harness        claude-code 2.1.285                                    │
+│  scope          project + user                                         │
 │  llm · default  anthropic:opus                                         │
 │  mcp            github (stdio)                                         │
 │  skills         1  (1 local)                                           │
@@ -111,6 +112,7 @@ $ hlock pull github:alice/agent-setup -o harness.alice.lock
 ╭─ 📌 harness.alice.lock · pinned ───────────────────────────────────────╮
 │                                                                        │
 │  harness        claude-code 2.1.285                                    │
+│  scope          project + user                                         │
 │  llm · default  anthropic:opus                                         │
 │  mcp            github (stdio)                                         │
 │  skills         1  (1 local)                                           │

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 import shutil
 import subprocess
 import sys
@@ -329,6 +330,10 @@ def _pin_panel(lock: dict, title: str | None = None) -> Panel:
     h = lock.get("harness") or {}
     t = _kv_table()
     t.add_row("harness", f"[bold]{h.get('name')}[/] {h.get('version') or ''}  [muted]{h.get('source') or ''}[/]")
+    prov = lock.get("provenance") or {}
+    if prov.get("scopes"):
+        picked = prov.get("user-include") or []
+        t.add_row("scope", " + ".join(prov["scopes"]) + (f"  [muted]({escape(', '.join(picked))})[/]" if picked else ""))
     for llm in lock.get("llm") or []:
         where = f"  [muted]via {llm['runtime']}[/]" if llm.get("runtime") else (
             f"  [muted]{llm['endpoint']}[/]" if llm.get("endpoint") else "")
@@ -822,21 +827,32 @@ def resolve(backend: str | None, harness: str | None, workdir: str | None) -> No
 @click.option("--harness", "harness", default=None,
               help="Harness to pin. [dim]\\[default: \\[target], else the one you're running in][/]")
 @click.option("-o", "--out", default=None, help="Where to write the pinned lock.  [dim]\\[default: the project's lock][/]")
+@click.option("--user", is_flag=True,
+              help="Also pin your user-level setup (~/.claude, ~/.pi/agent, …), not just the project's.")
+@click.option("-i", "--include-user-scope", "include", multiple=True, metavar="GLOB",
+              help="Also pin the user-level skills and files matching GLOB, relative to the harness's "
+                   "config root (or ~/…). Repeatable.  [dim]e.g. -i 'skills/review-*' -i CLAUDE.md[/]")
 @click.option("--no-vendor", is_flag=True, help="Don't copy unfetchable skills and config into .hlock/vendor.")
 @click.option("--force", is_flag=True, help="Replace a resolved lock (one with evidence).")
 @click.option("--json", "as_json", is_flag=True, help="Print the result as JSON.")
-def pin(harness: str | None, out: str | None, no_vendor: bool, force: bool, as_json: bool) -> None:
+def pin(harness: str | None, out: str | None, user: bool, include: tuple[str, ...], no_vendor: bool, force: bool,
+        as_json: bool) -> None:
     """Pin your current harness setup into [path]harness.lock[/].
 
     Captures the harness version and install source, the default and small models,
-    local inference runtimes and their models, MCP servers, skills, plugins,
-    instruction files, and config. Secrets are replaced with
-    [key]HLOCK_SECRET_*[/] placeholders; content another machine can't fetch is
-    vendored into [path].hlock/vendor/[/]. No [path]harness.toml[/] needed.
+    local inference runtimes and their models, and the project's MCP servers, skills,
+    instruction files, and config. [cmd]--user[/] adds the ones in your user-level
+    config (skills, MCP servers, plugins, [path]CLAUDE.md[/], settings), and
+    [cmd]-i GLOB[/] adds only those matching a pattern. Secrets are
+    replaced with [key]HLOCK_SECRET_*[/] placeholders; content another machine can't
+    fetch is vendored into [path].hlock/vendor/[/]. No [path]harness.toml[/] needed.
     """
+    if user and include:
+        raise click.UsageError("--user already pins everything in the user scope; drop --include-user-scope, or --user")
     with _working("Pinning your harness setup…"):
         out = out or _l()
-        result = json.loads(_pin(harness=harness, out=out, vendor=not no_vendor, force=force, manifest=_m()))
+        result = json.loads(_pin(harness=harness, out=out, vendor=not no_vendor, force=force, manifest=_m(), user=user,
+                                 include=list(include)))
     if as_json:
         console.print_json(data=result)
         return
@@ -849,6 +865,9 @@ def pin(harness: str | None, out: str | None, no_vendor: bool, force: bool, as_j
     if result["vendored"]:
         console.print(f"[muted]vendored {len(result['vendored'])} files into[/] [path]{_vendor_dir(result['vendored'], h['name'])}[/]  "
                       "[muted]· review before committing[/]")
+    if result.get("skipped"):
+        console.print(f"[muted]left out user-level: {_skipped_summary(result['skipped'])}[/]")
+        console.print("[muted]  to pin it too:[/] [cmd]hlock pin --user[/][muted], or pick with[/] [cmd]-i GLOB[/]")
     if result["previous"]:
         if result["diff"]:
             console.print("[bold]changes since the last pin[/]")
@@ -858,6 +877,41 @@ def pin(harness: str | None, out: str | None, no_vendor: bool, force: bool, as_j
         else:
             console.print("[muted]no changes since the last pin[/]")
     _next("hlock check", "hlock sync")
+
+
+def _user_scope(lf) -> tuple[bool, list[str]]:
+    """How a pinned lock captured the user scope, as `pin`'s (user, include) arguments, so a
+    re-pin captures the same. Locks from before scopes were recorded captured everything."""
+    prov = json.loads(lf.to_json()).get("provenance") or {}
+    include = prov.get("user-include") or []
+    return not include and "user" in (prov.get("scopes") or ["user"]), include
+
+
+def _pin_cmd(lf) -> str:
+    """The `hlock pin` command that re-pins a lock in the scope it was pinned with."""
+    user, include = _user_scope(lf)
+    flags = ["--user"] if user else [f"-i {shlex.quote(p)}" for p in include]
+    return " ".join(["hlock pin", *flags])
+
+
+_SKIPPED_NOUNS = {
+    "skills": ("skill", "skills"),
+    "mcp": ("MCP server", "MCP servers"),
+    "plugins": ("plugin", "plugins"),
+    "instructions": ("instruction file", "instruction files"),
+    "config": ("config file", "config files"),
+    "providers": ("model provider", "model providers"),
+}
+
+
+def _skipped_summary(skipped: dict[str, int]) -> str:
+    """What a project-only pin left out, e.g. `12 skills, 2 MCP servers, 1 config file`."""
+    parts = []
+    for kind, (one, many) in _SKIPPED_NOUNS.items():
+        n = skipped.get(kind, 0)
+        if n:
+            parts.append(f"{n} {one if n == 1 else many}")
+    return ", ".join(parts)
 
 
 def _vendor_dir(vendored: list[str], harness: str) -> str:
@@ -1295,7 +1349,7 @@ def check(prefix: str | None) -> None:
             for line in drift:
                 err_console.print(f"  {line}")
             restore = f"hlock sync --prefix {prefix}" if prefix else "hlock sync --in-place"
-            err_console.print(f"  [muted]hint:[/] re-pin with [cmd]hlock pin[/], or restore it with [cmd]{restore}[/]")
+            err_console.print(f"  [muted]hint:[/] re-pin with [cmd]{escape(_pin_cmd(lf))}[/], or restore it with [cmd]{restore}[/]")
             sys.exit(1)
         _ok(f"{which} matches [path]{_ld()}[/]")
         return
@@ -2550,7 +2604,8 @@ def meta_run_cmd(job: str, instructions: tuple[str, ...], headless: bool | None,
     if job == "update" and repin and v.get("diff"):
         with _working("Re-pinning the project's lock…"):
             lf = Lockfile.load(_l())
-            _pin(harness=lf.harness, out=_l(), vendor=True, force=False, manifest=_m())
+            user, include = _user_scope(lf)
+            _pin(harness=lf.harness, out=_l(), vendor=True, force=False, manifest=_m(), user=user, include=include)
         v["details"] = [*(v.get("details") or []), f"re-pinned {_ld()}"]
     (run_dir / "result.json").write_text(json.dumps({
         "job": job, "harness": prep["harness"], "harness_version": prep.get("harness_version"), "mode": prep["mode"],

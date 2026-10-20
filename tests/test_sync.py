@@ -60,7 +60,7 @@ def machines(tmp_path, monkeypatch):
                                   "env": {"GITHUB_TOKEN": GH_TOKEN}}},
     }))
     monkeypatch.setenv("HOME", str(a))
-    assert invoke("pin", "--harness", "claude").exit_code == 0
+    assert invoke("pin", "--user", "--harness", "claude").exit_code == 0
     monkeypatch.setenv("HOME", str(b))  # now we're on the new machine
     return {"a": a, "b": b, "bin": bindir}
 

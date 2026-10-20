@@ -35,9 +35,10 @@ The conventions:
 - **The root `harness.lock` is optional.** Use it for the setup the project recommends,
   such as one the maintainers [resolved](resolve.md) against the repository's
   [eval pack](eval-packs.md). Contributors' own locks don't replace it.
-- **Commit each lock with its vendored files.** `hlock pin` copies hand-written skills and
-  config into `.hlock/locks/.hlock/vendor/<handle>/`, next to the lock. Review them before
-  committing, as you would for any [pin](pin.md#vendoring).
+- **Commit each lock with its vendored files.** A plain `hlock pin` records only the
+  repository's setup and vendors nothing. With `--user`, it copies your hand-written skills
+  and config into `.hlock/locks/.hlock/vendor/<handle>/`, next to the lock. Review them
+  before committing, as you would for any [pin](pin.md#vendoring).
 - **Don't commit `.hlock/env/`.** It's where `sync` and `launch` restore locks in
   isolation. Add it to `.gitignore`:
 
@@ -68,17 +69,25 @@ $ hlock pin --harness claude-code -o .hlock/locks/harness.alice.lock
 ╭─ 📌 .hlock/locks/harness.alice.lock · pinned ─╮
 │                                               │
 │  harness        claude-code 2.1.0             │
+│  scope          project                       │
 │  llm · default  anthropic:opus                │
-│  skills         1  (1 local)                  │
-│  config         {root}/settings.json          │
+│  mcp            linear (http)                 │
+│  skills         1  (1 first-party)            │
+│  instructions   CLAUDE.md                     │
+│  config         .mcp.json                     │
 │                                               │
 ╰───────────────────────────────────────────────╯
-vendored 2 files into .hlock/vendor/alice/claude-code/  · review before committing
+left out user-level: 1 skill, 1 MCP server, 1 instruction file, 2 config files
+  to pin it too: hlock pin --user, or pick with -i GLOB
 next → hlock check  ·  hlock sync
 ```
 
-The vendor path in that message is relative to the lock's directory, so the files are in
-`.hlock/locks/.hlock/vendor/alice/claude-code/`.
+By default your lock records your harness and model, and the skills, MCP servers and
+config the repository itself provides. Your personal setup in your home directory stays
+out of the repository. To share it too, add `--user`, or pick parts of it with
+`-i 'skills/review-*'`: hand-written skills and config are then copied into
+`.hlock/locks/.hlock/vendor/alice/`, so review them before committing (see
+[Project and user scope](pin.md#project-and-user-scope)).
 
 Later commands take your lock with `--lock`. To check for drift, then re-pin:
 
@@ -86,7 +95,6 @@ Later commands take your lock with `--lock`. To check for drift, then re-pin:
 $ hlock --lock .hlock/locks/harness.alice.lock check
 ✗ drift: your claude-code setup changed since .hlock/locks/harness.alice.lock was pinned
   ~ llm default: anthropic:opus → anthropic:sonnet
-  ~ config {root}/settings.json: 3b6166240d → 97e3b9f397
   hint: re-pin with hlock pin, or restore it with hlock sync --in-place
 $ hlock --lock .hlock/locks/harness.alice.lock pin --harness claude-code
 ```

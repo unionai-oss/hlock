@@ -77,14 +77,16 @@ A decider never blocks your agent. When it's unsure, slow, can't be reached, or 
 something `may` doesn't allow, the hook prints nothing and the harness does what it would
 have done.
 
-`hlock pin` locks the deciders with the rest of your setup:
+`hlock pin` locks the deciders with the rest of your setup (here with `--user`, since the
+settings live in `~/.claude`):
 
 ```console
-$ hlock pin --harness claude
+$ hlock pin --user --harness claude
 ✓ pinned claude-code 2.1.0 → harness.lock  (--harness)
 ╭─ 📌 harness.lock · pinned ────────────────────────────────────────────────────────╮
 │                                                                                   │
 │  harness            claude-code 2.1.0                                             │
+│  scope              project + user                                                │
 │  llm · default      anthropic:opus                                                │
 │  config             {root}/settings.json                                          │
 │  decider · approve  typesafe:jev-1.13.0  hook: PermissionRequest · may deny, ask  │
@@ -216,7 +218,7 @@ and a newer hlock whose questions for a use differ from the ones locked (`hlock 
 $ hlock check
 ✗ drift: your claude-code setup changed since harness.lock was pinned
   decider approve: policy .hlock/approve.md changed since the lock was written
-  hint: re-pin with hlock pin, or restore it with hlock sync --in-place
+  hint: re-pin with hlock pin --user, or restore it with hlock sync --in-place
 ```
 
 With `any-of`, [`hlock resolve`](resolve.md) measures each candidate on your evals and
