@@ -60,7 +60,7 @@ hlock works with Claude Code, Codex, Pi, OpenCode, Cursor, Gemini CLI and more; 
     Through 0.1.2 the roles were reversed: `harness-lock` was the package and `hlock` the
     alias. Both the old `harness-lock` and the new `hlock` contain the `harness_lock`
     module, so `pip install -U harness-lock` in an existing 0.1.2 environment can leave
-    `harness_lock` half removed (`import hlock` then fails with an `ImportError`).
+    `harness_lock` half removed (`import harness_lock` then fails with an `ImportError`).
     Reinstall cleanly instead:
 
     ```bash

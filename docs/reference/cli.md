@@ -60,7 +60,7 @@ anywhere inside a project. The directory holding the manifest is the **project r
 
 - relative paths in the manifest (`[evals] packs`, instruction files) resolve against it;
 - the lock defaults to `harness.lock` next to the manifest;
-- `.harnesslock/` (trial artifacts), `.hlock/vendor/` and `.hlock/env/` live there.
+- `.hlock/` lives there: trial artifacts (`store/`, `runs/`, `tune/`), vendored files (`vendor/`), and synced environments (`env/`).
 
 Without a manifest (a project that only has a pinned lock), hlock uses the nearest
 `harness.lock` instead. Paths you pass on the command line, like `-o` or `--evals`, are
@@ -225,7 +225,7 @@ hlock resolve [--backend local|devbox|cluster] [--harness NAME] [--workdir DIR]
 |---|---|---|
 | `--backend` | manifest `[backend] target` | Where trials run |
 | `--harness` | manifest `[target] harness` | Target harness for this run. See [Harnesses](../guides/harnesses.md#resolve-for-a-target). |
-| `--workdir` | `.harnesslock` | Where trial artifacts go |
+| `--workdir` | `.hlock` | Where trial artifacts go |
 
 ## `pin`
 
@@ -498,7 +498,7 @@ hlock tune [--depth LEVEL] [--data SOURCE] [OPTIONS]
 | `--apply` | | Also adopt the result into `harness.lock` |
 | `--max-trials N` | | Cap the number of trials |
 | `--backend` | manifest `[backend] target` | `local`, `devbox`, or `cluster` |
-| `--workdir DIR` | `.harnesslock` | Where trial artifacts go |
+| `--workdir DIR` | `.hlock` | Where trial artifacts go |
 | `-d`, `--detach` | | Run in the background as a tune job; can't be combined with `--apply` |
 
 The job commands below take a `JOB`: a job id or a unique prefix of one. Without it,

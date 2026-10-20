@@ -4,7 +4,7 @@ A tune can take minutes (prompt and hyperparameter search) or days (fine-tuning)
 detached tune runs in its own process, outside the terminal that started it. Each job
 gets a directory in the project:
 
-    .harnesslock/tune/jobs/<id>/
+    .hlock/tune/jobs/<id>/
         job.json            what was asked for, status, timestamps, report
         pid                 the orchestrator's process id
         tune.log            the orchestrator's stdout and stderr
@@ -17,7 +17,7 @@ stages run as Flyte tasks and their run ids end up in the result lock. A job wri
 lock into its own directory, never over `harness.tune.lock` or `harness.lock`:
 `fetch` copies it out (and `--apply` adopts it) when you're ready.
 
-Run a job's orchestrator with ``python -m harness_lock.jobs <job-dir>``.
+Run a job's orchestrator with ``python -m hlock.jobs <job-dir>``.
 """
 
 from __future__ import annotations
@@ -35,7 +35,7 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-JOBS_DIR = Path(".harnesslock") / "tune" / "jobs"
+JOBS_DIR = Path(".hlock") / "tune" / "jobs"
 RESULT = "harness.tune.lock"
 LOG = "tune.log"
 
@@ -123,7 +123,7 @@ def submit(manifest: str | Path, *, lock: str | Path, options: dict, cwd: str | 
     backend, workdir). The job's result goes into its own directory; `out` and `apply`
     are for `fetch`. Raises ValueError if the manifest can't be read.
     """
-    from harness_lock import Manifest
+    from hlock import Manifest
 
     manifest = Path(manifest).resolve()
     backend = options.get("backend") or Manifest.load(str(manifest)).backend
@@ -168,7 +168,7 @@ def submit(manifest: str | Path, *, lock: str | Path, options: dict, cwd: str | 
     else:
         kwargs["start_new_session"] = True  # survive the terminal closing
     with open(job_dir / LOG, "ab") as log:
-        proc = subprocess.Popen([sys.executable, "-m", "harness_lock.jobs", str(job_dir)], stdout=log, **kwargs)
+        proc = subprocess.Popen([sys.executable, "-m", "hlock.jobs", str(job_dir)], stdout=log, **kwargs)
     (job_dir / "pid").write_text(f"{proc.pid}\n")
     job["dir"] = str(job_dir)
     job["pid"] = proc.pid
@@ -177,7 +177,7 @@ def submit(manifest: str | Path, *, lock: str | Path, options: dict, cwd: str | 
 
 def run(job_dir: str | Path) -> int:
     """The orchestrator: run the job's tune and record the outcome."""
-    from harness_lock import tune
+    from hlock import tune
 
     job_dir = Path(job_dir)
     job = json.loads((job_dir / "job.json").read_text())
@@ -201,7 +201,7 @@ def run(job_dir: str | Path) -> int:
 
 def _runs(result: Path) -> list[str]:
     """Flyte run ids the cluster stages recorded in the tune lock."""
-    from harness_lock import Lockfile
+    from hlock import Lockfile
 
     try:
         run = ((json.loads(Lockfile.load(str(result)).to_json()).get("tune") or {}).get("provenance") or {}).get("run")

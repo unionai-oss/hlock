@@ -2,7 +2,7 @@
 
 Invoked out-of-process by the Rust core (``hlock``) over a versioned JSON contract:
 
-    python -m harness_lock.tasks.worker <request.json> <response.json>
+    python -m hlock.tasks.worker <request.json> <response.json>
 
 Each handler owns one ecosystem-heavy stage of ``hlock tune``. On
 ``backend=cluster`` (a fully-fledged Union cluster) the worker lifts each body to

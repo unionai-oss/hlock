@@ -81,7 +81,7 @@ back and can close it:
 ```console
 $ hlock tune --detach --depth hpo
 ✓ started tune job cdda29ff  (depth=hpo, pid 91638)
-log .harnesslock/tune/jobs/cdda29ff/tune.log
+log .hlock/tune/jobs/cdda29ff/tune.log
 next → hlock tune show cdda29ff  ·  hlock tune fetch cdda29ff --wait
 ```
 
@@ -111,7 +111,7 @@ Every job command takes a job id, or any unique prefix of one, and defaults to t
 newest job. `hlock tune cancel <job>` stops a running job and the worker processes it
 started.
 
-Jobs live in `.harnesslock/tune/jobs/<id>/`: `job.json` with the settings, status, and
+Jobs live in `.hlock/tune/jobs/<id>/`: `job.json` with the settings, status, and
 report; `tune.log`; the resulting `harness.tune.lock`; and the trial artifacts in
 `work/`, unless you passed `--workdir`.
 
@@ -126,7 +126,7 @@ Flyte, so the machine has to stay on until the job finishes.
 | `--max-trials N` | Cap the number of trials |
 | `--out FILE` | Write somewhere other than `harness.tune.lock` |
 | `--backend` | Override the manifest's backend |
-| `--workdir DIR` | Where trial artifacts go (default `.harnesslock`) |
+| `--workdir DIR` | Where trial artifacts go (default `.hlock`) |
 | `-d`, `--detach` | Run as a [background job](#running-in-the-background) |
 
 ## Fine-tuning settings

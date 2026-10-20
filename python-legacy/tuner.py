@@ -40,7 +40,7 @@ from hlock.tasks import Task, TaskPack
 class Tuner:
     def __init__(self, manifest: Manifest, workdir: Path | None = None) -> None:
         self.manifest = manifest
-        self.workdir = Path(workdir) if workdir else Path(".harnesslock")
+        self.workdir = Path(workdir) if workdir else Path(".hlock")
         self.store = Store(self.workdir / "store")
         self.run_dir = self.workdir / "runs"
         self.cache = TrialCache(self.workdir / "trial-cache.json")
