@@ -259,19 +259,6 @@ uv run --group docs zensical serve # docs at http://localhost:8000
 
 Want to help? See the [contributing guide](https://docs.hlock.ai/project/contributing/). Releases are cut from tags. See [RELEASING.md](https://github.com/unionai-oss/hlock/blob/main/RELEASING.md).
 
-## Status
-
-What works today: `pin`, `check`, `sync`, and `launch` for the
-[supported harnesses](https://docs.hlock.ai/guides/harnesses/), declared dependencies
-(`add`, `remove`, `outdated`, APM packages and `apm.lock.yaml` export), audit and trust
-(hidden-Unicode scanning, executable approval, `hlock-policy.toml`, SARIF, CycloneDX and SPDX
-SBOMs), `localize`, manifest and
-lockfile schema v1, a content-addressed store, eval packs (`hlock evals`) with graders, the
-reference provider and harness, grid search with Pareto selection, `upgrade`
-(plan/apply/rollback), `tune` across the `offline`, `local`, and `flyte` backends and pluggable backends, and the
-`meta` harness. The [design specs](https://github.com/unionai-oss/hlock/tree/main/specs) describe the full design,
-much of which is still on the roadmap.
-
 ## License
 
 [Apache-2.0](https://github.com/unionai-oss/hlock/blob/main/LICENSE)
