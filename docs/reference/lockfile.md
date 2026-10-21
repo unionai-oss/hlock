@@ -145,6 +145,8 @@ isolation = "locked-only"
 
 [evidence]
 eval-pack = "./evals"
+eval-pack-version = "hlock-demo/evals@0.1.0"
+eval-pack-digest = "sha256:1de30d21400e4ebc04033d646b314ba32a1d9011751712f92cba4ddce71d5e1e"
 split = "search"
 trials = 4
 
@@ -187,7 +189,7 @@ strategy = "grid"
 | `[context]` | Context `isolation` and `compaction` settings |
 | `[[tool]]`, `[[skill]]`, `[[instructions]]` | MCP servers, skills, and instruction files, each with a source or digest. A pinned lock fills these in; see below. |
 | `[[decider]]` | One per [decision model](../guides/deciders.md) the stack uses (see below) |
-| `[evidence]` | The eval pack and split measured, the trial count, and success-rate, cost, and latency statistics. `[evidence.judge]` records the judge of [`judge` and `trace` graders](../guides/eval-packs.md#judges): its `model`, the model that `answered`, its `protocol`, a `fallback`, the share of `uncertain-grades`, and `cost-usd-per-task` when
+| `[evidence]` | The eval packs measured: their paths (`eval-pack`), `name@version` (`eval-pack-version`), and a digest of every file in them (`eval-pack-digest`), which `hlock check` compares with the packs on disk, warning when they've changed. Then the split measured, the trial count, and success-rate, cost, and latency statistics. `[evidence.judge]` records the judge of [`judge` and `trace` graders](../guides/eval-packs.md#judges): its `model`, the model that `answered`, its `protocol`, a `fallback`, the share of `uncertain-grades`, and `cost-usd-per-task` when
 the provider publishes a price. |
 | `[verify]` | Runtime verification thresholds: `canary-tasks`, `min-success-rate`, `fingerprint-tolerance` |
 | `[provenance]` | The backend that produced the lock, the search settings, for a pinned lock the `scopes` it captured and any `user-include` patterns, and `openapm` (`"0.1"`) when APM packages were resolved |

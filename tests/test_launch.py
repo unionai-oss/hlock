@@ -194,3 +194,37 @@ def test_command_harness_and_failures(code_project):
     assert r.exit_code == 1
     result = json.loads(r.output)
     assert result["success"] is False and "got: do it" in result["log"]
+
+
+def test_evals_run_drives_the_locked_cli_in_a_stand_in_project(tmp_path, monkeypatch, clean_env):
+    """`hlock evals run` runs the agent CLI in the task's workspace, with the lock's
+    project-scoped skills and instructions set up there, and nothing else from the project."""
+    home, project, bindir = tmp_path / "home", tmp_path / "project", tmp_path / "bin"
+    for d in (home, project, bindir):
+        d.mkdir()
+    executable(bindir / "claude", "#!/bin/sh\n"
+               'if [ "$1" = "--version" ]; then echo "2.1.0 (Claude Code)"; exit 0; fi\n'
+               'printf "Hello, world!" > hello.txt\nls -A\n')
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("PATH", f"{bindir}{os.pathsep}/usr/bin{os.pathsep}/bin")
+    monkeypatch.chdir(project)
+    (project / ".claude/skills/house-style").mkdir(parents=True)
+    (project / ".claude/skills/house-style/SKILL.md").write_text("---\nname: house-style\ndescription: d\n---\nbody\n")
+    (project / "CLAUDE.md").write_text("be terse\n")
+    (project / "secret-notes.md").write_text("the answer\n")
+    assert invoke("pin", "--harness", "claude").exit_code == 0
+    assert invoke("evals", "init").exit_code == 0
+    work = tmp_path / "runs"
+    r = invoke("evals", "run", "hello_file", "--workdir", str(work))
+    assert r.exit_code == 0, r.output
+    assert "✓ hello_file  1.00" in r.output
+    ws = work / "hello_file-0"
+    assert (ws / "CLAUDE.md").read_text() == "be terse\n"
+    assert (ws / ".claude/skills/house-style/SKILL.md").is_file()
+    assert not (ws / "secret-notes.md").exists() and not (ws / "harness.lock").exists()
+    assert (project / ".hlock/env/claude-code/config").is_dir()  # the isolated root stays the project's
+    # a project file changed since it was locked is left out, and the run says so
+    (project / "CLAUDE.md").write_text("be verbose\n")
+    r = invoke("evals", "run", "hello_file", "--workdir", str(tmp_path / "runs2"))
+    assert "left out CLAUDE.md: it changed in the project since it was locked" in r.output, r.output
+    assert not (tmp_path / "runs2/hello_file-0/CLAUDE.md").exists()

@@ -181,6 +181,7 @@ hlock evals init                       # a runnable hello-world pack in ./evals
 hlock evals init --from-traces         # draft tasks from past agent sessions in this project
 hlock evals templates                  # templates for evals init --template
 hlock evals check                      # exits 1 while the pack isn't ready
+hlock evals run [TASK]...              # run the locked agent on tasks and grade each run (costs a session each)
 hlock evals grade TASK [WORKSPACE]     # grade a directory as a run of TASK would leave it
 hlock init --pack ./evals              # a starter harness.toml
 hlock resolve                          # run the candidates on the pack, lock the winner

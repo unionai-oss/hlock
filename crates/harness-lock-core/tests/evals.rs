@@ -134,3 +134,69 @@ fn the_old_names_still_load() {
     fs::write(&path, text.replace("eval-pack =", "task-pack =")).unwrap();
     assert_eq!(Lockfile::load(&path).unwrap().evidence.eval_pack.as_deref(), Some("./evals"));
 }
+
+fn hello_pack(name: &str) -> PathBuf {
+    let root = tmp(name);
+    write(&root, "pack.toml", r#"
+[pack]
+name = "t/keys"
+version = "0.1.0"
+domain = "test"
+
+[[task]]
+id = "a"
+prompt = "a/prompt.md"
+fixtures = "a/workspace/"
+expected = { artifacts = ["out.txt"] }
+"#);
+    write(&root, "a/prompt.md", "Write out.txt.\n");
+    write(&root, "a/workspace/in.txt", "input\n");
+    root
+}
+
+#[test]
+fn check_reports_unknown_keys_with_the_closest_known_one() {
+    let root = &hello_pack("keys");
+    let text = fs::read_to_string(root.join("pack.toml")).unwrap()
+        .replace("domain = \"test\"", "domain = \"test\"\nlicence = \"MIT\"\n\n[pack.judge]\nmodle = \"x\"")
+        .replace("fixtures =", "timeout_seconds = 5\ngrader = []\nfixtures =");
+    write(root, "pack.toml", &text);
+    let pack = EvalPack::load(root.to_str().unwrap(), None).unwrap();
+    let errors = messages(&pack, "error");
+    for want in [
+        "unknown key `licence` in [pack] (did you mean `license`?)",
+        "unknown key `modle` in [pack.judge] (did you mean `model`?)",
+        "unknown key `timeout_seconds` in [[task]] (did you mean `timeout-seconds`?)",
+        "unknown key `grader` in [[task]] (did you mean `graders`?)",
+    ] {
+        assert!(errors.iter().any(|e| e == want), "{want:?} not in {errors:?}");
+    }
+    // nothing close: no guess
+    write(root, "pack.toml", &text.replace("grader = []", "flavor = \"x\""));
+    let pack = EvalPack::load(root.to_str().unwrap(), None).unwrap();
+    assert!(messages(&pack, "error").iter().any(|e| e == "unknown key `flavor` in [[task]]"));
+}
+
+#[test]
+fn the_pack_hash_covers_every_file() {
+    let root = &hello_pack("hash");
+    let before = EvalPack::load(root.to_str().unwrap(), None).unwrap().hash;
+    write(root, "a/prompt.md", "Write out.txt, carefully.\n");
+    let after_prompt = EvalPack::load(root.to_str().unwrap(), None).unwrap().hash;
+    write(root, "a/workspace/in.txt", "other input\n");
+    let after_fixture = EvalPack::load(root.to_str().unwrap(), None).unwrap().hash;
+    assert!(before != after_prompt && after_prompt != after_fixture);
+}
+
+#[test]
+fn prepare_workspace_copies_the_fixtures_into_a_fresh_directory() {
+    let root = &hello_pack("prepare");
+    let pack = EvalPack::load(root.to_str().unwrap(), None).unwrap();
+    let ws = tmp("prepare-ws").join("a-0");
+    let task = pack.prepare_workspace("a", &ws).unwrap();
+    assert_eq!(task.prompt_text, "Write out.txt.\n");
+    assert_eq!(fs::read_to_string(ws.join("in.txt")).unwrap(), "input\n");
+    // never over an earlier run
+    assert!(pack.prepare_workspace("a", &ws).unwrap_err().to_string().contains("isn't empty"));
+    assert!(pack.prepare_workspace("nope", &ws.with_file_name("x")).unwrap_err().to_string().contains("no task \"nope\""));
+}

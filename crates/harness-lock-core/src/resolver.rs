@@ -454,6 +454,8 @@ impl Resolver {
             context: Context { isolation: self.manifest.context.get("isolation").and_then(serde_json::Value::as_str).unwrap_or("locked-only").into(), ..Default::default() },
             evidence: Evidence {
                 eval_pack: Some(self.manifest.eval_packs().join(",")),
+                eval_pack_version: crate::tasks::packs_version(&self.manifest),
+                eval_pack_digest: Some(crate::tasks::packs_digest(&self.manifest)),
                 split: "search".into(),
                 trials: winner.n,
                 success_rate,

@@ -104,6 +104,13 @@ pub const PLACEHOLDER: &str = "TODO(hlock)";
 /// Below this many tasks the holdout split is too small to say much.
 pub const MIN_TASKS: usize = 10;
 
+/// The keys `pack.toml` knows, by table: anything else is reported by
+/// [`EvalPack::check`], since a mistyped key is otherwise dropped without a word.
+const TOP_KEYS: &[&str] = &["pack", "task"];
+const PACK_KEYS: &[&str] = &["name", "version", "domain", "license", "judge"];
+const JUDGE_KEYS: &[&str] = &["model", "base-url", "key-env", "protocol", "long-context", "fallback", "fallback-base-url", "uncertain"];
+const TASK_KEYS: &[&str] = &["id", "prompt", "fixtures", "solution", "tools", "expected", "graders", "tags", "timeout-seconds"];
+
 /// One comparison [`EvalPack::calibrate`] makes: a criterion (or the overall
 /// `(passes)`) on one run, as judges `a` and `b` scored it.
 #[derive(Debug, Clone, Serialize)]
@@ -179,6 +186,87 @@ fn task_workspace(root: &Path, id: &str) -> Result<PathBuf> {
     Ok(ws)
 }
 
+/// A key `pack.toml` doesn't know, in each table it has: an error, naming the known key
+/// it's closest to.
+fn unknown_keys(text: &str) -> Vec<PackIssue> {
+    let Ok(doc) = text.parse::<toml::Table>() else { return Vec::new() };
+    let mut issues = Vec::new();
+    let mut report = |task: Option<&str>, table: &toml::Table, known: &[&str], name: &str| {
+        for key in table.keys().filter(|k| !known.contains(&k.as_str())) {
+            let hint = closest(key, known).map(|k| format!(" (did you mean `{k}`?)")).unwrap_or_default();
+            issues.push(PackIssue::error(task, format!("unknown key `{key}` in {name}{hint}")));
+        }
+    };
+    report(None, &doc, TOP_KEYS, "pack.toml");
+    if let Some(pack) = doc.get("pack").and_then(toml::Value::as_table) {
+        report(None, pack, PACK_KEYS, "[pack]");
+        if let Some(judge) = pack.get("judge").and_then(toml::Value::as_table) {
+            report(None, judge, JUDGE_KEYS, "[pack.judge]");
+        }
+    }
+    for t in doc.get("task").and_then(toml::Value::as_array).into_iter().flatten().filter_map(toml::Value::as_table) {
+        let id = t.get("id").and_then(toml::Value::as_str).filter(|s| !s.is_empty());
+        report(id, t, TASK_KEYS, "[[task]]");
+    }
+    issues
+}
+
+/// The known key `key` is most likely a typo of: one within a third of its length in
+/// edits, once `_` and `-` are treated alike.
+fn closest<'a>(key: &str, known: &[&'a str]) -> Option<&'a str> {
+    let norm = |s: &str| s.to_ascii_lowercase().replace('_', "-");
+    let k = norm(key);
+    known
+        .iter()
+        .map(|c| (edit_distance(&k, &norm(c)), *c))
+        .filter(|(d, _)| *d <= (k.chars().count() / 3).max(1))
+        .min_by_key(|(d, _)| *d)
+        .map(|(_, c)| c)
+}
+
+/// Edits (insertions, deletions, substitutions, and swaps of adjacent characters) that
+/// turn `a` into `b`.
+fn edit_distance(a: &str, b: &str) -> usize {
+    let (a, b): (Vec<char>, Vec<char>) = (a.chars().collect(), b.chars().collect());
+    let mut d = vec![vec![0usize; b.len() + 1]; a.len() + 1];
+    for (i, row) in d.iter_mut().enumerate() {
+        row[0] = i;
+    }
+    for j in 0..=b.len() {
+        d[0][j] = j;
+    }
+    for i in 1..=a.len() {
+        for j in 1..=b.len() {
+            let cost = usize::from(a[i - 1] != b[j - 1]);
+            d[i][j] = (d[i - 1][j] + 1).min(d[i][j - 1] + 1).min(d[i - 1][j - 1] + cost);
+            if i > 1 && j > 1 && a[i - 1] == b[j - 2] && a[i - 2] == b[j - 1] {
+                d[i][j] = d[i][j].min(d[i - 2][j - 2] + 1);
+            }
+        }
+    }
+    d[a.len()][b.len()]
+}
+
+/// The digest of the eval packs a manifest names: their directories' tree digests,
+/// joined and hashed. A missing pack counts as its path. The lock's `[evidence]` and
+/// `hlock add --eval`'s `[*.evidence]` record it, and the trial cache is keyed on it.
+pub fn packs_digest(m: &crate::manifest::Manifest) -> String {
+    let root = m.root();
+    let parts: Vec<String> = m.eval_packs().iter().map(|p| {
+        let dir = root.join(p);
+        if dir.is_dir() { crate::capture::tree_digest(&dir) } else { p.clone() }
+    }).collect();
+    crate::hash::sha256_text(&parts.join("\n"))
+}
+
+/// `name@version` of each eval pack a manifest names, comma-separated, for the lock's
+/// `[evidence] eval-pack-version`; `None` when none of them loads.
+pub fn packs_version(m: &crate::manifest::Manifest) -> Option<String> {
+    let root = m.root();
+    let ids: Vec<String> = m.eval_packs().iter().filter_map(|p| EvalPack::load(p, Some(&root)).ok()).map(|p| format!("{}@{}", p.name, p.version)).collect();
+    (!ids.is_empty()).then(|| ids.join(","))
+}
+
 /// Copy each directory in `sources` into `ws`, without following symlinks.
 fn fill_workspace(ws: &Path, sources: impl IntoIterator<Item = PathBuf>) -> Result<()> {
     std::fs::create_dir_all(ws)?;
@@ -209,7 +297,8 @@ impl EvalPack {
             t.pack_dir = Some(p.clone());
             t.load_prompt_text();
         }
-        let hash = crate::hash::sha256_hex(text.as_bytes());
+        // every file in the pack: a prompt, a test script or a fixture changes what's measured
+        let hash = crate::capture::tree_digest(&p);
         Ok(EvalPack {
             name: file.pack.name,
             version: file.pack.version,
@@ -248,6 +337,7 @@ impl EvalPack {
                     "pack.toml still has {} {PLACEHOLDER} ({word} {shown})", lines.len()
                 )));
             }
+            issues.extend(unknown_keys(&text));
         }
         if self.tasks.is_empty() {
             issues.push(PackIssue::error(None, "the pack has no [[task]] entries".into()));
@@ -430,6 +520,23 @@ impl EvalPack {
         let ws = task_workspace(&scratch.0, id)?;
         fill_workspace(&ws, sources)?;
         Ok(self.grade_with(task, &ws, opts))
+    }
+
+    /// Make `dest` a fresh workspace for task `id`, holding its fixtures, for an agent to
+    /// run in (`hlock evals run`). `dest` must not exist yet, or be an empty directory.
+    pub fn prepare_workspace(&self, id: &str, dest: &Path) -> Result<&Task> {
+        let task = self.tasks.iter().find(|t| t.id == id).ok_or_else(|| {
+            Error::EvalPack(format!("no task {id:?} in {} (tasks: {})", self.path.display(), self.tasks.iter().map(|t| t.id.as_str()).collect::<Vec<_>>().join(", ")))
+        })?;
+        if std::fs::read_dir(dest).is_ok_and(|mut d| d.next().is_some()) || dest.is_file() {
+            return Err(Error::EvalPack(format!("{} already exists and isn't empty", dest.display())));
+        }
+        let fixtures = task.fixtures.as_ref().map(|f| self.path.join(f));
+        if let Some(dir) = fixtures.as_ref().filter(|d| !d.is_dir()) {
+            return Err(Error::EvalPack(format!("task {id}: fixtures directory {} not found", dir.display())));
+        }
+        fill_workspace(dest, fixtures)?;
+        Ok(task)
     }
 
     /// Grade task `t` in a fresh temporary workspace: its fixtures, plus `extra` (a

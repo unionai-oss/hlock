@@ -2881,16 +2881,6 @@ impl Measurement {
     }
 }
 
-/// The digest of the eval packs a manifest names (their directories' tree digests).
-fn packs_digest(m: &crate::manifest::Manifest) -> String {
-    let root = m.root();
-    let parts: Vec<String> = m.eval_packs().iter().map(|p| {
-        let dir = root.join(p);
-        if dir.is_dir() { crate::capture::tree_digest(&dir) } else { p.clone() }
-    }).collect();
-    crate::hash::sha256_text(&parts.join("\n"))
-}
-
 /// The stack a lock describes, for trials: its models, harness, skills, MCP servers and
 /// instruction files.
 fn lock_stack(lock: &Lockfile) -> crate::search::Stack {
@@ -2977,7 +2967,7 @@ pub fn measure(p: &Prepared, reg: &crate::profiles::Registry, ctx: &Ctx) -> Resu
     if tasks.is_empty() {
         return Err(err(format!("the eval packs ({}) have no tasks in the search split", manifest.eval_packs().join(", "))));
     }
-    let pack_digest = packs_digest(&manifest);
+    let pack_digest = crate::tasks::packs_digest(&manifest);
     let seeds = manifest.seeds();
     let cache_dir = workdir.join("trials");
     let ws_root = workdir.join("runs");

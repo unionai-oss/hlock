@@ -52,7 +52,7 @@ skill when they disagree.
 | Keep per-person locks in a repo | `hlock pin --harness H -o .hlock/locks/harness.HANDLE.lock` | [teams](https://docs.hlock.ai/guides/teams/) |
 | Check a lock is safe to use | `hlock audit`, `hlock trust` | [audit](https://docs.hlock.ai/guides/audit/) |
 | Store a secret a lock needs | `hlock secret list`, `hlock secret set NAME` | [secrets](https://docs.hlock.ai/guides/secrets/) |
-| Write tasks to measure agents on | `hlock evals init`, `hlock evals check`, `hlock evals grade` | [eval packs](https://docs.hlock.ai/guides/eval-packs/) |
+| Write tasks to measure agents on | `hlock evals init`, `hlock evals check`, `hlock evals run`, `hlock evals grade` | [eval packs](https://docs.hlock.ai/guides/eval-packs/) |
 | Find the best model and harness | `hlock init`, edit `harness.toml`, `hlock resolve` | [resolve](https://docs.hlock.ai/guides/resolve/) |
 | Run everything on local models | `hlock localize` | [localize](https://docs.hlock.ai/guides/localize/) |
 | See what's locked | `hlock show`, `hlock tree` | [CLI](https://docs.hlock.ai/reference/cli/) |

@@ -42,6 +42,10 @@ pub struct LaunchOptions {
     pub trust: bool,
     /// Files whose hidden characters are let through (`--allow-hidden FILE`).
     pub allow_hidden: Vec<String>,
+    /// For an agent CLI: the directory that stands in for the project, where the lock's
+    /// project-scoped entries are set up and the agent runs (an `hlock evals run`
+    /// workspace). Default: the project. The isolated config root stays the project's.
+    pub project: Option<PathBuf>,
 }
 
 /// What to `exec`, and what happened while preparing it.
@@ -394,6 +398,46 @@ pub fn env_prefix(lock_path: &Path, ctx: &Ctx) -> PathBuf {
     ctx.cwd.join(dir)
 }
 
+/// Set up the lock's project-scoped skills and instruction files in `to`, a stand-in for
+/// the project at `from` (`LaunchOptions::project`). The plan leaves them to the repo, so
+/// each is copied from the project, and only while it still matches the lock: a file
+/// changed since it was pinned is left out, with a note.
+fn stand_in_project(lock: &Lockfile, plan: &sync::Plan, from: &Path, to: &Path, prep: &mut LaunchPrep) -> Result<()> {
+    let from_repo = |id: &str| plan.steps.iter().any(|st| st.id == id && st.status == "manual" && st.reason.contains("comes from the repo"));
+    for s in &lock.skill {
+        let Some(path) = s.path.as_deref().filter(|p| crate::fsutil::safe_rel(p)) else { continue };
+        if !from_repo(&format!("skill:{}", s.name)) {
+            continue;
+        }
+        let src = from.join(path);
+        if src.is_dir() && Some(crate::capture::tree_digest(&src)) == s.digest {
+            crate::fsutil::copy_tree(&src, &to.join(path))?;
+            prep.done.push(format!("Copy skill {} → {path}", s.name));
+        } else {
+            prep.notes.push(format!("left out skill {}: {path} changed in the project since it was locked", s.name));
+        }
+    }
+    for i in &lock.instructions {
+        if !crate::fsutil::safe_rel(&i.name) || !from_repo(&format!("instructions:{}", i.name)) {
+            continue;
+        }
+        let src = from.join(&i.name);
+        match std::fs::read(&src) {
+            Ok(bytes) if Some(crate::hash::sha256_bytes(&bytes)) == i.digest => {
+                let dest = to.join(&i.name);
+                if let Some(parent) = dest.parent() {
+                    std::fs::create_dir_all(parent)?;
+                }
+                crate::fsutil::clear_symlink(&dest)?;
+                std::fs::write(&dest, bytes)?;
+                prep.done.push(format!("Write {}", i.name));
+            }
+            _ => prep.notes.push(format!("left out {}: it changed in the project since it was locked", i.name)),
+        }
+    }
+    Ok(())
+}
+
 /// Prepare a launch: verify, materialize, and build the command to `exec`.
 /// `args` are passed through to the harness (or, for a code harness, joined into the prompt).
 /// What a launch may place outside `sync`'s plan (translating into another harness, or a
@@ -478,6 +522,16 @@ pub fn prepare(lock: &Lockfile, lock_path: &Path, reg: &Registry, ctx: &Ctx, opt
         return Ok(prep);
     }
 
+    // the isolated root is the real project's; project-scoped entries go to `opts.project`
+    let (project_dir, default_prefix) = (ctx.cwd.clone(), env_prefix(lock_path, ctx));
+    let moved;
+    let ctx = match &opts.project {
+        Some(p) => {
+            moved = Ctx { cwd: p.clone(), ..ctx.clone() };
+            &moved
+        }
+        None => ctx,
+    };
     let probe = probe_harness(target, ctx);
     let bin = probe.binary.clone().ok_or_else(|| {
         let hint = if same { "run `hlock sync --install`" } else { "install it first" };
@@ -518,8 +572,8 @@ pub fn prepare(lock: &Lockfile, lock_path: &Path, reg: &Registry, ctx: &Ctx, opt
     } else {
         let prefix = match opts.prefix.clone() {
             Some(p) if p.is_absolute() => p,
-            Some(p) => ctx.cwd.join(p),
-            None => env_prefix(lock_path, ctx),
+            Some(p) => project_dir.join(p),
+            None => default_prefix,
         };
         sync::ignore_env(&sync::env_dir(target, &prefix, ctx))?;
         // secrets go in the harness's environment where its config can reference them
@@ -538,6 +592,9 @@ pub fn prepare(lock: &Lockfile, lock_path: &Path, reg: &Registry, ctx: &Ctx, opt
             // what isn't trusted (or has hidden characters) was left out; say so rather than start without it silently
             for st in plan.steps.iter().filter(|s| s.status == "manual" && (s.reason.starts_with('⚑') || s.reason.starts_with("you denied") || s.reason.contains("hide text"))) {
                 prep.notes.push(format!("left out {}: {}", st.title, st.reason));
+            }
+            if opts.project.is_some() {
+                stand_in_project(lock, &plan, &project_dir, &ctx.cwd, &mut prep)?;
             }
             for st in plan.steps.iter().filter(|s| s.kind == "secret" && s.status == "manual") {
                 prep.missing_secrets.push(st.id.trim_start_matches("secret:").to_string());

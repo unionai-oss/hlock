@@ -91,6 +91,10 @@ hlock init [--name NAME] [--pack PATH] [--harness NAME] [--force]
 
 Write, check, and grade [eval packs](../guides/eval-packs.md).
 
+`evals check`, `evals grade`, `evals run` and `evals calibrate` find the pack the same way
+when you don't name one: the current directory if it has a `pack.toml`, else the first of
+`[evals] packs` in `harness.toml`, else `./evals`.
+
 ### `evals init`
 
 Write a starter eval pack. The default `hello-world` pack is complete and runs as is.
@@ -121,8 +125,10 @@ List the templates, with the kinds of task each one has slots for. Takes `--json
 
 ### `evals check`
 
-Check that a pack is ready: required fields, prompts and fixtures present, graders that
-parse and whose files exist, no `TODO(hlock)` left, and tasks that can fail. Exits `1` on
+Check that a pack is ready: required fields, no unknown keys, prompts and fixtures
+present, graders that parse and whose files exist, no `TODO(hlock)` left, and tasks that
+can fail. An unknown key in `[pack]`, `[pack.judge]` or a `[[task]]` is an error that
+names the closest known key, since a mistyped key is otherwise ignored. Exits `1` on
 errors; warnings don't fail. Takes `--json`.
 
 ```bash
@@ -131,7 +137,7 @@ hlock evals check [DIRECTORY] [--run [--judges]] [--json]
 
 | Option | Default | Description |
 |---|---|---|
-| `DIRECTORY` | `./evals` | The pack |
+| `DIRECTORY` | [the pack](#evals) | The pack |
 | `--run` | | Also run each task's graders on its fixtures alone (they should fail) and on its fixtures plus its `solution` (they should pass): test commands, and judges that are decision models. Warns when a judge is uncertain on a solution. See [Check your graders](../guides/eval-packs.md#check-your-graders). |
 | `--judges` | | With `--run`, also run LLM judges |
 
@@ -153,12 +159,38 @@ hlock evals grade TASK [WORKSPACE] [--pack DIR] [--json]
 |---|---|---|
 | `TASK` | | The task id |
 | `WORKSPACE` | the task's fixtures and solution | The directory to grade |
-| `--pack` | `./evals` | The pack |
+| `--pack` | [the pack](#evals) | The pack |
 
 Judges use `[evals.judge]` from the project's `harness.toml`, else the pack's
 `[pack.judge]`, else `[deciders.judge]` or `[deciders.default]`, else one hlock finds (see
 [Which judge](../guides/eval-packs.md#which-judge)). A judge's grade lists each criterion's
 probability, and is marked `uncertain` near the line.
+
+### `evals run`
+
+Run the agent `harness.lock` pins on the pack's tasks, each in a fresh workspace, and grade
+each run with the task's graders, judges included. It prints one line per run, with its
+score, time and workspace, and the graders that failed. Exits `1` if a run fails. Takes
+`--json`. Nothing is recorded in the lock. See
+[Try tasks on your agent](../guides/eval-packs.md#try-tasks-on-your-agent).
+
+```bash
+hlock evals run [TASK]... [--pack DIR] [--seeds N] [--workdir DIR] [--trust] [--json]
+```
+
+| Option | Default | Description |
+|---|---|---|
+| `TASK` | every task | The tasks to run |
+| `--pack` | [the pack](#evals) | The pack |
+| `--seeds` | `1` | Runs per task |
+| `--workdir` | a new temporary directory | Where the workspaces (`<task>-<seed>/`) and agent logs (`<task>-<seed>.log`) go |
+| `--trust` | | Approve every executable the lock would run |
+
+An agent CLI runs through its non-interactive mode, as [`run`](#run) runs it, with the
+workspace as its working directory and the lock's project-scoped skills and instruction
+files set up in it. A code harness runs through its contract. A lock for the simulated
+`reference` harness is refused. A run that takes longer than the task's `timeout-seconds`
+is stopped and fails.
 
 ### `evals calibrate`
 
@@ -172,7 +204,7 @@ hlock evals calibrate [DIRECTORY] --against MODEL [--against-base-url URL] [--mo
 
 | Option | Default | Description |
 |---|---|---|
-| `DIRECTORY` | `./evals` | The pack |
+| `DIRECTORY` | [the pack](#evals) | The pack |
 | `--against` | | The second judge, as `provider:model` (an LLM, usually) |
 | `--against-base-url` | | An OpenAI-compatible endpoint for `--against`, for a local LLM |
 | `--model` | the pack's judge | The judge to calibrate |
@@ -269,7 +301,8 @@ harness and fails with a list of what changed. It checks your own config, or wit
 
 For a resolved lock, `check` also fails when the lock is for a different harness than `[target] harness`, or
 when the installed harness's version differs from the one the lock pins (skipped when the
-harness isn't installed).
+harness isn't installed). It warns, without failing, when the eval packs have changed
+since the lock's evidence was measured (their digest no longer matches `eval-pack-digest`).
 
 When the project declares dependencies (in `harness.toml` or `apm.yml`), `check` also fails
 when one is missing, changed, unlocked or no longer declared, or when a skill in the
