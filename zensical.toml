@@ -20,6 +20,7 @@ nav = [
   { "Getting started" = [
     "getting-started/installation.md",
     "getting-started/quickstart.md",
+    "getting-started/apm.md",
   ] },
   { "Concepts" = [
     "concepts/index.md",

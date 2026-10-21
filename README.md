@@ -234,7 +234,8 @@ generate it. hlock isn't trying to replace any of them; it has different devex g
 | Write better prompts and programs | [DSPy](https://github.com/stanfordnlp/dspy), [GEPA](https://github.com/gepa-ai/gepa) | They generate candidates; hlock picks among stacks and makes the pick reproducible |
 
 The [comparison page](https://docs.hlock.ai/concepts/related/) goes through each one,
-including "why not just dotfiles / chezmoi / Nix / APM?".
+including "why not just dotfiles / chezmoi / Nix / APM?". Already using APM? See
+[Coming from APM](https://docs.hlock.ai/getting-started/apm/).
 
 ## Development
 

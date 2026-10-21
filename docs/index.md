@@ -183,6 +183,8 @@ The tools will look familiar:
   [Quickstart](getting-started/quickstart.md).
 - **Want the mental model?** Read [How it works](concepts/index.md).
 - **Sharing a repository?** See [Team repositories](guides/teams.md).
+- **Already using APM?** See [Coming from APM](getting-started/apm.md): keep `apm.yml`,
+  and add what hlock locks and measures on top.
 - **Comparing tools?** See [hlock and related tools](concepts/related.md): APM, chezmoi,
   Nix, promptfoo, DSPy, and where each one fits.
 - **Want an agent to do the setup?** See [Delegating to the meta harness](guides/meta.md).

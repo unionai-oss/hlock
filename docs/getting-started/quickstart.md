@@ -184,6 +184,9 @@ MCP servers, skills, and instructions over. See [Launching a locked harness](../
 
 ## Where to next
 
+!!! tip "Already using APM?"
+    Keep `apm.yml`: hlock reads it. See [Coming from APM](apm.md).
+
 Your setup is pinned, versioned, and portable. From here, two paths, and a helper for
 both:
 

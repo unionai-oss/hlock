@@ -241,6 +241,10 @@ primary harness only.
 
 ## APM packages
 
+!!! tip "Already using APM?"
+    [Coming from APM](../getting-started/apm.md) explains what hlock adds on top of APM and
+    how to use the two together.
+
 [APM](https://github.com/microsoft/apm) (Agent Package Manager) packages are git
 repositories, or paths in them, with an `apm.yml`. hlock resolves them itself, in Rust, by
 the rules of the [OpenAPM v0.1](https://github.com/microsoft/apm) spec, so a project needs

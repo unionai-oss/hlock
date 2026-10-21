@@ -58,7 +58,8 @@ runs it, or which local runtime serves it, and it doesn't measure whether a pack
 hlock's lock covers those, and `resolve` measures. The two compose: hlock reads `apm.yml`
 and `apm.lock.yaml`, resolves `apm:` packages by the same OpenAPM rules, and writes an
 `apm.lock.yaml` that `apm install --frozen` accepts, so one team can use both
-([APM packages](../guides/dependencies.md#apm-packages)).
+([APM packages](../guides/dependencies.md#apm-packages)). If you already use APM, start with
+[Coming from APM](../getting-started/apm.md).
 
 **[rulesync](https://github.com/dyoshikawa/rulesync)** and
 **[Ruler](https://github.com/intellectronica/ruler)** keep one set of rules, MCP servers
@@ -175,7 +176,7 @@ instruction files and APM packages with no Python or Node on the path, and `--ev
 answers whether one helps on your tasks. Its lock also covers the rest of the stack
 (harness version, models, runtimes, config, secrets). Projects can use both: APM users keep
 their `apm.yml`, hlock reads it, and `hlock export --format apm-lock` keeps `apm.lock.yaml`
-in step.
+in step. [Coming from APM](../getting-started/apm.md) walks through using the two together.
 
 ### Why not rulesync or Ruler?
 
