@@ -35,7 +35,8 @@ you report a change as done, and report failures as they are.
 | `harness_lock/` | Shim re-exporting `hlock`, shipped in the `hlock` wheel |
 | `packaging/harness-lock/` | The code-free `harness-lock` PyPI alias (pins `hlock`) |
 | `hlock/cli.py` | The `hlock` CLI (rich + rich-click) |
-| `hlock/tasks/worker.py` | Worker for the `devbox` and `cluster` backends (versioned JSON contract) |
+| `hlock/tasks/worker.py` | Worker for Python backends: the stock handlers (versioned JSON contract) |
+| `hlock/backends/` | Pluggable backends: the `Backend` API, and the built-in `local` and `flyte` |
 | `tests/` | pytest suites |
 | `docs/`, `zensical.toml` | Documentation site |
 | `evals/` | Demo eval pack |

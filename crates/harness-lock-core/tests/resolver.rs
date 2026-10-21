@@ -67,7 +67,7 @@ strategy = "grid"
 max_trials = 200
 
 [backend]
-target = "local"
+target = "offline"
 "#
     );
     let mut m = Manifest::from_str(&toml).unwrap();

@@ -58,7 +58,7 @@ def test_detach_then_fetch(project):
     rows = json.loads(r.output)
     assert [j["id"] for j in rows] == [jid]
     assert rows[0]["status"] == "succeeded"
-    assert rows[0]["options"]["backend"] == "local"
+    assert rows[0]["options"]["backend"] == "offline"
     assert rows[0]["report"]["depth"] == "probe"
 
     r = invoke("tune", "show")
@@ -108,7 +108,7 @@ def fake_job(root: Path, job_id: str, pid: int, status: str = "running") -> Path
     (d / "job.json").write_text(json.dumps({
         "id": job_id, "kind": "tune", "status": status, "created_at": jobs._now(), "started_at": jobs._now(),
         "finished_at": None, "host": socket.gethostname(), "workdir": str(d / "work"),
-        "options": {"depth": "ft", "backend": "cluster"}, "error": None,
+        "options": {"depth": "ft", "backend": "flyte"}, "error": None,
     }))
     (d / "pid").write_text(f"{pid}\n")
     (d / jobs.LOG).write_text("training step 1/3\n")

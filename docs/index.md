@@ -176,8 +176,8 @@ The tools will look familiar:
     ---
 
     [`hlock tune`](guides/tune.md) goes past model choice into prompts, hyperparameters,
-    and fine-tuned small models, on your evals. Run it locally, on a devbox, or lift
-    trials to a Flyte cluster for GPUs with the [`cluster` backend](guides/backends.md).
+    and fine-tuned small models, on your evals. Run it offline, on this machine, on a
+    Flyte cluster for GPUs, or on [a backend you write](guides/backends.md).
 
 </div>
 

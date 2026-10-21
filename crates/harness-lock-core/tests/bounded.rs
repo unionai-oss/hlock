@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 use harness_lock_core::agent::{self, AgentConfig};
 use harness_lock_core::contract::{self, Invocation};
 use harness_lock_core::profiles::Ctx;
-use harness_lock_core::worker::PythonWorker;
+use harness_lock_core::worker::{Backend, Executor, ProcessExecutor, TaskRequest};
 use serde_json::{json, Value};
 
 fn tmp(name: &str) -> PathBuf {
@@ -43,11 +43,12 @@ fn a_hung_worker_times_out() {
     // read when the worker is made; nothing else in this test binary reads them
     std::env::set_var("HL_PYTHON", &script);
     std::env::set_var("HLOCK_WORKER_TIMEOUT", "1");
-    let w = PythonWorker::new();
+    let w = ProcessExecutor::python();
     std::env::remove_var("HL_PYTHON");
     std::env::remove_var("HLOCK_WORKER_TIMEOUT");
     let t = Instant::now();
-    let err = w.call("grade", "devbox", None, None, 0, &d, &json!({})).unwrap_err().to_string();
+    let local = Backend::resolve(&harness_lock_core::Manifest::from_str("").unwrap(), Some("local")).unwrap();
+    let err = w.call(&TaskRequest::new(&local, "grade", &d)).unwrap_err().to_string();
     assert!(err.contains("timed out after 1s") && err.contains("HLOCK_WORKER_TIMEOUT"), "{err}");
     assert!(t.elapsed() < Duration::from_secs(6), "took {:?}", t.elapsed());
     let _ = std::fs::remove_dir_all(&d);

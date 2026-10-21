@@ -61,9 +61,10 @@ success rate Some(1.0) over 2 trials
 | Item | What it is |
 |---|---|
 | [`Manifest`](https://docs.rs/harness-lock-core/latest/harness_lock_core/manifest/struct.Manifest.html) | A parsed `harness.toml`: `load`, `from_str`, `manifest_hash`, `eval_packs`, `backend_target` |
-| [`Resolver`](https://docs.rs/harness-lock-core/latest/harness_lock_core/resolver/struct.Resolver.html) | The resolver: `new`, `with_backend`, `enumerate_stacks`, `run_trial`, `resolve` |
+| [`Resolver`](https://docs.rs/harness-lock-core/latest/harness_lock_core/resolver/struct.Resolver.html) | The resolver: `new`, `with_backend`, `with_executor`, `enumerate_stacks`, `run_trial`, `resolve` |
 | [`Lockfile`](https://docs.rs/harness-lock-core/latest/harness_lock_core/lockfile/struct.Lockfile.html) | The `harness.lock` model: `load`, `from_str`, `save`, `check_manifest`, `summary`, and public fields for every section |
-| [`Backend`](https://docs.rs/harness-lock-core/latest/harness_lock_core/worker/enum.Backend.html) | `Local`, `Devbox`, or `Cluster`; `Backend::parse("devbox")` |
+| [`Backend`](https://docs.rs/harness-lock-core/latest/harness_lock_core/worker/struct.Backend.html) | A backend resolved from its name: `Backend::resolve(&manifest, Some("local"))`, `Backend::offline()` |
+| [`worker::Executor`](https://docs.rs/harness-lock-core/latest/harness_lock_core/worker/trait.Executor.html) | The trait a backend implements: `describe` and `call`. [`worker::serve`](https://docs.rs/harness-lock-core/latest/harness_lock_core/worker/fn.serve.html) makes an executable out of one; see [Write your own backend](../guides/backends.md#in-rust) |
 | [`Store`](https://docs.rs/harness-lock-core/latest/harness_lock_core/store/struct.Store.html) | The content-addressed artifact store under `.hlock/` |
 | [`HarnessAdapter`](https://docs.rs/harness-lock-core/latest/harness_lock_core/adapters/trait.HarnessAdapter.html) | The trait a harness implements to run trials |
 | [`Error`](https://docs.rs/harness-lock-core/latest/harness_lock_core/error/enum.Error.html), [`Result`](https://docs.rs/harness-lock-core/latest/harness_lock_core/error/type.Result.html) | The error type, with one variant per kind (`Manifest`, `Lockfile`, `EvalPack`, `Tuning`, …) |
@@ -80,7 +81,7 @@ success rate Some(1.0) over 2 trials
 | [`tasks`](https://docs.rs/harness-lock-core/latest/harness_lock_core/tasks/) | Eval packs, the search/holdout split, grading |
 | [`ops`](https://docs.rs/harness-lock-core/latest/harness_lock_core/ops/) | `upgrade` and `tune`, the engines behind those commands |
 | [`meta`](https://docs.rs/harness-lock-core/latest/harness_lock_core/meta/) | The meta harness: `choose`, `configure`, `pin`, `check`, job `render`/`prepare`/`verify` |
-| [`worker`](https://docs.rs/harness-lock-core/latest/harness_lock_core/worker/) | Backends and the Python worker bridge (versioned JSON contract) |
+| [`worker`](https://docs.rs/harness-lock-core/latest/harness_lock_core/worker/) | Backends: resolving them by name, the versioned JSON contract (`TaskRequest`, `TaskResult`, `Describe`), `Executor`, `ProcessExecutor`, and `serve` |
 | [`providers`](https://docs.rs/harness-lock-core/latest/harness_lock_core/providers/) | The deterministic reference LLM provider |
 | [`store`](https://docs.rs/harness-lock-core/latest/harness_lock_core/store/), [`hash`](https://docs.rs/harness-lock-core/latest/harness_lock_core/hash/) | Content addressing and hashing |
 

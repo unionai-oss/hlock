@@ -39,5 +39,5 @@ toml_edit = "0.22"
 [features]
 default = []
 # Uses https://github.com/flyteorg/flyte-sdk-rs for durable, traced trial
-# execution on a Flyte / Union backend.
+# execution on a Flyte backend.
 flyte = ["dep:flyte"]

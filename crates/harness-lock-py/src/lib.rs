@@ -122,6 +122,11 @@ impl PyManifest {
         self.inner.backend_target()
     }
 
+    /// `[backends]`, as JSON: each backend the project defines or configures.
+    fn backends(&self) -> PyResult<String> {
+        serde_json::to_string(&self.inner.backends).map_err(|e| py_err(e.into()))
+    }
+
     fn manifest_hash(&self) -> String {
         self.inner.manifest_hash()
     }
@@ -509,7 +514,7 @@ fn resolve(
     let root = core_manifest.root();
     let wd = workdir.map(PathBuf::from).unwrap_or_else(|| root.join(".hlock"));
     let lock = lock.map(PathBuf::from).unwrap_or_else(|| root.join(core::LOCKFILE_PATH));
-    let backend = core::Backend::parse(core_manifest.backend_target().as_str());
+    let backend = core::Backend::resolve(&core_manifest, None).map_err(py_err)?;
     let lf = interruptible(py, move || {
         let mut resolver = core::Resolver::with_backend(core_manifest, &wd, backend);
         resolver.harness_override = harness;
@@ -539,7 +544,7 @@ fn resolve(
 fn resolve_plan(py: Python<'_>, manifest: Option<PyObject>, backend: Option<String>, workdir: Option<String>, harness: Option<String>) -> PyResult<String> {
     let core_manifest = resolve_manifest(py, manifest, backend.as_deref())?;
     let wd = workdir.map(PathBuf::from).unwrap_or_else(|| core_manifest.root().join(".hlock"));
-    let backend = core::Backend::parse(core_manifest.backend_target().as_str());
+    let backend = core::Backend::resolve(&core_manifest, None).map_err(py_err)?;
     let mut resolver = core::Resolver::with_backend(core_manifest, &wd, backend);
     resolver.harness_override = harness;
     let notes = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
@@ -902,6 +907,38 @@ fn pull(py: Python<'_>, source: String, out: Option<String>, name: Option<String
 /// Parse a pull source (`github:…`, `gitlab:…`, `git:…`, a repository URL) the way `pull`
 /// does, and return it as JSON (`spec`, `url`, `ref`, `path`, `owner`; credentials left
 /// out). Raises `PullError` for a source `pull` would refuse.
+/// The backend `backend` names (else the manifest's target), how it was found, and what
+/// it says it runs, as JSON (`hlock backend status`). A backend that can't describe
+/// itself has an `error` instead of `describe`.
+#[pyfunction]
+#[pyo3(signature = (manifest=None, backend=None, workdir=None))]
+fn backend_describe(py: Python<'_>, manifest: Option<PyObject>, backend: Option<String>, workdir: Option<String>) -> PyResult<String> {
+    // without a manifest, the defaults (the backend is still named by `backend`)
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let m = match manifest {
+        None if core::find_manifest(&cwd).is_none() => core::Manifest::from_str("").map_err(py_err)?,
+        manifest => resolve_manifest(py, manifest, None)?,
+    };
+    let b = core::Backend::resolve(&m, backend.as_deref()).map_err(py_err)?;
+    let wd = workdir.map(PathBuf::from).unwrap_or_else(|| m.root().join(".hlock"));
+    let mut out = serde_json::json!({
+        "name": b.name,
+        "renamed_from": b.renamed_from,
+        "source": b.source(),
+        "options": b.options,
+    });
+    if let Some(w) = core::worker::Worker::for_backend(&b, wd.join("backend")) {
+        match py.allow_threads(|| w.describe().cloned()) {
+            Ok(d) => out["describe"] = serde_json::to_value(d).map_err(|e| py_err(e.into()))?,
+            Err(e) => out["error"] = serde_json::json!(match e {
+                core::Error::Worker(m) => m,
+                e => e.to_string(),
+            }),
+        }
+    }
+    to_json(&out)
+}
+
 #[pyfunction]
 fn pull_parse(source: &str) -> PyResult<String> {
     let s = core::pull::parse(source).map_err(py_err)?;
@@ -1955,6 +1992,7 @@ fn _hlock(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(pull, m)?)?;
     m.add_function(wrap_pyfunction!(pull_find, m)?)?;
     m.add_function(wrap_pyfunction!(pull_parse, m)?)?;
+    m.add_function(wrap_pyfunction!(backend_describe, m)?)?;
     m.add_function(wrap_pyfunction!(pull_list, m)?)?;
     m.add_function(wrap_pyfunction!(pull_remove, m)?)?;
     m.add_function(wrap_pyfunction!(pull_env, m)?)?;

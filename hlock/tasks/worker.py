@@ -1,16 +1,13 @@
-"""Python worker for harness-lock's heavy tuning work items.
+"""hlock's Python worker: the stock handlers for the work items of ``resolve`` and ``tune``.
 
 Invoked out-of-process by the Rust core (``hlock``) over a versioned JSON contract:
 
     python -m hlock.tasks.worker <request.json> <response.json>
 
-Each handler owns one ecosystem-heavy stage of ``hlock tune``. On
-``backend=cluster`` (a fully-fledged Union cluster) the worker lifts each body to
-a real Flyte 2 task — CPU images for data/prompt/grading/LLM trials, a GPU image
-+ accelerator request for LoRA fine-tuning, `cache="auto"` for durable trial
-caching, dataset/adapter offload through ``flyte.io``, and run-id/budget
-provenance — and returns the identical response shape either way. Locally
-(``devbox`` or no SDK) the same body runs in-process.
+The worker is the process for every Python backend (see ``hlock.backends``): it loads
+the backend the request names and hands it the work item. ``local`` runs the handlers
+below in process; ``flyte`` runs them inside Flyte 2 tasks; a third-party backend runs
+them, or its own code, wherever it likes.
 
 Heavy libs (``pandas``/``polars``, ``torch``/``peft``/``trl``, ``flyte``) are
 optional and imported lazily; the worker degrades to a deterministic offline
@@ -29,7 +26,7 @@ import time
 from pathlib import Path
 
 # Keep in sync with crates/harness-lock-core/src/worker.rs::CONTRACT_VERSION.
-CONTRACT_VERSION = 2
+CONTRACT_VERSION = 3
 
 
 # --------------------------------------------------------------------------- #
@@ -212,7 +209,7 @@ def llm_run_trial(req: dict) -> dict:
 
     if not _llm_configured():
         if provider != "reference":
-            return {"error": NEEDS_ENDPOINT.format(backend=req.get("backend") or "devbox", model=model_spec)}
+            return {"error": NEEDS_ENDPOINT.format(backend=req.get("backend") or "local", model=model_spec)}
         return _reference_trial(stack, provider, model, prompt, seed, temperature, tool_timeout)
 
     ws = Path(req.get("workdir") or ".")
@@ -326,7 +323,7 @@ def data_load(req: dict) -> dict:
 
     Reads CSV/JSONL/Parquet via ``polars`` (fallback: ``pandas``, then file-count).
     Writes redacted per-split shards into ``workdir`` so downstream stages (prompt
-    scoring, fine-tuning) consume a content-hashed dataset, and (on Union) returns
+    scoring, fine-tuning) consume a content-hashed dataset, and (on Flyte) returns
     object-store URIs from the sourced paths for offload.
     """
     source = req.get("data", {}).get("source", "user")
@@ -567,7 +564,7 @@ def ft_lora(req: dict) -> dict:
     Requires ``torch``+``transformers``+``peft`` (+ ``trl``/``datasets``). Reads
     the train shard written by ``data.load`` (``trainset_digest``), trains a LoRA
     adapter with ``peft``, packs + content-digests the adapter, and reports
-    samples / loss / gpu-h / spend. On a Union GPU worker this runs with an
+    samples / loss / gpu-h / spend. On a Flyte GPU worker this runs with an
     accelerator request and gpu-h is measured from wall time.
     """
     try:
@@ -682,94 +679,13 @@ HANDLERS = {
 }
 
 
-# --------------------------------------------------------------------------- #
-# Union (Flyte 2) lift and dispatch
-# --------------------------------------------------------------------------- #
-
-def _union_image(kind: str):
-    """Return a (base image, pip packages) tuple for a stage's task environment."""
-    if kind == "ft.lora":
-        return (
-            "pytorch/pytorch:2.1-cuda12.1-cudnn8-devel",
-            ["transformers", "datasets", "peft", "accelerate", "bitsandbytes", "harness-lock"],
-        )
-    return (
-        None,  # debian base
-        ["pandas", "polars", "harness-lock"],
-    )
-
-
-def _union_requests(kind: str):
-    import flyte
-
-    if kind == "ft.lora":
-        return flyte.Resources(cpu="8", memory="32Gi", gpu="1", gpu_model="nvidia-a10g")
-    return flyte.Resources(cpu="4", memory="8Gi")
-
-
-def _union_run(kind: str, req: dict):
-    """Lift a single stage body to a real Union task and return (payload, run_id)."""
-    import asyncio
-
-    import flyte
-
-    base, pkgs = _union_image(kind)
-    image = (
-        flyte.Image.from_base(base) if base
-        else flyte.Image.from_debian_base(python_version=(3, 12))
-    ).with_pip_packages(*pkgs)
-    env = flyte.TaskEnvironment(name="hlock-" + kind.replace(".", "-"), image=image)
-
-    @env.task(cache="auto", requests=_union_requests(kind))
-    async def _stage(request: dict) -> dict:
-        # Re-dispatch the SAME kind on the cluster (bundled harness-lock) with the
-        # Union side done (no re-lift), so the body runs with the env's resources.
-        return _dispatch_no_union(request)
-
-    result = asyncio.run(flyte.run(_stage, inputs={"request": req}))
-    run_id = getattr(result, "name", "flyte://unknown")
-    return result, run_id
-
-
-def _maybe_flyte(req: dict, body):
-    """On `cluster`, best-effort lift the body to a real Union task; else in-process."""
-    if req.get("backend") != "cluster":
-        return body()
-    try:
-        payload, run_id = _union_run(req.get("kind", ""), req)
-        if not isinstance(payload, dict) or "result" not in payload:
-            payload = body()  # task returned a bare value; keep contract shape
-        else:
-            # inject Union provenance into the stage metadata
-            md = payload.setdefault("result", {})
-            digests = md.setdefault("model_digests", {})
-            if isinstance(digests, dict):
-                digests["run"] = run_id
-                digests["backend"] = "cluster"
-        return payload
-    except Exception as exc:  # noqa: BLE001 - no SDK / not on a cluster -> run locally
-        sys.stderr.write(f"[worker] Union lift unavailable ({exc}); running in-process\n")
-        return body()
-
-
-def _dispatch_no_union(req: dict) -> dict:
-    """Dispatch a handler without recursively attempting a Union lift."""
-    kind = req.get("kind", "")
-    handler = HANDLERS.get(kind)
-    if handler is None:
-        return {"error": f"unknown task kind: {kind!r}"}
-    return handler(req)
-
-
-def _dispatch(req: dict) -> dict:
-    return _dispatch_no_union(req)
-
-
 def _write(path, obj):
     Path(path).write_text(json.dumps(obj))
 
 
 def main(argv=None) -> int:
+    from hlock.backends import DESCRIBE, BackendError, load
+
     ap = argparse.ArgumentParser(prog="hlock-worker")
     ap.add_argument("request", type=Path, help="path to the request JSON")
     ap.add_argument("response", type=Path, help="path to write the response JSON")
@@ -777,27 +693,29 @@ def main(argv=None) -> int:
     try:
         req = json.loads(args.request.read_text())
     except Exception as exc:  # noqa: BLE001
-        _write(args.response, {"ok": False, "error": f"bad request: {exc}"})
+        _write(args.response, {"ok": False, "version": CONTRACT_VERSION, "error": f"bad request: {exc}"})
         return 1
     if req.get("version") != CONTRACT_VERSION:
         _write(
             args.response,
-            {"ok": False, "error": f"unsupported contract version {req.get('version')}"},
+            {"ok": False, "version": CONTRACT_VERSION, "error": f"unsupported contract version {req.get('version')}"},
         )
         return 1
     try:
-        payload = _maybe_flyte(req, lambda: _dispatch_no_union(req))
+        backend = load(req.get("backend") or "local", req.get("backend_object"))
+        result = backend.describe(req) if req.get("kind") == DESCRIBE else backend.run(req)
+    except BackendError as exc:
+        _write(args.response, {"ok": False, "version": CONTRACT_VERSION, "error": str(exc)})
+        return 1
     except Exception as exc:  # noqa: BLE001
-        _write(args.response, {"ok": False, "error": str(exc)})
+        _write(args.response, {"ok": False, "version": CONTRACT_VERSION, "error": str(exc) or type(exc).__name__})
         return 1
-    if payload is None:
-        payload = {"error": "worker produced no output"}
-    if "error" in payload:
-        _write(args.response, {"ok": False, "version": CONTRACT_VERSION, "error": payload["error"]})
+    if not isinstance(result, dict):
+        _write(args.response, {"ok": False, "version": CONTRACT_VERSION, "error": "the backend returned no result"})
         return 1
-    _write(args.response, {"ok": True, "version": CONTRACT_VERSION, "result": payload["result"]})
+    _write(args.response, {"ok": True, "version": CONTRACT_VERSION, "result": result})
     return 0
 
 
-if __name__ == "__main__":  # pragma: no cover
+if __name__ == "__main__":
     sys.exit(main())

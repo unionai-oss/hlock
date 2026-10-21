@@ -21,7 +21,7 @@ harness-lock-core = { path = "../harness-lock-core", version = "=0.5.0" }
 
 [features]
 default = []
-# Durable, traced trial execution on a Flyte / Union backend.
+# Durable, traced trial execution on a Flyte backend.
 flyte = ["harness-lock-core/flyte"]
 
 [lints]

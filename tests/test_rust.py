@@ -52,7 +52,7 @@ def test_search_space_tune(workspace, monkeypatch):
         harness=["reference"],
         evals=json.dumps({"packs": [str(ws)], "seeds": 2}),
     )
-    lf = hlock.resolve(space, backend="local", workdir=str(base / ".hlock"))
+    lf = hlock.resolve(space, backend="offline", workdir=str(base / ".hlock"))
     assert lf.harness == "reference"
     ev = json.loads(lf.evidence)
     assert ev["trials"] >= 1
@@ -72,7 +72,7 @@ def test_manifest_load_write(tmp_path):
         "[candidates]\nharness=['reference']\n[budget]\nstrategy='grid'\n"
     )
     assert m.name == "m"
-    assert m.backend == "local"
+    assert m.backend == "offline"
     assert "sha256:" in m.manifest_hash()
 
 
@@ -99,7 +99,7 @@ def test_upgrade_and_tune(tmp_path, monkeypatch):
     )
     (tmp_path / "harness.toml").write_text(manifest)
 
-    hlock.resolve(manifest="harness.toml", backend="local", workdir=str(tmp_path / ".hlock"))
+    hlock.resolve(manifest="harness.toml", backend="offline", workdir=str(tmp_path / ".hlock"))
     assert (tmp_path / "harness.lock").exists()
 
     plan = _json.loads(hlock.upgrade(manifest="harness.toml", all=True))

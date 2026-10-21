@@ -50,7 +50,7 @@ success-rate = ">=0.5"
 [budget]
 strategy = "grid"
 [backend]
-target = "local"
+target = "offline"
 "#;
     let mut m = Manifest::from_str(toml).unwrap();
     m.evals.insert("packs".to_string(), serde_json::json!([pack.to_string_lossy().to_string()]));
@@ -164,4 +164,86 @@ harness = ["reference"]
     assert_eq!(m.candidates.llm.get("planner").unwrap().any_of.len(), 2);
     let spec = TuneSpec { depth: "auto".into(), ..Default::default() };
     assert_eq!(spec.resolved_depth(), "hpo");
+}
+
+/// A command backend that runs only trials: each writes the task's artifact and passes.
+#[cfg(unix)]
+fn trials_only_backend(dir: &Path) -> std::path::PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let script = dir.join("trials-only");
+    fs::write(
+        &script,
+        r#"#!/bin/sh
+if grep -q '"kind":"backend.describe"' "$1"; then
+  echo '{"version": 3, "ok": true, "result": {"name": "trials-only", "kinds": ["llm.run_trial"], "about": "test"}}' > "$2"
+else
+  echo done > "$(dirname "$1")/summary.md"
+  echo '{"version": 3, "ok": true, "result": {"success": true, "cost_usd": 0.001, "steps": 1}}' > "$2"
+fi
+"#,
+    )
+    .unwrap();
+    fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+    script
+}
+
+#[cfg(unix)]
+#[test]
+fn a_custom_backend_runs_what_it_says_it_runs() {
+    let dir = std::env::temp_dir().join(format!("hlock-ops-custom-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).unwrap();
+    make_pack(&dir);
+    let script = trials_only_backend(&dir);
+    let mut m = make_manifest(&dir);
+    m.backends.insert("mine".into(), serde_json::json!({"command": [script.to_string_lossy()], "options": {"k": "v"}}));
+    let spec = TuneSpec {
+        depth: "prompt".into(),
+        backend: Some("mine".into()),
+        out: dir.join("harness.tune.lock"),
+        workdir: dir.join(".hlock"),
+        lock: Some(dir.join("harness.lock")),
+        ..Default::default()
+    };
+    let o = tune(m.clone(), &spec).unwrap();
+    assert_eq!(o.report["backend"], "mine");
+    let stages = o.report["stages"].as_array().unwrap();
+    let detail = |name: &str| stages.iter().find(|s| s["stage"] == name).map(|s| (s["ran"].clone(), s["detail"].clone())).unwrap();
+    assert_eq!(detail("data"), (serde_json::json!(false), serde_json::json!("the mine backend doesn't run data.load")));
+    assert_eq!(detail("prompt"), (serde_json::json!(false), serde_json::json!("the mine backend doesn't run prompt.search")));
+    // the trials ran on it, for real: the backend's cost, not the reference's
+    assert_eq!(o.report["best"]["success_rate"], 1.0);
+    assert_eq!(o.report["best"]["cost_usd"], 0.001);
+    assert_eq!(o.lock.provenance.backend, "mine");
+
+    // a name nothing defines is asked of the Python worker (its entry points), and fails
+    // before any trial runs (what it says is tested on the Python side)
+    let out = dir.join("nowhere.tune.lock");
+    assert!(tune(m, &TuneSpec { backend: Some("nowhere".into()), out: out.clone(), ..spec }).is_err());
+    assert!(!out.exists());
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_rust_backend_runs_in_process() {
+    use harness_lock_core::worker::{Describe, Executor, TaskRequest, TaskResult};
+    struct Always;
+    impl Executor for Always {
+        fn describe(&self, _: &TaskRequest) -> harness_lock_core::Result<Describe> {
+            Ok(Describe::new("always", ["llm.run_trial"]))
+        }
+        fn call(&self, req: &TaskRequest) -> harness_lock_core::Result<TaskResult> {
+            fs::write(Path::new(&req.workdir).join("summary.md"), "done")?;
+            Ok(TaskResult { success: true, cost_usd: Some(0.5), steps: 1, ..Default::default() })
+        }
+    }
+    let dir = std::env::temp_dir().join(format!("hlock-ops-embedded-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).unwrap();
+    make_pack(&dir);
+    let mut r = Resolver::with_executor(make_manifest(&dir), dir.join(".hlock"), "always", Box::new(Always));
+    let lock = r.resolve_lock().unwrap();
+    assert_eq!(lock.provenance.backend, "always");
+    assert_eq!(lock.evidence.success_rate.values().next(), Some(&1.0));
+    let _ = fs::remove_dir_all(&dir);
 }

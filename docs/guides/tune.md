@@ -16,11 +16,11 @@ $ hlock tune --depth hpo
 ╭─ ⚙ tune ─────────────────────────────────────────────────────────────────────────────────────────╮
 │                                                                                                  │
 │  depth    hpo                                                                                    │
-│  backend  local                                                                                  │
+│  backend  offline                                                                                │
 │  data     user-traces                                                                            │
 │  grid     12 configurations                                                                      │
-│  stages   data ✗ needs devbox or cluster, not local  ·  prompt ✗ needs devbox or cluster, not    │
-│           local  ·  hpo ✓                                                                        │
+│  stages   data ✗ not on offline: use local, flyte or another backend  ·  prompt ✗ not on         │
+│           offline: use local, flyte or another backend  ·  hpo ✓                                 │
 │                                                                                                  │
 │  Best configuration                                                                              │
 │  model                 reference:qwen-7b                                                         │
@@ -40,9 +40,9 @@ harness. When configurations tie, tune keeps the one closest to your lock: the f
 retries, then your temperature, then your model. Here every configuration solved the demo
 tasks, so it kept the lock's own `retries = 1` and `temperature = 0.2`.
 
-`stages` lists what ran. On the `local` backend only the HPO grid runs; the data, prompt
-and fine-tune stages need the `devbox` or `cluster` [backend](backends.md). A stage that
-didn't run isn't recorded in the tune lock. When the prompt stage runs, its gain is
+`stages` lists what ran. On the `offline` backend only the HPO grid runs; the data, prompt
+and fine-tune stages need `local`, `flyte`, or another [backend](backends.md) that runs
+them. A stage that didn't run isn't recorded in the tune lock. When the prompt stage runs, its gain is
 measured: the winner with the tuned prompt, minus the winner without it.
 
 ## Depth
@@ -58,8 +58,8 @@ measured: the winner with the tuned prompt, minus the winner without it.
 | `full` | Holdout re-validation and a tool-timeout sweep | `ft` grid × tool timeout `[30, 120]` s |
 | `auto` *(default)* | Currently the same as `hpo` | |
 
-`ft` and `full` need the `devbox` or `cluster` [backend](backends.md) for real
-training, and a GPU for anything beyond a tiny model. On `local`, tune says so before it
+`ft` and `full` need the `local` or `flyte` [backend](backends.md) for real
+training, and a GPU for anything beyond a tiny model. On `offline`, tune says so before it
 runs, and runs only the grid. "models" is your lock's model, or the planner candidates
 when there are several.
 
@@ -146,7 +146,7 @@ Jobs live in `.hlock/tune/jobs/<id>/`: `job.json` with the settings, status, and
 report; `tune.log`; the resulting `harness.tune.lock`; and the trial artifacts in
 `work/`, unless you passed `--workdir`.
 
-The job runs on this machine on every backend. On `cluster`, only its stages run on
+The job runs on this machine on every backend. On `flyte`, only its stages run on
 Flyte, so the machine has to stay on until the job finishes.
 
 ## Other options

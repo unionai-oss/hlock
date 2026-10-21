@@ -13,7 +13,7 @@ use crate::profiles::{probe_harness, Ctx, Registry};
 use crate::search::{select_winner, Stack, StackScore, TrialResult};
 use crate::store::Store;
 use crate::tasks::EvalPack;
-use crate::worker::{Backend, PythonAdapter};
+use crate::worker::{Backend, Executor, Runner, Worker, WorkerAdapter};
 
 /// Where the resolver reports progress and notes: `{"kind": "plan" | "trial" | "note" |
 /// "done", …}` (see [`Resolver::on_event`]).
@@ -27,6 +27,8 @@ pub struct Resolver {
     pub workdir: PathBuf,
     pub store: Store,
     pub backend: Backend,
+    /// The backend's worker, which runs trials and tune stages (none on `offline`).
+    pub worker: Option<std::sync::Arc<Worker>>,
     pack_by_task: BTreeMap<String, crate::tasks::EvalPack>,
     adapter: Box<dyn HarnessAdapter>,
     holdout: Vec<crate::tasks::Task>,
@@ -60,25 +62,39 @@ struct Search {
 impl Resolver {
     /// Create a resolver that runs on the local, in-process reference harness.
     pub fn new(manifest: Manifest, workdir: impl Into<PathBuf>) -> Self {
-        Self::with_backend(manifest, workdir, Backend::Local)
+        Self::with_backend(manifest, workdir, Backend::offline())
     }
 
-    /// Create a resolver for a specific backend. `devbox`/`cluster` delegate trials
-    /// to the Python worker (which may lift them to real Flyte tasks); `local`
-    /// keeps the deterministic offline reference harness.
+    /// Create a resolver for a specific backend. Every backend but `offline` runs
+    /// trials through its worker (see [`Backend::resolve`]); `offline` keeps the
+    /// deterministic reference harness.
     pub fn with_backend(manifest: Manifest, workdir: impl Into<PathBuf>, backend: Backend) -> Self {
         let workdir: PathBuf = workdir.into();
+        let worker = Worker::for_backend(&backend, workdir.join("backend")).map(std::sync::Arc::new);
+        Self::with_worker(manifest, workdir, backend, worker)
+    }
+
+    /// Create a resolver whose trials run on `exec`, a backend written in Rust and run
+    /// in process, named `name`.
+    pub fn with_executor(manifest: Manifest, workdir: impl Into<PathBuf>, name: &str, exec: Box<dyn Executor>) -> Self {
+        let workdir: PathBuf = workdir.into();
+        let backend = Backend { name: name.to_string(), renamed_from: None, runner: Runner::Embedded, options: json!({}) };
+        let worker = std::sync::Arc::new(Worker::new(backend.clone(), exec, workdir.join("backend")));
+        Self::with_worker(manifest, workdir, backend, Some(worker))
+    }
+
+    fn with_worker(manifest: Manifest, workdir: PathBuf, backend: Backend, worker: Option<std::sync::Arc<Worker>>) -> Self {
         let store = Store::new(workdir.join("store"));
-        let adapter: Box<dyn HarnessAdapter> = if backend.needs_worker() {
-            Box::new(PythonAdapter::with_backend(backend))
-        } else {
-            Box::new(ReferenceAdapter::default())
+        let adapter: Box<dyn HarnessAdapter> = match &worker {
+            Some(w) => Box::new(WorkerAdapter::new(w.clone())),
+            None => Box::new(ReferenceAdapter::default()),
         };
         Resolver {
             manifest,
             workdir,
             store,
             backend,
+            worker,
             pack_by_task: BTreeMap::new(),
             adapter,
             holdout: Vec::new(),
@@ -360,7 +376,7 @@ impl Resolver {
         crate::hash::sha256_text(&format!(
             "{}\0{}\0{}\0{}\0{}\0{}",
             crate::tasks::packs_digest(&self.manifest),
-            self.manifest.backend_target(),
+            self.backend.cache_identity(),
             serde_json::to_string(&self.manifest.judge()).unwrap_or_default(),
             serde_json::to_string(&self.manifest.default_judge()).unwrap_or_default(),
             env("HL_LLM_BASE_URL"),
@@ -418,10 +434,13 @@ impl Resolver {
                 s.harness
             )));
         }
-        // a worker backend with nothing to call fails here, not on every trial
-        if self.backend.needs_worker() {
+        // a backend that can't run these trials fails here, not on every trial
+        if let Some(note) = self.backend.renamed_note() {
+            self.note(note);
+        }
+        if let Some(w) = &self.worker {
             let via_worker: Vec<Stack> = stacks.iter().filter(|s| !self.code_harnesses.contains_key(&s.harness)).cloned().collect();
-            crate::worker::preflight(self.backend, &via_worker)?;
+            w.preflight(&via_worker)?;
         }
         // stacks the project's policy denies (a provider, a model, a harness) aren't measured
         let policy = crate::policy::Policy::for_dir(&self.manifest.root())?;
@@ -692,7 +711,7 @@ impl Resolver {
             },
             verify: Verify::default(),
             provenance: Provenance {
-                backend: self.manifest.backend_target(),
+                backend: self.backend.name.clone(),
                 search: search_map,
                 ..Default::default()
             },

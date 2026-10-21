@@ -12,8 +12,8 @@ gets a directory in the project:
         work/               trial artifacts (unless --workdir was given)
 
 The orchestrator is the same Rust-core tune that `hlock tune` runs in the foreground. On
-`devbox` and `cluster` it hands stages to the worker as usual, so on `cluster` the heavy
-stages run as Flyte tasks and their run ids end up in the result lock. A job writes its
+every backend but `offline` it hands stages to the backend as usual, so on `flyte` the
+heavy stages run as Flyte tasks and their run ids end up in the result lock. A job writes its
 lock into its own directory, never over `harness.tune.lock` or `harness.lock`:
 `fetch` copies it out (and `--apply` adopts it) when you're ready.
 
@@ -200,7 +200,7 @@ def run(job_dir: str | Path) -> int:
 
 
 def _runs(result: Path) -> list[str]:
-    """Flyte run ids the cluster stages recorded in the tune lock."""
+    """Flyte run ids the flyte stages recorded in the tune lock."""
     from hlock import Lockfile
 
     try:

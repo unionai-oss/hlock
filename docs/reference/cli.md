@@ -46,7 +46,8 @@ Failures print a one-line error with a hint and exit `1`.
 | [`runtime list`](#runtime-list) | List local inference runtimes and what's installed |
 | [`show`](#show) | Show the locked stack and its evidence |
 | [`tree`](#tree) | Print the locked component graph |
-| [`backend status`](#backend-status) | Show the configured backend and environment |
+| [`backend status`](#backend-status) | Show the backend, how it was found, and what it runs |
+| [`backend list`](#backend-list) | List the backends you can select |
 
 ## Global options
 
@@ -258,12 +259,12 @@ write `harness.lock`, and print every stack's scores and the chosen stack with i
 evidence. See [Finding the best stack](../guides/resolve.md).
 
 ```bash
-hlock resolve [--backend local|devbox|cluster] [--harness NAME] [--workdir DIR] [--dry-run] [--no-cache] [--json]
+hlock resolve [--backend NAME] [--harness NAME] [--workdir DIR] [--dry-run] [--no-cache] [--json]
 ```
 
 | Option | Default | Description |
 |---|---|---|
-| `--backend` | manifest `[backend] target` | Where trials run |
+| `--backend` | manifest `[backend] target` | Where trials run: `offline`, `local`, `flyte`, or a [custom backend](../guides/backends.md#write-your-own-backend) |
 | `--harness` | manifest `[target] harness` | Target harness for this run. See [Harnesses](../guides/harnesses.md#resolve-for-a-target). |
 | `--workdir` | `.hlock` | Where trial artifacts, the trial cache (`trials/`) and `report.md` go |
 | `--dry-run` | | List the stacks, the tasks in each split, and the trial counts, and run nothing |
@@ -614,11 +615,27 @@ hlock runtime list [--json]
 
 ## `backend status`
 
-Show the configured backend, and which `HL_*` variables and Flyte config the worker
-will use. API keys are reported as set or unset, never printed.
+Show the configured backend, how hlock found it, what it says it runs (its answer to
+`backend.describe`), and which `HL_*` variables and Flyte config it will use. API keys
+are reported as set or unset, never printed. A backend that can't describe itself shows
+why in `runs`.
 
 ```bash
-hlock backend status
+hlock backend status [--backend NAME]
+```
+
+| Option | Description |
+|---|---|
+| `--backend NAME` | Show this backend instead of the manifest's `[backend] target` |
+
+## `backend list`
+
+List the backends you can select: the built-ins, the manifest's `[backends]`,
+`hlock-backend-*` executables on `PATH`, and installed `hlock.backends` entry points. See
+[Write your own backend](../guides/backends.md#write-your-own-backend).
+
+```bash
+hlock backend list
 ```
 
 ## `run`
@@ -685,7 +702,7 @@ hlock tune [--depth LEVEL] [--data SOURCE] [OPTIONS]
 | `--strict` | | Fail unless the result beats the lock's own configuration, measured on the same tasks |
 | `--apply` | | Also adopt the result into `harness.lock`, as `tune apply` does |
 | `--max-trials N` | | Cap the grid's trials in total, spread round-robin across the configurations |
-| `--backend` | manifest `[backend] target` | `local`, `devbox`, or `cluster` |
+| `--backend` | manifest `[backend] target` | `offline`, `local`, `flyte`, or a [custom backend](../guides/backends.md#write-your-own-backend) |
 | `--workdir DIR` | `.hlock` | Where trial artifacts go |
 | `-d`, `--detach` | | Run in the background as a tune job; can't be combined with `--apply` |
 

@@ -24,7 +24,7 @@ space = SearchSpace(
     evals=json.dumps({"packs": ["./evals"], "seeds": 2}),
 )
 
-lock = hlock.resolve(space, backend="local")     # also writes ./harness.lock
+lock = hlock.resolve(space, backend="offline")   # also writes ./harness.lock
 print(lock.summary())
 # stack="agent" harness=reference llm=qwen-7b decision=none success-rate=1.00 trials=2
 
@@ -49,7 +49,7 @@ Run the resolver, check the winner on the holdout split, and write the lock.
 | Parameter | Description |
 |---|---|
 | `manifest` | A `Manifest`, a `SearchSpace`, a path to a TOML file, or TOML text. Defaults to the nearest `harness.toml` at or above the working directory. |
-| `backend` | `"local"`, `"devbox"`, or `"cluster"`. Overrides the manifest. |
+| `backend` | `"offline"`, `"local"`, `"flyte"`, or a [custom backend](../guides/backends.md#write-your-own-backend). Overrides the manifest. |
 | `workdir` | Where trial artifacts go. Defaults to `.hlock` in the project root (the manifest's directory). |
 | `harness` | Target harness, overriding `[target] harness` |
 | `lock` | Where to write the lock. Defaults to `harness.lock` in the project root. |
@@ -95,6 +95,23 @@ Plan, apply, or roll back upgrades, like [`hlock upgrade`](cli.md#upgrade). Retu
   "message": "plan: 1 upgrade(s) available — rerun with --apply to perform.",
   "lock_path": "/path/to/harness.lock"
 }
+```
+
+### `backend_describe`
+
+```python
+backend_describe(manifest=None, backend=None, workdir=None) -> str
+```
+
+The backend `backend` names (else the manifest's target), like
+[`hlock backend status`](cli.md#backend-status). Returns JSON with `name`,
+`renamed_from` (the old name it was selected by, or `null`), `source` (how it was found),
+`options`, and either `describe` (its answer: `name`, `kinds`, `model_endpoint`, `about`)
+or `error`. `offline` has neither, since it runs in process.
+
+```python
+>>> hlock.backend_describe(hlock.Manifest.from_str(""), backend="local")
+'{"describe":{"about":"hlock\'s stock handlers, in process on this machine","kinds":["llm.run_trial","data.load","data.synthetic","grade","prompt.search","ft.lora"],"model_endpoint":true,"name":"local"},"name":"local","options":{},"renamed_from":null,"source":"built in, Python worker"}'
 ```
 
 ### `tune`
@@ -368,7 +385,8 @@ Budget(max_spend_usd=None, max_trials=None, strategy="grid", random_seed=0)
 | `Manifest.load(path)` | Parse a `harness.toml` |
 | `Manifest.from_str(text)` | Parse TOML text |
 | `.name` | Project name |
-| `.backend` | Configured backend target |
+| `.backend` | Configured backend target (default `"offline"`) |
+| `.backends()` | `[backends]` as JSON: each backend the project defines or configures |
 | `.manifest_hash()` | `"sha256:…"` hash of the text the manifest was parsed from, as recorded in the lock |
 | `.eval_packs()` | List of eval pack paths (`.task_packs()` is the old name) |
 | `.decider(use)` | The model `[deciders.<use>]` names, else `[deciders.default]`'s (also when the use lists only `any-of` candidates), or `None` |
@@ -394,6 +412,20 @@ Budget(max_spend_usd=None, max_trials=None, strategy="grid", random_seed=0)
 |---|---|
 | `.summary()` | One-line summary of the locked stack |
 | `.run(prompt)` | Run the locked stack. Returns JSON: `success`, `model`, `cost_usd`. In v0.1 this uses the offline reference provider. |
+
+## `hlock.backends`
+
+The API for [writing a backend](../guides/backends.md#write-your-own-backend) in Python.
+
+| Name | Description |
+|---|---|
+| `Backend` | Base class. Set `name`, `kinds` (the work items it runs; default `KINDS`), `model_endpoint` (its trials call `HL_LLM_BASE_URL`; default `True`), and `about`, and override `run(request) -> dict`, which returns the item's result. `describe(request)` answers `backend.describe` from those attributes |
+| `run_local(request) -> dict` | Run a work item with hlock's stock handler, in this process, and return its result. Raises `BackendError` when it fails |
+| `BackendError` | Raise it from `run` to fail the item with a message |
+| `load(name, object=None) -> Backend` | The backend `object` (`"module:attr"`) names, else the built-in or `hlock.backends` entry point called `name`. A class is instantiated with no arguments |
+| `available() -> dict` | Every Python backend this interpreter can load, by name |
+| `KINDS` | The work items hlock's stock handlers run |
+| `GROUP` | `"hlock.backends"`, the entry point group |
 
 ## Constants
 

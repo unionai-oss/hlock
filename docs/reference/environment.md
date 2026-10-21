@@ -28,22 +28,24 @@
 | `OLLAYA_HOST`, `OLLAYA_API_KEY` | `127.0.0.1:11435` | Where Ollaya serves `ollaya:` deciders, and its key if it has one |
 | `HLOCK_META_RESTORE` | set by `hlock meta run` | Inside a meta harness session: the config variables isolation changed, with their original values. `hlock` commands put them back. Don't set it yourself. |
 
-The variables below are used by the worker (the `devbox` and `cluster`
-[backends](../guides/backends.md)); the `local` backend ignores them.
+The variables below are used by hlock's Python worker (the `local` and `flyte`
+[backends](../guides/backends.md), and Python backends you add); the `offline` backend
+ignores them.
 
 ## Worker
 
 | Variable | Default | Description |
 |---|---|---|
 | `HL_PYTHON` | the interpreter running `hlock` | Interpreter the Rust core uses to launch the worker, and the default for [code harnesses](../guides/harnesses.md#how-hlock-runs-a-code-harness). Point it at one with `hlock` installed. |
-| `HLOCK_WORKER_TIMEOUT` | `3600` | Seconds one worker call may take before hlock stops it (and what it started) and reports a timeout |
+| `HLOCK_FLYTE_HLOCK` | `hlock==<this version>` | What the [`flyte` backend](../guides/backends.md#flyte)'s task images install: a pip requirement, or the path of a Linux wheel of an unreleased build |
+| `HLOCK_WORKER_TIMEOUT` | `3600` | Seconds one work item may take on a backend process (the worker, or a command backend) before hlock stops it, and what it started, and reports a timeout |
 
 ## LLM calls
 
 Set these to call a real model through any OpenAI-compatible endpoint. Without
 `HL_LLM_BASE_URL`, the worker runs `reference:…` candidates on a deterministic offline
 reference LLM, and fails any other candidate before it runs (see
-[What a `devbox` trial is](../guides/backends.md#what-a-devbox-trial-is)).
+[What a `local` trial is](../guides/backends.md#what-a-local-trial-is)).
 
 | Variable | Default | Description |
 |---|---|---|
