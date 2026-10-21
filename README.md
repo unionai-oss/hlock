@@ -25,6 +25,14 @@
 
 ---
 
+> [!NOTE]
+> **hlock is in early development.** Expect rough edges and breaking changes between
+> releases. Feedback shapes where it goes next: [open an issue](https://github.com/unionai-oss/hlock/issues/new)
+> for bugs and feature requests, [start a discussion](https://github.com/unionai-oss/hlock/discussions)
+> for questions and ideas, or send a pull request. Agent-written pull requests are
+> welcome, as long as you've reviewed and understand the change. See the
+> [contributing guide](https://docs.hlock.ai/project/contributing/) to get started.
+
 Your agent is more than a model. It's a harness, MCP servers, skills, and config,
 hand-tuned on one machine. `hlock` is the missing harness packaging layer:
 `harness.lock` tracks all of its dependencies, so you can commit it to git and restore

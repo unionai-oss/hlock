@@ -1,7 +1,7 @@
 # Contributing
 
 Contributions are welcome, from people and from coding agents working on someone's
-behalf. This page covers how to propose a change and what a mergeable pull request
+behalf (see [Agent-written pull requests](#agent-written-pull-requests)). This page covers how to propose a change and what a mergeable pull request
 looks like. For setting up a working copy, see [Development](development.md).
 
 ## Ways to contribute
@@ -10,6 +10,7 @@ looks like. For setting up a working copy, see [Development](development.md).
   For bugs, include the command you ran, the output, `hlock --version`, and your OS
   and Python version. A minimal `harness.toml` and eval pack that reproduce the
   problem help most.
+- **Ask a question or share an idea:** [start a discussion](https://github.com/unionai-oss/hlock/discussions).
 - **Improve the docs:** every page has an edit button that opens the source file
   on GitHub. Small fixes can go straight to a pull request.
 - **Write code:** fix a bug, add a test, or pick up an open issue. For anything
@@ -66,6 +67,23 @@ ask for changes.
   Regenerate them with the tool that owns them.
 - **Docs describe what the code does today.** If a feature is planned but not built,
   say so, or leave it to the [design specs](https://github.com/unionai-oss/hlock/tree/main/specs).
+
+## Agent-written pull requests
+
+You're welcome to have a coding agent write your change. You're still the author:
+you're responsible for the pull request as if you'd written it yourself. Before you
+open it:
+
+- **Read the whole diff.** Make sure you understand what each change does and why
+  it's there, and can answer a reviewer's questions about it without asking the agent.
+- **Check it does what you asked.** Run the change yourself, not just the tests, and
+  confirm the tests cover the behavior you care about.
+- **Trim what doesn't belong.** Remove unrelated edits, speculative abstractions, and
+  docs for behavior that doesn't exist.
+- **Write or edit the description yourself**, so it says what you intend the change
+  to do, not only what the agent reported doing.
+
+Pull requests that the submitter hasn't vetted may be closed without a detailed review.
 
 ## For coding agents
 
