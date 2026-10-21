@@ -84,7 +84,11 @@ def run_local(request: dict) -> dict:
 
 
 def _entry_points() -> dict[str, str]:
-    return {ep.name: ep.value for ep in entry_points(group=GROUP)}
+    try:
+        eps = entry_points(group=GROUP)
+    except TypeError:  # Python 3.9: entry_points() takes no arguments and returns a dict
+        eps = entry_points().get(GROUP, ())
+    return {ep.name: ep.value for ep in eps}
 
 
 def available() -> dict[str, str]:
