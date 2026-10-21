@@ -47,7 +47,8 @@ nav = [
       "guides/backends.md",
       "guides/ci.md",
     ] },
-    { "Go local" = [
+    { "Switch harnesses" = [
+      "guides/migrate.md",
       "guides/localize.md",
     ] },
     { "Delegate to an agent" = [

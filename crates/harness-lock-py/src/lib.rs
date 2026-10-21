@@ -1446,6 +1446,24 @@ fn localize(
     })
 }
 
+/// Write a copy of a lock moved onto the harness `to` to `out` (default:
+/// `harness.<to>.lock` beside it). `model` (`provider:model`) sets the default role.
+/// Returns JSON with the lock, the migrate report, and the path written.
+#[pyfunction]
+#[pyo3(signature = (path="harness.lock".to_string(), to=String::new(), out=None, model=None, manifest=None))]
+fn migrate(py: Python<'_>, path: String, to: String, out: Option<String>, model: Option<String>, manifest: Option<String>) -> PyResult<String> {
+    interruptible(py, move || {
+        let (reg, ctx, _) = registry(manifest.as_deref(), Some(&lock_dir(&path)))?;
+        let target = reg.require_harness(&to).map_err(py_err)?.id.clone();
+        let out = out.unwrap_or_else(|| core::migrate::default_out(Path::new(&path), &target).to_string_lossy().into_owned());
+        let cwd = std::env::current_dir().unwrap_or_default();
+        let abs = |p: &str| if Path::new(p).is_absolute() { PathBuf::from(p) } else { cwd.join(p) };
+        let opts = core::migrate::MigrateOptions { to, model };
+        let o = core::migrate::migrate_to(&abs(&path), &abs(&out), &reg, &ctx, &opts).map_err(py_err)?;
+        Ok(json_str(serde_json::json!({"lock": o.lock, "report": o.report, "path": out})))
+    })
+}
+
 /// Free text with credential-looking words replaced by `[redacted]`.
 #[pyfunction]
 fn redact_text(text: String) -> String {
@@ -1970,6 +1988,7 @@ fn _hlock(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(launch_prepare, m)?)?;
     m.add_function(wrap_pyfunction!(run_code_harness, m)?)?;
     m.add_function(wrap_pyfunction!(localize, m)?)?;
+    m.add_function(wrap_pyfunction!(migrate, m)?)?;
     m.add_function(wrap_pyfunction!(check_eval_pack, m)?)?;
     m.add_function(wrap_pyfunction!(resolve_plan, m)?)?;
     m.add_function(wrap_pyfunction!(tune_apply, m)?)?;

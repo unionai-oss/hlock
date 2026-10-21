@@ -22,6 +22,10 @@ next → hlock sync harness.local.lock --pull  ·  hlock launch --lock harness.l
 
 The source lock isn't touched. `-o` names the output; `harness.local.lock` is the default.
 
+`localize` is a [migration](migrate.md) that also moves the models to a local runtime: the
+harness switch, and what carries over, work the same way. `hlock migrate --to <harness>
+--local` is `hlock localize --harness <harness>`.
+
 ## What changes
 
 **The harness**, if it's proprietary or can't use a local model endpoint. Each harness
@@ -47,10 +51,11 @@ moves to Kev on the local runtime, when its catalog has Kev (Ollama's does): the
 16 GB or more to spare, else the 4B. The localize report notes that its scores may move;
 re-resolve to measure.
 
-**What carries over:** MCP servers (written in the new harness's config shape), skills, and
-instruction files. Remote MCP servers still need the network, so `localize` flags them;
-`--strict` drops them. The old harness's plugins and settings don't carry over, and `localize`
-lists them.
+**What carries over:** MCP servers (written in the new harness's config shape), skills,
+instruction files, and decision models, each moved to where the new harness reads it, as
+[`migrate`](migrate.md#what-moves-and-where) does: `CLAUDE.md` becomes `AGENTS.md` on Codex,
+say. Remote MCP servers still need the network, so `localize` flags them; `--strict` drops
+them. The old harness's plugins and settings don't carry over, and `localize` lists them.
 
 The new lock also configures the harness to use the local endpoint. For OpenCode, it adds an
 `ollama` OpenAI-compatible provider and sets `model = "ollama/gemma3:12b"`. These settings are

@@ -199,6 +199,10 @@ better one:
 3. Go below the stack with [`hlock tune`](../guides/tune.md): prompts,
    hyperparameters, and fine-tuned small models.
 
+**Switch harnesses.** [`hlock migrate --to codex`](../guides/migrate.md) writes your lock
+onto another harness, with your skills, MCP servers, and instructions moved to where it
+reads them.
+
 **Go local.** [`hlock localize`](../guides/localize.md) turns your lock into an equivalent
 that runs entirely on your machine, with an open-source harness and local models. Give it
 an eval pack, and it measures the local candidates against your tasks and records the

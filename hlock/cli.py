@@ -91,6 +91,7 @@ from hlock import export_sbom as _export_sbom
 from hlock import grade_eval_task as _grade_eval_task
 from hlock import jobs as _jobs
 from hlock import localize as _localize
+from hlock import migrate as _migrate
 from hlock import pin as _pin
 from hlock import policy_check as _policy_check
 from hlock import prepare_eval_workspace as _prepare_eval_workspace
@@ -205,7 +206,7 @@ click.rich_click.COMMAND_GROUPS = {
         {"name": "Audit", "commands": ["audit", "trust"]},
         {"name": "Rehydrate & run", "commands": ["sync", "launch", "run"]},
         {"name": "Optimize", "commands": ["evals", "init", "resolve", "tune", "upgrade", "decide"]},
-        {"name": "Go local", "commands": ["localize"]},
+        {"name": "Switch", "commands": ["migrate", "localize"]},
         {"name": "Harness", "commands": ["harness", "runtime"]},
         {"name": "Inspect", "commands": ["show", "tree", "backend"]},
         {"name": "Meta", "commands": ["meta"]},
@@ -3157,33 +3158,8 @@ def _manifest_target() -> str | None:
         return None
 
 
-@main.command()
-@click.argument("lock", default=None, required=False)
-@click.option("-o", "--out", default="harness.local.lock", show_default=True, help="Where to write the localized lock.")
-@click.option("--harness", default=None, help="Local harness to use. [dim]\\[default: the lock's if local-capable, else the best installed][/]")
-@click.option("--runtime", default=None, help="Inference runtime (ollama, lmstudio, llama-cpp, …). [dim]\\[default: the best installed][/]")
-@click.option("--models", default=None, help="Comma-separated model ids to consider instead of the runtime's catalog.")
-@click.option("--memory-gb", type=float, default=None, help="Memory budget for model weights. [dim]\\[default: measured][/]")
-@click.option("--evals", "--tasks", "evals", default=None,
-              help="Eval pack to evaluate candidates on. [dim]\\[default: harness.toml's, if any][/]")
-@click.option("--strict", is_flag=True, help="Drop remote MCP servers instead of flagging them.")
-@click.option("--allow-network", is_flag=True, help="Keep self-hosted runtimes on your network instead of replacing them.")
-@click.option("--json", "as_json", is_flag=True, help="Print the localize report as JSON.")
-def localize(lock: str | None, out: str, harness: str | None, runtime: str | None, models: str | None,
-             memory_gb: float | None, evals: str | None, strict: bool, allow_network: bool, as_json: bool) -> None:
-    """Write an all-local equivalent of a lock to [path]harness.local.lock[/].
-
-    A proprietary harness, or one that can't use a local model, becomes a local-capable
-    one; models on API providers move to a local runtime, picked from its catalog and the
-    weights on disk to fit this machine's memory. MCP servers, skills and instructions carry
-    over. With eval packs, candidates are evaluated; otherwise they're ranked.
-    """
-    model_list = [m.strip() for m in models.split(",")] if models else []
-    with _working("Localizing…"):
-        lock = lock or _l()
-        result = json.loads(_localize(lock, out, harness=harness, runtime=runtime, models=model_list,
-                                      memory_gb=memory_gb, evals=evals, strict=strict, allow_network=allow_network,
-                                      manifest=_m()))
+def _print_localized(result: dict, lock: str, out: str, as_json: bool) -> None:
+    """Print what `localize` wrote: a panel, then what it replaced and its notes."""
     rep = result["report"]
     if as_json:
         console.print_json(data=rep)
@@ -3217,11 +3193,102 @@ def localize(lock: str | None, out: str, harness: str | None, runtime: str | Non
         t.add_row("evidence", "[muted]not evaluated (no eval packs); ranked by fit, tier, and what's on disk[/]")
     console.print(Panel(t, title=f"[brand]🏠 {out} · localized[/]", title_align="left", border_style="magenta",
                         expand=False, padding=(1, 2)))
+    _changes(rep)
+    _next(f"hlock sync {out} --pull", f"hlock launch --lock {out}")
+
+
+def _changes(rep: dict) -> None:
+    """The `~` lines for what was replaced, then the `!` notes."""
     for line in rep["replaced"]:
         console.print(f"  [ok]~[/] {line}")
     for line in rep["notes"]:
         console.print(f"  [warn]![/] {line}")
-    _next(f"hlock sync {out} --pull", f"hlock launch --lock {out}")
+
+
+@main.command()
+@click.argument("lock", default=None, required=False)
+@click.option("--to", "to", default=None, help="Harness to move to (codex, opencode, claude-code, …). [dim]\\[required unless --local][/]")
+@click.option("-o", "--out", default=None, help="Where to write the new lock. [dim]\\[default: harness.<to>.lock beside the source; harness.local.lock with --local][/]")
+@click.option("--model", default=None, help="provider:model for the default role. [dim]\\[default: kept when the harness supports its provider][/]")
+@click.option("--local", is_flag=True, help="Also move the models to a local runtime (what [cmd]hlock localize[/] does).")
+@click.option("--runtime", default=None, help="With --local: the inference runtime. [dim]\\[default: the best installed][/]")
+@click.option("--json", "as_json", is_flag=True, help="Print the migrate report as JSON.")
+def migrate(lock: str | None, to: str | None, out: str | None, model: str | None, local: bool, runtime: str | None,
+            as_json: bool) -> None:
+    """Write a copy of a lock moved onto another harness.
+
+    Skills, MCP servers, instructions and decision models go where the new harness reads
+    them, in its config shape; models move to a provider it supports. Plugins and settings
+    don't carry over and are listed. The source lock isn't touched; [cmd]hlock sync[/] puts
+    the new one in place.
+    """
+    lock = lock or _l()
+    if local:
+        if model:
+            _fail("--model doesn't apply with --local", "hlock localize --models picks local models")
+        out = out or "harness.local.lock"
+        with _working("Localizing…"):
+            result = json.loads(_localize(lock, out, harness=to, runtime=runtime, manifest=_m()))
+        _print_localized(result, lock, out, as_json)
+        return
+    if not to:
+        _fail("--to names the harness to move to", "hlock harness list shows them; --local picks a local one")
+    if runtime:
+        _fail("--runtime needs --local")
+    with _working("Migrating…"):
+        result = json.loads(_migrate(lock, to=to, out=out, model=model, manifest=_m()))
+    rep, out = result["report"], result["path"]
+    if as_json:
+        console.print_json(data=rep)
+        return
+    _ok(f"wrote [path]{_show(out)}[/]  [muted](from {_show(lock)})[/]")
+    t = _kv_table()
+    h = rep["harness"]
+    inst = "" if h["installed"] else "  [warn]not installed[/]"
+    t.add_row("harness", f"[bold]{h['to']}[/] {h.get('version') or ''}{inst}  [muted]from {h['from']}[/]")
+    for llm in result["lock"]["llm"]:
+        t.add_row(f"llm · {llm['role']}", f"[bold]{llm['provider']}:{llm['model']}[/]")
+    c = rep["carried"]
+    words = {"mcp": "MCP server", "skills": "skill", "instructions": "instruction file", "deciders": "decider"}
+    t.add_row("carried", ", ".join(f"{c[k]} {w}{'' if c[k] == 1 else 's'}" for k, w in words.items()))
+    base = rep.get("baseline") or {}
+    if base.get("trials"):
+        t.add_row("evidence", f"[muted]cleared; the source's ({_pct(base.get('success-rate'))} over {base['trials']} trials) "
+                              f"measured {h['from']}[/]")
+    console.print(Panel(t, title=f"[brand]⇄ {_show(out)} · migrated[/]", title_align="left", border_style="magenta",
+                        expand=False, padding=(1, 2)))
+    _changes(rep)
+    _next(f"hlock sync {_show(out)}", f"hlock launch --lock {_show(out)}")
+
+
+@main.command()
+@click.argument("lock", default=None, required=False)
+@click.option("-o", "--out", default="harness.local.lock", show_default=True, help="Where to write the localized lock.")
+@click.option("--harness", default=None, help="Local harness to use. [dim]\\[default: the lock's if local-capable, else the best installed][/]")
+@click.option("--runtime", default=None, help="Inference runtime (ollama, lmstudio, llama-cpp, …). [dim]\\[default: the best installed][/]")
+@click.option("--models", default=None, help="Comma-separated model ids to consider instead of the runtime's catalog.")
+@click.option("--memory-gb", type=float, default=None, help="Memory budget for model weights. [dim]\\[default: measured][/]")
+@click.option("--evals", "--tasks", "evals", default=None,
+              help="Eval pack to evaluate candidates on. [dim]\\[default: harness.toml's, if any][/]")
+@click.option("--strict", is_flag=True, help="Drop remote MCP servers instead of flagging them.")
+@click.option("--allow-network", is_flag=True, help="Keep self-hosted runtimes on your network instead of replacing them.")
+@click.option("--json", "as_json", is_flag=True, help="Print the localize report as JSON.")
+def localize(lock: str | None, out: str, harness: str | None, runtime: str | None, models: str | None,
+             memory_gb: float | None, evals: str | None, strict: bool, allow_network: bool, as_json: bool) -> None:
+    """Write an all-local equivalent of a lock to [path]harness.local.lock[/].
+
+    A proprietary harness, or one that can't use a local model, becomes a local-capable
+    one; models on API providers move to a local runtime, picked from its catalog and the
+    weights on disk to fit this machine's memory. MCP servers, skills and instructions carry
+    over. With eval packs, candidates are evaluated; otherwise they're ranked.
+    """
+    model_list = [m.strip() for m in models.split(",")] if models else []
+    with _working("Localizing…"):
+        lock = lock or _l()
+        result = json.loads(_localize(lock, out, harness=harness, runtime=runtime, models=model_list,
+                                      memory_gb=memory_gb, evals=evals, strict=strict, allow_network=allow_network,
+                                      manifest=_m()))
+    _print_localized(result, lock, out, as_json)
 
 
 @main.group()

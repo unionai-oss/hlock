@@ -6,7 +6,7 @@
 |---|---|---|
 | `harness.toml` | the user, `hlock init`, `hlock add` | The manifest: candidates to try, eval packs, objective, budget, `[target]`, and declared dependencies (`[skills]`, `[mcp]`, …). Edit it by hand. [Reference](https://docs.hlock.ai/reference/manifest/) |
 | `harness.lock` | `pin`, `add`, `remove`, `resolve`, `upgrade` | The lock: the exact stack, with digests. `kind = "pin"` for a pinned setup; a resolved lock also has `[evidence]`. Generated, so don't edit it. [Reference](https://docs.hlock.ai/reference/lockfile/) |
-| `harness.NAME.lock` | `pin -o`, `localize`, `tune fetch` | Other locks: `harness.local.lock` from `localize`, `harness.tune.lock` from `tune`, or per-person locks. |
+| `harness.NAME.lock` | `pin -o`, `migrate`, `localize`, `tune fetch` | Other locks: `harness.codex.lock` from `migrate --to codex`, `harness.local.lock` from `localize`, `harness.tune.lock` from `tune`, or per-person locks. |
 | `.hlock/locks/harness.HANDLE.lock` | `pin -o` | One contributor's lock in a shared repo. Its vendored files go in `.hlock/locks/.hlock/vendor/HANDLE/`. |
 | `.hlock/vendor/` | `pin --user` | Copies of files another machine can't fetch (hand-written skills, user config), with secrets redacted. Checked by digest, so don't edit them. |
 | `harness.meta.toml`, `harness.meta.lock` | `hlock meta init`, `hlock meta pin` | The meta harness's manifest and lock. [Reference](https://docs.hlock.ai/reference/meta-manifest/) |
