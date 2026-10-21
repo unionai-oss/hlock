@@ -58,8 +58,9 @@ impl Backend {
     }
 }
 
-/// Current version of the Rust <-> Python task contract.
-pub const CONTRACT_VERSION: u64 = 1;
+/// Current version of the Rust <-> Python task contract. 2: a trial's `cost_usd` may be
+/// null (unknown), and `simulated` says the offline reference ran it.
+pub const CONTRACT_VERSION: u64 = 2;
 
 /// One unit of work sent to the Python worker.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -83,8 +84,13 @@ pub struct TaskResult {
     pub success: bool,
     #[serde(default)]
     pub score: f64,
+    /// `None` when the cost isn't known (the endpoint reported no price), never a
+    /// made-up 0.
     #[serde(default)]
-    pub cost_usd: f64,
+    pub cost_usd: Option<f64>,
+    /// The offline reference ran it, not a model: a simulated success.
+    #[serde(default)]
+    pub simulated: bool,
     #[serde(default)]
     pub gpu_h: f64,
     #[serde(default)]
@@ -144,18 +150,89 @@ impl HarnessAdapter for PythonAdapter {
         "python-worker"
     }
 
+    /// The worker writes the trial's result into `workspace`, which starts from the task's
+    /// fixtures, and the resolver grades it there. A simulated success (the offline
+    /// reference) leaves the task's solution, as it does on `local`.
     fn run(&self, stack: &Stack, task: &Task, workspace: &Path, seed: u64) -> Result<RunOutcome> {
+        preflight(self.backend, std::slice::from_ref(stack))?;
+        if let Some(fixtures) = &task.fixtures {
+            let src = pack_path(task, "fixtures", fixtures)?;
+            if src.is_dir() {
+                crate::fsutil::copy_tree(&src, workspace)?;
+            }
+        }
         let r = self
             .worker
             .call("llm.run_trial", self.backend.as_str(), Some(stack), Some(task), seed, workspace, &json!({}))?;
+        if r.simulated && r.success {
+            leave_solution(task, workspace)?;
+        }
         Ok(RunOutcome {
             success: r.success,
-            cost_usd: r.cost_usd,
+            // an unknown cost counts as nothing in the totals; the trace keeps it null
+            cost_usd: r.cost_usd.unwrap_or(0.0),
             latency_s: r.latency_s,
             steps: r.steps,
             trace: r.trace,
         })
     }
+}
+
+/// The message when a worker backend has nothing to call for `stack`: its planner is a
+/// real model and `HL_LLM_BASE_URL` (`base_url`) isn't set. `reference` candidates run
+/// on the offline reference without one.
+fn missing_endpoint(backend: Backend, stack: &Stack, base_url: Option<&str>) -> Option<String> {
+    if !backend.needs_worker() || base_url.is_some_and(|u| !u.trim().is_empty()) {
+        return None;
+    }
+    let model = stack.llm.get("planner").cloned().unwrap_or_else(|| "reference:qwen-7b".into());
+    let provider = model.split_once(':').map_or("reference", |(p, _)| p);
+    (provider != "reference").then(|| format!("the {} backend needs a model endpoint for {model}: set HL_LLM_BASE_URL (see Backends)", backend.as_str()))
+}
+
+/// Fail before any trial when `backend` can't run one of `stacks`: on `devbox` and
+/// `cluster`, a real candidate's model is called at `HL_LLM_BASE_URL`, so without it there
+/// is nothing to call (and every trial would fail). Call it before the first trial;
+/// [`PythonAdapter::run`] checks each trial too.
+pub fn preflight(backend: Backend, stacks: &[Stack]) -> Result<()> {
+    let base_url = std::env::var("HL_LLM_BASE_URL").ok();
+    match stacks.iter().find_map(|s| missing_endpoint(backend, s, base_url.as_deref())) {
+        Some(why) => Err(Error::Worker(why)),
+        None => Ok(()),
+    }
+}
+
+/// A path the task names in its pack: relative, and inside it.
+fn pack_path(task: &Task, what: &str, rel: &Path) -> Result<std::path::PathBuf> {
+    let dir = task.pack_dir.as_ref().ok_or_else(|| Error::EvalPack(format!("task {} has no pack directory", task.id)))?;
+    if !crate::fsutil::safe_rel(&rel.to_string_lossy()) {
+        return Err(Error::EvalPack(format!("task {}: {what} {} must be a relative path inside the pack", task.id, rel.display())));
+    }
+    Ok(dir.join(rel))
+}
+
+/// What a simulated success leaves: the task's solution, else a stand-in for each
+/// expected artifact (as the reference adapter does on `local`).
+fn leave_solution(task: &Task, workspace: &Path) -> Result<()> {
+    if let Some(sol) = &task.solution {
+        let src = pack_path(task, "solution", sol)?;
+        if src.is_dir() {
+            crate::fsutil::copy_tree(&src, workspace)?;
+            return Ok(());
+        }
+    }
+    for art in task.expected_artifacts() {
+        if !crate::fsutil::safe_rel(&art) {
+            continue;
+        }
+        let out = workspace.join(&art);
+        if let Some(parent) = out.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        crate::fsutil::clear_symlink(&out)?;
+        std::fs::write(&out, format!("artifact for {}", task.id))?;
+    }
+    Ok(())
 }
 
 /// Shells any work item out to the Python worker over the versioned JSON contract.
@@ -310,5 +387,60 @@ mod tests {
     fn the_adapter_passes_its_backend() {
         assert_eq!(PythonAdapter::new().backend, Backend::Cluster);
         assert_eq!(PythonAdapter::with_backend(Backend::Devbox).backend, Backend::Devbox);
+    }
+
+    fn stack(planner: &str) -> Stack {
+        let mut s = Stack::default();
+        s.llm.insert("planner".into(), planner.into());
+        s
+    }
+
+    #[test]
+    fn a_real_model_needs_an_endpoint_on_a_worker_backend() {
+        let real = stack("anthropic:claude-sonnet-5-5");
+        let why = missing_endpoint(Backend::Devbox, &real, None).unwrap();
+        assert_eq!(why, "the devbox backend needs a model endpoint for anthropic:claude-sonnet-5-5: set HL_LLM_BASE_URL (see Backends)");
+        assert!(missing_endpoint(Backend::Devbox, &real, Some("  ")).is_some());
+        assert!(missing_endpoint(Backend::Devbox, &real, Some("http://localhost:8000/v1")).is_none());
+        // the offline reference needs nothing, and `local` never calls the worker
+        assert!(missing_endpoint(Backend::Devbox, &stack("reference:qwen-7b"), None).is_none());
+        assert!(missing_endpoint(Backend::Local, &real, None).is_none());
+    }
+
+    /// A task in a pack at `dir`, with fixtures and a solution.
+    fn task(dir: &Path) -> Task {
+        std::fs::create_dir_all(dir.join("t/workspace")).unwrap();
+        std::fs::create_dir_all(dir.join("t/solution")).unwrap();
+        std::fs::write(dir.join("t/workspace/in.txt"), "input").unwrap();
+        std::fs::write(dir.join("t/solution/out.txt"), "done").unwrap();
+        Task {
+            id: "t".into(),
+            fixtures: Some("t/workspace".into()),
+            solution: Some("t/solution".into()),
+            expected: [("artifacts".to_string(), json!(["out.txt"]))].into(),
+            pack_dir: Some(dir.to_path_buf()),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn the_worker_starts_from_the_fixtures_and_a_simulated_success_leaves_the_solution() {
+        let d = tmp("adapter");
+        let t = task(&d.join("pack"));
+        let ws = d.join("ws");
+        std::fs::create_dir_all(&ws).unwrap();
+        // the worker sees the fixtures in its workspace before it answers
+        let respond = |simulated: bool| format!(r#"test -f "$(dirname "$3")/in.txt" && echo '{{"version": 2, "ok": true, "result": {{"success": true, "simulated": {simulated}, "cost_usd": null}}}}' > "$4""#);
+        let a = PythonAdapter { worker: fake(&d, &respond(true), Duration::from_secs(10)), backend: Backend::Devbox };
+        let out = a.run(&stack("reference:qwen-7b"), &t, &ws, 0).unwrap();
+        assert!(out.success && out.cost_usd == 0.0);
+        assert_eq!(std::fs::read_to_string(ws.join("out.txt")).unwrap(), "done");
+        // a real model's run leaves only what it wrote
+        let ws2 = d.join("ws2");
+        std::fs::create_dir_all(&ws2).unwrap();
+        let a = PythonAdapter { worker: fake(&d, &respond(false), Duration::from_secs(10)), backend: Backend::Devbox };
+        assert!(a.run(&stack("reference:qwen-7b"), &t, &ws2, 0).unwrap().success);
+        assert!(ws2.join("in.txt").is_file() && !ws2.join("out.txt").exists());
+        let _ = std::fs::remove_dir_all(&d);
     }
 }

@@ -61,7 +61,7 @@ On the `devbox` and `cluster` backends, the Rust core shells each work item out 
 $HL_PYTHON -m hlock.tasks.worker request.json response.json
 ```
 
-Requests and responses follow a versioned JSON contract (`CONTRACT_VERSION = 1`). The
+Requests and responses follow a versioned JSON contract (`CONTRACT_VERSION = 2`). The
 core only ever sees the response, so it doesn't depend on where the work ran: in
 process, on this machine, or as a Flyte task on a GPU node.
 

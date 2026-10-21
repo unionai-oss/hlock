@@ -64,12 +64,15 @@ runs on this machine, in the interpreter named by `HL_PYTHON`.
 
     ```bash
     export HL_LLM_BASE_URL=http://localhost:8000/v1
-    export HL_LLM_MODEL=qwen-32b
+    export HL_LLM_MODEL=qwen-32b     # what reference:… candidates ask for
     export HL_LLM_API_KEY=...        # if the endpoint needs one
     ```
 
-    Without `HL_LLM_BASE_URL`, the worker uses the deterministic offline reference
-    LLM, so the pipeline still runs end to end.
+    Each candidate asks the endpoint for its own model: `openai:gpt-5` requests
+    `gpt-5`. `HL_LLM_MODEL` stands in only for `reference:…` candidates. Without
+    `HL_LLM_BASE_URL`, `reference:…` candidates run on the deterministic offline
+    reference, and any other candidate fails before it runs: "the devbox backend needs a
+    model endpoint for openai:gpt-5: set HL_LLM_BASE_URL (see Backends)".
 
 3.  Install the libraries for the stages you'll use:
 
@@ -83,6 +86,24 @@ runs on this machine, in the interpreter named by `HL_PYTHON`.
     ```bash
     hlock tune --backend devbox --depth probe --max-trials 10
     ```
+
+### What a `devbox` trial is
+
+A trial on `devbox` is a single completion, not an agent loop. The trial's workspace
+starts from the task's fixtures, as on every backend. The model gets the task's prompt and
+the text of the files in its workspace (up to 20,000 characters), and its reply is written
+to the task's first expected artifact, or `answer.md` when it has none. A code fence around
+the whole reply is dropped. The task's [graders](eval-packs.md#grading) then decide
+whether the trial passed, the same way they do on `local`.
+
+That fits tasks whose answer is one file: a summary, a value, a reply, a cleaned file. A
+task that needs tools, several files, or a running loop needs an agent. Run your own as a
+[code harness](harnesses.md#your-own-agent-frameworks-and-custom-scripts), which runs
+for real in trials on every backend.
+
+A trial's cost is what the endpoint reports (`usage.cost`, as OpenRouter's does). When it
+reports none, the cost is unknown: the trace records it as `null`, and it adds nothing to
+the totals.
 
 ## `cluster`
 

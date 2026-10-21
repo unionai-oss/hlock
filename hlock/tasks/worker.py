@@ -29,7 +29,7 @@ import time
 from pathlib import Path
 
 # Keep in sync with crates/harness-lock-core/src/worker.rs::CONTRACT_VERSION.
-CONTRACT_VERSION = 1
+CONTRACT_VERSION = 2
 
 
 # --------------------------------------------------------------------------- #
@@ -56,46 +56,64 @@ def _llm_configured() -> bool:
     return bool(os.environ.get("HL_LLM_BASE_URL"))
 
 
-def _call_real_llm(model: str, prompt: str, temperature: float = 0.2) -> dict | None:
-    """Best-effort OpenAI-compatible completion against a served model; None on failure."""
+def _served_model(model: str, provider: str = "reference") -> str:
+    """The model name to request: `HL_LLM_MODEL` stands in for a `reference` candidate
+    only; a real candidate asks for its own model."""
+    if provider == "reference":
+        return os.environ.get("HL_LLM_MODEL") or model
+    return model
+
+
+def _complete(model: str, prompt: str, temperature: float = 0.2, max_tokens: int = 200,
+              provider: str = "reference") -> dict:
+    """One OpenAI-compatible chat completion against `HL_LLM_BASE_URL`. Raises on any
+    failure. The cost is what the endpoint reports (`usage.cost`, as OpenRouter's does),
+    else None: unknown, never a made-up 0."""
+    import urllib.request
+
     base = os.environ.get("HL_LLM_BASE_URL", "").rstrip("/")
     key = os.environ.get("HL_LLM_API_KEY", "")
-    real_model = os.environ.get("HL_LLM_MODEL", model)
-    if not base:
+    body = json.dumps(
+        {
+            "model": _served_model(model, provider),
+            "messages": [{"role": "user", "content": prompt}],
+            "max_tokens": max_tokens,
+            "temperature": temperature,
+        }
+    ).encode()
+    headers = {"Content-Type": "application/json"}
+    if key:
+        headers["Authorization"] = f"Bearer {key}"
+    req = urllib.request.Request(base + "/chat/completions", data=body, headers=headers, method="POST")
+    start = time.monotonic()
+    with urllib.request.urlopen(req, timeout=120) as resp:
+        data = json.loads(resp.read().decode())
+    content = data["choices"][0]["message"]["content"] or ""
+    usage = data.get("usage") or {}
+    cost = usage.get("cost")
+    return {
+        "content": content,
+        "cost_usd": float(cost) if isinstance(cost, (int, float)) else None,
+        "latency_ms": round((time.monotonic() - start) * 1000.0, 1),
+        "usage": {
+            "input_tokens": usage.get("prompt_tokens", 0),
+            "output_tokens": usage.get("completion_tokens", 0),
+        },
+    }
+
+
+def _call_real_llm(model: str, prompt: str, temperature: float = 0.2) -> dict | None:
+    """Best-effort completion for the tune stages (prompt search, synthetic data, the
+    judge); None on failure, and they fall back to the reference."""
+    if not _llm_configured():
         return None
     try:
-        import urllib.request
-
-        body = json.dumps(
-            {
-                "model": real_model,
-                "messages": [{"role": "user", "content": prompt}],
-                "max_tokens": 200,
-                "temperature": temperature,
-            }
-        ).encode()
-        headers = {"Content-Type": "application/json"}
-        if key:
-            headers["Authorization"] = f"Bearer {key}"
-        req = urllib.request.Request(
-            base + "/chat/completions", data=body, headers=headers, method="POST"
-        )
-        with urllib.request.urlopen(req, timeout=60) as resp:
-            data = json.loads(resp.read().decode())
-        content = data["choices"][0]["message"]["content"]
-        usage = data.get("usage", {})
-        return {
-            "content": content,
-            "cost_usd": 0.0,
-            "latency_ms": 0.0,
-            "usage": {
-                "input_tokens": usage.get("prompt_tokens", 0),
-                "output_tokens": usage.get("completion_tokens", 0),
-            },
-        }
+        got = _complete(model, prompt, temperature)
     except Exception as exc:  # noqa: BLE001 - fall back on any transport failure
         sys.stderr.write(f"[worker] real LLM failed ({exc}); using reference fallback\n")
         return None
+    got["cost_usd"] = got["cost_usd"] or 0.0
+    return got
 
 
 def _call_llm(model: str, prompt: str, seed: int, salt: int = 0, temperature: float = 0.2) -> dict:
@@ -127,21 +145,128 @@ def _digest(obj) -> str:
 # Handlers (each returns {"result": {...}} or {"error": "..."})
 # --------------------------------------------------------------------------- #
 
+NEEDS_ENDPOINT = "the {backend} backend needs a model endpoint for {model}: set HL_LLM_BASE_URL (see Backends)"
+# how much of the workspace's text a single completion is shown, in characters
+MAX_WORKSPACE_TEXT = 20_000
+
+
+def _workspace_text(ws: Path) -> str:
+    """The text files the task starts from (its fixtures), for the prompt: a single
+    completion can't open them itself."""
+    parts, used = [], 0
+    for f in sorted(p for p in ws.rglob("*") if p.is_file() and not p.is_symlink()):
+        rel = f.relative_to(ws).as_posix()
+        if rel.startswith(("_al_", ".")):
+            continue
+        try:
+            text = f.read_text()
+        except (UnicodeDecodeError, OSError):
+            continue
+        if used + len(text) > MAX_WORKSPACE_TEXT:
+            parts.append(f"### {rel}\n(left out: the workspace's text is over {MAX_WORKSPACE_TEXT} characters)")
+            break
+        used += len(text)
+        parts.append(f"### {rel}\n```\n{text}\n```")
+    return "\n\n".join(parts)
+
+
+def _unfence(text: str) -> str:
+    """The reply without a code fence around all of it, which models add to files."""
+    lines = text.strip().splitlines()
+    if len(lines) >= 2 and lines[0].startswith("```") and lines[-1].strip() == "```":
+        return "\n".join(lines[1:-1]) + "\n"
+    return text
+
+
+def _artifact_path(ws: Path, expected: list) -> Path | None:
+    """Where the reply goes: the first expected artifact, else `answer.md`, inside `ws`."""
+    rel = next((a for a in expected if isinstance(a, str) and a), "answer.md")
+    p = Path(rel)
+    if p.is_absolute() or ".." in p.parts:
+        return None
+    return ws / p
+
+
 def llm_run_trial(req: dict) -> dict:
-    """Run one (stack, task, seed) trial honoring retries/temperature/timeout."""
+    """Run one (stack, task, seed) trial.
+
+    With `HL_LLM_BASE_URL`, the trial is one completion, not an agent loop: the model gets
+    the task's prompt and the text files in its workspace, and its reply is written to the
+    task's first expected artifact (or `answer.md`). The run completes, and the task's
+    graders, which the Rust core runs on the workspace, decide whether it succeeded.
+
+    Without one, a `reference` candidate runs on the deterministic offline reference
+    (`simulated` in the result, so the core leaves the task's solution, as a simulated
+    success does on `local`). Any other candidate is an error: there's nothing to call.
+    """
     stack = req.get("stack") or {}
     model_spec = stack.get("llm", {}).get("planner", "reference:qwen-7b")
     provider, _, model = model_spec.partition(":")
     if not model:
         provider, model = "reference", model_spec
-    retries = int(stack.get("retries", 0))
-    max_steps = int(stack.get("max_steps", 40))
     temperature = float(stack.get("temperature") or 0.2)
     tool_timeout = float(stack.get("tool_timeout_seconds") or 120.0)
     seed = int(req.get("seed", 0))
     task = req.get("task") or {}
     prompt = task.get("prompt_text") or "solve the task"
 
+    if not _llm_configured():
+        if provider != "reference":
+            return {"error": NEEDS_ENDPOINT.format(backend=req.get("backend") or "devbox", model=model_spec)}
+        return _reference_trial(stack, provider, model, prompt, seed, temperature, tool_timeout)
+
+    ws = Path(req.get("workdir") or ".")
+    out = _artifact_path(ws, task.get("expected") or [])
+    if out is None:
+        return {"error": f"task {task.get('id')}: its expected artifact isn't a path inside the workspace"}
+    name = out.relative_to(ws).as_posix()
+    files = _workspace_text(ws)
+    composed = (
+        f"{prompt}\n\n"
+        + (f"These files are in the working directory:\n\n{files}\n\n" if files else "")
+        + f"Reply with only the full contents of `{name}`, and nothing else."
+    )
+    try:
+        r = _complete(model, composed, temperature, max_tokens=4096, provider=provider)
+    except Exception as exc:  # noqa: BLE001 - the trial fails, and says why
+        return {"error": f"the model endpoint failed for {model_spec}: {exc}"}
+    out.parent.mkdir(parents=True, exist_ok=True)
+    if out.is_symlink():
+        out.unlink()
+    text = _unfence(r["content"])
+    out.write_text(text)
+    event = {
+        "type": "llm.call",
+        "role": "planner",
+        "model": _served_model(model, provider),
+        "temperature": temperature,
+        "usage": r["usage"],
+        "cost_usd": r["cost_usd"],
+        "latency_ms": r["latency_ms"],
+        "wrote": name,
+    }
+    return {
+        "result": {
+            "success": True,
+            "score": 1.0,
+            "cost_usd": r["cost_usd"],
+            "gpu_h": 0.0,
+            "latency_s": round(r["latency_ms"] / 1000.0, 3),
+            "steps": 1,
+            "trace": [event],
+            "artifact_digests": [_digest(text)],
+            "model_digests": {"provider": provider, "model": model},
+            "simulated": False,
+        }
+    }
+
+
+def _reference_trial(stack: dict, provider: str, model: str, prompt: str, seed: int, temperature: float,
+                     tool_timeout: float) -> dict:
+    """The deterministic offline reference: succeeds as often as the model's simulated
+    quality, honoring retries and max steps."""
+    retries = int(stack.get("retries", 0))
+    max_steps = int(stack.get("max_steps", 40))
     cost = 0.0
     latency = 0.0
     success = False
@@ -182,6 +307,7 @@ def llm_run_trial(req: dict) -> dict:
             "trace": events,
             "artifact_digests": [],
             "model_digests": {"provider": provider, "model": model},
+            "simulated": True,
         }
     }
 

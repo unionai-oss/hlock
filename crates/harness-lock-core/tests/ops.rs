@@ -120,9 +120,11 @@ fn a_lock_that_doesnt_load_is_an_error_not_a_zero_baseline() {
     let up = UpgradeSpec { all: true, apply: true, workdir: dir.join(".hlock"), lock: Some(lock.clone()), ..Default::default() };
     assert!(upgrade(make_manifest(&dir), &up).is_err());
     assert_eq!(fs::read_to_string(&lock).unwrap(), "this isn't = [ a lock", "left alone");
-    // no lock at all is no baseline, which tune may still beat
+    // with no lock, the baseline is the manifest's first configuration, measured
     fs::remove_file(&lock).unwrap();
-    assert!(tune(make_manifest(&dir), &TuneSpec { lock: Some(lock), ..tune_spec }).is_ok());
+    let o = tune(make_manifest(&dir), &TuneSpec { lock: Some(lock), strict: false, ..tune_spec }).unwrap();
+    assert_eq!(o.report["baseline"]["measured"], true);
+    assert!(o.report["baseline"]["trials"].as_u64().unwrap() > 0);
     let _ = fs::remove_dir_all(&dir);
 }
 

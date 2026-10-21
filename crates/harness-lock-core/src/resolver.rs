@@ -15,7 +15,12 @@ use crate::store::Store;
 use crate::tasks::EvalPack;
 use crate::worker::{Backend, PythonAdapter};
 
-/// Aggregated metrics container produced by the resolver.
+/// Where the resolver reports progress and notes: `{"kind": "plan" | "trial" | "note" |
+/// "done", …}` (see [`Resolver::on_event`]).
+pub type OnEvent = Box<dyn FnMut(serde_json::Value) + Send>;
+
+/// Above this many stacks a search is refused: narrow the candidates instead.
+pub const MAX_STACKS: usize = 200;
 
 pub struct Resolver {
     pub manifest: Manifest,
@@ -34,6 +39,22 @@ pub struct Resolver {
     /// Locks a code harness's trials get the skills and MCP servers of, by stack hash
     /// (`hlock add --eval` measures the lock with and without a dependency).
     pub trial_locks: BTreeMap<String, (Lockfile, PathBuf)>,
+    /// Progress and notes as they happen (`hlock resolve` prints them). Without a
+    /// callback, notes go to stderr.
+    pub on_event: std::sync::Mutex<Option<OnEvent>>,
+    /// Reuse earlier trials from `<workdir>/trials` (off with `resolve --no-cache`).
+    pub use_cache: bool,
+    /// What the last [`Resolver::resolve_lock`] compared: each stack's scores, the
+    /// holdout check, and how many trials ran or came from the cache.
+    pub report: Option<serde_json::Value>,
+}
+
+/// What a search measures: the stacks, the search-split tasks, and the stacks the
+/// project's policy dropped.
+struct Search {
+    stacks: Vec<Stack>,
+    tasks: Vec<crate::tasks::Task>,
+    dropped: Vec<String>,
 }
 
 impl Resolver {
@@ -65,11 +86,37 @@ impl Resolver {
             code_harnesses: BTreeMap::new(),
             profiles: BTreeMap::new(),
             trial_locks: BTreeMap::new(),
+            on_event: std::sync::Mutex::new(None),
+            use_cache: true,
+            report: None,
+        }
+    }
+
+    /// Send an event to [`Resolver::on_event`], if there is one.
+    fn emit(&self, event: serde_json::Value) -> bool {
+        match self.on_event.lock() {
+            Ok(mut f) => match f.as_mut() {
+                Some(f) => {
+                    f(event);
+                    true
+                }
+                None => false,
+            },
+            Err(_) => false,
+        }
+    }
+
+    /// A warning about the run: to [`Resolver::on_event`], else stderr.
+    pub fn note(&self, text: impl Into<String>) {
+        let text = text.into();
+        if !self.emit(json!({"kind": "note", "text": text})) {
+            eprintln!("warn: {text}");
         }
     }
 
     /// Load the manifest's eval packs and return the search-split tasks.
     pub fn load_packs(&mut self) -> Vec<crate::tasks::Task> {
+        self.holdout.clear();
         let mut search: Vec<crate::tasks::Task> = Vec::new();
         let base = self.manifest.root();
         for ref_ in self.manifest.eval_packs() {
@@ -77,7 +124,7 @@ impl Resolver {
                 Ok(pack) => {
                     let errors = pack.check().iter().filter(|i| i.level == "error").count();
                     if errors > 0 {
-                        eprintln!("warn: eval pack {ref_} has {errors} problem(s); run `hlock evals check {ref_}`");
+                        self.note(format!("eval pack {ref_} has {errors} problem(s); run `hlock evals check {ref_}`"));
                     }
                     let (s, h) = pack.split(self.manifest.search_frac(), self.manifest.budget.random_seed);
                     for t in pack.tasks.clone() {
@@ -86,7 +133,7 @@ impl Resolver {
                     search.extend(s);
                     self.holdout.extend(h);
                 }
-                Err(e) => eprintln!("warn: skipping eval pack {ref_}: {e}"),
+                Err(e) => self.note(format!("skipping eval pack {ref_}: {e}")),
             }
         }
         search
@@ -134,8 +181,11 @@ impl Resolver {
                 }
             }
         }
-        if stacks.len() > 200 {
-            stacks.truncate(200);
+        if stacks.len() > MAX_STACKS {
+            return Err(Error::Manifest(format!(
+                "the candidates make {} stacks, more than the {MAX_STACKS} hlock searches; narrow [candidates] (fewer models, decisions, harnesses or deciders)",
+                stacks.len()
+            )));
         }
         Ok(stacks)
     }
@@ -146,7 +196,7 @@ impl Resolver {
         let mut combos = vec![BTreeMap::new()];
         for (use_, spec) in specs.iter().filter(|(u, _)| crate::decide::AGENT_USES.contains(&u.as_str())) {
             if crate::decide::wiring(use_, harness, self.profiles.get(harness)).is_none() {
-                eprintln!("warn: {harness} can't make {use_} decisions; [deciders.{use_}] is left out of its stacks");
+                self.note(format!("{harness} can't make {use_} decisions; [deciders.{use_}] is left out of its stacks"));
                 continue;
             }
             // each model, at each `min-probability` candidate, in the manifest's order
@@ -210,7 +260,9 @@ impl Resolver {
     /// can't run it, the trial fails and records why in `error` (and its stored trace).
     pub fn run_trial(&self, stack: &Stack, task: &crate::tasks::Task, seed: u64, ws_root: &Path) -> TrialResult {
         let hash = stack.hash();
-        let ws = ws_root.join(format!("{}_{}_{}", &hash[..10.min(hash.len())], task.id, seed));
+        // hex digits only: a colon isn't allowed in a Windows path
+        let short: String = hash.trim_start_matches("sha256:").chars().take(12).collect();
+        let ws = ws_root.join(format!("{short}_{}_{seed}", task.id));
 
         let outcome = Self::fresh_workspace(ws_root, &ws, &task.id).and_then(|()| match self.code_harnesses.get(&stack.harness) {
             Some(p) => crate::contract::CommandAdapter::new(p.clone(), Ctx::from_process())
@@ -222,7 +274,7 @@ impl Resolver {
         let (outcome, error) = match outcome {
             Ok(o) => (o, None),
             Err(e) => {
-                eprintln!("warn: {} couldn't run task {} (seed {seed}): {e}", stack.label(), task.id);
+                self.note(format!("{} couldn't run task {} (seed {seed}): {e}", stack.label(), task.id));
                 let failed = crate::adapters::RunOutcome { success: false, cost_usd: 0.0, latency_s: 0.0, steps: 0, trace: json!([]) };
                 (failed, Some(e.to_string()))
             }
@@ -246,6 +298,12 @@ impl Resolver {
             cost_usd: judged.iter().map(|g| g.cost_usd).sum::<Option<f64>>(),
         });
         let success = error.is_none() && outcome.success && grades.iter().all(|g| g.success);
+        let detail = error.clone().or_else(|| {
+            grades.iter().find(|g| !g.success).map(|g| {
+                let why = g.detail.lines().rev().find(|l| !l.trim().is_empty()).unwrap_or("failed");
+                format!("{}: {why}", g.grader)
+            })
+        }).or_else(|| (!success).then(|| "the harness reported a failure".to_string()));
         let score = if error.is_some() { 0.0 } else { grades.iter().map(|g| g.score).sum::<f64>() / grades.len().max(1) as f64 };
 
         // persist the trace to the store (content-addressed)
@@ -272,7 +330,42 @@ impl Resolver {
             steps: outcome.steps,
             error,
             judging,
+            detail,
         }
+    }
+
+    /// Run a trial, or take it from the cache in `cache_dir` when an identical one ran
+    /// before. `key` holds what besides the stack, task and seed decides the result.
+    /// A code harness's trials always run: hlock can't tell when the agent's code changed.
+    fn cached_trial(&self, stack: &Stack, task: &crate::tasks::Task, seed: u64, ws_root: &Path, cache_dir: &Path, key: &str) -> (TrialResult, bool) {
+        let cacheable = self.use_cache && !self.code_harnesses.contains_key(&stack.harness);
+        let file = cache_dir.join(format!("{}.json", crate::hash::sha256_hex(format!("resolve\0{}\0{}\0{seed}\0{key}", stack.hash(), task.id).as_bytes())));
+        if cacheable {
+            if let Some(r) = std::fs::read_to_string(&file).ok().and_then(|t| serde_json::from_str::<TrialResult>(&t).ok()) {
+                return (r, true);
+            }
+        }
+        let r = self.run_trial(stack, task, seed, ws_root);
+        if cacheable && r.error.is_none() {
+            let _ = std::fs::create_dir_all(cache_dir);
+            let _ = crate::fsutil::write_atomic(&file, serde_json::to_string(&r).unwrap_or_default());
+        }
+        (r, false)
+    }
+
+    /// What, besides the stack, task and seed, decides a trial's result: the packs'
+    /// content, the backend, the judge, and the worker's model endpoint.
+    fn cache_key(&self) -> String {
+        let env = |k: &str| std::env::var(k).unwrap_or_default();
+        crate::hash::sha256_text(&format!(
+            "{}\0{}\0{}\0{}\0{}\0{}",
+            crate::tasks::packs_digest(&self.manifest),
+            self.manifest.backend_target(),
+            serde_json::to_string(&self.manifest.judge()).unwrap_or_default(),
+            serde_json::to_string(&self.manifest.default_judge()).unwrap_or_default(),
+            env("HL_LLM_BASE_URL"),
+            env("HL_LLM_MODEL"),
+        ))
     }
 
     /// Resolve: enumerate, run, aggregate, select, and write `harness.lock`.
@@ -305,12 +398,31 @@ impl Resolver {
         Ok(())
     }
 
-    /// Resolve and return the winning lock without writing it.
-    pub fn resolve_lock(&mut self) -> Result<Lockfile> {
+    /// Everything a search needs, checked before any trial runs: the manifest, the
+    /// target, the stacks (less those the policy denies), and the search tasks.
+    fn prepare_search(&mut self) -> Result<Search> {
+        self.manifest.check_search()?;
         self.prepare_trials()?;
         // problems in the objective or the deciders stop the resolve before any trial runs
         crate::search::parse_constraints(&self.manifest.objective.constraints)?;
         let mut stacks = self.enumerate_stacks()?;
+        // an agent CLI runs its provider's models, not the offline reference model
+        let no_models = self.manifest.candidates.llm.values().all(|c| c.any_of.is_empty());
+        if let Some(s) = stacks.iter().find(|s| no_models && self.profiles.get(&s.harness).is_some_and(|p| p.kind == "cli")) {
+            return Err(Error::Manifest(format!("list the models {} runs in [candidates.llm.planner] (e.g. \"anthropic:claude-sonnet-5-5\")", s.harness)));
+        }
+        if let Some(s) = stacks.iter().find(|s| self.profiles.get(&s.harness).is_some_and(|p| p.kind == "cli") && s.llm.values().any(|m| m.starts_with("reference:") || !m.contains(':'))) {
+            let model = s.llm.values().find(|m| m.starts_with("reference:") || !m.contains(':')).cloned().unwrap_or_default();
+            return Err(Error::Manifest(format!(
+                "{} can't run {model}, the offline reference model; list models it runs in [candidates.llm] (e.g. \"anthropic:claude-sonnet-5-5\"), or set [target] harness = \"reference\" for the offline demo",
+                s.harness
+            )));
+        }
+        // a worker backend with nothing to call fails here, not on every trial
+        if self.backend.needs_worker() {
+            let via_worker: Vec<Stack> = stacks.iter().filter(|s| !self.code_harnesses.contains_key(&s.harness)).cloned().collect();
+            crate::worker::preflight(self.backend, &via_worker)?;
+        }
         // stacks the project's policy denies (a provider, a model, a harness) aren't measured
         let policy = crate::policy::Policy::for_dir(&self.manifest.root())?;
         let mut dropped: Vec<String> = Vec::new();
@@ -328,47 +440,93 @@ impl Resolver {
                 true
             });
             for d in &dropped {
-                eprintln!("warn: policy dropped {d}");
+                self.note(format!("policy dropped {d}"));
             }
             if stacks.is_empty() {
                 return Err(Error::Tuning(format!("the project's policy denies every candidate stack ({} dropped)", dropped.len())));
             }
         }
-        let search_tasks = self.load_packs();
-        if search_tasks.is_empty() {
+        let tasks = self.load_packs();
+        if tasks.is_empty() {
             return Err(Error::EvalPack(format!(
                 "no tasks to measure the stacks on: the eval packs ({}) have none, or didn't load",
                 self.manifest.eval_packs().join(", ")
             )));
         }
+        Ok(Search { stacks, tasks, dropped })
+    }
+
+    /// What `resolve` would run, without running it (`hlock resolve --dry-run`): the
+    /// stacks, the tasks in each split, and the trial counts.
+    pub fn plan(&mut self) -> Result<serde_json::Value> {
+        let search = self.prepare_search()?;
+        let seeds = self.manifest.seeds() as usize;
+        let all = search.stacks.len() * search.tasks.len() * seeds;
+        let max = self.manifest.budget.max_trials;
+        let adapter = search.stacks.first().map(|s| self.adapter_for(s)).unwrap_or_default();
+        Ok(json!({
+            "stacks": search.stacks.iter().map(Stack::label).collect::<Vec<_>>(),
+            "tasks": search.tasks.iter().map(|t| &t.id).collect::<Vec<_>>(),
+            "holdout-tasks": self.holdout.iter().map(|t| &t.id).collect::<Vec<_>>(),
+            "seeds": seeds,
+            "trials": max.map_or(all, |m| m.min(all)),
+            "all-trials": all,
+            "holdout-trials": self.holdout.len() * seeds,
+            "max-trials": max,
+            "max-spend-usd": self.manifest.budget.max_spend_usd,
+            "dropped-by-policy": search.dropped,
+            "adapter": adapter,
+        }))
+    }
+
+    /// Resolve and return the winning lock without writing it: measure every stack on
+    /// the search split, pick the winner, and check it on the holdout split.
+    pub fn resolve_lock(&mut self) -> Result<Lockfile> {
+        let Search { stacks, tasks: search_tasks, dropped } = self.prepare_search()?;
         let seeds = self.manifest.seeds();
         let ws_root = self.workdir.join("runs");
         let _ = std::fs::create_dir_all(&ws_root);
+        let cache_dir = self.workdir.join("trials");
+        let key = self.cache_key();
 
         // every (task, seed), seed by seed so a cut budget still covers each task
         let plan: Vec<(&crate::tasks::Task, u64)> = (0..seeds).flat_map(|seed| search_tasks.iter().map(move |t| (t, seed))).collect();
-        // `max-trials` is spent round-robin across the stacks, so none is dropped whole
-        // and no trial runs that the budget then discards
+        let total = plan.len() * stacks.len();
         let max = self.manifest.budget.max_trials.unwrap_or(usize::MAX);
+        let planned = total.min(max);
+        self.emit(json!({"kind": "plan", "stacks": stacks.len(), "tasks": search_tasks.len(), "seeds": seeds, "trials": planned, "holdout-trials": self.holdout.len() * seeds as usize}));
+        // the budget is spent round-robin across the stacks, so none is dropped whole and
+        // no trial runs that the budget then discards
+        let mut spend = Spend::new(self.manifest.budget.max_spend_usd);
         let mut results: Vec<Vec<TrialResult>> = vec![Vec::new(); stacks.len()];
-        let mut n = 0usize;
+        let (mut n, mut cached) = (0usize, 0usize);
+        let mut cut: Option<String> = None;
         'budget: for (task, seed) in &plan {
             for (stack, out) in stacks.iter().zip(results.iter_mut()) {
                 if n >= max {
+                    cut = Some(format!("budget.max-trials ({max})"));
                     break 'budget;
                 }
-                out.push(self.run_trial(stack, task, *seed, &ws_root));
+                if !spend.allows() {
+                    cut = Some(format!("budget.max-spend-usd (${})", spend.cap.unwrap_or_default()));
+                    break 'budget;
+                }
+                let (r, hit) = self.cached_trial(stack, task, *seed, &ws_root, &cache_dir, &key);
+                spend.add(&r, hit);
+                cached += usize::from(hit);
                 n += 1;
+                self.emit(json!({"kind": "trial", "done": n, "total": planned, "stack": stack.label(), "task": task.id, "seed": seed, "success": r.success, "cached": hit}));
+                out.push(r);
             }
         }
-        if n < plan.len() * stacks.len() {
-            eprintln!("warn: budget.max-trials ({max}) ran {n} of {} trials, spread across the stacks", plan.len() * stacks.len());
+        if let Some(why) = &cut {
+            self.note(format!("{why} ran {n} of {total} trials, spread across the stacks"));
         }
 
         let mut scores: Vec<StackScore> = Vec::new();
         for (stack, trials) in stacks.iter().zip(results) {
             if trials.is_empty() {
-                eprintln!("warn: {} got no trials within budget.max-trials", stack.label());
+                self.note(format!("{} got no trials within the budget", stack.label()));
                 continue;
             }
             // a stack whose harness couldn't run a single trial is broken, not slow
@@ -379,23 +537,82 @@ impl Resolver {
             scores.push(StackScore { stack: stack.clone(), n: trials.len(), trials });
         }
 
-        let winner = select_winner(
-            scores.clone(),
-            &self.manifest.objective.primary,
-            &self.manifest.objective.constraints,
-            &self.manifest.objective.select,
-        )?;
+        let winner = match select_winner(scores.clone(), &self.manifest.objective.primary, &self.manifest.objective.constraints, &self.manifest.objective.select) {
+            Ok(w) => w,
+            // when nothing passed at all, say why the first trial failed
+            Err(Error::Tuning(m)) if scores.iter().all(|s| s.trials.iter().all(|t| !t.success)) => {
+                let first = scores.iter().flat_map(|s| &s.trials).find_map(|t| t.detail.as_ref().map(|d| format!("task {}: {d}", t.task_id)));
+                return Err(Error::Tuning(match first {
+                    Some(d) => format!("{m}. Every trial failed; the first, {d}"),
+                    None => m,
+                }));
+            }
+            Err(e) => return Err(e),
+        };
 
-        let mut lock = self.build_resolve(&winner, &scores)?;
+        // check the winner on tasks it wasn't picked on
+        let holdout_tasks = self.holdout.clone();
+        let mut holdout_trials = Vec::new();
+        let mut holdout_cut = false;
+        'holdout: for seed in 0..seeds {
+            for task in &holdout_tasks {
+                if !spend.allows() {
+                    self.note(format!("budget.max-spend-usd (${}) stopped the holdout check after {} of {} trials", spend.cap.unwrap_or_default(), holdout_trials.len(), holdout_tasks.len() * seeds as usize));
+                    holdout_cut = true;
+                    break 'holdout;
+                }
+                let (r, hit) = self.cached_trial(&winner.stack, task, seed, &ws_root, &cache_dir, &key);
+                spend.add(&r, hit);
+                cached += usize::from(hit);
+                self.emit(json!({"kind": "trial", "done": holdout_trials.len() + 1, "total": holdout_tasks.len() * seeds as usize, "stack": winner.stack.label(), "task": task.id, "seed": seed, "success": r.success, "cached": hit, "split": "holdout"}));
+                holdout_trials.push(r);
+            }
+        }
+        let holdout = (!holdout_trials.is_empty()).then(|| StackScore { stack: winner.stack.clone(), n: holdout_trials.len(), trials: holdout_trials });
+        if holdout.is_none() {
+            let why = if holdout_cut { "the budget left nothing for the holdout check" } else { "there are no holdout tasks; add tasks, or lower [evals.splits] search" };
+            self.note(format!("the evidence comes from the tasks the winner was picked on (in-sample): {why}"));
+        }
+
+        let mut lock = self.build_resolve(&winner, holdout.as_ref(), stacks.len(), n)?;
         if !dropped.is_empty() {
             lock.provenance.search.insert("dropped-by-policy".into(), serde_json::json!(dropped));
         }
-        let _ = self.write_report(&lock, &scores);
+        if cached > 0 {
+            lock.provenance.search.insert("cached".into(), serde_json::json!(cached));
+        }
+        let report_path = self.workdir.join("report.md");
+        let mut report = json!({
+            "stacks": scores.iter().map(|sc| json!({
+                "label": sc.stack.label(),
+                "success-rate": roundf(sc.success_rate()),
+                "cost-usd-per-task": roundf(sc.mean_cost()),
+                "latency-s-p50": roundf(sc.mean_latency()),
+                "trials": sc.n,
+                "winner": sc.stack.hash() == winner.stack.hash(),
+            })).collect::<Vec<_>>(),
+            "winner": winner.stack.label(),
+            "holdout": holdout.as_ref().map(|h| json!({"success-rate": roundf(h.success_rate()), "trials": h.n})),
+            "trials": n + holdout.as_ref().map_or(0, |h| h.n),
+            "cached": cached,
+            "spend-usd": roundf(spend.spent),
+            "report": report_path.to_string_lossy(),
+        });
+        if self.write_report(&lock, &report).is_err() {
+            report["report"] = serde_json::Value::Null;
+        }
+        let mut done = report.clone();
+        done["kind"] = json!("done");
+        self.emit(done);
+        self.report = Some(report);
         Ok(lock)
     }
 
-    fn build_resolve(&self, winner: &StackScore, _scores: &[StackScore]) -> Result<Lockfile> {
+    /// The evidence comes from the holdout check when there is one (the winner's search
+    /// score is kept as `success-rate.search`), else from the search trials.
+    fn build_resolve(&self, winner: &StackScore, holdout: Option<&StackScore>, n_stacks: usize, n_trials: usize) -> Result<Lockfile> {
         let s = &winner.stack;
+        let measured = holdout.unwrap_or(winner);
         let llms = s
             .llm
             .iter()
@@ -417,19 +634,26 @@ impl Resolver {
             .collect();
 
         let mut success_rate = BTreeMap::new();
-        success_rate.insert("mean".to_string(), roundf(winner.success_rate()));
+        success_rate.insert("mean".to_string(), roundf(measured.success_rate()));
+        if holdout.is_some() {
+            success_rate.insert("search".to_string(), roundf(winner.success_rate()));
+        }
         let mut cost = BTreeMap::new();
-        cost.insert("mean".to_string(), roundf(winner.mean_cost()));
+        cost.insert("mean".to_string(), roundf(measured.mean_cost()));
         let mut latency = BTreeMap::new();
-        latency.insert("p50".to_string(), roundf(winner.mean_latency()));
-        latency.insert("p95".to_string(), roundf(winner.p95_latency()));
+        latency.insert("p50".to_string(), roundf(measured.mean_latency()));
+        latency.insert("p95".to_string(), roundf(measured.p95_latency()));
 
         let mut stack_map = BTreeMap::new();
         stack_map.insert("name".to_string(), serde_json::json!(self.manifest.name()));
         stack_map.insert("selection".to_string(), serde_json::json!(self.manifest.objective.select));
         let mut search_map = BTreeMap::new();
         search_map.insert("strategy".to_string(), serde_json::json!(self.manifest.budget.strategy));
-        search_map.insert("candidates".to_string(), serde_json::json!(winner.n));
+        search_map.insert("candidates".to_string(), serde_json::json!(n_stacks));
+        search_map.insert("trials".to_string(), serde_json::json!(n_trials));
+        if let Some(h) = holdout {
+            search_map.insert("holdout-trials".to_string(), serde_json::json!(h.n));
+        }
 
         Ok(Lockfile {
             manifest_hash: Some(self.manifest.manifest_hash()),
@@ -456,12 +680,14 @@ impl Resolver {
                 eval_pack: Some(self.manifest.eval_packs().join(",")),
                 eval_pack_version: crate::tasks::packs_version(&self.manifest),
                 eval_pack_digest: Some(crate::tasks::packs_digest(&self.manifest)),
-                split: "search".into(),
-                trials: winner.n,
+                split: if holdout.is_some() { "holdout" } else { "search" }.into(),
+                trials: measured.n,
                 success_rate,
                 cost_usd_per_task: cost,
                 latency_s_per_task: latency,
-                judge: self.judge_model(winner),
+                judge: self.judge_model(measured),
+                // an agent CLI's trials ran on a stand-in, not the agent itself
+                simulated: self.profiles.get(&s.harness).is_some_and(|p| p.kind == "cli"),
                 ..Default::default()
             },
             verify: Verify::default(),
@@ -531,10 +757,51 @@ impl Resolver {
         h
     }
 
-    fn write_report(&self, lock: &Lockfile, _scores: &[StackScore]) -> Result<()> {
-        let report = self.workdir.join("report.md");
-        std::fs::write(&report, format!("# harness-lock report\n\n{}\n", lock.summary()))?;
+    /// `<workdir>/report.md`: the lock's summary and every stack's scores.
+    fn write_report(&self, lock: &Lockfile, report: &serde_json::Value) -> Result<()> {
+        let mut md = format!("# harness-lock report\n\n{}\n\n| stack | success | cost/task | p50 | trials |\n|---|---|---|---|---|\n", lock.summary());
+        for st in report["stacks"].as_array().into_iter().flatten() {
+            md.push_str(&format!(
+                "| {}{} | {:.0}% | ${:.4} | {:.2}s | {} |\n",
+                st["label"].as_str().unwrap_or_default(),
+                if st["winner"].as_bool() == Some(true) { " ★" } else { "" },
+                st["success-rate"].as_f64().unwrap_or_default() * 100.0,
+                st["cost-usd-per-task"].as_f64().unwrap_or_default(),
+                st["latency-s-p50"].as_f64().unwrap_or_default(),
+                st["trials"],
+            ));
+        }
+        if let Some(h) = report["holdout"].as_object() {
+            md.push_str(&format!("\nHoldout: {:.0}% on {} trials.\n", h["success-rate"].as_f64().unwrap_or_default() * 100.0, h["trials"]));
+        }
+        std::fs::write(self.workdir.join("report.md"), md)?;
         Ok(())
+    }
+}
+
+/// `[budget] max-spend-usd` as trials run: a trial starts only when the spend so far,
+/// plus what a trial has cost on average, stays within the cap. Cached trials are free.
+struct Spend {
+    cap: Option<f64>,
+    spent: f64,
+    ran: usize,
+}
+
+impl Spend {
+    fn new(cap: Option<f64>) -> Spend {
+        Spend { cap, spent: 0.0, ran: 0 }
+    }
+
+    fn allows(&self) -> bool {
+        let next = if self.ran > 0 { self.spent / self.ran as f64 } else { 0.0 };
+        self.cap.is_none_or(|cap| self.spent + next <= cap)
+    }
+
+    fn add(&mut self, r: &TrialResult, cached: bool) {
+        if !cached {
+            self.spent += r.cost_usd;
+            self.ran += 1;
+        }
     }
 }
 

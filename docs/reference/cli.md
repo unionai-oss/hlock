@@ -252,18 +252,26 @@ hlock decide hook USE --format FORMAT [--event EVENT] [--input JSON] [--lock PAT
 
 ## `resolve`
 
-Run the resolver over the manifest's search space, write `harness.lock`, and print the
-chosen stack with its evidence.
+Run the resolver over the manifest's search space, check the winner on the holdout split,
+write `harness.lock`, and print every stack's scores and the chosen stack with its
+evidence. See [Finding the best stack](../guides/resolve.md).
 
 ```bash
-hlock resolve [--backend local|devbox|cluster] [--harness NAME] [--workdir DIR]
+hlock resolve [--backend local|devbox|cluster] [--harness NAME] [--workdir DIR] [--dry-run] [--no-cache] [--json]
 ```
 
 | Option | Default | Description |
 |---|---|---|
 | `--backend` | manifest `[backend] target` | Where trials run |
 | `--harness` | manifest `[target] harness` | Target harness for this run. See [Harnesses](../guides/harnesses.md#resolve-for-a-target). |
-| `--workdir` | `.hlock` | Where trial artifacts go |
+| `--workdir` | `.hlock` | Where trial artifacts, the trial cache (`trials/`) and `report.md` go |
+| `--dry-run` | | List the stacks, the tasks in each split, and the trial counts, and run nothing |
+| `--no-cache` | | Run every trial again, even ones an earlier resolve ran |
+| `--json` | | Print `{"lock", "report", "notes"}`: the lock, every stack's scores and the holdout check, and the notes |
+
+Before any trial, `resolve` fails on an unknown manifest key, an unsupported `strategy`,
+`primary` or `select`, more than 200 stacks, or an agent CLI target paired with `reference:`
+models.
 
 ## `pin`
 
@@ -671,17 +679,31 @@ hlock tune [--depth LEVEL] [--data SOURCE] [OPTIONS]
 |---|---|---|
 | `--depth` | `auto` | `probe`, `prompt`, `hpo`, `ft`, `full`, or `auto` |
 | `--data` | `user` | `user`, `user:<paths>`, `synthetic[:n]`, or `hub:<pack>` |
-| `--harness NAME` | | Restrict to one harness |
+| `--harness NAME` | the lock's | Tune for this harness instead |
 | `--out FILE` | `harness.tune.lock` | Output file |
-| `--strict` | | Fail unless the result beats the base lock |
-| `--apply` | | Also adopt the result into `harness.lock` |
-| `--max-trials N` | | Cap the number of trials |
+| `--strict` | | Fail unless the result beats the lock's own configuration, measured on the same tasks |
+| `--apply` | | Also adopt the result into `harness.lock`, as `tune apply` does |
+| `--max-trials N` | | Cap the grid's trials in total, spread round-robin across the configurations |
 | `--backend` | manifest `[backend] target` | `local`, `devbox`, or `cluster` |
 | `--workdir DIR` | `.hlock` | Where trial artifacts go |
 | `-d`, `--detach` | | Run in the background as a tune job; can't be combined with `--apply` |
 
 The job commands below take a `JOB`: a job id or a unique prefix of one. Without it,
 they use the newest job. See [Running in the background](../guides/tune.md#running-in-the-background).
+
+### `tune apply`
+
+Adopt a tune lock as `harness.lock`, keeping the old lock in `harness.lock.prev` (`hlock
+upgrade --rollback` restores it). It refuses a tune lock for another harness than
+`[target] harness`, and a file that isn't a tune lock.
+
+```bash
+hlock tune apply [FILE]
+```
+
+| Option | Default | Description |
+|---|---|---|
+| `FILE` | `harness.tune.lock` | The tune lock to adopt |
 
 ### `tune list`
 

@@ -68,6 +68,7 @@ from ._hlock import (
     pull_remove,
     redact_text,
     resolve,
+    resolve_plan,
     run_code_harness,
     runtimes,
     scan_lock,
@@ -83,6 +84,7 @@ from ._hlock import (
     trust_approve,
     trust_list,
     tune,
+    tune_apply,
     upgrade,
 )
 
@@ -151,6 +153,7 @@ __all__ = [
     "pull_remove",
     "redact_text",
     "resolve",
+    "resolve_plan",
     "run_code_harness",
     "runtimes",
     "scan_lock",
@@ -166,5 +169,6 @@ __all__ = [
     "trust_approve",
     "trust_list",
     "tune",
+    "tune_apply",
     "upgrade",
 ]

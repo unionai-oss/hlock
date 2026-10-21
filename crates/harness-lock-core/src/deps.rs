@@ -2883,7 +2883,7 @@ impl Measurement {
 
 /// The stack a lock describes, for trials: its models, harness, skills, MCP servers and
 /// instruction files.
-fn lock_stack(lock: &Lockfile) -> crate::search::Stack {
+pub(crate) fn lock_stack(lock: &Lockfile) -> crate::search::Stack {
     let mut s = crate::search::Stack::default();
     for l in &lock.llm {
         s.llm.insert(l.role.clone(), format!("{}:{}", l.provider, l.model));

@@ -15,7 +15,7 @@ use crate::error::{Error, Result};
 use crate::hash::sha256_text;
 use crate::lockfile::{Decision, Evidence, Harness, Lockfile};
 use crate::manifest::Manifest;
-use crate::search::Stack;
+use crate::search::{Stack, StackScore};
 use crate::resolver::Resolver;
 use crate::LOCKFILE_PATH;
 
@@ -311,44 +311,68 @@ impl TuneSpec {
     }
 }
 
-/// Grid axes searched by `tune`. Deeper depths broaden the grid.
-/// Returns `(model, retries, temperature, tool_timeout_seconds)`.
-fn search_grid(manifest: &Manifest, depth: &str) -> Vec<(String, u32, f64, Option<u64>)> {
-    let mut models: Vec<String> = manifest
-        .candidates
-        .llm
-        .get("planner")
-        .map(|c| c.any_of.iter().map(|s| model_of(s)).collect())
-        .unwrap_or_default();
-    if models.is_empty() {
-        models.push("qwen-7b".to_string());
+/// The stack `tune` starts from: the base lock's (its harness, models, skills, tools,
+/// instructions, deciders and policy), else one built from the manifest's candidates.
+fn base_stack(base: Option<&Lockfile>, manifest: &Manifest, harness: Option<&str>) -> Stack {
+    let mut s = match base {
+        Some(lock) => {
+            let mut s = crate::deps::lock_stack(lock);
+            s.decision = if lock.decision.kind.is_empty() { "none".into() } else { lock.decision.kind.clone() };
+            s.retries = lock.policy.retries;
+            let params = lock.llm.iter().find(|l| l.role == "planner").or(lock.llm.first()).map(|l| l.params.clone()).unwrap_or_default();
+            s.temperature = Some(params.get("temperature").and_then(serde_json::Value::as_f64).unwrap_or(0.2));
+            s.tool_timeout_seconds = Some(params.get("tool_timeout_seconds").and_then(serde_json::Value::as_u64).unwrap_or(120));
+            s
+        }
+        None => Stack {
+            llm: BTreeMap::from([("planner".to_string(), manifest.candidates.llm.get("planner").and_then(|c| c.any_of.first().cloned()).unwrap_or_else(|| "reference:qwen-7b".into()))]),
+            harness: manifest.target_harness().or_else(|| manifest.candidates.harness.first().map(|h| h.name.clone())).unwrap_or_else(|| "reference".into()),
+            decision: manifest.candidates.decision.first().cloned().unwrap_or_else(|| "none".into()),
+            tools: manifest.tools.keys().cloned().collect(),
+            skills: manifest.skills.keys().cloned().collect(),
+            temperature: Some(0.2),
+            tool_timeout_seconds: Some(120),
+            ..Default::default()
+        },
+    };
+    if let Some(h) = harness {
+        s.harness = h.to_string();
     }
-    if matches!(depth, "ft" | "full") && !models.contains(&latest_model().to_string()) {
-        models.push(latest_model().to_string()); // "fine-tune" may serve the best open model
-    }
+    s
+}
+
+/// The role `tune` varies the model of: the planner, else the base's first role.
+fn tuned_role(base: &Stack) -> String {
+    if base.llm.contains_key("planner") || base.llm.is_empty() { "planner".into() } else { base.llm.keys().next().cloned().unwrap_or_default() }
+}
+
+/// The configurations `tune` tries: the base stack, varied over what tune tunes
+/// (retries, temperature, and at `full` the tool timeout), and over the planner model
+/// when `[candidates.llm.planner]` lists more than one. Deeper depths widen the grid.
+fn tune_grid(base: &Stack, manifest: &Manifest, depth: &str) -> Vec<Stack> {
+    let role = tuned_role(base);
+    let cands: Vec<String> = manifest.candidates.llm.get("planner").map(|c| c.any_of.clone()).unwrap_or_default();
+    let models: Vec<Option<String>> = if cands.len() > 1 { cands.into_iter().map(Some).collect() } else { vec![base.llm.get(&role).cloned()] };
     let retries: Vec<u32> = match depth {
         "probe" => vec![0],
         "prompt" => vec![0, 1],
-        _ => vec![0, 1, 3], // hpo | ft | full
+        _ => vec![0, 1, 3],
     };
-    // temperature is an HPO axis only once we are doing hyperparameter search
-    let temps: Vec<f64> = if matches!(depth, "hpo" | "ft" | "full") {
-        vec![0.2, 0.7]
-    } else {
-        vec![0.2]
-    };
-    // tool timeout-seconds is a full-depth HPO axis
-    let timeouts: Vec<Option<u64>> = if depth == "full" {
-        vec![Some(30), Some(120)]
-    } else {
-        vec![Some(120)]
-    };
+    let temps: Vec<f64> = if matches!(depth, "hpo" | "ft" | "full") { vec![0.2, 0.7] } else { vec![0.2] };
+    let timeouts: Vec<u64> = if depth == "full" { vec![30, 120] } else { vec![120] };
     let mut out = Vec::new();
     for m in &models {
         for &r in &retries {
             for &t in &temps {
                 for &tt in &timeouts {
-                    out.push((m.clone(), r, t, tt));
+                    let mut s = base.clone();
+                    if let Some(m) = m {
+                        s.llm.insert(role.clone(), m.clone());
+                    }
+                    s.retries = r;
+                    s.temperature = Some(t);
+                    s.tool_timeout_seconds = Some(tt);
+                    out.push(s);
                 }
             }
         }
@@ -356,26 +380,47 @@ fn search_grid(manifest: &Manifest, depth: &str) -> Vec<(String, u32, f64, Optio
     out
 }
 
+/// A stage of the tune pipeline, for the report: whether it ran, and why not.
+fn stage(name: &str, ran: bool, detail: impl Into<String>) -> serde_json::Value {
+    serde_json::json!({"stage": name, "ran": ran, "detail": detail.into()})
+}
+
 /// `hlock tune` -> `harness.tune.lock` (§5.9).
 ///
-/// Runs the depth-aware pipeline: **data** -> (depth>=prompt) **prompt search** ->
-/// **HPO trials** -> (depth>=ft) **LoRA fine-tune** -> (depth==full) **holdout
-/// re-validation**, on the configured backend. On `cluster`/Union the heavy stages
-/// are lifted to real Flyte tasks by the Python worker (GPUs for fine-tuning,
-/// images, caching), and their provenance/digests are recorded in the tune lock.
+/// Starts from the base lock's stack and varies only what tune tunes: **data** ->
+/// (depth>=prompt) **prompt search** -> **HPO trials** -> (depth>=ft) **LoRA
+/// fine-tune** -> (depth==full) **holdout re-validation**. The base configuration is
+/// measured on the same tasks first, as the baseline. Stages that need the worker run
+/// on `devbox`/`cluster` only, and a stage that didn't run isn't recorded.
 pub fn tune(manifest: Manifest, spec: &TuneSpec) -> Result<TuneOutcome> {
+    manifest.check_search()?;
     let depth = spec.resolved_depth().to_string();
-    let backend = crate::worker::Backend::parse(
-        spec.backend.as_deref().unwrap_or(manifest.backend_target().as_str()),
-    );
+    let backend = crate::worker::Backend::parse(spec.backend.as_deref().unwrap_or(manifest.backend_target().as_str()));
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let lock_path = spec.lock.clone().unwrap_or_else(|| cwd.join(LOCKFILE_PATH));
-    // no lock means no baseline; a lock that doesn't load must not become a baseline of
-    // 0 that `--strict` lets anything beat
     let base_lock = load_if_present(&lock_path)?;
-    let baseline_sr = base_lock.as_ref().map(baseline_sr).unwrap_or(0.0);
+    let base = base_stack(base_lock.as_ref(), &manifest, spec.harness.as_deref());
 
-    let mut resolver = crate::resolver::Resolver::with_backend(manifest.clone(), &spec.workdir, backend);
+    // trials run the base's harness: its code harness for real, else the reference adapter
+    let mut m = manifest.clone();
+    m.candidates.harness = vec![crate::manifest::HarnessCandidate { name: base.harness.clone(), ..Default::default() }];
+    let mut resolver = Resolver::with_backend(m, &spec.workdir, backend);
+    resolver.harness_override = Some(base.harness.clone());
+    resolver.prepare_trials()?;
+    let notes = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let sink = notes.clone();
+    *resolver.on_event.lock().map_err(|_| Error::Tuning("tune: event channel poisoned".into()))? = Some(Box::new(move |e: serde_json::Value| {
+        if let (Some("note"), Some(t)) = (e["kind"].as_str(), e["text"].as_str()) {
+            if let Ok(mut n) = sink.lock() {
+                n.push(t.to_string());
+            }
+        }
+    }));
+    let note = |t: String| {
+        if let Ok(mut n) = notes.lock() {
+            n.push(t);
+        }
+    };
     let search_tasks = resolver.load_packs();
     if search_tasks.is_empty() {
         return Err(Error::Tuning("no tasks loaded — cannot tune".into()));
@@ -383,227 +428,239 @@ pub fn tune(manifest: Manifest, spec: &TuneSpec) -> Result<TuneOutcome> {
     let seeds = manifest.seeds();
     let ws_root = spec.workdir.join("runs");
     std::fs::create_dir_all(&ws_root)?;
+    let worker = backend.needs_worker().then(crate::worker::PythonWorker::new);
+    if worker.is_none() && (prompt_depth(&depth) && depth != "hpo" || ft_depth(&depth)) {
+        note(format!("only the HPO grid runs on the {} backend; the data, prompt and fine-tune stages need devbox or cluster", backend.as_str()));
+    }
 
     let n_synthetic = parse_synthetic(&spec.data);
     let data_mode = if n_synthetic > 0 { "synthetic" } else { "user-traces" };
-
-    let worker = if backend.needs_worker() {
-        Some(crate::worker::PythonWorker::new())
-    } else {
-        None
-    };
+    let grid = tune_grid(&base, &manifest, &depth);
     let plan_value = serde_json::json!({
         "depth": depth,
         "data": spec.data,
         "data_mode": data_mode,
-        "harness": spec.harness,
+        "harness": base.harness,
         "max_trials": spec.max_trials,
         "axes": {
-            "retries": if depth == "probe" { serde_json::json!([0]) } else { serde_json::json!([0,1,3]) },
-            "temperature": if matches!(depth.as_str(), "hpo" | "ft" | "full") { serde_json::json!([0.2,0.7]) } else { serde_json::json!([0.2]) },
-            "tool_timeout_seconds": if depth == "full" { serde_json::json!([30,120]) } else { serde_json::json!([120]) },
+            "retries": grid.iter().map(|s| s.retries).collect::<std::collections::BTreeSet<_>>(),
+            "temperature": grid.iter().filter_map(|s| s.temperature).map(|t| (t * 100.0) as i64).collect::<std::collections::BTreeSet<_>>().into_iter().map(|t| t as f64 / 100.0).collect::<Vec<_>>(),
+            "tool_timeout_seconds": grid.iter().filter_map(|s| s.tool_timeout_seconds).collect::<std::collections::BTreeSet<_>>(),
         },
     });
+    let mut stages = Vec::new();
 
     // ---- stage 1: data (user traces or synthetic) ----
     let mut data_meta = serde_json::json!({});
-    if let Some(w) = &worker {
-        let kind = if n_synthetic > 0 { "data.synthetic" } else { "data.load" };
-        let ws = ws_root.join("stage_data");
-        match stage_run(w, backend.as_str(), kind, &ws, &plan_value) {
-            Ok(v) => data_meta = v,
-            Err(Error::Worker(e)) => eprintln!("warn: tune data stage: {e}"),
-            Err(e) => return Err(e),
+    match &worker {
+        Some(w) => {
+            let kind = if n_synthetic > 0 { "data.synthetic" } else { "data.load" };
+            match stage_run(w, backend.as_str(), kind, &ws_root.join("stage_data"), &plan_value) {
+                Ok(v) => {
+                    let rows = v.get("rows").and_then(serde_json::Value::as_u64).unwrap_or(0);
+                    if rows == 0 && n_synthetic == 0 {
+                        note(format!("--data {} found no traces, so there's no data to tune on", spec.data));
+                    }
+                    stages.push(stage("data", rows > 0, format!("{rows} rows")));
+                    if rows > 0 {
+                        data_meta = v;
+                    }
+                }
+                Err(Error::Worker(e)) => {
+                    note(format!("tune data stage: {e}"));
+                    stages.push(stage("data", false, e));
+                }
+                Err(e) => return Err(e),
+            }
         }
-    } else {
-        data_meta = serde_json::json!({ "_placeholder": true, "rows": 0 });
+        None => stages.push(stage("data", false, format!("needs devbox or cluster, not {}", backend.as_str()))),
     }
 
     // ---- stage 2: prompt search (depth >= prompt) ----
     let mut prompt_meta = serde_json::json!({});
     let mut tuned_prompt: Vec<String> = Vec::new();
     if prompt_depth(&depth) {
-        if let Some(w) = &worker {
-            let ws = ws_root.join("stage_prompt");
-            match stage_run(w, backend.as_str(), "prompt.search", &ws, &plan_value) {
+        match &worker {
+            Some(w) => match stage_run(w, backend.as_str(), "prompt.search", &ws_root.join("stage_prompt"), &plan_value) {
                 Ok(v) => {
-                    if let Some(p) = v.get("best_prompt").and_then(serde_json::Value::as_str) {
+                    if let Some(p) = v.get("best_prompt").and_then(serde_json::Value::as_str).filter(|_| v.get("_placeholder").is_none()) {
                         tuned_prompt = vec![p.to_string()];
+                        prompt_meta = v;
                     }
-                    prompt_meta = v;
+                    stages.push(stage("prompt", !tuned_prompt.is_empty(), if tuned_prompt.is_empty() { "no prompt found" } else { "searched" }));
                 }
-                Err(Error::Worker(e)) => eprintln!("warn: tune prompt stage: {e}"),
+                Err(Error::Worker(e)) => {
+                    note(format!("tune prompt stage: {e}"));
+                    stages.push(stage("prompt", false, e));
+                }
                 Err(e) => return Err(e),
-            }
+            },
+            None => stages.push(stage("prompt", false, format!("needs devbox or cluster, not {}", backend.as_str()))),
         }
     }
-
-    // ---- stage 3: HPO trials over the grid ----
-    let mut scored: Vec<(String, u32, f64, Option<u64>, f64, f64, usize)> = Vec::new();
-    for (model, retries, temp, tto) in search_grid(&manifest, &depth) {
-        let stack = Stack {
-            llm: BTreeMap::from([("planner".to_string(), format!("reference:{model}"))]),
-            harness: spec.harness.clone().unwrap_or_else(|| "reference".into()),
-            pattern: "single-agent".into(),
-            decision: manifest.candidates.decision.first().cloned().unwrap_or_else(|| "none".into()),
-            tools: manifest.tools.keys().cloned().collect(),
-            skills: manifest.skills.keys().cloned().collect(),
-            instructions: tuned_prompt.clone(),
-            max_steps: 40,
-            max_cost_usd_per_task: None,
-            retries,
-            temperature: Some(temp),
-            tool_timeout_seconds: tto,
-            deciders: BTreeMap::new(),
-        };
-        let mut ok = 0u64;
-        let mut n = 0u64;
-        let mut cost = 0.0;
-        let mut budget_hit = false;
-        for task in &search_tasks {
-            for seed in 0..seeds {
-                if let Some(max) = spec.max_trials {
-                    if n >= max as u64 {
-                        budget_hit = true;
-                        break;
-                    }
-                }
-                let tr = resolver.run_trial(&stack, task, seed, &ws_root);
-                if tr.success {
-                    ok += 1;
-                }
-                cost += tr.cost_usd;
-                n += 1;
-            }
-            if budget_hit {
-                break;
-            }
-        }
-        if n > 0 {
-            scored.push((model, retries, temp, tto, ok as f64 / n as f64, cost / n as f64, n as usize));
-        }
-    }
-
-    // pick best (highest success, then lowest cost)
-    let best = scored
-        .iter()
-        .max_by(|a, b| a.4.total_cmp(&b.4).then(b.5.total_cmp(&a.5)));
-    let Some((bm, br, btemp, btto, bs, bc, bn_trials)) = best.cloned() else {
-        return Err(Error::Tuning("tune produced no candidate".into()));
+    let with_prompt = |s: &Stack| {
+        let mut s = s.clone();
+        s.instructions.extend(tuned_prompt.iter().cloned());
+        s
     };
 
-    if spec.strict && bs <= baseline_sr {
+    // ---- baseline: the base configuration, on the same tasks and seeds ----
+    let pairs: Vec<(&crate::tasks::Task, u64)> = (0..seeds).flat_map(|seed| search_tasks.iter().map(move |t| (t, seed))).collect();
+    let run_all = |stack: &Stack| -> Vec<crate::search::TrialResult> { pairs.iter().map(|(t, seed)| resolver.run_trial(stack, t, *seed, &ws_root)).collect() };
+    let baseline_trials = run_all(&base);
+    let baseline = StackScore { stack: base.clone(), n: baseline_trials.len(), trials: baseline_trials };
+
+    // ---- stage 3: HPO trials over the grid, the budget spent round-robin ----
+    let configs: Vec<Stack> = grid.iter().map(&with_prompt).collect();
+    let mut results: Vec<Vec<crate::search::TrialResult>> = vec![Vec::new(); configs.len()];
+    let max = spec.max_trials.unwrap_or(usize::MAX);
+    let mut n = 0usize;
+    'budget: for (i, (task, seed)) in pairs.iter().enumerate() {
+        for (cfg, out) in configs.iter().zip(results.iter_mut()) {
+            // the base configuration's trials are already the baseline's
+            if cfg.hash() == base.hash() {
+                out.push(baseline.trials[i].clone());
+                continue;
+            }
+            if n >= max {
+                break 'budget;
+            }
+            out.push(resolver.run_trial(cfg, task, *seed, &ws_root));
+            n += 1;
+        }
+    }
+    if n >= max && spec.max_trials.is_some() {
+        note(format!("--max-trials {max} cut the grid; configurations were measured round-robin"));
+    }
+    let scored: Vec<StackScore> = configs.iter().cloned().zip(results).filter(|(_, t)| !t.is_empty()).map(|(stack, trials)| StackScore { stack, n: trials.len(), trials }).collect();
+    stages.push(stage("hpo", true, format!("{} configs", scored.len())));
+
+    // the best: highest success, then lowest cost, then closest to the base
+    let role = tuned_role(&base);
+    let distance = |s: &Stack| (s.retries.abs_diff(base.retries), s.temperature != base.temperature, s.llm.get(&role) != base.llm.get(&role), s.tool_timeout_seconds != base.tool_timeout_seconds);
+    let winner = scored
+        .iter()
+        .min_by(|a, b| b.success_rate().total_cmp(&a.success_rate()).then(a.mean_cost().total_cmp(&b.mean_cost())).then(distance(&a.stack).cmp(&distance(&b.stack))))
+        .cloned()
+        .ok_or_else(|| Error::Tuning("tune produced no candidate".into()))?;
+
+    if spec.strict && winner.success_rate() <= baseline.success_rate() {
         return Err(Error::Tuning(format!(
-            "--strict: tuned success-rate {bs:.2} does not beat the base {baseline_sr:.2}"
+            "--strict: tuned success-rate {:.2} does not beat the base configuration's {:.2}, measured on the same tasks",
+            winner.success_rate(),
+            baseline.success_rate()
         )));
     }
 
-    let winner_stack = Stack {
-        llm: BTreeMap::from([("planner".to_string(), format!("reference:{bm}"))]),
-        harness: spec.harness.clone().unwrap_or_else(|| "reference".into()),
-        pattern: "single-agent".into(),
-        decision: manifest.candidates.decision.first().cloned().unwrap_or_else(|| "none".into()),
-        tools: manifest.tools.keys().cloned().collect(),
-        skills: manifest.skills.keys().cloned().collect(),
-        instructions: tuned_prompt.clone(),
-        max_steps: 40,
-        max_cost_usd_per_task: None,
-        retries: br,
-        temperature: Some(btemp),
-        tool_timeout_seconds: btto,
-        deciders: BTreeMap::new(),
-    };
+    // what the tuned prompt adds: the winner with and without it
+    let prompt_gain = (!tuned_prompt.is_empty()).then(|| {
+        let mut plain = winner.stack.clone();
+        plain.instructions.retain(|i| !tuned_prompt.contains(i));
+        let t = run_all(&plain);
+        winner.success_rate() - StackScore { stack: plain, n: t.len(), trials: t }.success_rate()
+    });
 
     // ---- stage 4: fine-tune (depth >= ft) ----
     let mut ft_meta = serde_json::json!({});
     if ft_depth(&depth) {
-        if let Some(w) = &worker {
-            let ws = ws_root.join("stage_ft");
-            let ft_plan = serde_json::json!({
-                "depth": depth,
-                "data": spec.data,
-                "data_mode": data_mode,
-                "trainset_digest": data_meta.get("digest").cloned().unwrap_or(serde_json::Value::Null),
-            });
-            match stage_run(w, backend.as_str(), "ft.lora", &ws, &ft_plan) {
-                Ok(v) => ft_meta = v,
-                Err(Error::Worker(e)) => eprintln!("warn: tune fine-tune stage: {e}"),
-                Err(e) => return Err(e),
+        match &worker {
+            Some(w) => {
+                let ft_plan = serde_json::json!({
+                    "depth": depth,
+                    "data": spec.data,
+                    "data_mode": data_mode,
+                    "trainset_digest": data_meta.get("digest").cloned().unwrap_or(serde_json::Value::Null),
+                });
+                match stage_run(w, backend.as_str(), "ft.lora", &ws_root.join("stage_ft"), &ft_plan) {
+                    Ok(v) if v.get("adapter_digest").is_some() && v.get("_placeholder").is_none() => {
+                        stages.push(stage("finetune", true, "trained"));
+                        ft_meta = v;
+                    }
+                    Ok(_) => stages.push(stage("finetune", false, "no adapter trained")),
+                    Err(Error::Worker(e)) => {
+                        note(format!("tune fine-tune stage: {e}"));
+                        stages.push(stage("finetune", false, e));
+                    }
+                    Err(e) => return Err(e),
+                }
             }
+            None => stages.push(stage("finetune", false, format!("needs devbox or cluster, not {}", backend.as_str()))),
         }
     }
 
     // ---- stage 5: holdout re-validation (depth == full) ----
-    let (es, ec, en, esplit) = if depth == "full" {
-        let hold = resolver.holdout();
+    let mut measured = winner.clone();
+    let mut split = "search".to_string();
+    if depth == "full" {
+        let hold: Vec<crate::tasks::Task> = resolver.holdout().to_vec();
         if hold.is_empty() {
-            (bs, bc, bn_trials as usize, "search".to_string())
+            stages.push(stage("holdout", false, "no holdout tasks"));
         } else {
-            let mut ok = 0u64;
-            let mut n = 0u64;
-            let mut cost = 0.0;
-            for task in hold {
-                for seed in 0..seeds {
-                    let tr = resolver.run_trial(&winner_stack, task, seed, &ws_root);
-                    if tr.success {
-                        ok += 1;
-                    }
-                    cost += tr.cost_usd;
-                    n += 1;
-                }
-            }
-            (ok as f64 / n.max(1) as f64, cost / (n as f64).max(1.0), n as usize, "holdout".to_string())
+            let t: Vec<crate::search::TrialResult> = (0..seeds).flat_map(|seed| hold.iter().map(move |t| (t, seed))).map(|(t, seed)| resolver.run_trial(&winner.stack, t, seed, &ws_root)).collect();
+            stages.push(stage("holdout", true, format!("{} trials", t.len())));
+            measured = StackScore { stack: winner.stack.clone(), n: t.len(), trials: t };
+            split = "holdout".into();
         }
-    } else {
-        (bs, bc, bn_trials as usize, "search".to_string())
-    };
+    }
 
-    let tune_lock = build_tuned_lock(
-        &manifest,
-        winner_stack,
-        es,
-        ec,
-        &base_lock,
-        &data_mode,
-        &spec.data,
-        &depth,
-        scored.len(),
-        en,
-        backend.as_str(),
-        &prompt_meta,
-        &ft_meta,
-        &data_meta,
-        &esplit,
-    );
+    let simulated = resolver.adapter_for(&winner.stack) == "reference" && base.harness != "reference";
+    let tune_lock = build_tuned_lock(&manifest, base_lock.as_ref(), &winner, &measured, &split, scored.len(), backend.as_str(), &prompt_meta, prompt_gain, &ft_meta, &data_meta, &spec.data, data_mode, simulated, &plan_value);
 
-    let out_path = &spec.out;
-    if let Some(parent) = out_path.parent() {
+    if let Some(parent) = spec.out.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    tune_lock.save(out_path)?;
+    tune_lock.save(&spec.out)?;
+    let previous = if spec.apply { tune_apply(&spec.out, &lock_path, Some(&manifest))? } else { None };
 
-    if spec.apply {
-        tune_lock.save(&lock_path)?;
-    }
-
+    let best = &winner.stack;
+    let notes = notes.lock().map(|n| n.clone()).unwrap_or_default();
     let report = serde_json::json!({
         "depth": depth,
         "data": spec.data,
         "data_mode": data_mode,
         "backend": backend.as_str(),
-        "eval_split": esplit,
+        "harness": base.harness,
+        "eval_split": split,
         "grid": scored.len(),
-        "best": {"model": bm, "retries": br, "temperature": btemp, "tool_timeout_seconds": btto, "success_rate": es, "cost_usd": ec, "trials": en},
-        "baseline_success_rate": baseline_sr,
-        "gain_success_rate": es - baseline_sr,
-        "path": out_path.to_string_lossy(),
+        "trials": n,
+        "stages": stages,
+        "best": {"model": best.llm.get(&role), "retries": best.retries, "temperature": best.temperature, "tool_timeout_seconds": best.tool_timeout_seconds, "success_rate": measured.success_rate(), "cost_usd": measured.mean_cost(), "trials": measured.n},
+        "baseline": {"success_rate": baseline.success_rate(), "trials": baseline.n, "measured": true},
+        "baseline_success_rate": baseline.success_rate(),
+        "gain_success_rate": winner.success_rate() - baseline.success_rate(),
+        "simulated": simulated,
+        "notes": notes,
+        "path": spec.out.to_string_lossy(),
         "applied": spec.apply,
+        "previous": previous.map(|p| p.to_string_lossy().into_owned()),
     });
-    Ok(TuneOutcome {
-        path: out_path.clone(),
-        lock: tune_lock,
-        report,
-    })
+    Ok(TuneOutcome { path: spec.out.clone(), lock: tune_lock, report })
+}
+
+/// Adopt the tune lock at `tuned` as the lock at `lock_path` (`hlock tune apply`, `tune
+/// --apply`), keeping the old one as `<lock>.prev`. Refuses a tune lock for another harness
+/// than the manifest's `[target] harness`. Returns the `.prev` path when there was a lock.
+pub fn tune_apply(tuned: &std::path::Path, lock_path: &std::path::Path, manifest: Option<&Manifest>) -> Result<Option<PathBuf>> {
+    let t = Lockfile::load(tuned)?;
+    if t.kind.as_deref() != Some("tuned") {
+        return Err(Error::Lockfile(format!("{} isn't a tune lock; write one with hlock tune", tuned.display())));
+    }
+    if let Some(target) = manifest.and_then(Manifest::target_harness) {
+        let ctx = crate::profiles::Ctx::from_process();
+        let want = crate::profiles::Registry::load_for(&ctx, manifest).ok().and_then(|r| r.harness(&target).map(|p| p.id.clone())).unwrap_or(target);
+        if want != t.harness.name {
+            return Err(Error::Tuning(format!("{} is for harness {:?}, but harness.toml targets {want:?}; re-run hlock tune", tuned.display(), t.harness.name)));
+        }
+    }
+    let prev = PathBuf::from(format!("{}.prev", lock_path.display()));
+    let kept = if lock_path.is_file() {
+        std::fs::copy(lock_path, &prev)?;
+        Some(prev)
+    } else {
+        None
+    };
+    t.save(lock_path)?;
+    Ok(kept)
 }
 
 pub struct TuneOutcome {
@@ -612,163 +669,133 @@ pub struct TuneOutcome {
     pub report: serde_json::Value,
 }
 
+/// The tune lock: the base lock with the winner's model and policy, the measured
+/// evidence, and a `[tune]` table recording only the stages that ran.
+#[allow(clippy::too_many_arguments)]
 fn build_tuned_lock(
     manifest: &Manifest,
-    stack: Stack,
-    success: f64,
-    cost: f64,
-    base: &Option<Lockfile>,
-    data_mode: &str,
-    data_arg: &str,
-    depth: &str,
+    base: Option<&Lockfile>,
+    winner: &StackScore,
+    measured: &StackScore,
+    split: &str,
     grid_size: usize,
-    trials: usize,
     backend: &str,
     prompt_meta: &serde_json::Value,
+    prompt_gain: Option<f64>,
     ft_meta: &serde_json::Value,
     data_meta: &serde_json::Value,
-    eval_split: &str,
+    data_arg: &str,
+    data_mode: &str,
+    simulated: bool,
+    plan: &serde_json::Value,
 ) -> Lockfile {
-    let mut success_map = BTreeMap::new();
-    success_map.insert("mean".to_string(), (success * 1e4).round() / 1e4);
-    let mut cost_map = BTreeMap::new();
-    cost_map.insert("mean".to_string(), (cost * 1e6).round() / 1e6);
-
-    // Prompt + fine-tune digests come from the real worker stages when they ran
-    // (prompt.search / ft.lora); only when a depth demands a stage but there was
-    // no worker (pure-local) do we fall back to a flagged placeholder.
-    let mut proof_prompt = Vec::new();
-    if prompt_depth(depth) {
-        let placeholder = prompt_meta
-            .get("_placeholder")
-            .map(|_| true)
-            .or_else(|| prompt_meta.get("best_prompt").map(|_| false))
-            .unwrap_or(true);
-        proof_prompt.push(serde_json::json!({
-            "component": "harness.system-prompt",
-            "before": str_field(prompt_meta, "before_digest").unwrap_or_else(|| sha256_text("base system prompt")),
-            "after": str_field(prompt_meta, "after_digest").unwrap_or_else(|| sha256_text("tuned system prompt (depth >= prompt)")),
-            "gain": {"success-rate": format!("{success:+.2}")},
-            "_placeholder": placeholder,
-        }));
-    }
-
-    let mut finetune = Vec::new();
-    if ft_depth(depth) {
-        let placeholder = ft_meta.get("adapter_digest").is_none()
-            || ft_meta.get("_placeholder").is_some();
-        finetune.push(serde_json::json!({
-            "target": "decision",
-            "base": str_field(ft_meta, "base_model").unwrap_or_else(|| "hf://hlock/decider-1.5b".into()),
-            "data": format!("traces://{data_arg}"),
-            "adapter": {"lora": str_field(ft_meta, "adapter_digest").unwrap_or_else(|| "store://sha256:PLAN".into())},
-            "samples": num_field(ft_meta, "samples").unwrap_or(0.0) as i64,
-            "loss": num_field(ft_meta, "loss").unwrap_or(0.0),
-            "_placeholder": placeholder,
-        }));
-    }
-
-    let base_lock_hash = base
-        .as_ref()
-        .map(|l| sha256_text(&serde_json::to_string(l).unwrap_or_default()))
-        .unwrap_or_default();
-
-    let mut lf = Lockfile::default();
+    let stack = &winner.stack;
+    let mut lf = base.cloned().unwrap_or_default();
+    lf.base_lock = base.map(|l| sha256_text(&serde_json::to_string(l).unwrap_or_default()));
     lf.manifest_hash = Some(manifest.manifest_hash());
-    lf.base_lock = if base_lock_hash.is_empty() { None } else { Some(base_lock_hash) };
     lf.kind = Some("tuned".to_string());
-    let mut stack_map = BTreeMap::new();
-    stack_map.insert("name".to_string(), serde_json::json!(manifest.name()));
-    stack_map.insert("selection".to_string(), serde_json::json!("tune"));
-    lf.stack = stack_map;
-    lf.decision = Decision {
-        kind: stack.decision.clone(),
-        decisions: if stack.decision == "none" { vec![] } else { vec!["retry".into(), "stop".into()] },
-        ..Default::default()
+    lf.stack.entry("name".to_string()).or_insert_with(|| serde_json::json!(manifest.name()));
+    lf.stack.insert("selection".to_string(), serde_json::json!("tune"));
+    if base.is_none() {
+        lf.harness = Harness { name: stack.harness.clone(), pattern: Some(stack.pattern.clone()), ..Default::default() };
+        lf.decision = Decision {
+            kind: stack.decision.clone(),
+            decisions: if stack.decision == "none" { vec![] } else { vec!["retry".into(), "stop".into()] },
+            ..Default::default()
+        };
+        lf.policy = crate::lockfile::Policy { max_steps: 40, human_approval: "never".into(), ..Default::default() };
+    }
+    // the tuned model and its parameters, keeping the provider
+    let role = tuned_role(stack);
+    let spec = stack.llm.get(&role).cloned().unwrap_or_default();
+    let (provider, model) = match spec.split_once(':') {
+        Some((p, m)) if !m.is_empty() => (p.to_string(), m.to_string()),
+        _ => ("reference".to_string(), spec.clone()),
     };
-    lf.harness = Harness { name: stack.harness.clone(), pattern: Some(stack.pattern.clone()), ..Default::default() };
-    lf.llm = vec![crate::lockfile::LLM {
-        role: "planner".into(),
-        provider: "reference".into(),
-        model: stack.llm.get("planner").cloned().unwrap_or_default(),
-        resolved_from: None,
-        params: BTreeMap::from([
-            ("retries".to_string(), serde_json::json!(stack.retries)),
-            ("temperature".to_string(), serde_json::json!(stack.temperature.unwrap_or(0.2))),
-            ("tool_timeout_seconds".to_string(), serde_json::json!(stack.tool_timeout_seconds.unwrap_or(120))),
-        ]),
-        fingerprint: None,
-        ..Default::default()
-    }];
-    lf.policy = crate::lockfile::Policy {
-        retries: stack.retries,
-        max_steps: 40,
-        human_approval: "never".into(),
-        ..Default::default()
-    };
+    let params = [
+        ("retries".to_string(), serde_json::json!(stack.retries)),
+        ("temperature".to_string(), serde_json::json!(stack.temperature.unwrap_or(0.2))),
+        ("tool_timeout_seconds".to_string(), serde_json::json!(stack.tool_timeout_seconds.unwrap_or(120))),
+    ];
+    match lf.llm.iter_mut().find(|l| l.role == role) {
+        Some(l) => {
+            if l.provider != provider || l.model != model {
+                l.fingerprint = None;
+                l.resolved_from = Some(spec.clone());
+            }
+            l.provider = provider;
+            l.model = model;
+            l.params.extend(params);
+        }
+        None => lf.llm.push(crate::lockfile::LLM { role, provider, model, resolved_from: Some(spec.clone()), params: params.into_iter().collect(), ..Default::default() }),
+    }
+    lf.policy.retries = stack.retries;
+    let r4 = |v: f64| (v * 1e4).round() / 1e4;
+    let mut success = BTreeMap::from([("mean".to_string(), r4(measured.success_rate()))]);
+    if split == "holdout" {
+        success.insert("search".to_string(), r4(winner.success_rate()));
+    }
     lf.evidence = Evidence {
         eval_pack: Some(manifest.eval_packs().join(",")),
         eval_pack_version: crate::tasks::packs_version(manifest),
         eval_pack_digest: Some(crate::tasks::packs_digest(manifest)),
-        split: eval_split.into(),
-        trials,
-        success_rate: success_map,
-        cost_usd_per_task: cost_map,
+        split: split.into(),
+        trials: measured.n,
+        success_rate: success,
+        cost_usd_per_task: BTreeMap::from([("mean".to_string(), round6(measured.mean_cost()))]),
+        latency_s_per_task: BTreeMap::from([("p50".to_string(), r4(measured.mean_latency())), ("p95".to_string(), r4(measured.p95_latency()))]),
+        simulated,
         ..Default::default()
     };
-
-    // data provenance (real digest/rows/split when a worker stage ran)
-    let mut data_block = serde_json::json!({"source": data_arg, "mode": data_mode, "redact": true});
-    if let Some(d) = data_meta.get("digest").and_then(serde_json::Value::as_str) {
-        data_block["digest"] = serde_json::json!(d);
-    }
-    if let Some(v) = data_meta.get("rows") {
-        data_block["rows"] = v.clone();
-    }
-    if let Some(v) = data_meta.get("split") {
-        data_block["split"] = v.clone();
-    }
-    if data_meta.get("_placeholder").is_some() {
-        data_block["_placeholder"] = serde_json::json!(true);
+    lf.provenance.backend = backend.to_string();
+    if lf.context.isolation.is_empty() {
+        lf.context.isolation = manifest.context.get("isolation").and_then(serde_json::Value::as_str).unwrap_or("locked-only").into();
     }
 
-    // provenance: union run ids + budget (gpu-h / spend) aggregated across stages
-    let mut run_ids: Vec<String> = Vec::new();
-    for m in [prompt_meta, ft_meta, data_meta] {
-        if let Some(r) = m.get("run").and_then(serde_json::Value::as_str) {
-            run_ids.push(r.to_string());
-        }
-    }
-    let run = if run_ids.is_empty() {
-        format!("worker://{backend}")
-    } else {
-        run_ids.join(",")
-    };
-    let stage_gpu: f64 = [prompt_meta, ft_meta, data_meta]
-        .iter()
-        .map(|m| num_field(m, "gpu_h").unwrap_or(0.0))
-        .sum();
-    let stage_spend: f64 = [prompt_meta, ft_meta, data_meta]
-        .iter()
-        .map(|m| num_field(m, "cost_usd").unwrap_or(0.0))
-        .sum();
-    let spend = cost * trials as f64 + stage_spend;
-
-    lf.tune = Some(serde_json::json!({
+    let mut tune = serde_json::json!({
         "hpo": {
-            "axes": {
-                "retries": [0,1,3],
-                "temperature": [0.2,0.7],
-                "tool_timeout_seconds": [30,120],
-            },
+            "axes": plan["axes"],
             "trials": grid_size,
-            "best": {"model": stack.llm.get("planner"), "retries": stack.retries, "temperature": stack.temperature, "tool_timeout_seconds": stack.tool_timeout_seconds},
+            "best": {"model": spec, "retries": stack.retries, "temperature": stack.temperature, "tool_timeout_seconds": stack.tool_timeout_seconds},
         },
-        "prompt": {"applied": proof_prompt},
-        "finetune": finetune,
-        "data": data_block,
-        "provenance": {"run": run, "budget": {"spend-usd": round6(spend), "gpu-h": round6(stage_gpu)}},
-    }));
+    });
+    if let Some(gain) = prompt_gain {
+        tune["prompt"] = serde_json::json!({"applied": [{
+            "component": "harness.system-prompt",
+            "before": str_field(prompt_meta, "before_digest").unwrap_or_else(|| sha256_text("base system prompt")),
+            "after": str_field(prompt_meta, "after_digest").unwrap_or_else(|| sha256_text(prompt_meta["best_prompt"].as_str().unwrap_or_default())),
+            "gain": {"success-rate": format!("{gain:+.2}")},
+        }]});
+    }
+    if let Some(d) = str_field(ft_meta, "adapter_digest") {
+        tune["finetune"] = serde_json::json!([{
+            "target": "decision",
+            "base": str_field(ft_meta, "base_model").unwrap_or_default(),
+            "data": format!("traces://{data_arg}"),
+            "adapter": {"lora": d},
+            "samples": num_field(ft_meta, "samples").unwrap_or(0.0) as i64,
+            "loss": num_field(ft_meta, "loss").unwrap_or(0.0),
+        }]);
+    }
+    if data_meta.get("rows").is_some() {
+        let mut data = serde_json::json!({"source": data_arg, "mode": data_mode, "redact": true, "rows": data_meta["rows"]});
+        for k in ["digest", "split"] {
+            if let Some(v) = data_meta.get(k) {
+                data[k] = v.clone();
+            }
+        }
+        tune["data"] = data;
+    }
+    // provenance: union run ids + budget (gpu-h / spend) aggregated across stages
+    let metas = [prompt_meta, ft_meta, data_meta];
+    let run_ids: Vec<String> = metas.iter().filter_map(|m| str_field(m, "run")).collect();
+    let stage_gpu: f64 = metas.iter().map(|m| num_field(m, "gpu_h").unwrap_or(0.0)).sum();
+    let stage_spend: f64 = metas.iter().map(|m| num_field(m, "cost_usd").unwrap_or(0.0)).sum();
+    tune["provenance"] = serde_json::json!({
+        "run": if run_ids.is_empty() { format!("worker://{backend}") } else { run_ids.join(",") },
+        "budget": {"spend-usd": round6(winner.mean_cost() * winner.n as f64 + stage_spend), "gpu-h": round6(stage_gpu)},
+    });
+    lf.tune = Some(tune);
     lf
 }
 

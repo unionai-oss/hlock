@@ -213,7 +213,7 @@ fn unknown_keys(text: &str) -> Vec<PackIssue> {
 
 /// The known key `key` is most likely a typo of: one within a third of its length in
 /// edits, once `_` and `-` are treated alike.
-fn closest<'a>(key: &str, known: &[&'a str]) -> Option<&'a str> {
+pub(crate) fn closest<'a>(key: &str, known: &[&'a str]) -> Option<&'a str> {
     let norm = |s: &str| s.to_ascii_lowercase().replace('_', "-");
     let k = norm(key);
     known

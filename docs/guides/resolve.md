@@ -8,6 +8,8 @@ one that wins, along with the evidence. It doesn't change prompts or model weigh
 
 This walkthrough uses the built-in `reference` provider and harness, which are
 deterministic and offline: no accounts, no API keys, and the same results on every machine.
+`hlock init` writes a manifest for them unless you pass `--harness`, including when you run
+it inside an agent such as Claude Code.
 
 ## 1. Write an eval pack
 
@@ -73,7 +75,7 @@ success-rate = ">=0.5"
 
 [budget]
 strategy = "grid"
-max_trials = 200
+max-trials = 200
 
 [backend]
 target = "local"              # (4)!
@@ -86,39 +88,92 @@ target = "local"              # (4)!
 
 ## 3. Resolve the lock
 
+See what a resolve would run before it spends anything:
+
+```console
+$ hlock resolve --dry-run
+4 stacks × 2 tasks × 2 seeds = 16 trials, then 2 holdout trials for the winner  · on reference
+  reference/reference:qwen-7b/d=none
+  reference/reference:qwen-7b/d=rules:default
+  reference/reference:qwen-32b/d=none
+  reference/reference:qwen-32b/d=rules:default
+search   greet_people, hello_file
+holdout  count_words
+next → hlock resolve
+```
+
+Then resolve. A progress bar shows each trial as it runs, and notes (a budget cut, a
+stack that got no trials) appear as they happen:
+
 ```console
 $ hlock resolve
+Resolving harness.toml · 4 stacks × 2 tasks × 2 seeds = 16 trials, then 2 holdout
+
 ✓ wrote harness.lock
-╭─ 🔒 harness.lock ────────────────────────╮
-│                                          │
-│  Stack                                   │
-│  harness        reference                │
-│  llm · planner  reference:qwen-7b        │
-│  decision       none                     │
-│  backend        local                    │
-│                                          │
-│  Evidence                                │
-│  success rate  100%                      │
-│  cost / task   $0.0001                   │
-│  latency       p50 0.59s  ·  p95 1.28s   │
-│  trials        4                         │
-│                                          │
-│  lock-version 1 · manifest 2216eb06dca5  │
-│                                          │
-╰──────────────────────────────────────────╯
+stack                                            success  cost/task    p50  trials
+reference/reference:qwen-7b/d=none            ★     100%    $0.0001  0.59s       4
+reference/reference:qwen-7b/d=rules:default         100%    $0.0001  0.59s       4
+reference/reference:qwen-32b/d=none                 100%    $0.0004  0.45s       4
+reference/reference:qwen-32b/d=rules:default        100%    $0.0004  0.45s       4
+holdout  reference/reference:qwen-7b/d=none  100% on 2 trials it wasn't picked on
+╭─ 🔒 harness.lock ──────────────────────────────╮
+│                                                │
+│  Stack                                         │
+│  harness        reference                      │
+│  llm · planner  reference:qwen-7b              │
+│  decision       none                           │
+│  backend        local                          │
+│                                                │
+│  Evidence                                      │
+│  success rate  100%                            │
+│  cost / task   $0.0001                         │
+│  latency       p50 0.56s  ·  p95 0.66s         │
+│  trials        2  (holdout)  low sample (n=2)  │
+│  eval pack     hlock-demo/evals@0.1.0          │
+│                                                │
+│  lock-version 1 · manifest 9864f18edb96        │
+│                                                │
+╰────────────────────────────────────────────────╯
+report: .hlock/report.md
 next → hlock check  ·  hlock run "<prompt>"
 ```
 
-The resolver ran every combination of models and decision models on the eval pack, kept
-the [Pareto front](../concepts/index.md#selection), applied your constraints, and chose
-the cheapest stack that passed. Both 7B and 32B solved the demo tasks, so the cheaper
-7B model won.
+The resolver ran every combination of models and decision models on the search split,
+kept the [Pareto front](../concepts/index.md#selection), applied your constraints, and
+chose the cheapest stack that passed. Both 7B and 32B solved the demo tasks, so the
+cheaper 7B model won (★).
+
+Then it ran the winner on the holdout split, the tasks it wasn't picked on, and the lock's
+evidence comes from that run. The more stacks a search compares, the more the best one's
+search score is luck; the holdout score isn't. The search score is kept too, as
+`success-rate.search`. With no holdout tasks, the evidence is the search score and
+`resolve` says it's in-sample. Fewer than 10 trials is marked `low sample`: a demo pack
+of three tasks says little.
+
+`hlock resolve --json` prints the lock and every stack's scores, and
+`.hlock/report.md` keeps the table.
+
+### Repeat runs
+
+Trials are cached in `.hlock/trials`, keyed on the stack, the task, the seed, the eval
+packs' content, the backend, and the judge. A second resolve reuses them and says how
+many it reused; `--no-cache` runs them all again. A [code
+harness](harnesses.md#your-own-agent-frameworks-and-custom-scripts)'s trials always run,
+since hlock can't tell when your agent's code changed.
+
+### Budgets
+
+`[budget] max-trials` and `max-spend-usd` cap a search. Trials go round-robin across the
+stacks, every task once before any second seed, so a small budget measures every stack
+a little rather than some fully. `max-spend-usd` stops before the trial that would pass
+the cap, judging by what a trial has cost so far. The holdout check counts toward
+`max-spend-usd` but not `max-trials`.
 
 ## 4. Verify and inspect
 
 ```console
 $ hlock check
-✓ harness.lock matches harness.toml  2216eb06dca5
+✓ harness.lock matches harness.toml  9864f18edb96
 
 $ hlock tree
 🔒 harness.lock
@@ -153,7 +208,16 @@ it runs your agent.
 ## Resolve for your own harness
 
 Set `[target] harness` to resolve for the harness you use, and list the models it may
-try. See [Harnesses](harnesses.md#resolve-for-a-target).
+try: `hlock init --harness claude-code` takes them from a `harness.lock` that pins Claude
+Code. `resolve` refuses an agent CLI paired with the offline `reference:` models, since it
+can't run them. See [Harnesses](harnesses.md#resolve-for-a-target).
+
+!!! warning "Agent CLIs are measured on a stand-in"
+    In `resolve` trials, only [code harnesses](harnesses.md#your-own-agent-frameworks-and-custom-scripts)
+    run for real. An agent CLI's trials run on the reference harness, so the lock records
+    `simulated = true` in its evidence, and `resolve`, `show` and `check` say the evidence
+    is a stand-in. To see the real agent on your tasks, use
+    [`hlock evals run`](eval-packs.md#try-tasks-on-your-agent).
 
 ## Next
 

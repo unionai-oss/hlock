@@ -38,13 +38,17 @@ cost-usd-per-task = "<=0.05"
 
 [budget]
 strategy = "grid"
-max_trials = 200
-max_spend_usd = 25.0
-random_seed = 0
+max-trials = 200
+max-spend-usd = 25.0
+random-seed = 0
 
 [backend]
 target = "local"
 ```
+
+`resolve` and `tune` refuse a manifest with a key they don't know in `[budget]`,
+`[objective]`, `[evals]`, `[evals.splits]`, `[candidates]`, `[backend]`, `[target]`, or at
+the top level, and name the closest known key: a mistyped key is otherwise ignored.
 
 ## `[project]`
 
@@ -87,8 +91,8 @@ v0.1 ships the `reference` provider (models `qwen-1.5b`, `qwen-7b`, `qwen-32b`) 
 
 | Key | Default | Description |
 |---|---|---|
-| `primary` | `"success-rate"` | The metric being optimized |
-| `select` | `"min-cost"` | How to choose among stacks that pass: `"min-cost"` or `"max-quality"` |
+| `primary` | `"success-rate"` | The metric being optimized. `success-rate` is the only one; anything else is an error. |
+| `select` | `"min-cost"` | How to choose among stacks that pass: `"min-cost"` or `"max-quality"`. Anything else is an error. |
 | `constraints` | `{}` | Hard limits, as a table of metric to comparison |
 
 Constraint metrics are `success-rate` and `cost-usd-per-task`. Comparisons are `>=`,
@@ -101,10 +105,13 @@ comparison with a number, is an error. When no stack satisfies every constraint,
 
 | Key | Default | Description |
 |---|---|---|
-| `strategy` | `"grid"` | Search strategy. v0.1 supports `grid`. |
-| `max_trials` | | Upper bound on trials, spread round-robin across the stacks before any run ([The resolver](../concepts/index.md#the-resolver)) |
-| `max_spend_usd` | | Upper bound on spend |
-| `random_seed` | `0` | Seed for the search/holdout split |
+| `strategy` | `"grid"` | Search strategy. `grid` is the only one; anything else is an error. |
+| `max-trials` | | Upper bound on search trials, spread round-robin across the stacks before any run ([The resolver](../concepts/index.md#the-resolver)) |
+| `max-spend-usd` | | Upper bound on spend: no trial starts that would likely pass it. Counts the holdout check too. |
+| `random-seed` | `0` | Seed for the search/holdout split |
+
+The snake_case spellings (`max_trials`, `max_spend_usd`, `random_seed`) older manifests use
+still load.
 
 ## `[target]`
 

@@ -41,12 +41,14 @@ The variables below are used by the worker (the `devbox` and `cluster`
 ## LLM calls
 
 Set these to call a real model through any OpenAI-compatible endpoint. Without
-`HL_LLM_BASE_URL`, the worker uses a deterministic offline reference LLM.
+`HL_LLM_BASE_URL`, the worker runs `reference:…` candidates on a deterministic offline
+reference LLM, and fails any other candidate before it runs (see
+[What a `devbox` trial is](../guides/backends.md#what-a-devbox-trial-is)).
 
 | Variable | Default | Description |
 |---|---|---|
 | `HL_LLM_BASE_URL` | unset | Base URL of an OpenAI-compatible API, e.g. `http://localhost:8000/v1` |
-| `HL_LLM_MODEL` | unset | Model name to request |
+| `HL_LLM_MODEL` | unset | Model name to request for `reference:…` candidates; other candidates request their own model |
 | `HL_LLM_API_KEY` | unset | API key, if the endpoint needs one |
 
 ## Fine-tuning

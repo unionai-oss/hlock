@@ -184,11 +184,13 @@ hlock evals check                      # exits 1 while the pack isn't ready
 hlock evals run [TASK]...              # run the locked agent on tasks and grade each run (costs a session each)
 hlock evals grade TASK [WORKSPACE]     # grade a directory as a run of TASK would leave it
 hlock init --pack ./evals              # a starter harness.toml
+hlock resolve --dry-run                # the stacks and trial counts, before spending anything
 hlock resolve                          # run the candidates on the pack, lock the winner
 hlock show                             # the stack and its evidence
 hlock upgrade                          # on a resolved lock: plan newer models, --apply to switch
 hlock upgrade --rollback               # restore harness.lock.prev
-hlock tune                             # tune prompts and hyperparameters into harness.tune.lock
+hlock tune                             # tune the lock's retries/temperature into harness.tune.lock
+hlock tune apply                       # adopt harness.tune.lock (keeps harness.lock.prev)
 hlock localize                         # an all-local equivalent in harness.local.lock
 ```
 
@@ -197,9 +199,14 @@ hlock localize                         # an all-local equivalent in harness.loca
   tasks.
 - A useful pack has at least 10 tasks, each with a grader that checks the result (a
   `check.py` or a `rubric.md`) and a known-good `solution/`.
-- `resolve` runs real agents and can cost money. Confirm the candidates and
-  `[budget] max_trials` in `harness.toml` with the user first. `hlock backend status` shows
-  where trials will run.
+- `resolve` can cost money: a code harness runs for real, and `devbox`/`cluster` call real
+  models. Run `hlock resolve --dry-run` first and confirm the stacks, the trial count, and
+  `[budget] max-trials` / `max-spend-usd` with the user. `hlock backend status` shows where
+  trials will run.
+- Agent CLIs (Claude Code, Codex, …) are measured on a stand-in in `resolve` and `tune`; the
+  lock says `simulated = true`. To see the real agent on tasks, use `hlock evals run`.
+- `hlock init` writes the offline reference demo unless given `--harness`. For an agent
+  CLI, it takes candidate models from a `harness.lock` that pins that harness.
 
 Guides: https://docs.hlock.ai/guides/eval-packs/, https://docs.hlock.ai/guides/resolve/,
 https://docs.hlock.ai/guides/tune/, https://docs.hlock.ai/guides/localize/
