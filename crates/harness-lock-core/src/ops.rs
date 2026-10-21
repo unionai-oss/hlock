@@ -708,6 +708,8 @@ fn build_tuned_lock(
     };
     lf.evidence = Evidence {
         eval_pack: Some(manifest.eval_packs().join(",")),
+        eval_pack_version: crate::tasks::packs_version(manifest),
+        eval_pack_digest: Some(crate::tasks::packs_digest(manifest)),
         split: eval_split.into(),
         trials,
         success_rate: success_map,

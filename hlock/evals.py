@@ -474,7 +474,12 @@ should look like the work this user actually hands to an agent. Your job is to r
    errors. It runs each task's graders on its fixtures alone (they must fail) and on its
    solution (they must pass). `hlock evals grade <task> [dir]` shows each grader's result,
    judges included.
-5. Tell the user the pack is ready, and that `hlock init --pack {pack_dir}` (or the `[evals]`
+5. If there's a `harness.lock`, offer to try a few tasks on the user's own agent with
+   `hlock evals run <task> --pack {pack_dir}`. It runs their real agent (so ask first: it
+   costs what a session costs), grades each run, and keeps each workspace. A task the
+   agent fails for the wrong reason, like an unclear prompt or a grader that's too strict,
+   needs fixing; one it fails for the right reason is a good task.
+6. Tell the user the pack is ready, and that `hlock init --pack {pack_dir}` (or the `[evals]`
    section of an existing `harness.toml`) points hlock at it.
 """
 
@@ -703,6 +708,11 @@ these tasks, so each one must run on its own in an empty workspace and be checka
 4. Run `hlock evals check {pack_dir} --run` and fix what it reports until it shows no
    errors. It runs each task's graders on its fixtures alone (they must fail) and on its
    solution (they must pass).
-5. Tell the user the pack is ready, and that `hlock init --pack {pack_dir}` (or the `[evals]`
+5. If there's a `harness.lock`, offer to try a few tasks on the user's own agent with
+   `hlock evals run <task> --pack {pack_dir}`. It runs their real agent (so ask first: it
+   costs what a session costs), grades each run, and keeps each workspace. A task the
+   agent fails for the wrong reason, like an unclear prompt or a grader that's too strict,
+   needs fixing; one it fails for the right reason is a good task.
+6. Tell the user the pack is ready, and that `hlock init --pack {pack_dir}` (or the `[evals]`
    section of an existing `harness.toml`) points hlock at it.
 """

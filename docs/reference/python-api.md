@@ -136,7 +136,7 @@ Load the [eval pack](../guides/eval-packs.md) at `path` and check it, like
 [`hlock evals check`](cli.md#evals). With `run`, also try its graders on each task's
 fixtures and solution, like `--run` (decision-model judges included, and LLM judges with
 `judges`). `manifest` is the path of a `harness.toml` whose judge settings apply. Returns
-JSON with `name`, `version`, `domain`, `path`, `hash`, `tasks` (the task ids), `judge`
+JSON with `name`, `version`, `domain`, `path`, `hash` (a digest of every file in the pack), `tasks` (the task ids), `judge`
 (its `model` and whether it's a `decider`, or `None`), and `issues`, each with `level`
 (`error` or `warn`), `task` (or `None`), and `message`.
 
@@ -163,6 +163,37 @@ Grade a copy of `workspace` as the output of `task` in the pack at `path`, like
 >>> r = json.loads(hl.grade_eval_task("evals", "greet_people", "run"))
 >>> r["success"], round(r["score"], 2), [(g["grader"], g["success"]) for g in r["grades"]]
 (False, 0.67, [('artifact:greetings.md', True), ('tests:greet_people/check.py', False)])
+```
+
+### `prepare_eval_workspace`
+
+```python
+prepare_eval_workspace(path, task, dest) -> str
+```
+
+Make `dest` a fresh workspace for `task` in the pack at `path`, holding the task's fixtures,
+as [`hlock evals run`](cli.md#evals-run) does before it runs the agent there. `dest` must not
+exist yet, or be empty. Returns JSON with `task`, `prompt` (the prompt's text),
+`timeout-seconds`, and `workspace`.
+
+```python
+>>> r = json.loads(hl.prepare_eval_workspace("evals", "count_words", "run"))
+>>> r["task"], r["timeout-seconds"], os.listdir("run")
+('count_words', 300, ['words.txt'])
+```
+
+### `eval_packs_digest`
+
+```python
+eval_packs_digest(manifest) -> str
+```
+
+The digest of every file in the eval packs the `harness.toml` at `manifest` names, as a
+resolved lock records it in `[evidence] eval-pack-digest`.
+
+```python
+>>> hl.eval_packs_digest("harness.toml")
+'sha256:1de30d21400e4ebc04033d646b314ba32a1d9011751712f92cba4ddce71d5e1e'
 ```
 
 ### `calibrate_eval_pack`

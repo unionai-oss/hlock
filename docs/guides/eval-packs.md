@@ -168,7 +168,7 @@ my-service/evals 0.1.0  10 tasks · evals
 | A task id is missing or duplicated | An expected artifact is already in the fixtures, so it passes without any work |
 | A prompt file is missing or empty, or a fixtures or solution directory is missing | The pack has `judge` graders but no judge model |
 | A grader doesn't parse, or a file it names is missing | A `trace` grader, which isn't supported yet and is skipped |
-| | Fewer than 10 tasks, so the holdout split is too small |
+| An unknown key in `[pack]`, `[pack.judge]` or a `[[task]]` (such as `timeout_seconds`), with the closest known key | Fewer than 10 tasks, so the holdout split is too small |
 
 `hlock resolve` also warns about any pack with errors before it runs. To check the graders
 themselves, run `check --run` (see [Check your graders](#check-your-graders)).
@@ -525,6 +525,40 @@ hlock evals calibrate --against ollama:qwen3:8b --against-base-url http://localh
 On the offline `reference` harness, a simulated successful run leaves the task's solution
 in the workspace, so a pack's graders run for real even in the [demo](resolve.md).
 
+## Try tasks on your agent
+
+`hlock evals check --run` shows that the graders work. It doesn't show how your agent does
+on the tasks. `hlock evals run` runs the agent your `harness.lock` pins (from
+[`hlock pin`](pin.md)) on each task, each in a fresh workspace, and grades each run:
+
+```console
+$ hlock evals run
+✓ hello_file  1.00  0.23s  runs/hello_file-0
+✓ count_words  1.00  0.01s  runs/count_words-0
+✗ greet_people  0.67  0.01s  runs/greet_people-0
+    ✗ tests:greet_people/check.py  0.33  1 of 3 lines right: expected ['Hello, Ada!', 'Hello, Grace!', 'Hello, Linus!'], got ['Hello, Ada!', 'Hi, Grace!']
+✗ 2 of 3 runs passed  (loop, harness.lock)
+next → hlock evals grade greet_people runs/greet_people-0
+```
+
+Use it while you write a pack. A task the agent fails for the wrong reason, like an unclear
+prompt or a grader that's too strict, needs fixing. A task it fails for the right reason is
+a good one to keep. Name tasks to run just those (`hlock evals run greet_people`), and use
+`--seeds N` to run each one more than once.
+
+An agent CLI (Claude Code, Codex, Pi, …) runs for real through its non-interactive mode,
+the way [`hlock run`](resolve.md) runs it, in the lock's isolated environment. A code
+harness runs through [its contract](harnesses.md#how-hlock-runs-a-code-harness). Each run
+starts from the task's fixtures, in a directory outside the project (`--workdir` picks
+another), so the agent can't read the answer from the project next door. The lock's
+project-scoped skills and instruction files are set up in the workspace, as long as they
+still match the lock. The agent's output goes to `<task>-<seed>.log` next to the workspace,
+and a run that passes the task's `timeout-seconds` is stopped and fails.
+
+Workspaces are kept: open one, diff it against the task's `solution/`, or grade it again
+with `hlock evals grade`. Runs cost what a session with your agent costs, and nothing is
+recorded in the lock. [`hlock resolve`](resolve.md) is what measures stacks.
+
 ## Using a pack
 
 Point the manifest at one or more packs:
@@ -538,9 +572,26 @@ seeds = 3               # runs per task per candidate; default 3
 search = 0.7            # fraction of tasks used to pick the winner; the rest is holdout
 ```
 
-Pack paths are relative to the project root (the directory holding `harness.toml`). Each
-pack's contents are hashed, and the hash is recorded so evidence can be traced back to the
-exact tasks.
+Pack paths are relative to the project root (the directory holding `harness.toml`). The
+lock's evidence records each pack's `name@version` and a digest of every file in the packs,
+so evidence can be traced back to the exact tasks:
+
+```toml title="harness.lock"
+[evidence]
+eval-pack = "./evals"
+eval-pack-version = "hlock-demo/evals@0.1.0"
+eval-pack-digest = "sha256:1de30d21400e4ebc04033d646b314ba32a1d9011751712f92cba4ddce71d5e1e"
+```
+
+Once a prompt, a grader, or a fixture changes, `hlock check` warns that the evidence was
+measured on an older pack. It still exits `0`, since the stack itself hasn't drifted:
+
+```console
+$ hlock check
+! the eval packs changed since harness.lock's evidence was measured
+  hint: re-measure with hlock resolve
+✓ harness.lock matches harness.toml  4de9365bbc79
+```
 
 !!! note "Renamed from task packs"
     Eval packs used to be called task packs. Manifests with a `[tasks]` section and locks

@@ -426,6 +426,9 @@ impl PyLockfile {
     fn evidence(&self) -> String {
         let mut m = serde_json::Map::new();
         m.insert("trials".into(), serde_json::json!(self.inner.evidence.trials));
+        m.insert("eval_pack".into(), serde_json::json!(self.inner.evidence.eval_pack));
+        m.insert("eval_pack_version".into(), serde_json::json!(self.inner.evidence.eval_pack_version));
+        m.insert("eval_pack_digest".into(), serde_json::json!(self.inner.evidence.eval_pack_digest));
         m.insert(
             "success_rate".into(),
             serde_json::json!(self.inner.evidence.success_rate),
@@ -1278,7 +1281,7 @@ fn sync_dockerfile(plan: &str, path: String, manifest: Option<String>) -> PyResu
 /// Prepare `hlock launch`: verify, materialize the isolated root, and return
 /// JSON with the argv and environment to exec, plus what was done and notes.
 #[pyfunction]
-#[pyo3(signature = (path="harness.lock".to_string(), harness=None, prefix=None, allow_version_mismatch=false, in_place=false, args=Vec::new(), manifest=None, prompt=None, trust=false, allow_hidden=None))]
+#[pyo3(signature = (path="harness.lock".to_string(), harness=None, prefix=None, allow_version_mismatch=false, in_place=false, args=Vec::new(), manifest=None, prompt=None, trust=false, allow_hidden=None, project=None))]
 #[allow(clippy::too_many_arguments)]
 fn launch_prepare(
     py: Python<'_>,
@@ -1292,11 +1295,15 @@ fn launch_prepare(
     prompt: Option<String>,
     trust: bool,
     allow_hidden: Option<Vec<String>>,
+    project: Option<String>,
 ) -> PyResult<String> {
     interruptible(py, move || {
         let (reg, ctx, _) = registry(manifest.as_deref(), Some(&lock_dir(&path)))?;
         let lock = core::Lockfile::load(Path::new(&path)).map_err(py_err)?;
+        // with a stand-in project, a relative lock path still means the real one
+        let path = if project.is_some() { lock_dir(&path).join(Path::new(&path).file_name().unwrap_or_default()).to_string_lossy().into_owned() } else { path };
         let opts = core::launch::LaunchOptions {
+            project: project.map(PathBuf::from),
             prompt,
             target: harness,
             prefix: prefix.map(PathBuf::from),
@@ -1440,6 +1447,29 @@ fn check_eval_pack(py: Python<'_>, path: String, run: bool, manifest: Option<Str
             "issues": issues,
         })))
     })
+}
+
+/// Make `dest` a fresh workspace for task `task` of the eval pack at `path`, holding
+/// its fixtures (see `EvalPack::prepare_workspace`). Returns JSON with the task's
+/// `prompt` text and `timeout-seconds`, for `hlock evals run`.
+#[pyfunction]
+fn prepare_eval_workspace(path: String, task: String, dest: String) -> PyResult<String> {
+    let pack = core::tasks::EvalPack::load(&path, None).map_err(py_err)?;
+    let t = pack.prepare_workspace(&task, Path::new(&dest)).map_err(py_err)?;
+    Ok(json_str(serde_json::json!({
+        "task": t.id,
+        "prompt": t.prompt_text,
+        "timeout-seconds": t.timeout_seconds,
+        "workspace": dest,
+    })))
+}
+
+/// The content digest of the eval packs the manifest at `manifest` names (see
+/// `tasks::packs_digest`), as the lock's `[evidence] eval-pack-digest` records it.
+#[pyfunction]
+fn eval_packs_digest(manifest: String) -> PyResult<String> {
+    let m = core::Manifest::load(Path::new(&manifest)).map_err(py_err)?;
+    Ok(core::tasks::packs_digest(&m))
 }
 
 /// Grade a directory as the output of task `task` in the eval pack at `path` (see
@@ -1884,6 +1914,8 @@ fn _hlock(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(run_code_harness, m)?)?;
     m.add_function(wrap_pyfunction!(localize, m)?)?;
     m.add_function(wrap_pyfunction!(check_eval_pack, m)?)?;
+    m.add_function(wrap_pyfunction!(prepare_eval_workspace, m)?)?;
+    m.add_function(wrap_pyfunction!(eval_packs_digest, m)?)?;
     m.add_function(wrap_pyfunction!(grade_eval_task, m)?)?;
     m.add_function(wrap_pyfunction!(calibrate_eval_pack, m)?)?;
     m.add_function(wrap_pyfunction!(decide, m)?)?;

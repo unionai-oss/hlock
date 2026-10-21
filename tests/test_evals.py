@@ -199,3 +199,125 @@ def test_old_tasks_names_still_work(project):
     assert m.eval_packs() == m.task_packs() == ["./evals"]
     old = hl.SearchSpace(tasks=json.dumps({"packs": ["./evals"]})).to_manifest("x")
     assert old.eval_packs() == ["./evals"]
+
+
+# ---- pack.toml keys, finding the pack, hints ----------------------------------------
+
+
+def test_check_reports_unknown_keys(project):
+    invoke("evals", "init")
+    toml = (project / "evals/pack.toml").read_text()
+    toml = toml.replace("timeout-seconds = 300", "timeout_seconds = 300", 1).replace("tags = [\"files\"]", "tag = [\"files\"]", 1)
+    (project / "evals/pack.toml").write_text(toml + '\n[pack.judge]\nmodle = "x"\n')
+    r = invoke("evals", "check")
+    assert r.exit_code == 1, r.output
+    assert "hello_file  unknown key `timeout_seconds` in [[task]] (did you mean `timeout-seconds`?)" in r.output
+    assert "count_words  unknown key `tag` in [[task]] (did you mean `tags`?)" in r.output
+    assert "unknown key `modle` in [pack.judge] (did you mean `model`?)" in r.output
+
+
+def test_evals_commands_find_the_pack(project):
+    invoke("evals", "init", "tasks")
+    (project / "harness.toml").write_text('[project]\nname = "p"\n\n[evals]\npacks = ["./tasks"]\n')
+    r = invoke("evals", "check")
+    assert r.exit_code == 0 and "3 tasks · tasks" in r.output, r.output
+    assert invoke("evals", "grade", "greet_people").exit_code == 0
+    os.chdir(project / "tasks")  # inside the pack, it's this directory
+    r = invoke("evals", "check")
+    assert r.exit_code == 0 and "3 tasks · ." in r.output, r.output
+
+
+def test_pack_errors_get_a_hint_that_fits(project):
+    r = invoke("evals", "check", "./nope")
+    assert r.exit_code == 1 and "hint: write one with hlock evals init ./nope" in r.output, r.output
+    assert "harness.toml" not in r.output
+    (project / "bad").mkdir()
+    (project / "bad/pack.toml").write_text("[[task]\n")
+    r = invoke("evals", "check", "bad")
+    assert r.exit_code == 1 and "TOML parse error" in r.output and "hint:" not in r.output, r.output
+
+
+# ---- hlock evals run ----------------------------------------------------------------
+
+AGENT = """#!/bin/sh
+# does hello_file right, gets count_words wrong, never finishes greet_people
+case "$1" in
+  *hello.txt*) printf 'Hello, world!\\n' > hello.txt ;;
+  *words*) echo 8 > count.txt ;;
+  *names*) sleep 30 ;;
+esac
+echo "ran in $(pwd)"
+"""
+
+
+@pytest.fixture
+def code_harness(project):
+    invoke("evals", "init")
+    toml = (project / "evals/pack.toml").read_text()
+    (project / "evals/pack.toml").write_text(toml.replace("timeout-seconds = 300", "timeout-seconds = 2"))
+    (project / "agent.sh").write_text(AGENT)
+    (project / "agent.sh").chmod(0o755)
+    (project / "harness.toml").write_text('[project]\nname = "p"\n\n[target]\nharness = "loop"\n\n'
+                                          '[harnesses.loop]\ncommand = ["./agent.sh", "{prompt}"]\n\n'
+                                          '[evals]\npacks = ["./evals"]\n')
+    assert invoke("pin").exit_code == 0
+    return project
+
+
+def test_evals_run_needs_a_locked_agent(project):
+    invoke("evals", "init")
+    r = invoke("evals", "run")
+    assert r.exit_code == 1 and "hint: pin your setup with hlock pin" in r.output, r.output
+    invoke("init", "--pack", "./evals")
+    assert invoke("resolve").exit_code == 0
+    r = invoke("evals", "run")
+    assert r.exit_code == 1 and "simulated reference harness" in r.output, r.output
+
+
+def test_evals_run_runs_and_grades_each_task(code_harness, tmp_path_factory):
+    work = tmp_path_factory.mktemp("runs")
+    r = invoke("evals", "run", "--trust", "--workdir", str(work))
+    assert r.exit_code == 1, r.output
+    assert "✓ hello_file  1.00" in r.output
+    assert "✗ count_words  0.00" in r.output and 'count.txt should be "9", but is "8"' in r.output
+    assert "stopped after the task's 2s timeout" in r.output
+    assert "✗ 1 of 3 runs passed  (loop, harness.lock)" in r.output
+    assert f"next → hlock evals grade count_words {work / 'count_words-0'}" in r.output.replace("\n", "")
+    # workspaces are kept, with the fixtures, outside the project; the log sits next to each
+    assert (work / "count_words-0/words.txt").is_file() and (work / "hello_file-0/hello.txt").is_file()
+    assert f"ran in {(work / 'hello_file-0').resolve()}" in (work / "hello_file-0.log").read_text()
+    # an earlier run's workspace isn't overwritten
+    r = invoke("evals", "run", "hello_file", "--trust", "--workdir", str(work))
+    assert r.exit_code == 1 and "is left from an earlier run" in r.output, r.output
+
+
+def test_evals_run_json_and_task_selection(code_harness):
+    r = invoke("evals", "run", "hello_file", "--seeds", "2", "--trust", "--json")
+    assert r.exit_code == 0, r.output
+    out = json.loads(r.output)
+    assert out["harness"] == "loop" and [(x["task"], x["seed"]) for x in out["runs"]] == [("hello_file", 0), ("hello_file", 1)]
+    assert all(x["success"] and x["score"] == 1.0 and x["grade"]["success"] for x in out["runs"])
+    assert not out["workdir"].startswith(str(code_harness))  # a temporary directory outside the project
+    r = invoke("evals", "run", "nope")
+    assert r.exit_code == 1 and "no task 'nope'" in r.output and "hello_file, count_words, greet_people" in r.output
+
+
+# ---- the lock's evidence names the pack ----------------------------------------------
+
+
+def test_evidence_names_the_pack_and_check_notices_a_change(project):
+    invoke("evals", "init")
+    invoke("init", "--pack", "./evals")
+    assert invoke("resolve").exit_code == 0
+    ev = json.loads(invoke("show", "--json").output)["evidence"]
+    assert ev["eval-pack"] == "./evals" and ev["eval-pack-version"] == f"{project.name}/evals@0.1.0"
+    assert ev["eval-pack-digest"]
+    assert "eval pack" in invoke("show").output
+    r = invoke("check")
+    assert r.exit_code == 0 and "eval packs changed" not in r.output, r.output
+    # a prompt is part of the pack: editing one makes the evidence describe an older pack
+    (project / "evals/hello_file/prompt.md").write_text("Write hello.txt, politely.\n")
+    r = invoke("check")
+    assert r.exit_code == 0, r.output
+    assert "the eval packs changed since harness.lock's evidence was measured" in r.output
+    assert "re-measure with hlock resolve" in r.output

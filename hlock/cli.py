@@ -14,8 +14,10 @@ import os
 import re
 import shlex
 import shutil
+import signal
 import subprocess
 import sys
+import tempfile
 import time
 from contextlib import contextmanager
 from datetime import datetime, timezone
@@ -81,6 +83,7 @@ from hlock import deps_record_configs as _deps_record_configs
 from hlock import deps_refresh as _deps_refresh
 from hlock import deps_remove as _deps_remove
 from hlock import deps_upgrade as _deps_upgrade
+from hlock import eval_packs_digest as _eval_packs_digest
 from hlock import evals as _evals
 from hlock import export_apm_lock as _export_apm_lock
 from hlock import export_sbom as _export_sbom
@@ -89,6 +92,7 @@ from hlock import jobs as _jobs
 from hlock import localize as _localize
 from hlock import pin as _pin
 from hlock import policy_check as _policy_check
+from hlock import prepare_eval_workspace as _prepare_eval_workspace
 from hlock import pull as _pull
 from hlock import pull_env as _pull_env
 from hlock import pull_find as _pull_find
@@ -232,7 +236,12 @@ def _hint_for(e: Exception) -> str | None:
     if "no tasks loaded" in message or "no viable stack" in message:
         return f"check that [key]\\[evals] packs[/] in [path]{_md()}[/] point at a directory with a pack.toml"
     if isinstance(e, EvalPackError):
-        return f"check the [key]\\[evals] packs[/] paths in [path]{_md()}[/]"
+        missing = re.search(r"missing pack\.toml at (.+?): ", message)
+        if not missing:
+            return None  # the message says what's wrong, and where
+        packs = _manifest_packs()
+        listed = f"; [key]\\[evals] packs[/] in [path]{_md()}[/] lists {', '.join(packs)}" if packs else ""
+        return f"write one with [cmd]hlock evals init {missing.group(1)}[/]{listed}"
     if isinstance(e, ProfileError) and "unknown harness" in message:
         return "list the known harnesses with [cmd]hlock harness list[/]"
     if isinstance(e, ProfileError) and ("several harnesses are installed" in message or "no supported harness" in message):
@@ -313,6 +322,8 @@ def _lock_panel(lf, title: str | None = None) -> Panel:
     lat = ev.get("latency_s_per_task") or {}
     evidence.add_row("latency", f"p50 {_secs(lat.get('p50'))}  ·  p95 {_secs(lat.get('p95'))}")
     evidence.add_row("trials", str(ev.get("trials", "—")))
+    if ev.get("eval_pack_version") or ev.get("eval_pack"):
+        evidence.add_row("eval pack", escape(ev.get("eval_pack_version") or ev["eval_pack"]))
     judge = ev.get("judge")
     if judge:
         judge = judge if isinstance(judge, dict) else {"model": judge}
@@ -516,6 +527,23 @@ def init(name: str, pack: str, harness: str | None, force: bool) -> None:
     _next("hlock resolve")
 
 
+def _manifest_packs() -> list[str]:
+    """`[evals] packs` in harness.toml, if there is one that loads."""
+    try:
+        return Manifest.load(_m()).eval_packs() if Path(_m()).exists() else []
+    except (ValueError, OSError):
+        return []
+
+
+def _default_pack() -> str:
+    """The pack the evals commands use when none is named: this directory if it holds a
+    pack.toml, else the first of `[evals] packs`, else ./evals."""
+    if Path("pack.toml").is_file():
+        return "."
+    packs = _manifest_packs()
+    return _show(Path(_m()).parent / packs[0]) if packs else "./evals"
+
+
 @main.group()
 def evals() -> None:
     """Write and check [bold]eval packs[/], the tasks every candidate stack is measured on."""
@@ -629,7 +657,7 @@ def evals_templates(as_json: bool) -> None:
 
 
 @evals.command("check")
-@click.argument("directory", default="./evals")
+@click.argument("directory", required=False)
 @click.option("--run", is_flag=True,
               help="Also run each task's graders, judges aside, on its fixtures alone (they should fail) and on "
                    "its solution (they should pass). Runs the pack's test commands.")
@@ -637,9 +665,13 @@ def evals_templates(as_json: bool) -> None:
               help="With --run, also run LLM judges, which cost more and can't be compared run to run. "
                    "Decision-model judges always run with --run.")
 @click.option("--json", "as_json", is_flag=True, help="Print the result as JSON.")
-def evals_check(directory: str, run: bool, judges: bool, as_json: bool) -> None:
-    """Check that an eval pack is ready: required fields, prompts, fixtures, graders, and
-    no [key]TODO(hlock)[/] slots left. Exits 1 on errors; warnings don't fail."""
+def evals_check(directory: str | None, run: bool, judges: bool, as_json: bool) -> None:
+    """Check that an eval pack is ready: required fields, known keys, prompts, fixtures,
+    graders, and no [key]TODO(hlock)[/] slots left. Exits 1 on errors; warnings don't fail.
+
+    [dim]\\[default: this directory if it has a pack.toml, else the first of \\[evals] packs, else ./evals][/]
+    """
+    directory = directory or _default_pack()
     manifest = _m() if Path(_m()).exists() else None
     with _friendly_errors():
         result = json.loads(_check_eval_pack(directory, run=run, manifest=manifest, judges=judges))
@@ -671,12 +703,13 @@ def evals_check(directory: str, run: bool, judges: bool, as_json: bool) -> None:
 @evals.command("grade")
 @click.argument("task")
 @click.argument("workspace", required=False)
-@click.option("--pack", "pack", default="./evals", show_default=True, help="The eval pack directory.")
+@click.option("--pack", "pack", default=None, help="The eval pack directory.  [dim]\\[default: this directory if it has a pack.toml, else the first of \\[evals] packs, else ./evals][/]")
 @click.option("--json", "as_json", is_flag=True, help="Print the result as JSON.")
-def evals_grade(task: str, workspace: str | None, pack: str, as_json: bool) -> None:
+def evals_grade(task: str, workspace: str | None, pack: str | None, as_json: bool) -> None:
     """Grade a directory as if a run of TASK left it, with every grader the task has,
     judges included. With no WORKSPACE, grades the task's solution. Exits 1 if a grader
     fails."""
+    pack = pack or _default_pack()
     manifest = _m() if Path(_m()).exists() else None
     with _working(f"Grading {task}…"):
         result = json.loads(_grade_eval_task(pack, task, workspace, manifest=manifest))
@@ -701,17 +734,154 @@ def evals_grade(task: str, workspace: str | None, pack: str, as_json: bool) -> N
     _ok("passed")
 
 
+@evals.command("run")
+@click.argument("tasks", nargs=-1, metavar="[TASK]...")
+@click.option("--pack", "pack", default=None, help="The eval pack directory.  [dim]\\[default: this directory if it has a pack.toml, else the first of \\[evals] packs, else ./evals][/]")
+@click.option("--seeds", default=1, show_default=True, type=click.IntRange(1, 20), help="Runs per task.")
+@click.option("--workdir", default=None, help="Where the runs' workspaces go.  [dim]\\[default: a new temporary directory][/]")
+@click.option("--trust", "trust", is_flag=True, help="Approve every executable the lock would run.")
+@click.option("--json", "as_json", is_flag=True, help="Print the runs as JSON.")
+def evals_run(tasks: tuple[str, ...], pack: str | None, seeds: int, workdir: str | None, trust: bool,
+              as_json: bool) -> None:
+    """Run the locked agent on the pack's tasks (or just TASK), each in a fresh workspace,
+    and grade each run with the task's graders. Exits 1 if a run fails.
+
+    For writing a pack: see how your agent does on a task, then fix its prompt or its
+    graders. An agent CLI runs for real, as [cmd]hlock run[/] runs it, with the lock's
+    project-scoped skills and instructions set up in the workspace. Nothing is recorded in
+    the lock. Workspaces are kept, outside the project, for [cmd]hlock evals grade[/].
+    """
+    pack = pack or _default_pack()
+    manifest = _m() if Path(_m()).exists() else None
+    if not Path(_l()).exists():
+        _fail(f"no {LOCK} here, so there's no locked agent to run", "pin your setup with [cmd]hlock pin[/]")
+    with _friendly_errors():
+        lf = Lockfile.load(_l())
+        ids = json.loads(_check_eval_pack(pack, manifest=manifest))["tasks"]
+    kind = _harness_kind(lf.harness)
+    if kind is None:
+        _fail(f"{_ld()} is for the simulated {lf.harness} harness, so there's no agent to run",
+              "pin your own setup with [cmd]hlock pin[/]; [cmd]hlock resolve[/] measures the reference harness")
+    unknown = [t for t in tasks if t not in ids]
+    if unknown:
+        _fail(f"no task {unknown[0]!r} in {_show(pack)}", f"its tasks: {', '.join(ids) or '(none)'}")
+    root = Path(workdir).resolve() if workdir else Path(tempfile.mkdtemp(prefix="hlock-evals-"))
+    root.mkdir(parents=True, exist_ok=True)
+    runs, notes = [], []
+    for tid in tasks or ids:
+        for seed in range(seeds):
+            ws = root / f"{tid}-{seed}"
+            if ws.exists():
+                _fail(f"{_show(ws)} is left from an earlier run", "remove it, or pass another [cmd]--workdir[/]")
+            with _friendly_errors():
+                task = json.loads(_prepare_eval_workspace(pack, tid, str(ws)))
+            label = f"Running {tid}" + (f" (seed {seed})" if seeds > 1 else "") + "…"
+            with _working(label) if not as_json else _friendly_errors():
+                r = _run_task(kind, task, ws, root / f"{tid}-{seed}.log", trust, notes)
+                g = json.loads(_grade_eval_task(pack, tid, str(ws), manifest=manifest)) if r["started"] else None
+            r.update(task=tid, seed=seed, workspace=str(ws), grade=g,
+                     success=r["error"] is None and bool(g and g["success"]),
+                     score=g["score"] if g and r["error"] is None else 0.0)
+            runs.append(r)
+            if not as_json:
+                _print_run(r)
+    failed = sum(not r["success"] for r in runs)
+    if as_json:
+        console.print_json(data={"harness": lf.harness, "lock": _l(), "workdir": str(root), "notes": notes,
+                                 "runs": [{k: v for k, v in r.items() if k != "started"} for r in runs]})
+        sys.exit(1 if failed else 0)
+    for line in notes:
+        console.print(f"[warn]![/] {escape(line)}", soft_wrap=True)
+    summary = f"{len(runs) - failed} of {len(runs)} runs passed  [muted]({lf.harness}, {_ld()})[/]"
+    first = next((r for r in runs if not r["success"]), runs[0] if runs else None)
+    if failed:
+        err_console.print(f"[fail]✗[/] {summary}")
+    else:
+        _ok(summary)
+    if first:
+        _next(f"hlock evals grade {first['task']} {_show(first['workspace'])}" + (f" --pack {pack}" if pack != _default_pack() else ""))
+    sys.exit(1 if failed else 0)
+
+
+def _run_task(kind: str, task: dict, ws: Path, log: Path, trust: bool, notes: list[str]) -> dict:
+    """Run the locked agent on `task` in workspace `ws`, its output going to `log`: a CLI
+    harness through its non-interactive mode, a code harness through the contract."""
+    timeout = task["timeout-seconds"]
+    start = time.monotonic()
+    if kind == "custom":
+        r = json.loads(run_code_harness(task["prompt"], _l(), workspace=str(ws), timeout=timeout, manifest=_m(),
+                                        trust=trust))
+        log.write_text(r.get("log") or "")
+        if r["success"]:
+            error = None
+        elif "[hlock] timed out after" in (r.get("log") or ""):
+            error = f"stopped after the task's {timeout}s timeout"
+        elif r.get("exit_code"):
+            error = f"exited {r['exit_code']}"
+        else:
+            error = "the harness reported a failure"
+        return {"started": True, "error": error, "latency_s": r.get("latency_s"), "cost_usd": r.get("cost_usd"),
+                "log": str(log)}
+    prep = json.loads(launch_prepare(_l(), prompt=task["prompt"], manifest=_m(), trust=trust, project=str(ws)))
+    secret_env = prep.pop("secret_env", {})  # values for the config's references; never shown
+    for line in prep["notes"] + [f"secret {s} isn't set" for s in prep["missing_secrets"]]:
+        if line not in notes:
+            notes.append(line)
+    env = {**os.environ, **prep["env"], **secret_env}
+    with log.open("w") as out:
+        try:
+            # its own process group, so a timeout stops everything it started
+            proc = subprocess.Popen(prep["argv"], cwd=ws, env=env, stdin=subprocess.DEVNULL, stdout=out,
+                                    stderr=subprocess.STDOUT, start_new_session=True)
+        except OSError as e:
+            return {"started": False, "error": f"cannot start {prep['argv'][0]}: {e}", "latency_s": 0.0,
+                    "cost_usd": None, "log": str(log)}
+        try:
+            code = proc.wait(timeout=timeout)
+            error = None if code == 0 else f"{prep['harness_name']} exited {code}"
+        except subprocess.TimeoutExpired:
+            os.killpg(proc.pid, signal.SIGKILL)
+            proc.wait()
+            error = f"stopped after the task's {timeout}s timeout"
+    return {"started": True, "error": error, "latency_s": round(time.monotonic() - start, 3), "cost_usd": None,
+            "log": str(log)}
+
+
+def _print_run(r: dict) -> None:
+    mark = "[ok]✓[/]" if r["success"] else "[fail]✗[/]"
+    seed = f"  [muted]seed {r['seed']}[/]" if r["seed"] else ""
+    console.print(f"{mark} [key]{escape(r['task'])}[/]{seed}  {r['score']:.2f}  [muted]{_secs(r['latency_s'])}  "
+                  f"{escape(_show(r['workspace']))}[/]", soft_wrap=True)
+    if r["error"]:
+        console.print(f"    [fail]{escape(r['error'])}[/]  [muted]log: {escape(_show(r['log']))}[/]", soft_wrap=True)
+        try:  # the agent's last words usually say why ("Not logged in")
+            last = next((line for line in reversed(Path(r["log"]).read_text(errors="replace").splitlines()) if line.strip()), "")
+        except OSError:
+            last = ""
+        if last:
+            console.print(f"    [muted]{escape(last[:200])}[/]", soft_wrap=True)
+    for g in (r["grade"] or {}).get("grades", []):
+        if not g["success"]:
+            # the last line: a script's message or a test run's summary, not "exit code 1"
+            detail = next((line for line in reversed(g["detail"].splitlines()) if line.strip()), "")
+            console.print(f"    [fail]✗[/] {escape(g['grader'])}  [muted]{g['score']:.2f}  {escape(detail)}[/]", soft_wrap=True)
+
+
 @evals.command("calibrate")
-@click.argument("directory", default="./evals")
+@click.argument("directory", required=False)
 @click.option("--against", required=True, metavar="MODEL", help="The judge to compare with, as provider:model (an LLM, usually).")
 @click.option("--against-base-url", default=None, metavar="URL",
               help="An OpenAI-compatible endpoint for --against, for a local LLM (Ollama's is http://localhost:11434/v1).")
 @click.option("--model", default=None, metavar="MODEL", help="The judge to calibrate.  [dim]\\[default: the pack's judge][/]")
 @click.option("--json", "as_json", is_flag=True, help="Print the comparison as JSON.")
-def evals_calibrate(directory: str, against: str, against_base_url: str | None, model: str | None, as_json: bool) -> None:
+def evals_calibrate(directory: str | None, against: str, against_base_url: str | None, model: str | None, as_json: bool) -> None:
     """Judge each task's solution, and its run with no work done, with two judges, and
     list the criteria they disagree on: the ones to reword, or give [key]true[/] and
-    [key]false[/] descriptions."""
+    [key]false[/] descriptions.
+
+    [dim]\\[default: this directory if it has a pack.toml, else the first of \\[evals] packs, else ./evals][/]
+    """
+    directory = directory or _default_pack()
     manifest = _m() if Path(_m()).exists() else None
     with _working("Judging with two judges…"):
         result = json.loads(_calibrate_eval_pack(directory, against, model=model, manifest=manifest,
@@ -2069,7 +2239,22 @@ def check(prefix: str | None) -> None:
             err_console.print(f"  {line}")
         err_console.print("  [muted]hint:[/] re-lock with [cmd]hlock resolve[/]")
         sys.exit(1)
+    if _packs_changed(lf):
+        err_console.print(f"[warn]![/] the eval packs changed since {_ld()}'s evidence was measured")
+        err_console.print("  [muted]hint:[/] re-measure with [cmd]hlock resolve[/]")
     _ok(f"[path]{_ld()}[/] matches [path]{_md()}[/]  [muted]{live.split(':', 1)[-1][:12]}[/]")
+
+
+def _packs_changed(lf) -> bool:
+    """Whether the eval packs' content differs from what the lock's evidence was measured
+    on. A lock that predates `eval-pack-digest` has nothing to compare."""
+    digest = json.loads(lf.evidence).get("eval_pack_digest")
+    if not digest or not Path(_m()).exists():
+        return False
+    try:
+        return _eval_packs_digest(_m()) != digest
+    except (ValueError, OSError):
+        return False
 
 
 @main.command()

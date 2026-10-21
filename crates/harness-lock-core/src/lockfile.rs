@@ -468,6 +468,9 @@ pub struct Evidence {
     pub eval_pack: Option<String>,
     #[serde(alias = "task-pack-version")]
     pub eval_pack_version: Option<String>,
+    /// The eval packs' content digest when the evidence was measured (see
+    /// [`crate::tasks::packs_digest`]): `hlock check` warns once it changes.
+    pub eval_pack_digest: Option<String>,
     pub split: String,
     pub trials: usize,
     pub success_rate: BTreeMap<String, f64>,
