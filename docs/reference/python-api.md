@@ -41,10 +41,10 @@ print(outcome)   # {'cost_usd': 0.0001, 'model': 'qwen-7b', 'success': True}
 ### `resolve`
 
 ```python
-resolve(manifest=None, backend=None, workdir=None, harness=None, lock=None) -> Lockfile
+resolve(manifest=None, backend=None, workdir=None, harness=None, lock=None, on_event=None, no_cache=False) -> Lockfile
 ```
 
-Run the resolver and write the lock.
+Run the resolver, check the winner on the holdout split, and write the lock.
 
 | Parameter | Description |
 |---|---|
@@ -53,6 +53,20 @@ Run the resolver and write the lock.
 | `workdir` | Where trial artifacts go. Defaults to `.hlock` in the project root (the manifest's directory). |
 | `harness` | Target harness, overriding `[target] harness` |
 | `lock` | Where to write the lock. Defaults to `harness.lock` in the project root. |
+| `on_event` | Called with each progress event, a JSON string with a `kind`: `plan` (the trial counts), `trial` (one trial done, with `done`, `total`, `stack`, `task`, `seed`, `success`, `cached`, and `split` for the holdout), `note` (a warning, in `text`), and `done` (every stack's scores, the `holdout` check, and how many trials were `cached`) |
+| `no_cache` | Run every trial again instead of reusing ones an earlier resolve ran |
+
+### `resolve_plan`
+
+```python
+resolve_plan(manifest=None, backend=None, workdir=None, harness=None) -> str
+```
+
+What `resolve` would run, like `hlock resolve --dry-run`, without running anything.
+Returns JSON with `stacks` (their labels), `tasks` and `holdout-tasks` (ids), `seeds`,
+`trials` (after `max-trials`), `all-trials`, `holdout-trials`, `max-trials`,
+`max-spend-usd`, `dropped-by-policy`, `adapter`, and `notes`. Raises the errors `resolve`
+would raise before its first trial.
 
 ### `load`
 
@@ -93,8 +107,22 @@ tune(
 ```
 
 Run tuning, like [`hlock tune`](cli.md#tune). Returns JSON with `path`
-(the tune lock written), `summary`, and a `report` with `depth`, `backend`, `data_mode`,
-`grid`, `best`, `baseline_success_rate`, and `gain_success_rate`.
+(the tune lock written), `summary`, and a `report` with `depth`, `backend`, `harness`,
+`data_mode`, `grid`, `trials`, `stages` (each with `stage`, whether it `ran`, and a
+`detail`), `best`, `baseline` (the lock's own configuration, measured, with its
+`success_rate` and `trials`), `baseline_success_rate`, `gain_success_rate`, `simulated`,
+`notes`, `applied`, and `previous` (the `.prev` path when `apply` replaced a lock).
+
+### `tune_apply`
+
+```python
+tune_apply(path="harness.tune.lock", lock="harness.lock", manifest=None) -> str | None
+```
+
+Adopt a tune lock, like [`hlock tune apply`](cli.md#tune-apply): copy `lock` to
+`<lock>.prev`, then write the tune lock there. With `manifest`, refuses a tune lock for
+another harness than its `[target] harness`. Returns the `.prev` path, or `None` when there
+was no lock.
 
 ### Tune jobs
 

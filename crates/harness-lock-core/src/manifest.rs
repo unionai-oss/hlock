@@ -16,13 +16,18 @@ pub struct Objective {
     pub select: String,
 }
 
+/// `[budget]`. Keys are kebab-case like the rest of the manifest; the snake_case
+/// spellings older docs and `hlock init` wrote still load.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 #[serde(default)]
 pub struct Budget {
+    #[serde(alias = "max_spend_usd")]
     pub max_spend_usd: Option<f64>,
+    #[serde(alias = "max_trials")]
     pub max_trials: Option<usize>,
     pub strategy: String,
+    #[serde(alias = "random_seed")]
     pub random_seed: u64,
 }
 
@@ -31,11 +36,28 @@ impl Default for Budget {
         Budget {
             max_spend_usd: None,
             max_trials: None,
-            strategy: "auto".into(),
+            strategy: "grid".into(),
             random_seed: 0,
         }
     }
 }
+
+/// The search strategies, objectives and select rules `resolve` supports.
+pub const STRATEGIES: &[&str] = &["grid"];
+pub const PRIMARIES: &[&str] = &["success-rate"];
+pub const SELECTS: &[&str] = &["min-cost", "max-quality"];
+
+/// The keys of the manifest's fixed-shape tables; anything else is reported by
+/// [`Manifest::problems`]. Tables holding names (`[skills]`, `[harnesses]`, …) aren't
+/// checked, and neither are the reserved `[context]` and `[enforce]`.
+const TOP_KEYS: &[&str] = &["project", "evals", "tasks", "candidates", "tools", "skills", "instructions", "mcp", "plugins", "packages", "context", "objective", "budget", "enforce", "backend", "target", "harnesses", "deciders"];
+const BUDGET_KEYS: &[&str] = &["max-spend-usd", "max-trials", "strategy", "random-seed", "max_spend_usd", "max_trials", "random_seed"];
+const OBJECTIVE_KEYS: &[&str] = &["primary", "constraints", "select"];
+const EVALS_KEYS: &[&str] = &["packs", "seeds", "splits", "judge"];
+const SPLITS_KEYS: &[&str] = &["search"];
+const CANDIDATES_KEYS: &[&str] = &["llm", "decision", "harness", "policy"];
+const BACKEND_KEYS: &[&str] = &["target"];
+const TARGET_KEYS: &[&str] = &["harness", "also"];
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(default)]
@@ -194,6 +216,48 @@ impl Manifest {
         let mut m: Manifest = toml::from_str(text).map_err(|e| Error::Manifest(format!("invalid harness.toml: {e}")))?;
         m.source_text = Some(text.to_string());
         Ok(m)
+    }
+
+    /// Problems that would make `resolve` or `tune` quietly do something other than
+    /// what the manifest says: a key a fixed-shape table doesn't know (naming the closest
+    /// one), and a `strategy`, `primary` or `select` that isn't supported.
+    pub fn problems(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        if let Some(doc) = self.source_text.as_deref().and_then(|t| t.parse::<toml::Table>().ok()) {
+            let mut report = |table: Option<&toml::Table>, known: &[&str], name: &str| {
+                for key in table.into_iter().flat_map(|t| t.keys()).filter(|k| !known.contains(&k.as_str())) {
+                    let hint = crate::tasks::closest(key, known).map(|k| format!(" (did you mean `{k}`?)")).unwrap_or_default();
+                    out.push(format!("unknown key `{key}` in {name}{hint}"));
+                }
+            };
+            let table = |path: &[&str]| path.iter().try_fold(&doc, |t, k| t.get(*k).and_then(toml::Value::as_table));
+            report(Some(&doc), TOP_KEYS, "harness.toml");
+            report(table(&["budget"]), BUDGET_KEYS, "[budget]");
+            report(table(&["objective"]), OBJECTIVE_KEYS, "[objective]");
+            report(table(&["evals"]).or(table(&["tasks"])), EVALS_KEYS, "[evals]");
+            report(table(&["evals", "splits"]), SPLITS_KEYS, "[evals.splits]");
+            report(table(&["candidates"]), CANDIDATES_KEYS, "[candidates]");
+            report(table(&["backend"]), BACKEND_KEYS, "[backend]");
+            report(table(&["target"]), TARGET_KEYS, "[target]");
+        }
+        let mut supported = |key: &str, value: &str, allowed: &[&str]| {
+            if !value.is_empty() && !allowed.contains(&value) {
+                out.push(format!("{key} = {value:?} isn't supported (use {})", allowed.iter().map(|a| format!("{a:?}")).collect::<Vec<_>>().join(" or ")));
+            }
+        };
+        supported("[budget] strategy", &self.budget.strategy, STRATEGIES);
+        supported("[objective] primary", &self.objective.primary, PRIMARIES);
+        supported("[objective] select", &self.objective.select, SELECTS);
+        out
+    }
+
+    /// [`Manifest::problems`] as an error, for the commands that search.
+    pub fn check_search(&self) -> Result<()> {
+        let p = self.problems();
+        if p.is_empty() {
+            return Ok(());
+        }
+        Err(Error::Manifest(format!("harness.toml: {}", p.join("; "))))
     }
 
     pub fn name(&self) -> String {

@@ -109,22 +109,34 @@ or only the default `reference`, the target becomes the only candidate; otherwis
 be one of them. The lock's `[harness]` pins the version and install source of the copy on
 this machine:
 
+The candidate models must be ones the harness runs: `resolve` refuses an agent CLI paired
+with the offline `reference:` models. `hlock init --harness claude-code` takes them from a
+`harness.lock` that pins Claude Code, and otherwise leaves `[candidates.llm.planner]` for you
+to fill in.
+
 ```console
+$ hlock init --force --harness claude-code
+✓ wrote harness.toml  (project 'demo', eval pack ./evals)
+target claude-code  (--harness)
+next → hlock resolve
 $ hlock resolve
-✓ wrote harness.lock
-╭─ 🔒 harness.lock ────────────────────────╮
-│  Stack                                   │
-│  harness        claude-code 2.1.285      │
-│  llm · planner  reference:qwen-7b        │
-│  …                                       │
-╰──────────────────────────────────────────╯
-! trials ran on the reference adapter; native claude-code execution isn't built yet, so
-the evidence is a stand-in
+…
+╭─ 🔒 harness.lock ──────────────────────────────╮
+│                                                │
+│  Stack                                         │
+│  harness        claude-code 2.1.285            │
+│  llm · planner  anthropic:opus                 │
+│  …                                             │
+╰────────────────────────────────────────────────╯
+! claude-code itself didn't run these trials: they ran on hlock's offline reference harness, so the evidence is a stand-in. hlock evals run tries the real agent on tasks.
 ```
 
-hlock can't drive agent CLIs inside trials yet, so trials run on the backend's adapter, and
-`[harness] adapter` in the lock records which one. `hlock resolve --harness <name>` overrides
-the target for one run and reminds you to record it in `harness.toml`.
+hlock can't drive agent CLIs inside trials yet, so trials run on the backend's adapter.
+`[harness] adapter` in the lock records which one, and `[evidence] simulated = true` marks
+evidence from a stand-in, which `hlock show` and `hlock check` repeat. To watch the real
+agent on your tasks, use [`hlock evals run`](eval-packs.md#try-tasks-on-your-agent).
+`hlock resolve --harness <name>` overrides the target for one run and reminds you to
+record it in `harness.toml`.
 
 `hlock check` then also fails when:
 

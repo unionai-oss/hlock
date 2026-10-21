@@ -70,9 +70,10 @@ A trial the harness couldn't run at all counts as failed, and its error goes in 
 trial's trace with a warning. If every trial of a stack fails that way, the stack is
 broken rather than weak, and `resolve` stops with that error instead of writing a lock.
 
-`[budget] max_trials` caps the trials before they run: they go round-robin across the
-stacks (each stack's in task order, every task once before any second seed), so a small
-budget spends evenly rather than measuring some stacks fully and others not at all.
+`[budget] max-trials` and `max-spend-usd` cap the trials before they run: they go
+round-robin across the stacks (each stack's in task order, every task once before any
+second seed), so a small budget spends evenly rather than measuring some stacks fully and
+others not at all.
 
 ### Selection
 
@@ -139,6 +140,8 @@ The agent never decides whether it succeeded.
 
 An eval pack is split deterministically into a **search** split, used to pick the
 winner, and a **holdout** split, used to confirm the gain is real. The split defaults
-to 70/30 by task id, seeded by `[budget] random_seed`, so the same manifest always
-produces the same split. Deep `hlock tune` runs (`--depth full`) re-validate on
-the holdout split.
+to 70/30 by task id, seeded by `[budget] random-seed`, so the same manifest always
+produces the same split. `hlock resolve` runs the winner on the holdout split, and the
+lock's evidence comes from that run (`split = "holdout"`, with the search score as
+`success-rate.search`). Deep `hlock tune` runs (`--depth full`) re-validate on the
+holdout split too.

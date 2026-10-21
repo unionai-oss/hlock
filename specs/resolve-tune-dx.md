@@ -1,6 +1,6 @@
 # Resolve and tune developer experience
 
-Status: proposed · Owner: Niels Bantilan · Last updated: 2026-10-20 · Builds on [v0](v0.md) §5.9, §7
+Status: implemented · Owner: Niels Bantilan · Last updated: 2026-10-20 · Builds on [v0](v0.md) §5.9, §7
 
 > `hlock tune --apply` keeps the base lock's setup instead of replacing it with a
 > reference stack. The `[budget]` keys the docs show take effect. `resolve` reports
@@ -302,3 +302,26 @@ holdout: reference/qwen-7b/none 100% on 2 trials
 | `hlock/jobs.py` | `tune fetch --apply` writes `.prev` |
 | docs | `resolve.md` (walkthrough harness, holdout, table), `tune.md` (stages, baseline, apply), `backends.md` (devbox is a single completion), `manifest.md` and `concepts/index.md` (kebab-case budget keys, holdout) |
 | `skills/hlock` | `tune apply`, and the resolve walkthrough's `--harness reference` |
+
+## 4. As built
+
+Where the implementation differs from §2, and what's left:
+
+- **§2.8 `init`.** Profiles don't list the models a harness runs, so `init` can't write
+  runnable candidates on its own. Inside an agent, `hlock init` writes the reference demo
+  (no `[target]`) and says how to target the agent. `hlock init --harness <agent CLI>` takes
+  the candidate models from a `harness.lock` that pins that harness, and otherwise writes an
+  empty `any_of` with a comment. `resolve` then fails with "list the models … runs".
+- **§2.10 cache.** A code harness's trials aren't cached, because hlock can't tell when
+  the agent's code changed. The key covers the stack, task, seed, pack digest, backend,
+  judges, and `HL_LLM_BASE_URL`/`HL_LLM_MODEL`.
+- **§2.2/§2.3 budgets.** The holdout check counts toward `max-spend-usd`, not
+  `max-trials`. Tune's `--max-trials` caps the grid and doesn't count the baseline.
+- **§2.4 cost.** The worker reports `cost_usd: null` when the endpoint gives no usage
+  cost, but `RunOutcome.cost_usd` is still a number, so evidence counts it as 0. Recording
+  unknown cost needs an optional cost through `adapters.rs`, `search.rs` and the
+  resolver. Left for later.
+- **§2.5.** `--data user` with no traces warns, but without naming where it looked (the
+  worker's `data.load` doesn't report that).
+- `resolve` replaces a *pinned* `harness.lock` without asking, which drops what `pin`
+  captured. That predates this spec and isn't covered by it; noted for later.

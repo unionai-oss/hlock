@@ -271,7 +271,12 @@ def fetch(root: str | Path, ref: str | None, out: str | Path, apply: bool = Fals
     lock = Path(job["lock"])
     job["base_changed"] = _digest(lock) != job.get("base_lock_digest")
     if apply:
-        shutil.copyfile(src, lock)
+        from hlock import (
+            tune_apply,  # keeps harness.lock.prev and checks the target harness
+        )
+
+        manifest = job.get("manifest")
+        job["previous"] = tune_apply(str(src), str(lock), manifest=manifest if manifest and Path(manifest).is_file() else None)
     job["fetched"] = str(out)
     return job
 

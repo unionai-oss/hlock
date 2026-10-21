@@ -69,6 +69,7 @@ def test_detach_then_fetch(project):
     assert r.exit_code == 0, r.output
     assert "adopted into harness.lock" in r.output
     assert (project / "harness.lock").read_text() == (project / "elsewhere.tune.lock").read_text()
+    assert (project / "harness.lock.prev").read_text() == base  # the lock it replaced is kept
 
 
 def test_failed_job(project):

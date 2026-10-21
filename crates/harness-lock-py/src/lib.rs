@@ -429,6 +429,8 @@ impl PyLockfile {
         m.insert("eval_pack".into(), serde_json::json!(self.inner.evidence.eval_pack));
         m.insert("eval_pack_version".into(), serde_json::json!(self.inner.evidence.eval_pack_version));
         m.insert("eval_pack_digest".into(), serde_json::json!(self.inner.evidence.eval_pack_digest));
+        m.insert("split".into(), serde_json::json!(self.inner.evidence.split));
+        m.insert("simulated".into(), serde_json::json!(self.inner.evidence.simulated));
         m.insert(
             "success_rate".into(),
             serde_json::json!(self.inner.evidence.success_rate),
@@ -487,8 +489,12 @@ impl PyLockedAgent {
 // --------------------------------------------------------------------------- //
 // module functions
 // --------------------------------------------------------------------------- //
+/// Resolve the manifest and write the winning lock. `on_event`, if given, is called
+/// with each progress event as a JSON string: `plan`, `trial`, `note`, and `done` (which
+/// holds every stack's scores and the holdout check). `no_cache` re-runs every trial.
 #[pyfunction]
-#[pyo3(signature = (manifest=None, backend=None, workdir=None, harness=None, lock=None))]
+#[pyo3(signature = (manifest=None, backend=None, workdir=None, harness=None, lock=None, on_event=None, no_cache=false))]
+#[allow(clippy::too_many_arguments)]
 fn resolve(
     py: Python<'_>,
     manifest: Option<PyObject>,
@@ -496,6 +502,8 @@ fn resolve(
     workdir: Option<String>,
     harness: Option<String>,
     lock: Option<String>,
+    on_event: Option<PyObject>,
+    no_cache: bool,
 ) -> PyResult<PyLockfile> {
     let core_manifest = resolve_manifest(py, manifest, backend.as_deref())?;
     let root = core_manifest.root();
@@ -505,11 +513,60 @@ fn resolve(
     let lf = interruptible(py, move || {
         let mut resolver = core::Resolver::with_backend(core_manifest, &wd, backend);
         resolver.harness_override = harness;
+        resolver.use_cache = !no_cache;
+        if let Some(f) = on_event {
+            if let Ok(mut slot) = resolver.on_event.lock() {
+                *slot = Some(Box::new(move |e: serde_json::Value| {
+                    Python::with_gil(|py| {
+                        if let Err(err) = f.call1(py, (e.to_string(),)) {
+                            err.print(py);
+                        }
+                    })
+                }));
+            }
+        }
         let lf = resolver.resolve_lock().map_err(py_err)?;
         lf.save(&lock).map_err(py_err)?;
         Ok(lf)
     })?;
     Ok(PyLockfile { inner: lf })
+}
+
+/// What `resolve` would run, as JSON, without running anything: the stacks, the tasks in
+/// each split, and the trial counts (`hlock resolve --dry-run`).
+#[pyfunction]
+#[pyo3(signature = (manifest=None, backend=None, workdir=None, harness=None))]
+fn resolve_plan(py: Python<'_>, manifest: Option<PyObject>, backend: Option<String>, workdir: Option<String>, harness: Option<String>) -> PyResult<String> {
+    let core_manifest = resolve_manifest(py, manifest, backend.as_deref())?;
+    let wd = workdir.map(PathBuf::from).unwrap_or_else(|| core_manifest.root().join(".hlock"));
+    let backend = core::Backend::parse(core_manifest.backend_target().as_str());
+    let mut resolver = core::Resolver::with_backend(core_manifest, &wd, backend);
+    resolver.harness_override = harness;
+    let notes = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let sink = notes.clone();
+    if let Ok(mut slot) = resolver.on_event.lock() {
+        *slot = Some(Box::new(move |e: serde_json::Value| {
+            if let (Some(t), Ok(mut n)) = (e["text"].as_str(), sink.lock()) {
+                n.push(t.to_string());
+            }
+        }));
+    }
+    let mut plan = resolver.plan().map_err(py_err)?;
+    plan["notes"] = serde_json::json!(notes.lock().map(|n| n.clone()).unwrap_or_default());
+    Ok(json_str(plan))
+}
+
+/// Adopt the tune lock at `path` as the lock at `lock`, keeping the old one as
+/// `<lock>.prev` (`hlock tune apply`). Returns the `.prev` path, or None.
+#[pyfunction]
+#[pyo3(signature = (path="harness.tune.lock".to_string(), lock="harness.lock".to_string(), manifest=None))]
+fn tune_apply(path: String, lock: String, manifest: Option<String>) -> PyResult<Option<String>> {
+    let m = match manifest.as_deref().map(Path::new).filter(|p| p.is_file()) {
+        Some(p) => Some(core::Manifest::load(p).map_err(py_err)?),
+        None => None,
+    };
+    let prev = core::ops::tune_apply(Path::new(&path), Path::new(&lock), m.as_ref()).map_err(py_err)?;
+    Ok(prev.map(|p| p.to_string_lossy().into_owned()))
 }
 
 #[pyfunction]
@@ -1914,6 +1971,8 @@ fn _hlock(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(run_code_harness, m)?)?;
     m.add_function(wrap_pyfunction!(localize, m)?)?;
     m.add_function(wrap_pyfunction!(check_eval_pack, m)?)?;
+    m.add_function(wrap_pyfunction!(resolve_plan, m)?)?;
+    m.add_function(wrap_pyfunction!(tune_apply, m)?)?;
     m.add_function(wrap_pyfunction!(prepare_eval_workspace, m)?)?;
     m.add_function(wrap_pyfunction!(eval_packs_digest, m)?)?;
     m.add_function(wrap_pyfunction!(grade_eval_task, m)?)?;

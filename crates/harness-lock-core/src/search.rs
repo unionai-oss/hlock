@@ -104,6 +104,9 @@ pub struct TrialResult {
     pub error: Option<String>,
     /// What judged the trial's `judge` and `trace` graders, when any ran.
     pub judging: Option<TrialJudging>,
+    /// Why it failed: the first failing grader and its detail, or the run's error.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
 }
 
 /// The judging of one trial: for the lock's `evidence.judge`, from the winner's trials.
@@ -237,8 +240,15 @@ pub fn parse_constraints(constraints: &BTreeMap<String, String>) -> Result<Vec<C
 /// the rest, and apply the select rule. Errors when a constraint doesn't parse, and when
 /// no stack meets every constraint (naming the closest one), rather than picking a
 /// stack that misses one.
-pub fn select_winner(scores: Vec<StackScore>, _primary: &str, constraints: &BTreeMap<String, String>, select: &str) -> Result<StackScore> {
+pub fn select_winner(scores: Vec<StackScore>, primary: &str, constraints: &BTreeMap<String, String>, select: &str) -> Result<StackScore> {
     let constraints = parse_constraints(constraints)?;
+    // an unknown rule is an error, not a silent `min-cost`
+    if !primary.is_empty() && !crate::manifest::PRIMARIES.contains(&primary) {
+        return Err(Error::Manifest(format!("[objective] primary = {primary:?} isn't supported (use \"success-rate\")")));
+    }
+    if !select.is_empty() && !crate::manifest::SELECTS.contains(&select) {
+        return Err(Error::Manifest(format!("[objective] select = {select:?} isn't supported (use \"min-cost\" or \"max-quality\")")));
+    }
     let no_stack = || Error::Tuning("no viable stack found".into());
     let (eligible, missed): (Vec<StackScore>, Vec<StackScore>) = scores.into_iter().partition(|s| constraints.iter().all(|c| c.holds(s)));
     if eligible.is_empty() {

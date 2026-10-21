@@ -5,32 +5,45 @@ and *produces* improvements: tuned prompts, tuned hyperparameters, and, at the d
 levels, fine-tuned small models. The result goes into a separate `harness.tune.lock`, so
 your base lock stays untouched until you adopt it.
 
-```bash
-hlock tune --depth hpo
-```
+Tune starts from your `harness.lock`: its harness, models, skills, tools, instructions and
+config stay as they are. It varies only what it tunes: retries, temperature, at `full` the
+tool timeout, and the planner model when `[candidates.llm.planner]` lists more than one.
+With no lock, it starts from the manifest's first candidates.
 
 ```console
+$ hlock tune --depth hpo
 ✓ wrote harness.tune.lock
-╭─ ⚙ tune ────────────────────────────╮
-│                                     │
-│  depth    hpo                       │
-│  backend  local                     │
-│  data     user-traces               │
-│  grid     12 configurations         │
-│                                     │
-│  Best configuration                 │
-│  model                 qwen-7b      │
-│  retries               3            │
-│  temperature           0.7          │
-│  tool timeout seconds  120          │
-│                                     │
-│  success rate  100%  →  100%   +0%  │
-│                                     │
-╰─────────────────────────────────────╯
-next → hlock tune --apply
+╭─ ⚙ tune ─────────────────────────────────────────────────────────────────────────────────────────╮
+│                                                                                                  │
+│  depth    hpo                                                                                    │
+│  backend  local                                                                                  │
+│  data     user-traces                                                                            │
+│  grid     12 configurations                                                                      │
+│  stages   data ✗ needs devbox or cluster, not local  ·  prompt ✗ needs devbox or cluster, not    │
+│           local  ·  hpo ✓                                                                        │
+│                                                                                                  │
+│  Best configuration                                                                              │
+│  model                 reference:qwen-7b                                                         │
+│  retries               1                                                                         │
+│  temperature           0.2                                                                       │
+│  tool timeout seconds  120                                                                       │
+│                                                                                                  │
+│  success rate  100%  →  100%   +0%   (baseline: the lock's own configuration, measured)          │
+│                                                                                                  │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+next → hlock tune apply
 ```
 
-The baseline is the success rate recorded in your current `harness.lock`.
+The baseline is your lock's own configuration, run on the same tasks and seeds before the
+grid, not the number recorded in `harness.lock`, which may come from another split or
+harness. When configurations tie, tune keeps the one closest to your lock: the fewest
+retries, then your temperature, then your model. Here every configuration solved the demo
+tasks, so it kept the lock's own `retries = 1` and `temperature = 0.2`.
+
+`stages` lists what ran. On the `local` backend only the HPO grid runs; the data, prompt
+and fine-tune stages need the `devbox` or `cluster` [backend](backends.md). A stage that
+didn't run isn't recorded in the tune lock. When the prompt stage runs, its gain is
+measured: the winner with the tuned prompt, minus the winner without it.
 
 ## Depth
 
@@ -41,12 +54,14 @@ The baseline is the success rate recorded in your current `harness.lock`.
 | `probe` | Cheap policy probes, no retraining | models × retries `[0]` |
 | `prompt` | System prompt and instructions search | models × retries `[0, 1]` |
 | `hpo` | Hyperparameter search | models × retries `[0, 1, 3]` × temperature `[0.2, 0.7]` |
-| `ft` | LoRA fine-tuning of a small model on your data | `hpo` grid, plus the newest model |
+| `ft` | LoRA fine-tuning of a small model on your data | `hpo` grid |
 | `full` | Holdout re-validation and a tool-timeout sweep | `ft` grid × tool timeout `[30, 120]` s |
 | `auto` *(default)* | Currently the same as `hpo` | |
 
 `ft` and `full` need the `devbox` or `cluster` [backend](backends.md) for real
-training, and a GPU for anything beyond a tiny model.
+training, and a GPU for anything beyond a tiny model. On `local`, tune says so before it
+runs, and runs only the grid. "models" is your lock's model, or the planner candidates
+when there are several.
 
 ## Data
 
@@ -64,13 +79,28 @@ content-hashed, so the tune lock records exactly what data produced it.
 
 ## Adopting the result
 
-```bash
-hlock tune --depth hpo --apply     # also write the result into harness.lock
-hlock tune --depth hpo --strict    # fail unless it beats the base lock
+```console
+$ hlock tune apply
+✓ applied harness.tune.lock to harness.lock  (previous kept in harness.lock.prev)
+next → hlock check  ·  hlock upgrade --rollback
 ```
 
-`--strict` makes `tune` safe to run on a schedule: it exits non-zero, and writes no
-tune lock, unless the tuned stack beats your current success rate.
+`hlock tune apply [FILE]` adopts a tune lock you already have, without running the search
+again, and keeps the lock it replaces in `harness.lock.prev` (`hlock upgrade --rollback`
+restores it). It refuses a tune lock for another harness than `[target] harness`. `hlock
+tune --apply` tunes and applies in one step, the same way.
+
+```console
+$ hlock tune --depth hpo --strict
+✗ error: tuning error: --strict: tuned success-rate 1.00 does not beat the base configuration's 1.00, measured on the same tasks
+```
+
+`--strict` makes `tune` safe to run on a schedule: it exits non-zero, and writes no tune
+lock, unless the tuned stack beats the measured baseline.
+
+When the lock is for an agent CLI, tune's trials run on a stand-in for it, as
+[`resolve`'s do](resolve.md#resolve-for-your-own-harness), and tune says the gains are a
+stand-in.
 
 ## Running in the background
 
@@ -103,7 +133,8 @@ $ hlock tune fetch
 ```
 
 A job writes its result into its own directory and never touches your locks, so you can
-run several at once. `fetch` takes the same `--out` and `--apply` as `tune`, and
+run several at once. `fetch` takes the same `--out` and `--apply` as `tune` (`--apply` keeps
+`harness.lock.prev` too), and
 `--wait` blocks until the job finishes, which suits scripts and CI. If `harness.lock`
 changed after the job started, `fetch` warns that the job tuned against the older one.
 
@@ -122,8 +153,8 @@ Flyte, so the machine has to stay on until the job finishes.
 
 | Option | Description |
 |---|---|
-| `--harness NAME` | Restrict the search to one harness |
-| `--max-trials N` | Cap the number of trials |
+| `--harness NAME` | Tune for this harness instead of the lock's |
+| `--max-trials N` | Cap the grid's trials in total, spread round-robin across the configurations (the baseline isn't counted) |
 | `--out FILE` | Write somewhere other than `harness.tune.lock` |
 | `--backend` | Override the manifest's backend |
 | `--workdir DIR` | Where trial artifacts go (default `.hlock`) |

@@ -478,6 +478,10 @@ pub struct Evidence {
     pub latency_s_per_task: BTreeMap<String, f64>,
     /// The judge that scored `judge` and `trace` graders, when the packs have any.
     pub judge: Option<EvidenceJudge>,
+    /// True when the trials ran on a stand-in for the harness (an agent CLI measured on
+    /// the reference adapter), not on the harness itself.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub simulated: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]

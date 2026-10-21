@@ -27,6 +27,7 @@ import rich_click as click
 from rich.console import Console, Group
 from rich.markup import escape
 from rich.panel import Panel
+from rich.progress import BarColumn, MofNCompleteColumn, Progress, TextColumn
 from rich.table import Table
 from rich.text import Text
 from rich.theme import Theme
@@ -100,12 +101,14 @@ from hlock import pull_list as _pull_list
 from hlock import pull_parse as _pull_parse
 from hlock import pull_remove as _pull_remove
 from hlock import resolve as _resolve
+from hlock import resolve_plan as _resolve_plan
 from hlock import scan_lock as _scan_lock
 from hlock import select_harness as _select_harness
 from hlock import traces as _traces
 from hlock import trust_approve as _trust_approve
 from hlock import trust_list as _trust_list
 from hlock import tune as al_tune
+from hlock import tune_apply as _tune_apply
 from hlock import upgrade as al_upgrade
 
 MANIFEST = "harness.toml"
@@ -321,7 +324,10 @@ def _lock_panel(lf, title: str | None = None) -> Panel:
     evidence.add_row("cost / task", _usd((ev.get("cost_usd_per_task") or {}).get("mean")))
     lat = ev.get("latency_s_per_task") or {}
     evidence.add_row("latency", f"p50 {_secs(lat.get('p50'))}  ·  p95 {_secs(lat.get('p95'))}")
-    evidence.add_row("trials", str(ev.get("trials", "—")))
+    trials = ev.get("trials")
+    split = f"  [muted]({ev['split']})[/]" if ev.get("split") else ""
+    few = f"  [warn]low sample (n={trials})[/]" if isinstance(trials, int) and 0 < trials < 10 else ""
+    evidence.add_row("trials", f"{trials if trials is not None else '—'}{split}{few}")
     if ev.get("eval_pack_version") or ev.get("eval_pack"):
         evidence.add_row("eval pack", escape(ev.get("eval_pack_version") or ev["eval_pack"]))
     judge = ev.get("judge")
@@ -418,6 +424,7 @@ def _print_lock(lf, title: str | None = None) -> None:
         console.print(_pin_panel(json.loads(lf.to_json()), title))
     else:
         console.print(_lock_panel(lf, title))
+        _print_simulated(json.loads(lf.to_json()))
 
 
 _GLOBAL_OPTS = ("-m", "--manifest", "--lock")
@@ -498,28 +505,38 @@ def _restore_meta_env() -> None:
 @click.option("--name", default="demo", show_default=True, help="Project name for the manifest.")
 @click.option("--pack", default="./evals", show_default=True, help="Path to an eval pack directory.")
 @click.option("--harness", "harness", default=None,
-              help="Target harness for \\[target]. [dim]\\[default: the one you're running in, if any][/]")
+              help="Target harness for \\[target].  [dim]\\[default: the offline reference harness][/]")
 @click.option("--force", is_flag=True, help="Overwrite an existing harness.toml.")
 def init(name: str, pack: str, harness: str | None, force: bool) -> None:
-    """Write a starter [path]harness.toml[/] manifest."""
+    """Write a starter [path]harness.toml[/] manifest.
+
+    With no [cmd]--harness[/], it resolves on the offline reference harness. With an agent
+    CLI, its candidate models come from [path]harness.lock[/] when that pins the same harness.
+    """
     p = Path(_m())
     if p.exists() and not force:
         _fail(f"{_md()} already exists", "pass [cmd]--force[/] to overwrite it")
-    target = None
+    target, models = None, None
     if harness:
         with _friendly_errors():
             target = json.loads(_select_harness(harness, manifest=_m()))
-    else:
-        # Only an unambiguous signal (running inside a harness) picks one silently.
-        try:
-            sel = json.loads(_select_harness(manifest=_m()))
-            target = sel if sel["reason"] == "running inside it" else None
-        except (ValueError, OSError):
-            target = None
-    p.write_text(_default_manifest(name, pack, target["id"] if target else None))
+        if _harness_kind(target["id"]) == "cli":
+            models = _locked_models(target["id"])
+    p.write_text(_default_manifest(name, pack, target["id"] if target else None, models))
     _ok(f"wrote [path]{_show(p)}[/]  [muted](project {name!r}, eval pack {pack})[/]")
     if target:
         console.print(f"[key]target[/] [bold]{target['id']}[/]  [muted]({target['reason']})[/]")
+        if models == []:
+            console.print(f"[warn]![/] list the models {target['id']} runs in [key]\\[candidates.llm.planner][/] "
+                          "before resolving", soft_wrap=True)
+    else:
+        try:
+            sel = json.loads(_select_harness(manifest=_m()))
+        except (ValueError, OSError):
+            sel = {}
+        if sel.get("reason") == "running inside it":
+            console.print(f"[muted]you're in {sel['id']}; this manifest resolves on the offline reference harness. "
+                          f"To resolve for {sel['id']}: hlock init --force --harness {sel['id']}[/]", soft_wrap=True)
     if not (Path(pack) / "pack.toml").exists():
         console.print(f"[warn]![/] no [path]pack.toml[/] found in [path]{pack}[/]; add one before resolving")
         _next(f"hlock evals init {pack}", "hlock resolve")
@@ -998,19 +1015,76 @@ def decide_hook(use_: str, fmt: str, event: str | None, input_: str | None, verb
 @click.option("--harness", "harness", default=None,
               help="Target harness, overriding \\[target] harness (e.g. claude, codex, pi, opencode).")
 @click.option("--workdir", default=None, help="Where to put trial artifacts.  [dim]\\[default: .hlock][/]")
-def resolve(backend: str | None, harness: str | None, workdir: str | None) -> None:
-    """Search the space and pin the winner in [path]harness.lock[/]."""
-    with _working(f"Resolving {_md()} on the {backend or 'configured'} backend…"):
-        lf = _resolve(_m(), backend=backend, workdir=workdir, harness=harness, lock=_l())
-    _ok(f"wrote [path]{_ld()}[/]")
-    console.print(_lock_panel(lf))
+@click.option("--dry-run", is_flag=True, help="List the stacks and count the trials, and run nothing.")
+@click.option("--no-cache", is_flag=True, help="Run every trial again, even ones an earlier resolve ran.")
+@click.option("--json", "as_json", is_flag=True, help="Print the lock and every stack's scores as JSON.")
+def resolve(backend: str | None, harness: str | None, workdir: str | None, dry_run: bool, no_cache: bool,
+            as_json: bool) -> None:
+    """Search the space and pin the winner in [path]harness.lock[/].
+
+    Every stack runs on the search split; the winner then runs on the holdout split, and
+    the lock's evidence comes from that. Trials an earlier resolve ran with the same
+    stack, tasks and judge come from the cache, except a code harness's.
+    """
+    if dry_run:
+        with _friendly_errors():
+            plan = json.loads(_resolve_plan(_m(), backend=backend, workdir=workdir, harness=harness))
+        if as_json:
+            console.print_json(data=plan)
+            return
+        _print_resolve_plan(plan)
+        _next("hlock resolve")
+        return
+    done: dict = {}
+    notes: list[str] = []
+    progress = Progress(TextColumn("  "), BarColumn(bar_width=24), MofNCompleteColumn(),
+                        TextColumn("[muted]{task.description}[/]"), console=err_console, transient=True,
+                        disable=as_json)
+    bars: dict = {}
+
+    def on_event(raw: str) -> None:
+        e = json.loads(raw)
+        kind = e.get("kind")
+        if kind == "plan":
+            bars["search"] = progress.add_task("", total=e["trials"])
+            if not as_json:
+                err_console.print(f"[brand]Resolving {_md()}[/] [muted]· {e['stacks']} stacks × {e['tasks']} tasks × "
+                                  f"{e['seeds']} seeds = {e['trials']} trials, then {e['holdout-trials']} holdout[/]")
+        elif kind == "trial":
+            split = e.get("split", "search")
+            if split not in bars:
+                bars[split] = progress.add_task("", total=e["total"])
+            cached = " (cached)" if e.get("cached") else ""
+            progress.update(bars[split], completed=e["done"],
+                            description=f"{split} · {escape(e['stack'])}  {escape(e['task'])}#{e['seed']}{cached}")
+        elif kind == "note":
+            notes.append(e["text"])
+            if not as_json:
+                progress.console.print(f"[warn]![/] {escape(e['text'])}", soft_wrap=True)
+        elif kind == "done":
+            done.update(e)
+
+    with _friendly_errors(), progress:
+        lf = _resolve(_m(), backend=backend, workdir=workdir, harness=harness, lock=_l(), on_event=on_event,
+                      no_cache=no_cache)
     lock = json.loads(lf.to_json())
-    adapter = (lock.get("harness") or {}).get("adapter")
-    if adapter and adapter != lf.harness:
-        console.print(
-            f"[warn]![/] trials ran on the [bold]{adapter}[/] adapter; native {lf.harness} execution "
-            "isn't built yet, so the evidence is a stand-in"
-        )
+    if as_json:
+        done.pop("kind", None)
+        console.print_json(data={"lock": lock, "report": done, "notes": notes})
+        return
+    _ok(f"wrote [path]{_ld()}[/]")
+    if done.get("stacks"):
+        console.print(_stacks_table(done))
+    if done.get("holdout"):
+        h = done["holdout"]
+        console.print(f"[key]holdout[/]  {escape(done['winner'])}  [bold]{_pct(h['success-rate'])}[/] "
+                      f"[muted]on {h['trials']} trials it wasn't picked on[/]")
+    if done.get("cached"):
+        console.print(f"[muted]{done['cached']} trials came from the cache; --no-cache runs them again[/]")
+    console.print(_lock_panel(lf))
+    _print_simulated(lock)
+    if done.get("report"):
+        console.print(f"[muted]report:[/] [path]{_show(done['report'])}[/]")
     if harness:
         with _friendly_errors():
             m = Manifest.load(_m())
@@ -1020,6 +1094,46 @@ def resolve(backend: str | None, harness: str | None, workdir: str | None) -> No
                 f'[key]\\[target] harness = "{lf.harness}"[/] so [cmd]hlock check[/] can enforce it'
             )
     _next("hlock check", 'hlock run "<prompt>"')
+
+
+def _print_resolve_plan(plan: dict) -> None:
+    """What `resolve --dry-run` prints."""
+    n, tasks, seeds = len(plan["stacks"]), len(plan["tasks"]), plan["seeds"]
+    line = f"{n} stacks × {tasks} tasks × {seeds} seeds = {plan['all-trials']} trials"
+    if plan["trials"] < plan["all-trials"]:
+        line += f", capped at {plan['trials']} by max-trials"
+    console.print(f"[bold]{line}[/], then {plan['holdout-trials']} holdout trials for the winner  "
+                  f"[muted]· on {escape(plan['adapter'] or 'reference')}[/]")
+    for label in plan["stacks"]:
+        console.print(f"  {escape(label)}")
+    console.print(f"[key]search[/]   {escape(', '.join(plan['tasks']))}")
+    console.print(f"[key]holdout[/]  {escape(', '.join(plan['holdout-tasks']) or '(none)')}")
+    if plan.get("max-spend-usd") is not None:
+        console.print(f"[key]budget[/]   up to {_usd(plan['max-spend-usd'])}")
+    for line in plan.get("notes") or []:
+        console.print(f"[warn]![/] {escape(line)}")
+
+
+def _stacks_table(done: dict) -> Table:
+    """Every stack `resolve` measured, with the winner starred."""
+    t = Table(box=None, header_style="muted", pad_edge=False)
+    for col, justify in (("stack", "left"), ("", "left"), ("success", "right"), ("cost/task", "right"),
+                         ("p50", "right"), ("trials", "right")):
+        t.add_column(col, justify=justify)
+    for st in done["stacks"]:
+        star = "[brand]★[/]" if st["winner"] else ""
+        t.add_row(escape(st["label"]), star, _pct(st["success-rate"]), _usd(st["cost-usd-per-task"]),
+                  _secs(st["latency-s-p50"]), str(st["trials"]))
+    return t
+
+
+def _print_simulated(lock: dict) -> None:
+    """Say so when a lock's evidence came from a stand-in for its harness."""
+    if (lock.get("evidence") or {}).get("simulated"):
+        name = (lock.get("harness") or {}).get("name", "the harness")
+        console.print(f"[warn]![/] {name} itself didn't run these trials: they ran on hlock's offline reference "
+                      "harness, so the evidence is a stand-in. [cmd]hlock evals run[/] tries the real agent "
+                      "on tasks.", soft_wrap=True)
 
 
 @main.command()
@@ -2242,6 +2356,8 @@ def check(prefix: str | None) -> None:
     if _packs_changed(lf):
         err_console.print(f"[warn]![/] the eval packs changed since {_ld()}'s evidence was measured")
         err_console.print("  [muted]hint:[/] re-measure with [cmd]hlock resolve[/]")
+    if json.loads(lf.evidence).get("simulated"):
+        err_console.print(f"[warn]![/] {_ld()}'s evidence is a stand-in: {lf.harness} itself didn't run its trials")
     _ok(f"[path]{_ld()}[/] matches [path]{_md()}[/]  [muted]{live.split(':', 1)[-1][:12]}[/]")
 
 
@@ -2570,8 +2686,9 @@ def upgrade(target: str | None, to: str | None, all_: bool, apply: bool, rollbac
 @click.option("--harness", default=None, help="Restrict to one harness.")
 @click.option("--out", default="harness.tune.lock", show_default=True, help="Output tune lock filename.")
 @click.option("--strict", is_flag=True, help="Fail unless the tune lock beats the base.")
-@click.option("--apply", is_flag=True, help="Also adopt the result into harness.lock.")
-@click.option("--max-trials", default=None, type=int, help="Cap the number of trials.")
+@click.option("--apply", is_flag=True, help="Also adopt the result into harness.lock (keeping harness.lock.prev).")
+@click.option("--max-trials", default=None, type=int,
+              help="Cap the grid's trials in total, spread round-robin across the configurations.")
 @click.option("--backend", default=None, type=click.Choice(["local", "devbox", "cluster"]),
               help="Override the manifest's \\[backend] target.")
 @click.option("--workdir", default=None, help="Where to put trial artifacts.")
@@ -2581,6 +2698,11 @@ def upgrade(target: str | None, to: str | None, all_: bool, apply: bool, rollbac
 def tune(ctx: click.Context, depth: str, data: str, harness: str | None, out: str, strict: bool, apply: bool,
          max_trials: int | None, backend: str | None, workdir: str | None, detach: bool) -> None:
     """Tune prompts, hyperparameters and small models into [path]harness.tune.lock[/].
+
+    Tune starts from [path]harness.lock[/]'s stack (its harness, models, skills and config)
+    and varies retries, temperature and, with several [key]\\[candidates.llm.planner][/], the
+    model. It measures the lock's own configuration first, as the baseline. Adopt the
+    result with [cmd]hlock tune apply[/].
 
     Long tunes can run in the background: [cmd]hlock tune --detach[/] starts a tune job,
     and [cmd]hlock tune fetch[/] collects its result when it finishes.
@@ -2596,12 +2718,19 @@ def tune(ctx: click.Context, depth: str, data: str, harness: str | None, out: st
             al_tune(_m(), depth=depth, data=data, harness=harness, out=out, strict=strict, apply=apply,
                     max_trials=max_trials, backend=backend, workdir=workdir, lock=_l())
         )
-    _ok(f"wrote [path]{result.get('path')}[/]")
-    console.print(_tune_panel(result.get("report", {})))
+    report = result.get("report", {})
+    for line in report.get("notes") or []:
+        console.print(f"[warn]![/] {escape(line)}", soft_wrap=True)
+    _ok(f"wrote [path]{_show(result.get('path'))}[/]")
+    console.print(_tune_panel(report))
+    if report.get("simulated"):
+        console.print(f"[warn]![/] {report.get('harness')} itself didn't run these trials: they ran on hlock's "
+                      "offline reference harness, so the gains are a stand-in", soft_wrap=True)
     if apply:
-        _ok(f"adopted into [path]{_ld()}[/]")
+        kept = f"  [muted](previous kept in {_show(report['previous'])})[/]" if report.get("previous") else ""
+        _ok(f"applied to [path]{_ld()}[/]{kept}")
     else:
-        _next("hlock tune --apply")
+        _next("hlock tune apply" + (f" {out}" if out != "harness.tune.lock" else ""))
 
 
 def _tune_panel(r: dict, title: str = "[brand]⚙ tune[/]") -> Panel:
@@ -2610,7 +2739,12 @@ def _tune_panel(r: dict, title: str = "[brand]⚙ tune[/]") -> Panel:
     run_info.add_row("depth", str(r.get("depth")))
     run_info.add_row("backend", str(r.get("backend")))
     run_info.add_row("data", str(r.get("data_mode") or r.get("data")))
-    run_info.add_row("grid", f"{r.get('grid')} configurations")
+    run_info.add_row("grid", f"{r.get('grid')} configuration{'' if r.get('grid') == 1 else 's'}")
+    stages = r.get("stages") or []
+    if stages:
+        cells = [f"{st['stage']} [ok]✓[/]" if st["ran"] else f"{st['stage']} [fail]✗[/] [muted]{escape(st['detail'])}[/]"
+                 for st in stages]
+        run_info.add_row("stages", "  ·  ".join(cells))
 
     chosen = _kv_table()
     for k, v in best.items():
@@ -2618,9 +2752,11 @@ def _tune_panel(r: dict, title: str = "[brand]⚙ tune[/]") -> Panel:
             continue
         chosen.add_row(k.replace("_", " "), f"[bold]{v}[/]")
 
+    measured = (r.get("baseline") or {}).get("measured")
     result_row = Text.assemble(
         ("success rate  ", "key"), _pct(r.get("baseline_success_rate")), "  →  ",
         (_pct(best.get("success_rate")), "bold"), "   ", _signed_pct(r.get("gain_success_rate")),
+        ("   (baseline: the lock's own configuration, measured)" if measured else "", "muted"),
     )
     return Panel(
         Group(run_info, Text(""), Text("Best configuration", style="bold"), chosen, Text(""), result_row),
@@ -2688,6 +2824,20 @@ def _job_errors():
         elif " is queued" in msg or " is running" in msg:
             hint = "wait for it with [cmd]--wait[/], or check on it with [cmd]hlock tune show[/]"
         _fail(msg, hint)
+
+
+@tune.command("apply")
+@click.argument("path", default="harness.tune.lock")
+def tune_apply_cmd(path: str) -> None:
+    """Adopt a tune lock as [path]harness.lock[/], keeping the old one in [path]harness.lock.prev[/].
+
+    It refuses a tune lock for another harness than [key]\\[target] harness[/].
+    """
+    with _friendly_errors():
+        prev = _tune_apply(path, _l(), manifest=_m() if Path(_m()).exists() else None)
+    kept = f"  [muted](previous kept in {_show(prev)})[/]" if prev else ""
+    _ok(f"applied [path]{_show(path)}[/] to [path]{_ld()}[/]{kept}")
+    _next("hlock check", "hlock upgrade --rollback" if prev else "hlock show")
 
 
 @tune.command("list")
@@ -3641,12 +3791,32 @@ def meta_verify_cmd(job: str, out: str | None, count: int, as_json: bool) -> Non
     sys.exit(_verdict_exit(v))
 
 
-def _default_manifest(name: str, pack: str, target: str | None = None) -> str:
+def _locked_models(harness_id: str) -> list[str]:
+    """The models harness.lock pins, when it's a lock for `harness_id`."""
+    try:
+        lf = Lockfile.load(_l())
+    except (ValueError, OSError):
+        return []
+    if lf.harness != harness_id:
+        return []
+    return [spec for _, spec in json.loads(lf.llm) if not spec.startswith("reference:")]
+
+
+def _default_manifest(name: str, pack: str, target: str | None = None, models: list[str] | None = None) -> str:
     target_block = (
         f'[target]\nharness = "{target}"            # the harness this lock is for\n'
         if target
         else '# [target]\n# harness = "claude-code"      # the harness this lock is for (see: hlock harness list)\n'
     )
+    if models is None:
+        planner = 'any_of = ["reference:qwen-7b", "reference:qwen-32b"]'
+        harness_line = 'harness = ["reference"]'
+    elif models:
+        planner = "any_of = [" + ", ".join(f'"{m}"' for m in models) + "]"
+        harness_line = f'harness = ["{target}"]'
+    else:
+        planner = f'any_of = []                  # the models {target} runs, e.g. "anthropic:claude-sonnet-5-5"'
+        harness_line = f'harness = ["{target}"]'
     return f"""# hlock manifest — declare what the resolver may try and what 'best' means.
 [project]
 name = "{name}"
@@ -3657,11 +3827,11 @@ packs = ["{pack}"]
 seeds = 2
 
 [candidates.llm.planner]
-any_of = ["reference:qwen-7b", "reference:qwen-32b"]
+{planner}
 
 [candidates]
 decision = ["none", "rules:default"]
-harness = ["reference"]
+{harness_line}
 
 [objective]
 primary = "success-rate"
@@ -3672,7 +3842,7 @@ success-rate = ">=0.5"
 
 [budget]
 strategy = "grid"
-max_trials = 200
+max-trials = 200
 
 [backend]
 target = "local"
