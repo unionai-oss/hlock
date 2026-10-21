@@ -38,6 +38,7 @@ Failures print a one-line error with a hint and exit `1`.
 | [`tune fetch`](#tune-fetch) | Write a finished tune job's result to `harness.tune.lock` |
 | [`tune cancel`](#tune-cancel) | Stop a running tune job |
 | [`upgrade`](#upgrade) | Plan, apply, or roll back component upgrades on a resolved lock |
+| [`migrate`](#migrate) | Write a copy of a lock moved onto another harness |
 | [`localize`](#localize) | Write an all-local equivalent of a lock |
 | [`meta`](#meta) | Set up and run the meta harness, the agent hlock uses for its own work |
 | [`harness list`](#harness-list) | List known harnesses and what's installed |
@@ -767,6 +768,26 @@ Stop a queued or running tune job and the worker processes it started.
 ```bash
 hlock tune cancel JOB
 ```
+
+## `migrate`
+
+Move a lock onto another harness: skills, MCP servers, instructions and decision models go
+where it reads them, and models move to a provider it supports. See
+[Switching harnesses with migrate](../guides/migrate.md).
+
+```bash
+hlock migrate [LOCK] --to HARNESS [OPTIONS]
+```
+
+| Option | Default | Description |
+|---|---|---|
+| `LOCK` | `harness.lock` | Lock to migrate |
+| `--to` | required, except with `--local` | Harness to move to (`codex`, `opencode`, `claude-code`, …) |
+| `-o`, `--out` | `harness.<to>.lock` beside the source; `harness.local.lock` with `--local` | Where to write the new lock |
+| `--model` | kept when the harness supports its provider | `provider:model` for the default role |
+| `--local` | | Also move the models to a local runtime, as [`localize`](#localize) does |
+| `--runtime` | the best installed | With `--local`: the inference runtime |
+| `--json` | | Print the migrate report as JSON |
 
 ## `localize`
 

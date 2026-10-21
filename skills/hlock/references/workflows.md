@@ -191,8 +191,15 @@ hlock upgrade                          # on a resolved lock: plan newer models, 
 hlock upgrade --rollback               # restore harness.lock.prev
 hlock tune                             # tune the lock's retries/temperature into harness.tune.lock
 hlock tune apply                       # adopt harness.tune.lock (keeps harness.lock.prev)
+hlock migrate --to codex               # the same setup on another harness, in harness.codex.lock
 hlock localize                         # an all-local equivalent in harness.local.lock
 ```
+
+- `migrate` moves skills, MCP servers, instructions and deciders to where the new harness
+  reads them (`CLAUDE.md` → `AGENTS.md`, `.claude/skills` → `.agents/skills` for Codex), and
+  models to a provider it supports (`--model provider:model` picks one). Plugins and settings
+  don't carry; it lists them. Nothing changes until `hlock sync harness.codex.lock`
+  (`--in-place` to switch your own config), so show the user the report first.
 
 - `evals init` with `--template` or `--from-traces` also writes an Agent Skill that guides
   an agent through filling in or reviewing the pack. Use it when you're asked to write
@@ -209,7 +216,8 @@ hlock localize                         # an all-local equivalent in harness.loca
   CLI, it takes candidate models from a `harness.lock` that pins that harness.
 
 Guides: https://docs.hlock.ai/guides/eval-packs/, https://docs.hlock.ai/guides/resolve/,
-https://docs.hlock.ai/guides/tune/, https://docs.hlock.ai/guides/localize/
+https://docs.hlock.ai/guides/tune/, https://docs.hlock.ai/guides/migrate/,
+https://docs.hlock.ai/guides/localize/
 
 ## The meta harness
 

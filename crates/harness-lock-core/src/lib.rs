@@ -26,6 +26,7 @@ pub mod hash;
 pub mod lockfile;
 pub mod manifest;
 pub mod meta;
+pub mod migrate;
 pub mod ops;
 pub mod policy;
 pub mod process;

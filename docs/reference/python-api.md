@@ -468,7 +468,7 @@ except hl.LockfileError as e:
 ```
 
 Calls that run commands or wait on the network (`resolve`, `tune`, `upgrade`, `pull`,
-`sync_plan`, `sync_run_step`, `launch_prepare`, `localize`, `decide`, the eval and meta
+`sync_plan`, `sync_run_step`, `launch_prepare`, `localize`, `migrate`, `decide`, the eval and meta
 functions, and probes) release the GIL, and Ctrl-C stops them: they raise
 `KeyboardInterrupt` and stop the commands they started. `agent_run` re-raises the first
 exception its `say` or `ask` callback raises, after stopping the run.

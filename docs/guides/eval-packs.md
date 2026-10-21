@@ -1,13 +1,13 @@
 # Eval packs
 
-An eval pack is the set of tasks that defines what "works" means for your domain. Every
-candidate stack runs against it, and the evidence in `harness.lock` comes from it, so the
-pack matters more than any other input. A good pack looks like the work you actually want
-the agent to do.
+An eval pack is the set of tasks that defines what how well a specific harness setup
+performs for the kinds of tasks and work you do with it. Every candidate stack runs against
+it, and the evidence in `harness.lock` comes from it, so the pack matters more than any other
+input. A good eval pack looks like the work you actually want the agent to do.
 
 Eval packs and [skills](pin.md) sit on opposite sides of the resolver. A skill is something
 the agent uses, so it's one of the things hlock can tune. An eval pack is how hlock scores
-each candidate, so you can tell whether a skill helped.
+each candidate harness configuration, so you can tell whether a skill helped.
 
 ## Start a pack
 

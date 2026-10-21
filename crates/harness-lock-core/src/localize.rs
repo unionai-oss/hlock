@@ -14,13 +14,11 @@ use std::time::Duration;
 
 use serde_json::{json, Map, Value};
 
-use crate::capture::{drop_nulls, locate_model, render_config, VendorFile, VENDOR_DIR};
+use crate::capture::{drop_nulls, locate_model, VendorFile, VENDOR_DIR};
 use crate::error::{Error, Result};
-use crate::launch::mcp_entry;
-use crate::lockfile::{ConfigFile, Evidence, Harness, Lockfile, Runtime, LLM};
+use crate::lockfile::{Evidence, Harness, Lockfile, Runtime, LLM};
 use crate::manifest::{HarnessCandidate, LLMCandidate, Manifest};
 use crate::profiles::{probe_harness, probe_runtime, run_capture, CatalogModel, Ctx, HarnessProfile, Registry, RuntimeProfile};
-use crate::sync::set_pointer;
 
 /// Local-capable harnesses `localize` tries, most preferred first.
 pub const DEFAULT_HARNESSES: &[&str] = &["opencode", "pi", "codex", "hermes", "goose"];
@@ -483,122 +481,28 @@ pub fn localize(source: &Lockfile, source_path: &Path, reg: &Registry, ctx: &Ctx
         }
     }
 
-    // harness-specific parts that don't carry over
+    // harness-specific parts: where the new harness reads them, or dropped
+    let vroot = format!("{VENDOR_DIR}/{}/localize", target.id);
     let mut vendor = Vec::new();
     if harness_changed {
-        let plugins: Vec<String> = lock.native.iter().filter(|n| n.kind != "package").map(|n| n.name.clone()).collect();
-        if !plugins.is_empty() {
-            let shown: Vec<&str> = plugins.iter().take(4).map(String::as_str).collect();
-            let more = if plugins.len() > 4 { format!(" and {} more", plugins.len() - 4) } else { String::new() };
-            notes.push(format!("{}'s {} plugins don't carry over: {}{more}", source.harness.name, plugins.len(), shown.join(", ")));
-        }
-        lock.native.retain(|n| n.kind == "package");
-        lock.config.clear();
-        lock.skill.retain(|s| !matches!(s.origin.as_str(), "harness-builtin" | "bundled"));
-        // each user-level file goes to its own file in the target, so two never share a path
-        let user: Vec<String> = lock.instructions.iter().filter(|i| i.scope == "user").map(|i| i.name.clone()).collect();
-        let mut dests = crate::launch::user_instruction_targets(target, &user).into_iter();
-        let mut dropped = Vec::new();
-        let has_dest = target.instructions.iter().any(|i| i.starts_with("{root}/"));
-        lock.instructions.retain_mut(|i| {
-            if i.scope != "user" || !has_dest {
-                return true;
-            }
-            match dests.next().flatten() {
-                Some(tpl) => {
-                    i.name = tpl.to_string();
-                    true
-                }
-                None => {
-                    dropped.push(i.name.clone());
-                    false
-                }
-            }
-        });
-        if !dropped.is_empty() {
-            notes.push(format!("{} has no place for user instructions {}", target.name, dropped.join(", ")));
-        }
+        let mut c = crate::migrate::Carry::default();
+        crate::migrate::carry_over(&mut lock, source, src_profile, target, ctx, &vroot, &mut c);
+        replaced.extend(c.replaced);
+        notes.extend(c.notes);
+        vendor.extend(c.vendor);
     }
 
     // configure the local endpoint (and, for a new harness, its MCP servers)
     let default_model = lock.llm.iter().find(|l| l.role == "default").or_else(|| lock.llm.first()).map(|l| l.model.clone()).unwrap_or_default();
-    let host = format!("http://localhost:{port}");
-    let vars = [("provider", runtime.id.as_str()), ("model", default_model.as_str()), ("base_url", base_url.as_str()), ("host", host.as_str())];
     let mut per_file: BTreeMap<String, Map<String, Value>> = BTreeMap::new();
-    let local_provider: Vec<_> = target.local_provider.iter().filter(|lp| lp.applies_to(Some(&runtime.id))).collect();
-    if target.kind == "cli" && !local_provider.is_empty() {
-        for lp in local_provider {
-            let entry = per_file.entry(lp.file.clone()).or_default();
-            for (ptr, v) in &lp.set {
-                let ptr = subst_value(&json!(ptr), &vars).as_str().unwrap_or_default().to_string();
-                entry.insert(ptr, subst_value(v, &vars));
-            }
-        }
-    } else if target.kind == "cli" {
+    if target.kind == "cli" && !crate::migrate::local_model_settings(target, &runtime.id, &default_model, &base_url, &mut per_file) {
         notes.push(format!("the {} profile doesn't say how to configure a local model; point it at {base_url} yourself", target.name));
     }
     if harness_changed {
-        if let Some((file, ptr)) = target.mcp.write.as_deref().and_then(|w| w.split_once('#')) {
-            let shape = target.mcp.shape.as_deref().unwrap_or("standard");
-            let servers: Map<String, Value> = lock.tool.iter().filter(|t| t.kind == "mcp").map(|t| (t.name.clone(), mcp_entry(t, shape))).collect();
-            if !servers.is_empty() {
-                per_file.entry(file.to_string()).or_default().insert(ptr.to_string(), Value::Object(servers));
-            }
-        }
+        crate::migrate::mcp_settings(&lock, target, &mut per_file, &mut notes);
     }
-    let vroot = format!("{VENDOR_DIR}/{}/localize", target.id);
-    let source_dir = match source_path.parent().filter(|p| !p.as_os_str().is_empty()) {
-        Some(p) if p.is_absolute() => p.to_path_buf(),
-        Some(p) => ctx.cwd.join(p),
-        None => ctx.cwd.clone(),
-    };
-    for (file, mut sets) in per_file {
-        let Some(spec) = target.files.get(&file) else {
-            notes.push(format!("the {} profile has no file {file:?}", target.id));
-            continue;
-        };
-        // the source lock's entry for the same file (the harness didn't change, or this
-        // lock was localized before) is merged into, never duplicated
-        if let Some(i) = lock.config.iter().position(|c| c.id == file) {
-            let prev = lock.config.remove(i);
-            let fmt = if prev.restore == "pointers" || prev.format == "jsonc" { "json" } else { prev.format.as_str() };
-            let doc = prev.vendored.as_deref().and_then(|v| read_vendored(&source_dir, v)).and_then(|t| crate::capture::parse_config(&t, fmt).ok());
-            match (prev.restore.as_str(), doc) {
-                // earlier pointers stay, under ours
-                ("pointers", Some(Value::Object(m))) => {
-                    for (p, v) in m {
-                        sets.entry(p).or_insert(v);
-                    }
-                }
-                // a whole file: ours are set inside it
-                ("record", _) => {}
-                (_, Some(mut doc)) => {
-                    for (p, v) in &sets {
-                        set_pointer(&mut doc, p, v.clone());
-                    }
-                    let rel = format!("{vroot}/{file}.{fmt}");
-                    vendor.push(VendorFile { rel: rel.clone(), bytes: render_config(&doc, fmt).map_err(Error::Profile)?.into_bytes(), executable: false });
-                    lock.config.insert(i, ConfigFile { digest: Some(crate::hash::content_hash(&doc)), vendored: Some(rel), ..prev });
-                    continue;
-                }
-                (_, None) => notes.push(format!("can't read the source lock's vendored {file}; only the local model settings are restored")),
-            }
-        }
-        let body = Value::Object(sets.clone());
-        let rel = format!("{vroot}/{file}.pointers.json");
-        vendor.push(VendorFile { rel: rel.clone(), bytes: render_config(&body, "json").map_err(Error::Profile)?.into_bytes(), executable: false });
-        lock.config.push(ConfigFile {
-            id: file.clone(),
-            path: spec.path.clone(),
-            format: spec.format.clone(),
-            restore: "pointers".into(),
-            pointers: sets.keys().cloned().collect(),
-            // what's vendored, as pin digests a pointer-restored file
-            digest: Some(crate::hash::content_hash(&body)),
-            vendored: Some(rel),
-            scan: None,
-        });
-    }
+    let source_dir = crate::migrate::dir_of(source_path, ctx);
+    crate::migrate::write_settings(&mut lock, target, per_file, &source_dir, &vroot, &mut notes, &mut vendor)?;
 
     lock.evidence = evidence;
     let report = json!({
@@ -626,38 +530,19 @@ pub fn localize(source: &Lockfile, source_path: &Path, reg: &Registry, ctx: &Ctx
     Ok(LocalizeOutcome { lock, vendor, report })
 }
 
-/// A vendored file of a lock in `dir`, when its path is inside `dir`.
-fn read_vendored(dir: &Path, rel: &str) -> Option<String> {
-    let p = dir.join(rel);
-    (crate::fsutil::safe_rel(rel) && crate::fsutil::within(dir, &p)).then(|| crate::fsutil::read_regular_text(&p, 20 << 20).ok()).flatten()
-}
-
 /// Localize and write the lock to `out`, with its vendored files beside it.
 pub fn localize_to(source_path: &Path, out: &Path, reg: &Registry, ctx: &Ctx, opts: &LocalizeOptions) -> Result<LocalizeOutcome> {
     let source = Lockfile::load(source_path)?;
     let mut o = localize(&source, source_path, reg, ctx, opts)?;
-    // record the source relative to the new lock when they share a directory
-    if source_path.parent() == out.parent() {
-        if let Some(name) = source_path.file_name() {
-            o.lock.base_lock = Some(name.to_string_lossy().into_owned());
-        }
-    }
-    let base = out.parent().filter(|p| !p.as_os_str().is_empty()).map(Path::to_path_buf).unwrap_or_else(|| ctx.cwd.clone());
-    let _ = std::fs::remove_dir_all(base.join(VENDOR_DIR).join(&o.lock.harness.name).join("localize"));
-    for f in &o.vendor {
-        let dest = base.join(&f.rel);
-        if let Some(p) = dest.parent() {
-            std::fs::create_dir_all(p)?;
-        }
-        std::fs::write(&dest, &f.bytes)?;
-    }
-    o.lock.save(out)?;
+    let sub = format!("{}/localize", o.lock.harness.name);
+    crate::migrate::save_to(&mut o.lock, &o.vendor, source_path, out, ctx, &sub)?;
     Ok(o)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::lockfile::ConfigFile;
 
     #[test]
     fn params_parsing() {
