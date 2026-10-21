@@ -85,6 +85,29 @@ $ hlock tune apply
 next → hlock check  ·  hlock upgrade --rollback
 ```
 
+When the prompt stage finds a prompt, the tune lock carries its text, not only its digest:
+`tune` adds it to the end of the project instruction file the harness reads (the base lock's
+own, else the harness's first one, such as `CLAUDE.md`; `AGENTS.md` for the reference harness)
+and writes the result to `.hlock/tuned/<digest>/`. The lock's `[[instructions]]` entry for that
+file points at it, with `source = "tune"`, so `sync` and `launch` place it like any vendored
+instruction file. Commit `.hlock/tuned/` with the lock, and read the change with
+[`hlock diff`](diff.md):
+
+```console
+$ hlock diff
+harness.lock.prev → harness.lock
+
++ instructions AGENTS.md  (tune)
+    AGENTS.md  added  +3 -0
+    @@ -0,0 +1,3 @@
+    +Be careful.
+    +
+    +Be concise and verify each step before continuing.
+~ evidence split: holdout → search
+
+1 instruction file changed
+```
+
 `hlock tune apply [FILE]` adopts a tune lock you already have, without running the search
 again, and keeps the lock it replaces in `harness.lock.prev` (`hlock upgrade --rollback`
 restores it). It refuses a tune lock for another harness than `[target] harness`. `hlock

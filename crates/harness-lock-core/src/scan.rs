@@ -139,6 +139,12 @@ pub fn visible(s: &str) -> String {
     s.chars().map(|c| if classify(c).is_some_and(|(sev, _, _)| sev >= Severity::Warning) || (c.is_control() && c != ' ') { format!("<U+{:04X}>", c as u32) } else { c.to_string() }).collect()
 }
 
+/// One line of text with its hidden characters shown as `<U+202E>`, as [`visible`] does,
+/// but keeping tabs: for showing file content in a diff.
+pub fn visible_line(s: &str) -> String {
+    s.chars().map(|c| if classify(c).is_some_and(|(sev, _, _)| sev >= Severity::Warning) || (c.is_control() && c != '\t') { format!("<U+{:04X}>", c as u32) } else { c.to_string() }).collect()
+}
+
 /// Hidden characters in `text`, named `file` in the findings.
 pub fn scan_text(text: &str, file: &str) -> Vec<Finding> {
     if text.is_ascii() {

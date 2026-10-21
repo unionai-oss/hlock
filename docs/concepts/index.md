@@ -101,6 +101,7 @@ A resolved [`harness.lock`](../reference/lockfile.md) records the outcome:
 
 The lock is plain TOML, generated, and meant to be committed. Reviewing a lock diff in
 a PR tells you what changed in the agent and what evidence supports the change.
+[`hlock diff`](../guides/diff.md) shows the text behind the digests it pins.
 
 ## What you do with a lock
 

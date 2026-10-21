@@ -9,6 +9,7 @@ the Flyte lift degrades to in-process when the ``flyte`` SDK is absent.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import subprocess
 import sys
@@ -226,6 +227,12 @@ max_trials = 2
     after = applied[0]["after"]
     assert after.startswith("sha256:") and after != applied[0]["before"]
     assert d["tune"]["data"]["mode"] == "synthetic"
+    # the tuned prompt's text is a file next to the tune lock, which the lock places
+    tuned = tmp_path / applied[0]["path"]
+    assert applied[0]["path"].startswith(".hlock/tuned/") and tuned.is_file()
+    assert "sha256:" + hashlib.sha256(tuned.read_bytes()).hexdigest() == after
+    entry = next(i for i in d["instructions"] if i["name"] == applied[0]["file"])
+    assert (entry["source"], entry["vendored"], entry["digest"]) == ("tune", applied[0]["path"], after)
 
 
 # ---- trials against a served model (HL_LLM_BASE_URL) -------------------------------

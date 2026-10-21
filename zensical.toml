@@ -38,6 +38,7 @@ nav = [
       "guides/teams.md",
       "guides/secrets.md",
       "guides/audit.md",
+      "guides/diff.md",
     ] },
     { "Optimize your harness" = [
       "guides/eval-packs.md",

@@ -574,6 +574,19 @@ fn tune_apply(path: String, lock: String, manifest: Option<String>) -> PyResult<
     Ok(prev.map(|p| p.to_string_lossy().into_owned()))
 }
 
+/// The content behind the changed digests between two locks (`hlock diff`), as JSON.
+/// `old` and `new` are lock files or git revisions; without them, `<lock>.prev` (or
+/// `HEAD`'s lock) and `lock`.
+#[pyfunction]
+#[pyo3(signature = (lock="harness.lock".to_string(), old=None, new=None, fetch=false))]
+fn lock_diff(lock: String, old: Option<String>, new: Option<String>, fetch: bool) -> PyResult<String> {
+    let lock = Path::new(&lock);
+    let (o, n) = core::lockdiff::sides(lock, old.as_deref(), new.as_deref()).map_err(py_err)?;
+    let project = core::fsutil::absolute(lock.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new(".")));
+    let ctx = core::profiles::Ctx::from_process();
+    Ok(json_str(core::lockdiff::diff(&o, &n, &project, &core::lockdiff::DiffOptions { fetch }, &ctx)))
+}
+
 #[pyfunction]
 fn load(path: &str) -> PyResult<PyLockedAgent> {
     core::Lockfile::load(Path::new(path))
@@ -1982,6 +1995,7 @@ fn _hlock(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyLockedAgent>()?;
     m.add_function(wrap_pyfunction!(resolve, m)?)?;
     m.add_function(wrap_pyfunction!(load, m)?)?;
+    m.add_function(wrap_pyfunction!(lock_diff, m)?)?;
     m.add_function(wrap_pyfunction!(upgrade, m)?)?;
     m.add_function(wrap_pyfunction!(tune, m)?)?;
     m.add_function(wrap_pyfunction!(harnesses, m)?)?;

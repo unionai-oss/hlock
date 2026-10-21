@@ -65,4 +65,5 @@ Because the lock is a committed file, an upgrade is a reviewable diff:
 ```bash
 hlock upgrade --all --apply
 git diff harness.lock     # model, fingerprint, and evidence changes side by side
+hlock diff                # the same, against harness.lock.prev, with the evidence change
 ```

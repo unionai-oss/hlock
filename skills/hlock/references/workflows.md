@@ -191,6 +191,7 @@ hlock upgrade                          # on a resolved lock: plan newer models, 
 hlock upgrade --rollback               # restore harness.lock.prev
 hlock tune                             # tune the lock's retries/temperature into harness.tune.lock
 hlock tune apply                       # adopt harness.tune.lock (keeps harness.lock.prev)
+hlock diff                             # what the last pin/apply changed, with the text behind each digest
 hlock migrate --to codex               # the same setup on another harness, in harness.codex.lock
 hlock localize                         # an all-local equivalent in harness.local.lock
 ```
