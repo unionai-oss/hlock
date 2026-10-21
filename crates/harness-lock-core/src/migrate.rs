@@ -83,6 +83,11 @@ pub(crate) fn instructions_dest(target: &HarnessProfile, name: &str) -> Option<S
     project.first().map(|i| i.to_string())
 }
 
+/// Whether `target`'s profile says which API providers it talks to.
+fn names_providers(target: &HarnessProfile) -> bool {
+    !target.api_keys.is_empty() || target.model.default_provider.is_some()
+}
+
 /// Whether `target` talks to `provider` natively.
 pub fn supports_provider(target: &HarnessProfile, provider: &str) -> bool {
     target.api_keys.iter().any(|k| k.provider == provider) || target.model.default_provider.as_deref() == Some(provider)
@@ -154,7 +159,7 @@ pub(crate) fn carry_over(lock: &mut Lockfile, source: &Lockfile, src: Option<&Ha
             c.notes.push(format!("skill {}: {path} changed since it was pinned; re-pin to move it", s.name));
             continue;
         }
-        let rel = format!("{vroot}/skills/{}", s.name);
+        let rel = format!("{vroot}/skills/{}/{}", if user_level(&dest) { "user" } else { "project" }, s.name);
         let mut warnings = Vec::new();
         match crate::capture::vendor_tree(&from, &rel, &mut c.vendor, &mut warnings) {
             Ok(()) => s.vendored = Some(rel),
@@ -168,13 +173,12 @@ pub(crate) fn carry_over(lock: &mut Lockfile, source: &Lockfile, src: Option<&Ha
     }
 
     // user instruction files: each to its own file in the target, so two never share a path
-    let has_dest = target.instructions.iter().any(|i| i.starts_with("{root}/"));
     let user: Vec<String> = lock.instructions.iter().filter(|i| i.scope == "user").map(|i| i.name.clone()).collect();
     let mut dests = crate::launch::user_instruction_targets(target, &user).into_iter();
     let mut dropped = Vec::new();
     let mut moves: Vec<(usize, String)> = Vec::new();
     for (n, i) in lock.instructions.iter().enumerate() {
-        if i.scope != "user" || !has_dest {
+        if i.scope != "user" {
             continue;
         }
         match dests.next().flatten() {
@@ -251,7 +255,7 @@ pub(crate) fn carry_over(lock: &mut Lockfile, source: &Lockfile, src: Option<&Ha
         let from = old_place(&old);
         match std::fs::read(&from) {
             Ok(bytes) if i.digest.as_ref().is_none_or(|d| *d == crate::hash::sha256_bytes(&bytes)) => {
-                let rel = format!("{vroot}/instructions/{}", file_name(&i.name));
+                let rel = format!("{vroot}/instructions/{}/{}", if i.scope == "user" { "user" } else { "project" }, file_name(&i.name));
                 c.vendor.push(VendorFile { rel: rel.clone(), bytes, executable: false });
                 i.vendored = Some(rel);
             }
@@ -284,13 +288,23 @@ pub(crate) fn carry_over(lock: &mut Lockfile, source: &Lockfile, src: Option<&Ha
 }
 
 /// The MCP servers of `lock` in `target`'s shape, under the file its servers are written to.
-pub(crate) fn mcp_settings(lock: &Lockfile, target: &HarnessProfile, per_file: &mut BTreeMap<String, Map<String, Value>>) {
-    if let Some((file, ptr)) = target.mcp.write.as_deref().and_then(|w| w.split_once('#')) {
-        let shape = target.mcp.shape.as_deref().unwrap_or("standard");
-        let servers: Map<String, Value> = lock.tool.iter().filter(|t| t.kind == "mcp").map(|t| (t.name.clone(), mcp_entry(t, shape))).collect();
-        if !servers.is_empty() {
+/// A disabled server is left out, as `launch` does, unless the shape can say it's disabled.
+pub(crate) fn mcp_settings(lock: &Lockfile, target: &HarnessProfile, per_file: &mut BTreeMap<String, Map<String, Value>>, notes: &mut Vec<String>) {
+    let shape = target.mcp.shape.as_deref().unwrap_or("standard");
+    let servers: Map<String, Value> = lock
+        .tool
+        .iter()
+        .filter(|t| t.kind == "mcp" && (t.enabled != Some(false) || matches!(shape, "opencode" | "goose")))
+        .map(|t| (t.name.clone(), mcp_entry(t, shape)))
+        .collect();
+    if servers.is_empty() {
+        return;
+    }
+    match target.mcp.write.as_deref().and_then(|w| w.split_once('#')) {
+        Some((file, ptr)) => {
             per_file.entry(file.to_string()).or_default().insert(ptr.to_string(), Value::Object(servers));
         }
+        None => notes.push(format!("{} has no MCP config hlock can write; add its {} MCP servers yourself", target.name, servers.len())),
     }
 }
 
@@ -467,7 +481,7 @@ pub fn migrate(source: &Lockfile, source_path: &Path, reg: &Registry, ctx: &Ctx,
     let wanted = match &opts.model {
         Some(m) => {
             let (p, name) = m.split_once(':').filter(|(p, n)| !p.is_empty() && !n.is_empty()).ok_or_else(|| Error::Profile(format!("--model {m:?} isn't written provider:model")))?;
-            if !supports_provider(target, p) {
+            if names_providers(target) && !supports_provider(target, p) {
                 let known: Vec<&str> = target.model.default_provider.iter().map(String::as_str).chain(target.api_keys.iter().map(|k| k.provider.as_str())).collect();
                 return Err(Error::Profile(format!("{} doesn't talk to {p:?} (it supports: {})", target.name, if known.is_empty() { "none".into() } else { known.join(", ") })));
             }
@@ -484,6 +498,7 @@ pub fn migrate(source: &Lockfile, source_path: &Path, reg: &Registry, ctx: &Ctx,
     }
     let default_idx = lock.llm.iter().position(|l| l.role == "default").or(if lock.llm.is_empty() { None } else { Some(0) });
     let fallback = target_model(target);
+    let mut unknown = Vec::new();
     for (n, l) in lock.llm.iter_mut().enumerate() {
         let from = format!("{}:{}", l.provider, l.model);
         // why the role can't stay as it is
@@ -491,6 +506,9 @@ pub fn migrate(source: &Lockfile, source_path: &Path, reg: &Registry, ctx: &Ctx,
             None
         } else if is_local(l) {
             (!can_local).then(|| format!("{} can't use a local model endpoint", target.name))
+        } else if !names_providers(target) {
+            unknown.push(format!("{}:{}", l.provider, l.model));
+            None
         } else {
             (!supports_provider(target, &l.provider)).then(|| format!("{} doesn't talk to {}; --model picks another", target.name, l.provider))
         };
@@ -499,7 +517,7 @@ pub fn migrate(source: &Lockfile, source_path: &Path, reg: &Registry, ctx: &Ctx,
             (_, None) => continue,
             (_, Some(why)) => match &fallback {
                 Some(f) => (f.clone(), why),
-                None => return Err(Error::Profile(format!("{} talks to no API provider hlock knows; `hlock migrate --local` moves the models to a local runtime", target.name))),
+                None => return Err(Error::Profile(format!("{} talks to no API provider; `hlock migrate --local` moves the models to a local runtime", target.name))),
             },
         };
         if (to.0.as_str(), to.1.as_str()) == (l.provider.as_str(), l.model.as_str()) {
@@ -507,6 +525,9 @@ pub fn migrate(source: &Lockfile, source_path: &Path, reg: &Registry, ctx: &Ctx,
         }
         c.replaced.push(format!("llm {}: {from} → {}:{} ({why})", l.role, to.0, to.1));
         *l = LLM { role: l.role.clone(), provider: to.0, model: to.1, resolved_from: Some(format!("migrate:{from}")), params: l.params.clone(), ..Default::default() };
+    }
+    if !unknown.is_empty() {
+        c.notes.push(format!("the {} profile doesn't say which providers it talks to; kept {}: check its model settings", target.name, unknown.join(", ")));
     }
     // local runtimes stay while something still uses them
     let used: BTreeSet<String> = lock.llm.iter().filter_map(|l| l.runtime.clone()).chain(lock.decider.iter().filter_map(|d| d.runtime.clone())).collect();
@@ -527,7 +548,7 @@ pub fn migrate(source: &Lockfile, source_path: &Path, reg: &Registry, ctx: &Ctx,
             c.notes.push(format!("the {} profile doesn't say how to set its model; set {}:{} yourself", target.name, l.provider, l.model));
         }
     }
-    mcp_settings(&lock, target, &mut per_file);
+    mcp_settings(&lock, target, &mut per_file, &mut c.notes);
     write_settings(&mut lock, target, per_file, &source_dir, &vroot, &mut c.notes, &mut c.vendor)?;
 
     // the evidence measured the old harness
@@ -616,7 +637,10 @@ mod tests {
         let source = Lockfile {
             harness: Harness { name: "claude-code".into(), ..Default::default() },
             llm: vec![LLM { role: "default".into(), provider: "anthropic".into(), model: "opus".into(), ..Default::default() }],
-            tool: vec![Tool { name: "gh".into(), kind: "mcp".into(), command: Some("npx".into()), ..Default::default() }],
+            tool: vec![
+                Tool { name: "gh".into(), kind: "mcp".into(), command: Some("npx".into()), ..Default::default() },
+                Tool { name: "off".into(), kind: "mcp".into(), command: Some("npx".into()), enabled: Some(false), ..Default::default() },
+            ],
             skill: vec![Skill { name: "review".into(), origin: "first-party".into(), digest: Some(tree_digest(&proj.join(".claude/skills/review"))), path: Some(".claude/skills/review".into()), scope: Some("project".into()), enabled: true, ..Default::default() }],
             instructions: vec![Instructions { name: "CLAUDE.md".into(), digest: Some(crate::hash::sha256_bytes(b"be brief\n")), scope: "project".into(), ..Default::default() }],
             decider: vec![
@@ -633,7 +657,7 @@ mod tests {
         assert_eq!(l.harness.name, "codex");
         assert_eq!((l.llm[0].provider.as_str(), l.llm[0].model.as_str()), ("openai", "gpt-5.5"));
         assert_eq!(l.skill[0].path.as_deref(), Some(".agents/skills/review"));
-        assert_eq!(l.skill[0].vendored.as_deref(), Some(".hlock/vendor/codex/migrate/skills/review"));
+        assert_eq!(l.skill[0].vendored.as_deref(), Some(".hlock/vendor/codex/migrate/skills/project/review"));
         // each output lock gets its own vendored files
         let a = migrate_to(&proj.join("harness.lock"), &proj.join("a.lock"), &reg, &ctx, &MigrateOptions { to: "codex".into(), model: None }).unwrap();
         let b = migrate_to(&proj.join("harness.lock"), &proj.join("b.lock"), &reg, &ctx, &MigrateOptions { to: "codex".into(), model: Some("openai:gpt-5.5-mini".into()) }).unwrap();
@@ -647,7 +671,9 @@ mod tests {
         assert_eq!(l.decider[0].wiring[0].file, "config");
         let cfg = l.config.iter().find(|c| c.id == "config").unwrap();
         assert!(cfg.pointers.contains(&"/mcp_servers".to_string()) && cfg.pointers.contains(&"/model".to_string()), "{:?}", cfg.pointers);
-        assert!(o.vendor.iter().any(|f| f.rel.ends_with("config.pointers.json")));
+        let pointers = o.vendor.iter().find(|f| f.rel.ends_with("config.pointers.json")).unwrap();
+        let servers: Value = serde_json::from_slice(&pointers.bytes).unwrap();
+        assert!(servers["/mcp_servers"].get("gh").is_some() && servers["/mcp_servers"].get("off").is_none(), "a disabled server stays off: {servers}");
 
         // the project's own AGENTS.md is pinned instead of moving CLAUDE.md onto it
         std::fs::write(proj.join("AGENTS.md"), "shared\n").unwrap();
@@ -664,5 +690,84 @@ mod tests {
         let err = migrate(&source, &proj.join("harness.lock"), &reg, &ctx, &MigrateOptions { to: "pydantic-ai".into(), model: None }).unwrap_err();
         assert!(err.to_string().contains("between agent CLIs"), "{err}");
         let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// Every agent CLI to every other: a lock with the source's own project and user
+    /// skills, instruction files, an MCP server and a decider, migrated, then planned by
+    /// `sync`. Each part either lands where the target reads it, or is dropped with a note.
+    #[test]
+    fn every_pair() {
+        let reg = Registry::builtin();
+        let clis: Vec<&HarnessProfile> = reg.harnesses.iter().filter(|h| h.kind == "cli").collect();
+        let mut problems = Vec::new();
+        let mut drops = Vec::new();
+        for src in &clis {
+            let d = std::env::temp_dir().join(format!("hlock-migrate-pairs-{}-{}", std::process::id(), src.id));
+            let _ = std::fs::remove_dir_all(&d);
+            let proj = d.join("proj");
+            std::fs::create_dir_all(&proj).unwrap();
+            let ctx = Ctx { home: d.join("home"), cwd: proj.clone(), env: BTreeMap::new(), path: vec![] };
+            let root = src.config_root(&ctx);
+            let mut lock = Lockfile { harness: Harness { name: src.id.clone(), ..Default::default() }, ..Default::default() };
+            let mut skill = |name: &str, path: String, scope: &str| {
+                let dir = if user_level(&path) { ctx.expand(&path, Some(&root)) } else { proj.join(&path) };
+                std::fs::create_dir_all(&dir).unwrap();
+                std::fs::write(dir.join("SKILL.md"), format!("---\nname: {name}\n---\n")).unwrap();
+                lock.skill.push(Skill { name: name.into(), origin: "first-party".into(), digest: Some(tree_digest(&dir)), path: Some(path), scope: Some(scope.into()), enabled: true, ..Default::default() });
+            };
+            if let Some(dir) = src.skills.dirs.iter().find(|d| !user_level(d)) {
+                skill("proj-skill", format!("{dir}/proj-skill"), "project");
+            }
+            if let Some(dir) = src.skills.write.as_ref().filter(|d| user_level(d)) {
+                skill("user-skill", format!("{dir}/user-skill"), "user");
+            }
+            let mut ins = |name: &str, scope: &str| {
+                let file = if user_level(name) { ctx.expand(name, Some(&root)) } else { proj.join(name) };
+                std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+                std::fs::write(&file, format!("{scope} rules\n")).unwrap();
+                lock.instructions.push(Instructions { name: name.into(), digest: Some(crate::hash::sha256_bytes(format!("{scope} rules\n").as_bytes())), scope: scope.into(), ..Default::default() });
+            };
+            if let Some(name) = src.instructions.iter().find(|i| !user_level(i)) {
+                ins(name, "project");
+            }
+            if let Some(name) = src.instructions.iter().find(|i| i.starts_with("{root}/")) {
+                ins(name, "user");
+            }
+            lock.tool.push(Tool { name: "gh".into(), kind: "mcp".into(), transport: Some("stdio".into()), command: Some("npx".into()), args: vec!["gh-mcp".into()], ..Default::default() });
+            if let Some((via, wiring)) = crate::decide::wiring("approve", &src.id, Some(src)) {
+                lock.decider.push(Decider { use_: "approve".into(), provider: "typesafe".into(), model: "kev-9b".into(), protocol: "systemone".into(), via, wiring, ..Default::default() });
+            }
+            if let Some((provider, model)) = target_model(src) {
+                lock.llm.push(LLM { role: "default".into(), provider, model, ..Default::default() });
+            }
+            let src_path = proj.join("harness.lock");
+            lock.save(&src_path).unwrap();
+            for target in clis.iter().filter(|t| t.id != src.id) {
+                let pair = format!("{} → {}", src.id, target.id);
+                let o = match migrate(&lock, &src_path, &reg, &ctx, &MigrateOptions { to: target.id.clone(), model: None }) {
+                    Ok(o) => o,
+                    Err(e) => {
+                        problems.push(format!("{pair}: {e}"));
+                        continue;
+                    }
+                };
+                let out = proj.join(format!("harness.{}.lock", target.id));
+                let mut new = o.lock.clone();
+                save_to(&mut new, &o.vendor, &src_path, &out, &ctx, &format!("{}/migrate", target.id)).unwrap();
+                let plan = crate::sync::plan(&new, &out, &reg, &ctx, &crate::sync::SyncOptions { trust: true, ..Default::default() }).unwrap();
+                for st in plan.steps.iter().filter(|s| s.status == "manual" && matches!(s.kind.as_str(), "skill" | "instructions" | "config")) {
+                    problems.push(format!("{pair}: {} {}: {}", st.kind, st.title, st.reason));
+                }
+                for n in o.report["notes"].as_array().unwrap() {
+                    let n = n.as_str().unwrap();
+                    if n.contains("no place") || n.contains("dropped") || n.contains("no skills directory") || n.contains("no copy") || n.contains("changed since") {
+                        drops.push(format!("{pair}: {n}"));
+                    }
+                }
+            }
+            let _ = std::fs::remove_dir_all(&d);
+        }
+        eprintln!("{} harnesses, {} pairs\n-- dropped with a note --\n{}", clis.len(), clis.len() * (clis.len() - 1), drops.join("\n"));
+        assert!(problems.is_empty(), "{} problems:\n{}", problems.len(), problems.join("\n"));
     }
 }

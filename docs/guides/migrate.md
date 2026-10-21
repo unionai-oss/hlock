@@ -51,11 +51,11 @@ in git), and update `[target] harness` in `harness.toml` if it names the old har
 
 | Part | Where it goes |
 |---|---|
-| MCP servers | Into the new harness's MCP config, in its shape (Codex's `[mcp_servers]`, OpenCode's `mcp`, Goose's extensions, …) |
+| MCP servers | Into the new harness's MCP config, in its shape (Codex's `[mcp_servers]`, OpenCode's `mcp`, Goose's extensions, …). Disabled servers stay off. IronClaw and ZeroClaw have no MCP config hlock writes, so `migrate` says to add them yourself. |
 | Project skills | Kept where they are if the new harness reads that directory (OpenCode reads `.claude/skills`). Otherwise moved to its `.agents/skills`, else its own project skill directory. |
 | User skills | Into the new harness's skill directory (`~/.codex/skills`, …), unless it already reads where they are (`~/.agents/skills`) |
 | Project instructions | Kept if the new harness reads the file. Otherwise renamed to the file it does read: `CLAUDE.md` → `AGENTS.md` for Codex, `GEMINI.md` for Gemini CLI. If the project already has that file, the lock pins the project's file instead. |
-| User instructions | Into the new harness's user instruction file (`~/.codex/AGENTS.md`, …) |
+| User instructions | Into the new harness's user instruction file (`~/.codex/AGENTS.md`, …), or dropped with a note when it has none |
 | Decision models | Rewired onto the new harness's hooks. A use it has no hook for is dropped, with a note. |
 
 A file that moves needs a copy for `sync` to put in its new place. When the lock doesn't
@@ -85,6 +85,10 @@ $ hlock migrate --to codex --model openai:gpt-5.5-mini
 …
   ~ llm default: anthropic:opus → openai:gpt-5.5-mini (--model)
 ```
+
+Some profiles don't say which providers their harness talks to (Hermes, Amp, nanobot,
+PicoClaw, ZeroClaw). Then the model is kept as it is, with a note to check that harness's model
+settings.
 
 The new lock sets the model in the harness's config (Codex's `model` and `model_provider`),
 so `sync` and `launch` start it on that model. Decision models are called by hlock, not the
