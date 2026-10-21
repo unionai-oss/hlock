@@ -25,16 +25,8 @@
 
 ---
 
-> [!NOTE]
-> **hlock is in early development.** Expect rough edges and breaking changes between
-> releases. Feedback shapes where it goes next: [open an issue](https://github.com/unionai-oss/hlock/issues/new)
-> for bugs and feature requests, [start a discussion](https://github.com/unionai-oss/hlock/discussions)
-> for questions and ideas, or send a pull request. Agent-written pull requests are
-> welcome, as long as you've reviewed and understand the change. See the
-> [contributing guide](https://docs.hlock.ai/project/contributing/) to get started.
-
 Your agent is more than a model. It's a harness, MCP servers, skills, and config,
-hand-tuned on one machine. `hlock` is the missing harness packaging layer:
+hand-tuned on one machine. `hlock` is the missing harness packaging layer, written in Rust 🦀:
 `harness.lock` tracks all of its dependencies, so you can commit it to git and restore
 it anywhere. When you're ready, it measures your stack against your own tasks and finds a
 better one.
@@ -46,6 +38,14 @@ better one.
 | ✅ `--locked` check | **`hlock check`**: show what changed since the pin |
 | 📦 `uv sync` / `npm ci` | **`hlock sync`**: rehydrate the locked setup on any machine |
 | ▶️ `uv run` | **`hlock launch`** and **`hlock run`**: start sessions and run prompts on the locked setup |
+
+> [!NOTE]
+> **hlock is in early development.** Expect rough edges and breaking changes between
+> releases. Feedback shapes where it goes next: [open an issue](https://github.com/unionai-oss/hlock/issues/new)
+> for bugs and feature requests, [start a discussion](https://github.com/unionai-oss/hlock/discussions)
+> for questions and ideas, or send a pull request. Agent-written pull requests are
+> welcome, as long as you've reviewed and understand the change. See the
+> [contributing guide](https://docs.hlock.ai/project/contributing/) to get started.
 
 <p align="center">
   <img src="https://raw.githubusercontent.com/unionai-oss/hlock/main/docs/assets/demo.webp" alt="An hlock session: pin a Claude Code setup into harness.lock and push it to GitHub, then pull and sync it on another machine" width="852">
