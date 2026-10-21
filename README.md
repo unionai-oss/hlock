@@ -60,10 +60,6 @@ pip install hlock        # or: uv add hlock  ·  uvx hlock --help
 Prebuilt wheels cover Linux (x86_64, aarch64), macOS (arm64, x86_64), and Windows (x64)
 for CPython 3.9+. For Rust, use `cargo add hlock`.
 
-> [!NOTE]
-> [`harness-lock`](https://pypi.org/project/harness-lock/) is an alias for `hlock`.
-> Both names install the same package at the same version, so `import hlock` and
-> `import harness_lock` are the same API.
 
 ## Quickstart
 
