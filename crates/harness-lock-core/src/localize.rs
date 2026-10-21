@@ -499,7 +499,7 @@ pub fn localize(source: &Lockfile, source_path: &Path, reg: &Registry, ctx: &Ctx
         notes.push(format!("the {} profile doesn't say how to configure a local model; point it at {base_url} yourself", target.name));
     }
     if harness_changed {
-        crate::migrate::mcp_settings(&lock, target, &mut per_file);
+        crate::migrate::mcp_settings(&lock, target, &mut per_file, &mut notes);
     }
     let source_dir = crate::migrate::dir_of(source_path, ctx);
     crate::migrate::write_settings(&mut lock, target, per_file, &source_dir, &vroot, &mut notes, &mut vendor)?;

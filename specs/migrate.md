@@ -110,8 +110,11 @@ For each `[[llm]]` role:
 3. Anything else moves to the target's provider: its `default-provider` if hlock has a
    default model for it, else the first provider in its `api-keys` that has one, with the
    same default models `hlock meta init` uses. A target with neither (Copilot, Cursor) gets
-   its provider with `model = "harness-default"`: the harness's own model. A target that
-   talks to no API provider at all is refused, with a hint to use `--local`.
+   its provider with `model = "harness-default"`: the harness's own model.
+4. A target whose profile names no providers at all (no `api-keys`, no
+   `default-provider`: Hermes, Amp, nanobot, PicoClaw, ZeroClaw today) keeps the model, with a
+   note to check its model settings. The profile doesn't say, so refusing would be a guess.
+   Only a local role that such a target also can't run is refused, with a hint to use `--local`.
 
 Each replaced role is reported (`llm default: anthropic:opus → openai:gpt-5.5 (Codex CLI
 doesn't talk to anthropic)`), with a note that `--model` picks another.
@@ -180,6 +183,13 @@ Code), user skills get a vendored copy, and deciders are rewired for the new har
   with its usual plan, backups and trust checks.
 
 ## 4. Tests
+
+- Every pair (Rust, `migrate::tests::every_pair`): for each agent-CLI profile, a lock with
+  that harness's own project and user skills, instruction files, an MCP server, a decider and
+  a model on its provider is migrated to every other CLI and planned by `sync`. No skill,
+  instruction or config step may be refused or fail its digest check: each part lands where
+  the target reads it, or is dropped with a note. A new profile is checked against all the
+  others without writing a test for it.
 
 - Core (Rust): skill and instruction path mapping for Codex, OpenCode and Hermes targets;
   provider support and the replacement model; decider rewiring and dropping.
