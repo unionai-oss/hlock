@@ -27,7 +27,7 @@ from importlib.metadata import entry_points
 __all__ = ["BUILTIN", "DESCRIBE", "GROUP", "KINDS", "Backend", "BackendError", "available", "load", "run_local"]
 
 #: The work items hlock's stock handlers run.
-KINDS = ("llm.run_trial", "data.load", "data.synthetic", "grade", "prompt.search", "ft.lora")
+KINDS = ("llm.run_trial", "data.load", "data.synthetic", "grade", "prompt.search", "harness.optimize", "ft.lora")
 #: The work item that asks a backend what it runs.
 DESCRIBE = "backend.describe"
 #: The entry point group Python backends register under.

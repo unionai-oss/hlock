@@ -102,7 +102,7 @@ def test_a_python_backend_from_the_manifest_runs_resolve_and_tune(project):
     assert r.exit_code == 0, r.output
     out = flat(r.output)
     assert "data ✗ the mine backend doesn't run data.load" in out
-    assert "prompt ✗ the mine backend doesn't run prompt.search" in out
+    assert "optimize ✗ the mine backend doesn't run harness.optimize" in out
 
     r = invoke("backend", "status")
     assert r.exit_code == 0, r.output

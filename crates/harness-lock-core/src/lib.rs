@@ -29,6 +29,7 @@ pub mod manifest;
 pub mod meta;
 pub mod migrate;
 pub mod ops;
+pub mod optimize;
 pub mod policy;
 pub mod process;
 pub mod profiles;

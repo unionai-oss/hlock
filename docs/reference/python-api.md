@@ -111,7 +111,7 @@ or `error`. `offline` has neither, since it runs in process.
 
 ```python
 >>> hlock.backend_describe(hlock.Manifest.from_str(""), backend="local")
-'{"describe":{"about":"hlock\'s stock handlers, in process on this machine","kinds":["llm.run_trial","data.load","data.synthetic","grade","prompt.search","ft.lora"],"model_endpoint":true,"name":"local"},"name":"local","options":{},"renamed_from":null,"source":"built in, Python worker"}'
+'{"describe":{"about":"hlock\'s stock handlers, in process on this machine","kinds":["llm.run_trial","data.load","data.synthetic","grade","prompt.search","harness.optimize","ft.lora"],"model_endpoint":true,"name":"local"},"name":"local","options":{},"renamed_from":null,"source":"built in, Python worker"}'
 ```
 
 ### `tune`
@@ -120,6 +120,7 @@ or `error`. `offline` has neither, since it runs in process.
 tune(
     manifest=None, depth="auto", data="user", harness=None, out=None,
     strict=False, apply=False, max_trials=None, backend=None, workdir=None, lock=None,
+    optimizer=None, edit=None, budget_rollouts=None, budget_usd=None,
 ) -> str
 ```
 
@@ -128,7 +129,33 @@ Run tuning, like [`hlock tune`](cli.md#tune). Returns JSON with `path`
 `data_mode`, `grid`, `trials`, `stages` (each with `stage`, whether it `ran`, and a
 `detail`), `best`, `baseline` (the lock's own configuration, measured, with its
 `success_rate` and `trials`), `baseline_success_rate`, `gain_success_rate`, `simulated`,
-`notes`, `applied`, and `previous` (the `.prev` path when `apply` replaced a lock).
+`notes`, `applied`, `previous` (the `.prev` path when `apply` replaced a lock), and
+`optimize` (when the optimize stage ran: `optimizer`, `acceptance`, the `edits` written, and
+how many components it `proposed` changing). `optimizer`, `edit` (a list of kinds),
+`budget_rollouts` and `budget_usd` override `[tune]`.
+
+### `tune_eval`
+
+```python
+tune_eval(session, candidate, split="train", tasks=None, trials=None) -> str
+```
+
+Run a tune candidate's trials, like [`hlock tune eval`](cli.md#tune-eval). Returns JSON with
+`candidate` (its digest), `split`, `results` (each with `task`, `trial`, `success`, `score`,
+`feedback`, `workspace`, `cost_usd`, `latency_s`, `cached`), and `budget`. An optimizer
+written in Python uses [`hlock.optimize.Session`](../guides/backends.md#write-an-optimizer),
+which wraps it and raises `BudgetExhausted` when the budget is spent.
+
+### `lock_diff`
+
+```python
+lock_diff(lock="harness.lock", old=None, new=None, fetch=False) -> str
+```
+
+Compare two locks, like [`hlock diff`](cli.md#diff). `old` and `new` are lock files or git
+revisions. Returns JSON with `old`, `new`, `summary`, `components` (each with `kind`,
+`name`, `change`, where its content came from, and its `files`' hunks, or why it's
+`unavailable`), `evidence`, and `unresolved`.
 
 ### `tune_apply`
 

@@ -187,11 +187,19 @@ def test_worker_contract_data_load_split():
     assert set(md["split"]) == {"train", "val", "test"}
 
 
-def test_tune_depth_prompt_local(tmp_path, monkeypatch):
-    """depth=prompt drives the data + prompt.search stages, writing real digests."""
+def test_tune_depth_prompt_on_a_backend_without_harness_optimize(tmp_path, monkeypatch):
+    """A backend from before harness.optimize: depth=prompt falls back to its prompt.search
+    (deprecated), which still writes the tuned prompt as a file the lock places."""
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("HL_PYTHON", sys.executable)
     monkeypatch.setenv("HL_LLM_BASE_URL", "")  # ensure deterministic reference path
+    (tmp_path / "legacy_backend.py").write_text(
+        "from hlock.backends import KINDS\n"
+        "from hlock.backends.local import LocalBackend\n\n\n"
+        "class Legacy(LocalBackend):\n"
+        "    kinds = tuple(k for k in KINDS if k != 'harness.optimize')\n"
+    )
+    monkeypatch.setenv("PYTHONPATH", str(tmp_path))
 
     manifest = f"""[project]
 name = "prompt-e2e"
@@ -214,12 +222,16 @@ select = "min-cost"
 [budget]
 strategy = "grid"
 max_trials = 2
+
+[backends.legacy]
+python = "legacy_backend:Legacy"
 """
     (tmp_path / "harness.toml").write_text(manifest)
 
     import hlock
 
-    json.loads(hlock.tune(backend="local", depth="prompt", data="synthetic:2", max_trials=2))
+    report = json.loads(hlock.tune(backend="legacy", depth="prompt", data="synthetic:2", max_trials=2))["report"]
+    assert any("prompt.search, which is deprecated" in n for n in report["notes"])
     d = json.loads(hlock.Lockfile.load(str(tmp_path / "harness.tune.lock")).to_json())
     applied = d["tune"]["prompt"]["applied"]
     assert applied and "_placeholder" not in applied[0]  # a real prompt search ran

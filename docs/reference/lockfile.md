@@ -280,6 +280,14 @@ plus what tuning produced: the chosen hyperparameters, applied prompts, fine-tun
 adapters, the data split, and the budget, all content-addressed. Adopt it into
 `harness.lock` with `hlock tune apply`, which keeps the old lock in `harness.lock.prev`.
 
+When the [optimize stage](../guides/tune.md#tune-the-harness-text) ran, `[tune.optimizer]`
+records the optimizer, what it could edit, its budget and usage, and a digest of the splits;
+`[tune.acceptance]` records the noise band, the paired test run (`base`, `candidate`,
+`better`, `worse`, `p`) and its cost, and why edits weren't accepted. Each accepted edit is
+a `[[tune.edit]]` (`component`, `kind`, `op`, `before`, `after`, `path`, `rationale`), and
+the lock's `[[instructions]]` (with `source = "tune"`) or `[[skill]]` entry points at its
+file under `.hlock/tuned/`.
+
 ## `harness.meta.lock`
 
 [`hlock meta pin`](../guides/meta.md) writes the meta harness's lock: a pinned lock

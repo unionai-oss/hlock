@@ -168,6 +168,9 @@ class FlyteBackend(Backend):
     about = "Flyte 2 tasks on the cluster in your Flyte config"
 
     def run(self, request: dict) -> dict:
+        if request.get("kind") == "harness.optimize":
+            # the search runs here, where the tune session is; its trials run on Flyte
+            return run_local(request)
         if flyte is None:
             sys.stderr.write(f"[flyte] the Flyte SDK isn't installed (pip install \"hlock[flyte]\"); "
                              f"running {request.get('kind')} in process\n")

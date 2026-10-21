@@ -284,6 +284,11 @@ pub struct TuneSpec {
     pub workdir: PathBuf,
     /// The base lock (default `./harness.lock`); `apply` writes back to it.
     pub lock: Option<PathBuf>,
+    /// Overrides of `[tune]`: the optimizer, what it may edit, its budget.
+    pub optimizer: Option<String>,
+    pub edit: Option<Vec<String>>,
+    pub budget_rollouts: Option<u64>,
+    pub budget_usd: Option<f64>,
 }
 
 impl Default for TuneSpec {
@@ -299,8 +304,270 @@ impl Default for TuneSpec {
             backend: None,
             workdir: PathBuf::from(".hlock"),
             lock: None,
+            optimizer: None,
+            edit: None,
+            budget_rollouts: None,
+            budget_usd: None,
         }
     }
+}
+
+/// `[tune]` in `harness.toml`, with `tune`'s flags applied.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TuneConfig {
+    /// The backend that searches: `hlock` (the trial backend's built-in) or another.
+    pub optimizer: String,
+    /// The component kinds it may edit; empty means no optimize stage.
+    pub edit: Vec<String>,
+    pub proposer: Option<String>,
+    pub budget: crate::optimize::Budget,
+    /// Trials per task in each evaluation, and in the acceptance runs.
+    pub trials: u32,
+    /// The sign test's significance level for accepting edits.
+    pub alpha: f64,
+    /// How much more per task an accepted candidate may cost (0.25 = 25%).
+    pub max_cost_increase: f64,
+}
+
+impl TuneConfig {
+    pub fn new(manifest: &Manifest, spec: &TuneSpec, depth: &str) -> Result<TuneConfig> {
+        let t = &manifest.tune;
+        let str_list = |v: &serde_json::Value| -> Vec<String> { v.as_array().map(|a| a.iter().filter_map(|x| x.as_str().map(str::to_string)).collect()).unwrap_or_default() };
+        let declared = t.get("edit").map(str_list);
+        let edit = spec.edit.clone().or(declared).unwrap_or_else(|| if prompt_depth(depth) { vec!["instructions".into()] } else { vec![] });
+        if let Some(k) = edit.iter().find(|k| !crate::optimize::KINDS.contains(&k.as_str())) {
+            return Err(Error::Tuning(format!("[tune] edit: {k:?} can't be tuned yet (use {})", crate::optimize::KINDS.iter().map(|k| format!("{k:?}")).collect::<Vec<_>>().join(" or "))));
+        }
+        let budget = t.get("budget");
+        let num = |k: &str| t.get(k).and_then(serde_json::Value::as_f64);
+        Ok(TuneConfig {
+            optimizer: spec.optimizer.clone().or_else(|| t.get("optimizer").and_then(|v| v.as_str()).map(str::to_string)).unwrap_or_else(|| "hlock".into()),
+            edit,
+            proposer: t.get("proposer").and_then(|v| v.as_str()).map(str::to_string),
+            budget: crate::optimize::Budget {
+                rollouts: spec.budget_rollouts.or_else(|| budget.and_then(|b| b.get("rollouts")).and_then(serde_json::Value::as_u64)).or(Some(100)),
+                usd: spec.budget_usd.or_else(|| budget.and_then(|b| b.get("usd")).and_then(serde_json::Value::as_f64)),
+            },
+            trials: t.get("trials").and_then(serde_json::Value::as_u64).map(|n| n.clamp(1, 20) as u32).unwrap_or(2),
+            alpha: num("alpha").unwrap_or(0.05),
+            max_cost_increase: num("max-cost-increase").unwrap_or(0.25),
+        })
+    }
+}
+
+/// What the optimize stage did: its candidate, whether hlock accepted it, and the record
+/// for the tune lock.
+struct Optimized {
+    /// The candidate bundle, after the leak check.
+    candidate: PathBuf,
+    seed: PathBuf,
+    spec: crate::optimize::BundleSpec,
+    changes: Vec<crate::optimize::Change>,
+    ledger: Vec<serde_json::Value>,
+    accepted: bool,
+    /// `[tune.optimizer]` and `[tune.acceptance]`.
+    optimizer: serde_json::Value,
+    acceptance: serde_json::Value,
+}
+
+/// Per-task success over `trials` seeds, and mean cost per trial.
+fn per_task(dir: &std::path::Path, resolver: &Resolver, stack: &Stack, tasks: &[crate::tasks::Task], trials: u32) -> Result<(BTreeMap<String, f64>, f64, usize)> {
+    let mut by = BTreeMap::new();
+    let (mut cost, mut n) = (0.0, 0usize);
+    for t in tasks {
+        let mut ok = 0.0;
+        for s in 0..trials {
+            let (r, _) = crate::optimize::cached_trial(dir, resolver, stack, t, u64::from(s))?;
+            ok += if r.success { 1.0 } else { 0.0 };
+            cost += r.cost_usd;
+            n += 1;
+        }
+        by.insert(t.id.clone(), ok / f64::from(trials));
+    }
+    Ok((by, cost / n.max(1) as f64, n))
+}
+
+/// The optimize stage (`specs/tune-optimizers.md` §3): write the bundle and the session,
+/// measure the noise on dev, hand the bundle to the optimizer, drop edits that copy the
+/// pack, then measure the candidate against the seed on the held-out tasks.
+#[allow(clippy::too_many_arguments)]
+fn optimize_stage(
+    w: &crate::worker::Worker,
+    cfg: &TuneConfig,
+    manifest: &Manifest,
+    spec: &TuneSpec,
+    resolver: &mut Resolver,
+    base: &Stack,
+    base_lock: Option<&Lockfile>,
+    lock_path: &std::path::Path,
+    search: &[crate::tasks::Task],
+    note: &dyn Fn(String),
+) -> Result<Optimized> {
+    use crate::optimize as opt;
+    let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
+    let id: String = crate::hash::sha256_hex(format!("{nanos}{}", std::process::id()).as_bytes()).chars().take(8).collect();
+    let workdir = crate::fsutil::absolute(&spec.workdir);
+    let dir = opt::Session::dir(&workdir, &id);
+    std::fs::create_dir_all(&dir)?;
+    let lock_dir = crate::fsutil::absolute(lock_path.parent().filter(|d| !d.as_os_str().is_empty()).unwrap_or(std::path::Path::new(".")));
+    let seed = dir.join("seed");
+    let bundle = opt::write_seed(base_lock, &lock_dir, &base.harness, &tuned_instructions_name(base_lock, manifest, &base.harness), &cfg.edit, &seed)?;
+
+    // train and dev from the search split; the holdout is the test split, which only hlock runs
+    let mut ids: Vec<&crate::tasks::Task> = search.iter().collect();
+    ids.sort_by(|a, b| a.id.cmp(&b.id));
+    let (mut train, mut dev): (Vec<crate::tasks::Task>, Vec<crate::tasks::Task>) = (Vec::new(), Vec::new());
+    for (i, t) in ids.into_iter().enumerate() {
+        if search.len() >= 3 && i % 3 == 2 { dev.push(t.clone()) } else { train.push(t.clone()) }
+    }
+    if dev.is_empty() {
+        note(format!("the pack has {} search tasks, too few to set some aside as dev: the optimizer's dev split is its train split", search.len()));
+        dev = train.clone();
+    }
+    let mut test: Vec<crate::tasks::Task> = resolver.holdout().to_vec();
+    let test_split = if test.is_empty() {
+        note("the pack has no holdout tasks, so the edits are checked on the dev split, which the optimizer saw; add a holdout split for an unbiased check".into());
+        test = dev.clone();
+        "dev"
+    } else {
+        if test.len() < 20 {
+            note(format!("the pack holds out {} tasks: a gain measured on fewer than 20 is unlikely to be real", test.len()));
+        }
+        "holdout"
+    };
+    let manifest_path = manifest.source_path.clone().map(|p| crate::fsutil::absolute(&p)).unwrap_or_else(|| manifest.root().join(crate::MANIFEST_PATH));
+    let session = opt::Session {
+        id: id.clone(),
+        manifest: manifest_path,
+        lock: Some(crate::fsutil::absolute(lock_path)).filter(|p| p.is_file()),
+        backend: spec.backend.clone(),
+        harness: base.harness.clone(),
+        workdir: workdir.clone(),
+        train: train.iter().map(|t| t.id.clone()).collect(),
+        dev: dev.iter().map(|t| t.id.clone()).collect(),
+        trials: cfg.trials,
+        budget: cfg.budget.clone(),
+        used: opt::Usage::default(),
+    };
+    session.save(&dir)?;
+
+    // the seed as a stack: what the candidate is measured against, with the same system prompt
+    let seed_stack = opt::overlay(base, &seed);
+    resolver.trial_locks.insert(seed_stack.hash(), opt::trial_lock(base_lock, &seed, &bundle)?);
+
+    // ---- the noise band: the seed's spread over seeds on dev ----
+    let mut rates = Vec::new();
+    for s in 0..cfg.trials {
+        let mut ok = 0usize;
+        for t in &dev {
+            ok += usize::from(opt::cached_trial(&dir, resolver, &seed_stack, t, u64::from(s))?.0.success);
+        }
+        rates.push(ok as f64 / dev.len().max(1) as f64);
+    }
+    let mean = rates.iter().sum::<f64>() / rates.len().max(1) as f64;
+    let noise = (rates.iter().map(|r| (r - mean).powi(2)).sum::<f64>() / rates.len().max(1) as f64).sqrt();
+
+    // ---- the search ----
+    let hlock_bin = std::env::var("HLOCK_BIN").ok().filter(|b| !b.is_empty()).unwrap_or_else(|| "hlock".into());
+    let payload = serde_json::json!({
+        "session": dir,
+        "seed": seed,
+        "tasks": {"train": session.train, "dev": session.dev},
+        "task_meta": train.iter().chain(dev.iter()).map(|t| (t.id.clone(), serde_json::json!({"prompt_text": t.prompt_text}))).collect::<serde_json::Map<_, _>>(),
+        "evaluate": {"command": [hlock_bin, "tune", "eval", "--session", dir.to_string_lossy()]},
+        "budget": cfg.budget,
+        "trials": cfg.trials,
+        "models": {"task": base.llm.get(&tuned_role(base)), "proposer": cfg.proposer},
+        "noise": {"dev_success_sd": noise},
+    });
+    let r = w.optimize(&dir.join("opt"), &serde_json::json!({"edit": cfg.edit}), payload).map_err(|e| match e {
+        Error::Worker(m) => Error::Tuning(format!("the {} optimizer failed: {m}", cfg.optimizer)),
+        e => e,
+    })?;
+    let cand_src = r.candidate.clone().map(PathBuf::from).ok_or_else(|| Error::Tuning(format!("the {} optimizer returned no candidate", cfg.optimizer)))?;
+    let ledger: Vec<serde_json::Value> = r
+        .ledger
+        .as_deref()
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .map(|t| t.lines().filter_map(|l| serde_json::from_str(l).ok()).collect())
+        .unwrap_or_default();
+    // hlock's copy of the candidate: the optimizer's directory isn't trusted to stay put
+    let candidate = dir.join("final");
+    let _ = std::fs::remove_dir_all(&candidate);
+    for sub in ["instructions", "skills"] {
+        if cand_src.join(sub).is_dir() {
+            crate::fsutil::copy_tree(&cand_src.join(sub), &candidate.join(sub))?;
+        }
+    }
+    std::fs::create_dir_all(&candidate)?;
+    let mut changes = opt::validate(&seed, &bundle, &candidate).map_err(|e| Error::Tuning(format!("the {} optimizer's candidate: {e}", cfg.optimizer)))?;
+
+    // ---- edits that copy the pack are dropped ----
+    let mut all = search.to_vec();
+    all.extend(resolver.holdout().iter().cloned());
+    let leaked = opt::leaks(&changes, &opt::pack_literals(&all));
+    for (cid, hits) in &leaked {
+        note(format!("dropped the edit to {cid}: it copies text from the eval pack ({})", hits.iter().map(|h| format!("{h:?}")).collect::<Vec<_>>().join(", ")));
+        opt::revert(&seed, &candidate, cid)?;
+    }
+    if !leaked.is_empty() {
+        changes = opt::validate(&seed, &bundle, &candidate)?;
+    }
+
+    let used = opt::Session::load(&dir).map(|s| s.used).unwrap_or_default();
+    let mut optimizer = serde_json::json!({
+        "name": cfg.optimizer,
+        "evaluator": if used.rollouts > 0 { "hlock" } else { "optimizer" },
+        "edit": cfg.edit,
+        "budget": {"rollouts": cfg.budget.rollouts, "usd": cfg.budget.usd},
+        "usage": {"rollouts": used.rollouts, "usd": round6(used.usd)},
+        "session": id,
+        "splits": crate::hash::content_hash(&serde_json::json!({"train": session.train, "dev": session.dev, "test": test.iter().map(|t| &t.id).collect::<Vec<_>>()})),
+    });
+    if let Some(o) = r.optimizer.as_object() {
+        for (k, v) in o.iter().filter(|(k, _)| matches!(k.as_str(), "version" | "proposer")) {
+            optimizer[k] = v.clone();
+        }
+    }
+    if optimizer.get("proposer").is_none_or(serde_json::Value::is_null) {
+        optimizer["proposer"] = serde_json::json!(cfg.proposer);
+    }
+
+    if changes.is_empty() {
+        let acceptance = serde_json::json!({"accepted": false, "reason": "the optimizer made no edits that hlock kept", "noise-band": round6(noise)});
+        return Ok(Optimized { candidate, seed, spec: bundle, changes, ledger, accepted: false, optimizer, acceptance });
+    }
+
+    // ---- acceptance: the seed and the candidate, paired, on the test split ----
+    let cand_stack = opt::overlay(base, &candidate);
+    resolver.trial_locks.insert(cand_stack.hash(), opt::trial_lock(base_lock, &candidate, &bundle)?);
+    let (b, b_cost, n) = per_task(&dir, resolver, &seed_stack, &test, cfg.trials)?;
+    let (c, c_cost, _) = per_task(&dir, resolver, &cand_stack, &test, cfg.trials)?;
+    let wins = test.iter().filter(|t| c[&t.id] > b[&t.id]).count();
+    let losses = test.iter().filter(|t| c[&t.id] < b[&t.id]).count();
+    let p = opt::sign_test(wins, losses);
+    let (bsr, csr) = (b.values().sum::<f64>() / b.len().max(1) as f64, c.values().sum::<f64>() / c.len().max(1) as f64);
+    let reason = if csr - bsr <= noise {
+        Some(format!("success {csr:.2} vs {bsr:.2} isn't above the noise band ({noise:.2})"))
+    } else if p > cfg.alpha {
+        Some(format!("the gain isn't significant: p = {p:.3} > {} ({wins} tasks better, {losses} worse)", cfg.alpha))
+    } else if b_cost > 0.0 && c_cost > b_cost * (1.0 + cfg.max_cost_increase) {
+        Some(format!("cost per trial rose from ${b_cost:.4} to ${c_cost:.4}, more than {:.0}%", cfg.max_cost_increase * 100.0))
+    } else {
+        None
+    };
+    let mut acceptance = serde_json::json!({
+        "accepted": reason.is_none(),
+        "noise-band": round6(noise),
+        "test": {"split": test_split, "tasks": test.len(), "trials": cfg.trials, "base": round6(bsr), "candidate": round6(csr), "better": wins, "worse": losses, "p": round6(p)},
+        "cost-usd-per-trial": {"base": round6(b_cost), "candidate": round6(c_cost)},
+        "runs": n * 2,
+    });
+    if let Some(why) = &reason {
+        acceptance["reason"] = serde_json::json!(why);
+        note(format!("hlock didn't accept the {} optimizer's edits: {why}", cfg.optimizer));
+    }
+    Ok(Optimized { candidate, seed, spec: bundle, changes, ledger, accepted: reason.is_none(), optimizer, acceptance })
 }
 
 impl TuneSpec {
@@ -314,7 +581,7 @@ impl TuneSpec {
 
 /// The stack `tune` starts from: the base lock's (its harness, models, skills, tools,
 /// instructions, deciders and policy), else one built from the manifest's candidates.
-fn base_stack(base: Option<&Lockfile>, manifest: &Manifest, harness: Option<&str>) -> Stack {
+pub(crate) fn base_stack(base: Option<&Lockfile>, manifest: &Manifest, harness: Option<&str>) -> Stack {
     let mut s = match base {
         Some(lock) => {
             let mut s = crate::deps::lock_stack(lock);
@@ -497,10 +764,52 @@ pub fn tune(manifest: Manifest, spec: &TuneSpec) -> Result<TuneOutcome> {
         Err(why) => stages.push(stage("data", false, why)),
     }
 
-    // ---- stage 2: prompt search (depth >= prompt) ----
+    // ---- stage 2: optimize the harness's text (depth >= prompt, or [tune] edit) ----
+    let tcfg = TuneConfig::new(&manifest, spec, &depth)?;
     let mut prompt_meta = serde_json::json!({});
     let mut tuned_prompt: Vec<String> = Vec::new();
-    if prompt_depth(&depth) {
+    let mut optimized: Option<Optimized> = None;
+    let mut legacy_prompt = false;
+    if !tcfg.edit.is_empty() {
+        // the optimizer: the trial backend's built-in one, or a backend of its own
+        let named: Option<crate::worker::Worker>;
+        let found = if tcfg.optimizer == "hlock" {
+            runs("harness.optimize")?
+        } else {
+            let b = crate::worker::Backend::resolve(&manifest, Some(&tcfg.optimizer))?;
+            named = crate::worker::Worker::for_backend(&b, spec.workdir.join("backend").join(&tcfg.optimizer));
+            match &named {
+                None => Err(format!("{} runs in hlock's core and has no optimizer; name a backend that runs harness.optimize", tcfg.optimizer)),
+                Some(w) => match w.unsupported("harness.optimize")? {
+                    Some(why) => Err(why),
+                    None => Ok(w),
+                },
+            }
+        };
+        match found {
+            Ok(w) => match optimize_stage(w, &tcfg, &manifest, spec, &mut resolver, &base, base_lock.as_ref(), &lock_path, &search_tasks, &note) {
+                Ok(o) => {
+                    let detail = if o.accepted { format!("{} edit{} accepted", o.changes.len(), if o.changes.len() == 1 { "" } else { "s" }) } else { "no edits accepted".to_string() };
+                    stages.push(stage("optimize", true, detail));
+                    optimized = Some(o);
+                }
+                Err(Error::Tuning(e) | Error::Worker(e)) => {
+                    note(format!("tune optimize stage: {e}"));
+                    stages.push(stage("optimize", false, e));
+                }
+                Err(e) => return Err(e),
+            },
+            // a backend from before harness.optimize: its prompt search, when it has one
+            Err(why) => match runs("prompt.search")? {
+                Ok(_) if tcfg.optimizer == "hlock" && tcfg.edit == ["instructions"] => {
+                    note(format!("the {} backend doesn't run harness.optimize; using its prompt.search, which is deprecated", backend.as_str()));
+                    legacy_prompt = true;
+                }
+                _ => stages.push(stage("optimize", false, why)),
+            },
+        }
+    }
+    if legacy_prompt {
         match runs("prompt.search")? {
             Ok(w) => match stage_run(w, "prompt.search", &ws_root.join("stage_prompt"), &plan_value) {
                 Ok(v) => {
@@ -519,27 +828,43 @@ pub fn tune(manifest: Manifest, spec: &TuneSpec) -> Result<TuneOutcome> {
             Err(why) => stages.push(stage("prompt", false, why)),
         }
     }
+    // after an optimize stage, every trial runs the lock's text (the seed) or, when hlock
+    // accepted the edits, the candidate's
+    let text = optimized.as_ref().map(|o| (if o.accepted { o.candidate.clone() } else { o.seed.clone() }, o.seed.clone(), o.spec.clone()));
     let with_prompt = |s: &Stack| {
         let mut s = s.clone();
         s.instructions.extend(tuned_prompt.iter().cloned());
-        s
+        match &text {
+            Some((dir, _, _)) => crate::optimize::overlay(&s, dir),
+            None => s,
+        }
     };
+    let base_run = match &text {
+        Some((_, seed, _)) => crate::optimize::overlay(&base, seed),
+        None => base.clone(),
+    };
+    let configs: Vec<Stack> = grid.iter().map(&with_prompt).collect();
+    if let Some((dir, seed, bspec)) = &text {
+        resolver.trial_locks.insert(base_run.hash(), crate::optimize::trial_lock(base_lock.as_ref(), seed, bspec)?);
+        for c in &configs {
+            resolver.trial_locks.insert(c.hash(), crate::optimize::trial_lock(base_lock.as_ref(), dir, bspec)?);
+        }
+    }
 
     // ---- baseline: the base configuration, on the same tasks and seeds ----
     let pairs: Vec<(&crate::tasks::Task, u64)> = (0..seeds).flat_map(|seed| search_tasks.iter().map(move |t| (t, seed))).collect();
     let run_all = |stack: &Stack| -> Vec<crate::search::TrialResult> { pairs.iter().map(|(t, seed)| resolver.run_trial(stack, t, *seed, &ws_root)).collect() };
-    let baseline_trials = run_all(&base);
-    let baseline = StackScore { stack: base.clone(), n: baseline_trials.len(), trials: baseline_trials };
+    let baseline_trials = run_all(&base_run);
+    let baseline = StackScore { stack: base_run.clone(), n: baseline_trials.len(), trials: baseline_trials };
 
     // ---- stage 3: HPO trials over the grid, the budget spent round-robin ----
-    let configs: Vec<Stack> = grid.iter().map(&with_prompt).collect();
     let mut results: Vec<Vec<crate::search::TrialResult>> = vec![Vec::new(); configs.len()];
     let max = spec.max_trials.unwrap_or(usize::MAX);
     let mut n = 0usize;
     'budget: for (i, (task, seed)) in pairs.iter().enumerate() {
         for (cfg, out) in configs.iter().zip(results.iter_mut()) {
             // the base configuration's trials are already the baseline's
-            if cfg.hash() == base.hash() {
+            if cfg.hash() == base_run.hash() {
                 out.push(baseline.trials[i].clone());
                 continue;
             }
@@ -630,7 +955,19 @@ pub fn tune(manifest: Manifest, spec: &TuneSpec) -> Result<TuneOutcome> {
         Some(p) => Some(write_tuned_instructions(base_lock.as_ref(), &manifest, &base.harness, &out_dir, lock_path.parent().filter(|d| !d.as_os_str().is_empty()).unwrap_or(std::path::Path::new(".")), p)?),
         None => None,
     };
-    let tune_lock = build_tuned_lock(&manifest, base_lock.as_ref(), &winner, &measured, &split, scored.len(), backend.as_str(), &prompt_meta, prompt_gain, tuned_file.as_ref(), &ft_meta, &data_meta, &spec.data, data_mode, simulated, &plan_value);
+    let mut tune_lock = build_tuned_lock(&manifest, base_lock.as_ref(), &winner, &measured, &split, scored.len(), backend.as_str(), &prompt_meta, prompt_gain, tuned_file.as_ref(), &ft_meta, &data_meta, &spec.data, data_mode, simulated, &plan_value);
+    let mut optimize_report = serde_json::Value::Null;
+    if let Some(o) = &optimized {
+        let mut t = tune_lock.tune.take().unwrap_or_else(|| serde_json::json!({}));
+        t["optimizer"] = o.optimizer.clone();
+        t["acceptance"] = o.acceptance.clone();
+        let edits = if o.accepted { crate::optimize::apply_to_lock(&mut tune_lock, &out_dir, &o.candidate, &o.changes, &o.ledger)? } else { Vec::new() };
+        if !edits.is_empty() {
+            t["edit"] = serde_json::json!(edits);
+        }
+        tune_lock.tune = Some(t);
+        optimize_report = serde_json::json!({"optimizer": o.optimizer, "acceptance": o.acceptance, "edits": edits, "proposed": o.changes.len()});
+    }
 
     if let Some(parent) = spec.out.parent() {
         std::fs::create_dir_all(parent)?;
@@ -650,6 +987,7 @@ pub fn tune(manifest: Manifest, spec: &TuneSpec) -> Result<TuneOutcome> {
         "grid": scored.len(),
         "trials": n,
         "stages": stages,
+        "optimize": optimize_report,
         "best": {"model": best.llm.get(&role), "retries": best.retries, "temperature": best.temperature, "tool_timeout_seconds": best.tool_timeout_seconds, "success_rate": measured.success_rate(), "cost_usd": measured.mean_cost(), "trials": measured.n},
         "baseline": {"success_rate": baseline.success_rate(), "trials": baseline.n, "measured": true},
         "baseline_success_rate": baseline.success_rate(),
@@ -907,10 +1245,12 @@ fn copy_tuned_files(t: &Lockfile, tuned: &std::path::Path, lock_path: &std::path
     if crate::fsutil::normalize(&from) == crate::fsutil::normalize(&to) {
         return Ok(());
     }
-    for rel in t.instructions.iter().filter(|i| i.source.as_deref() == Some("tune")).filter_map(|i| i.vendored.as_deref()).filter(|v| crate::fsutil::safe_rel(v)) {
-        let src = from.join(rel);
-        if src.is_file() {
-            let dest = to.join(rel);
+    let tuned = t.instructions.iter().filter_map(|i| i.vendored.as_deref()).chain(t.skill.iter().filter_map(|s| s.vendored.as_deref()));
+    for rel in tuned.filter(|v| v.starts_with(".hlock/tuned/") && crate::fsutil::safe_rel(v)) {
+        let (src, dest) = (from.join(rel), to.join(rel));
+        if src.is_dir() {
+            crate::fsutil::copy_tree(&src, &dest)?;
+        } else if src.is_file() {
             if let Some(parent) = dest.parent() {
                 std::fs::create_dir_all(parent)?;
             }

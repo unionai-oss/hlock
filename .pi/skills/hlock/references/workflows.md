@@ -189,7 +189,7 @@ hlock resolve                          # run the candidates on the pack, lock th
 hlock show                             # the stack and its evidence
 hlock upgrade                          # on a resolved lock: plan newer models, --apply to switch
 hlock upgrade --rollback               # restore harness.lock.prev
-hlock tune                             # tune the lock's retries/temperature into harness.tune.lock
+hlock tune                             # tune retries/temperature, and (on local/flyte) edit instruction files, into harness.tune.lock
 hlock tune apply                       # adopt harness.tune.lock (keeps harness.lock.prev)
 hlock diff                             # what the last pin/apply changed, with the text behind each digest
 hlock migrate --to codex               # the same setup on another harness, in harness.codex.lock
