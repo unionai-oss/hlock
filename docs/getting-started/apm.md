@@ -1,6 +1,6 @@
 # Coming from APM
 
-**Keep `apm.yml`. hlock locks the rest of your agent, and tells you which setup works
+**TLDR: Keep `apm.yml`. hlock locks the rest of your agent, and tells you which setup works
 best on your tasks.**
 
 If you use [APM](https://github.com/microsoft/apm), you already treat your agent's context
