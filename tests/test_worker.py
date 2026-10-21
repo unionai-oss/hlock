@@ -1,6 +1,6 @@
 """Tests for the Rust <-> Python worker bridge (hlock.tasks.worker).
 
-These prove the seam ``hlock tune --backend devbox|cluster`` uses: the Rust core
+These prove the seam ``hlock tune --backend local|flyte`` uses: the Rust core
 shells a trial out to the Python worker over a versioned JSON contract and
 consumes the response. They run entirely offline — the worker's LLM call falls
 back to the deterministic reference RNG when no ``HL_LLM_BASE_URL`` is set, and
@@ -103,7 +103,7 @@ def test_worker_contract_handlers(kind, key, tmp_path):
     assert key in resp["result"]["model_digests"]
 
 
-def test_tune_backend_devbox(tmp_path, monkeypatch):
+def test_tune_backend_local(tmp_path, monkeypatch):
     """End-to-end: Rust core -> Python worker -> harness.tune.lock, offline."""
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("HL_PYTHON", sys.executable)  # pin the interpreter the worker runs under
@@ -134,9 +134,9 @@ max_trials = 1
 
     import hlock
 
-    out = json.loads(hlock.tune(backend="devbox", depth="probe", data="synthetic:1", max_trials=1))
+    out = json.loads(hlock.tune(backend="local", depth="probe", data="synthetic:1", max_trials=1))
     report = out["report"]
-    assert report["backend"] == "devbox"
+    assert report["backend"] == "local"
     assert (tmp_path / "harness.tune.lock").exists()
     assert report["best"]["trials"] == 1  # evidence.trials follows the winner's real trial count
 
@@ -186,7 +186,7 @@ def test_worker_contract_data_load_split():
     assert set(md["split"]) == {"train", "val", "test"}
 
 
-def test_tune_depth_prompt_devbox(tmp_path, monkeypatch):
+def test_tune_depth_prompt_local(tmp_path, monkeypatch):
     """depth=prompt drives the data + prompt.search stages, writing real digests."""
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("HL_PYTHON", sys.executable)
@@ -218,7 +218,7 @@ max_trials = 2
 
     import hlock
 
-    json.loads(hlock.tune(backend="devbox", depth="prompt", data="synthetic:2", max_trials=2))
+    json.loads(hlock.tune(backend="local", depth="prompt", data="synthetic:2", max_trials=2))
     d = json.loads(hlock.Lockfile.load(str(tmp_path / "harness.tune.lock")).to_json())
     applied = d["tune"]["prompt"]["applied"]
     assert applied and "_placeholder" not in applied[0]  # a real prompt search ran
@@ -285,7 +285,7 @@ def trial(planner: str, ws: Path, expected=None, prompt="Count the words in word
     return run_worker({
         "version": CONTRACT_VERSION,
         "kind": "llm.run_trial",
-        "backend": "devbox",
+        "backend": "local",
         "stack": {"llm": {"planner": planner}},
         "task": {"id": "count_words", "prompt_text": prompt, "expected": expected or []},
         "seed": 0,
@@ -298,7 +298,7 @@ def test_a_real_model_needs_an_endpoint(tmp_path, monkeypatch):
     monkeypatch.delenv("HL_LLM_BASE_URL", raising=False)
     resp = trial("openai:gpt-5", tmp_path)
     assert resp["ok"] is False
-    assert resp["error"] == "the devbox backend needs a model endpoint for openai:gpt-5: set HL_LLM_BASE_URL (see Backends)"
+    assert resp["error"] == "the local backend needs a model endpoint for openai:gpt-5: set HL_LLM_BASE_URL (see Backends)"
     # the offline reference needs none, and says it was simulated
     resp = trial("reference:qwen-7b", tmp_path)
     assert resp["ok"] is True and resp["result"]["simulated"] is True
@@ -337,7 +337,7 @@ HELLO_ANSWERS = {"hello.txt": "Hello, world!", "count.txt": "9",
                  "greetings.md": "Hello, Ada!\nHello, Grace!\nHello, Linus!\n"}
 
 
-def test_resolve_on_devbox_grades_what_the_model_wrote(tmp_path, monkeypatch, endpoint):
+def test_resolve_on_local_grades_what_the_model_wrote(tmp_path, monkeypatch, endpoint):
     """End to end: the model's replies land in trial workspaces that start from the
     fixtures, and the pack's graders decide each trial."""
     from click.testing import CliRunner
@@ -356,11 +356,11 @@ def test_resolve_on_devbox_grades_what_the_model_wrote(tmp_path, monkeypatch, en
     endpoint(answer)
     assert CliRunner().invoke(main, ["evals", "init"]).exit_code == 0
     (tmp_path / "harness.toml").write_text(
-        '[project]\nname = "devbox-e2e"\n\n[evals]\npacks = ["./evals"]\nseeds = 1\n\n'
+        '[project]\nname = "local-e2e"\n\n[evals]\npacks = ["./evals"]\nseeds = 1\n\n'
         '[evals.splits]\nsearch = 1.0\n\n'
         '[candidates.llm.planner]\nany_of = ["openai:gpt-5"]\n\n'
         '[candidates]\ndecision = ["none"]\nharness = ["reference"]\n\n'
-        '[objective]\nprimary = "success-rate"\nselect = "min-cost"\n\n[backend]\ntarget = "devbox"\n')
+        '[objective]\nprimary = "success-rate"\nselect = "min-cost"\n\n[backend]\ntarget = "local"\n')
     r = CliRunner().invoke(main, ["resolve"])
     assert r.exit_code == 0, r.output
     lock = json.loads(CliRunner().invoke(main, ["show", "--json"]).output)

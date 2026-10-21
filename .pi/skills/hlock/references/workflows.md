@@ -199,8 +199,8 @@ hlock localize                         # an all-local equivalent in harness.loca
   tasks.
 - A useful pack has at least 10 tasks, each with a grader that checks the result (a
   `check.py` or a `rubric.md`) and a known-good `solution/`.
-- `resolve` can cost money: a code harness runs for real, and `devbox`/`cluster` call real
-  models. Run `hlock resolve --dry-run` first and confirm the stacks, the trial count, and
+- `resolve` can cost money: a code harness runs for real, and every backend but `offline`
+  (`local`, `flyte`, or a custom one) calls real models. Run `hlock resolve --dry-run` first and confirm the stacks, the trial count, and
   `[budget] max-trials` / `max-spend-usd` with the user. `hlock backend status` shows where
   trials will run.
 - Agent CLIs (Claude Code, Codex, …) are measured on a stand-in in `resolve` and `tune`; the

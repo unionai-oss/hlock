@@ -88,9 +88,9 @@ to follow releases instead (see [Declaring dependencies](../guides/dependencies.
 
 | Extra | Install | Adds |
 |---|---|---|
-| `flyte` | `pip install "hlock[flyte]"` | `flyteplugins-rs`, so the [`cluster` backend](../guides/backends.md) can lift work to Flyte/Union tasks |
+| `flyte` | `pip install "hlock[flyte]"` | The Flyte SDK (and `flyteplugins-rs`), so the [`flyte` backend](../guides/backends.md#flyte) can run work as Flyte tasks |
 
-The worker that runs heavy tuning stages (`devbox` and `cluster` backends) imports
+The worker that runs heavy tuning stages (`local` and `flyte` backends) imports
 `pandas`/`polars`, `torch`/`peft`/`trl`, and `flyte` lazily, and only when a stage needs
 them. Install those in the worker's environment when you use the stages that need them;
 see [Backends](../guides/backends.md).

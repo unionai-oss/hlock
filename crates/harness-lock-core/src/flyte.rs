@@ -5,7 +5,7 @@
 //!
 //! The SDK's model: a task container binary declares `#[flyte::task]` /
 //! `#[flyte::trace]` steps, `flyte::run` executes bodies locally, and a Python
-//! launcher (`flyteplugins-rs`) registers the task with a Flyte / Union backend
+//! launcher (`flyteplugins-rs`) registers the task with a Flyte backend
 //! (reading `~/.flyte/config.yaml`) and builds the worker image.
 //!
 //! This module is intentionally minimal and **not validated against a live

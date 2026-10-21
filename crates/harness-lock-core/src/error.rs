@@ -22,7 +22,7 @@ pub enum Error {
     Tuning(String),
     #[error("{0}")]
     Profile(String),
-    #[error("python worker error: {0}")]
+    #[error("backend error: {0}")]
     Worker(String),
     /// `hlock pull`: a source that can't be read, or running `git` or fetching failed.
     #[error("{0}")]

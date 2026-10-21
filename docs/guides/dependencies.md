@@ -135,9 +135,9 @@ digest = "sha256:e897751cd4763e9ce34cf19bf6df206e8f9dd1cb8de726a8ad1c6ef88260b8b
     `--eval` runs trials the way [`hlock resolve`](resolve.md) does. A
     [project harness](harness-profiles.md) (`[harnesses.<id>]`) runs for real, with each
     side's skills in `HLOCK_SKILLS_DIR` and its MCP servers in `HLOCK_MCP_CONFIG`. On the
-    default `local` backend, CLI harnesses such as Claude Code run on the offline reference
+    default `offline` backend, CLI harnesses such as Claude Code run on the offline reference
     harness, which doesn't read skills, so both sides score the same, and `add` says so.
-    To measure those, set `[backend] target` to `devbox` or `cluster`.
+    To measure those, set `[backend] target` to `local` or `flyte`.
 
 `--eval` isn't a dry run: it installs (in isolation) and runs trials, which can cost money
 and take minutes. Without an eval pack it stops and points you at `hlock evals init`.

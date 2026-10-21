@@ -50,7 +50,7 @@ pub const SELECTS: &[&str] = &["min-cost", "max-quality"];
 /// The keys of the manifest's fixed-shape tables; anything else is reported by
 /// [`Manifest::problems`]. Tables holding names (`[skills]`, `[harnesses]`, …) aren't
 /// checked, and neither are the reserved `[context]` and `[enforce]`.
-const TOP_KEYS: &[&str] = &["project", "evals", "tasks", "candidates", "tools", "skills", "instructions", "mcp", "plugins", "packages", "context", "objective", "budget", "enforce", "backend", "target", "harnesses", "deciders"];
+const TOP_KEYS: &[&str] = &["project", "evals", "tasks", "candidates", "tools", "skills", "instructions", "mcp", "plugins", "packages", "context", "objective", "budget", "enforce", "backend", "backends", "target", "harnesses", "deciders"];
 const BUDGET_KEYS: &[&str] = &["max-spend-usd", "max-trials", "strategy", "random-seed", "max_spend_usd", "max_trials", "random_seed"];
 const OBJECTIVE_KEYS: &[&str] = &["primary", "constraints", "select"];
 const EVALS_KEYS: &[&str] = &["packs", "seeds", "splits", "judge"];
@@ -159,6 +159,10 @@ pub struct Manifest {
     pub enforce: BTreeMap<String, serde_json::Value>,
     #[serde(default)]
     pub backend: BTreeMap<String, serde_json::Value>,
+    /// Backends the project defines or configures (`[backends.<name>]`): a `command` or
+    /// a `python` object, and `options`. See [`crate::worker::Backend::resolve`].
+    #[serde(default)]
+    pub backends: BTreeMap<String, serde_json::Value>,
     /// The harness this lock is for (`[target] harness = "claude-code"`).
     #[serde(default)]
     pub target: BTreeMap<String, serde_json::Value>,
@@ -238,6 +242,9 @@ impl Manifest {
             report(table(&["evals", "splits"]), SPLITS_KEYS, "[evals.splits]");
             report(table(&["candidates"]), CANDIDATES_KEYS, "[candidates]");
             report(table(&["backend"]), BACKEND_KEYS, "[backend]");
+            for name in table(&["backends"]).into_iter().flat_map(|t| t.keys()) {
+                report(table(&["backends", name]), crate::worker::BACKEND_DEF_KEYS, &format!("[backends.{name}]"));
+            }
             report(table(&["target"]), TARGET_KEYS, "[target]");
         }
         let mut supported = |key: &str, value: &str, allowed: &[&str]| {
@@ -348,7 +355,7 @@ impl Manifest {
             .get("target")
             .and_then(|v| v.as_str())
             .map(|s| s.to_string())
-            .unwrap_or_else(|| "local".to_string())
+            .unwrap_or_else(|| "offline".to_string())
     }
 
     /// `[target] harness`, the harness the lock is meant to run in.

@@ -226,6 +226,7 @@ __marimo__/
 # harness-lock local run artifacts (store, runs, caches) — commit harness.lock, not these
 .hlock/store/
 .hlock/runs/
+.hlock/backend/
 .hlock/tune/
 .hlock/localize/
 .hlock/report.md

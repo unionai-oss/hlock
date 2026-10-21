@@ -278,7 +278,8 @@ pub struct TuneSpec {
     pub strict: bool,
     pub apply: bool,
     pub max_trials: Option<usize>,
-    /// local | devbox | cluster (overrides the manifest's `[backend] target`).
+    /// A backend name: offline | local | flyte | a custom one (overrides the manifest's
+    /// `[backend] target`).
     pub backend: Option<String>,
     pub workdir: PathBuf,
     /// The base lock (default `./harness.lock`); `apply` writes back to it.
@@ -390,12 +391,13 @@ fn stage(name: &str, ran: bool, detail: impl Into<String>) -> serde_json::Value 
 /// Starts from the base lock's stack and varies only what tune tunes: **data** ->
 /// (depth>=prompt) **prompt search** -> **HPO trials** -> (depth>=ft) **LoRA
 /// fine-tune** -> (depth==full) **holdout re-validation**. The base configuration is
-/// measured on the same tasks first, as the baseline. Stages that need the worker run
-/// on `devbox`/`cluster` only, and a stage that didn't run isn't recorded.
+/// measured on the same tasks first, as the baseline. A stage runs when the backend
+/// says it runs that work item (never on `offline`), and a stage that didn't run isn't
+/// recorded.
 pub fn tune(manifest: Manifest, spec: &TuneSpec) -> Result<TuneOutcome> {
     manifest.check_search()?;
     let depth = spec.resolved_depth().to_string();
-    let backend = crate::worker::Backend::parse(spec.backend.as_deref().unwrap_or(manifest.backend_target().as_str()));
+    let backend = crate::worker::Backend::resolve(&manifest, spec.backend.as_deref())?;
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let lock_path = spec.lock.clone().unwrap_or_else(|| cwd.join(LOCKFILE_PATH));
     let base_lock = load_if_present(&lock_path)?;
@@ -404,7 +406,7 @@ pub fn tune(manifest: Manifest, spec: &TuneSpec) -> Result<TuneOutcome> {
     // trials run the base's harness: its code harness for real, else the reference adapter
     let mut m = manifest.clone();
     m.candidates.harness = vec![crate::manifest::HarnessCandidate { name: base.harness.clone(), ..Default::default() }];
-    let mut resolver = Resolver::with_backend(m, &spec.workdir, backend);
+    let mut resolver = Resolver::with_backend(m, &spec.workdir, backend.clone());
     resolver.harness_override = Some(base.harness.clone());
     resolver.prepare_trials()?;
     let notes = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
@@ -428,10 +430,29 @@ pub fn tune(manifest: Manifest, spec: &TuneSpec) -> Result<TuneOutcome> {
     let seeds = manifest.seeds();
     let ws_root = spec.workdir.join("runs");
     std::fs::create_dir_all(&ws_root)?;
-    let worker = backend.needs_worker().then(crate::worker::PythonWorker::new);
-    if worker.is_none() && (prompt_depth(&depth) && depth != "hpo" || ft_depth(&depth)) {
-        note(format!("only the HPO grid runs on the {} backend; the data, prompt and fine-tune stages need devbox or cluster", backend.as_str()));
+    if let Some(n) = backend.renamed_note() {
+        note(n);
     }
+    let worker = resolver.worker.clone();
+    if worker.is_none() && (prompt_depth(&depth) && depth != "hpo" || ft_depth(&depth)) {
+        note(format!("only the HPO grid runs on the {} backend; the data, prompt and fine-tune stages need local, flyte or another backend", backend.as_str()));
+    }
+    // a backend that can't describe itself, or can't run the base's trials, stops here
+    if let Some(w) = &worker {
+        if !resolver.adapter_for(&base).starts_with("code harness") {
+            w.preflight(std::slice::from_ref(&base))?;
+        }
+    }
+    // the backend that runs `kind`, else why the stage can't run
+    let runs = |kind: &str| -> Result<std::result::Result<&crate::worker::Worker, String>> {
+        match &worker {
+            None => Ok(Err(format!("not on {}: use local, flyte or another backend", backend.as_str()))),
+            Some(w) => Ok(match w.unsupported(kind)? {
+                Some(why) => Err(why),
+                None => Ok(&**w),
+            }),
+        }
+    };
 
     let n_synthetic = parse_synthetic(&spec.data);
     let data_mode = if n_synthetic > 0 { "synthetic" } else { "user-traces" };
@@ -452,10 +473,10 @@ pub fn tune(manifest: Manifest, spec: &TuneSpec) -> Result<TuneOutcome> {
 
     // ---- stage 1: data (user traces or synthetic) ----
     let mut data_meta = serde_json::json!({});
-    match &worker {
-        Some(w) => {
-            let kind = if n_synthetic > 0 { "data.synthetic" } else { "data.load" };
-            match stage_run(w, backend.as_str(), kind, &ws_root.join("stage_data"), &plan_value) {
+    let data_kind = if n_synthetic > 0 { "data.synthetic" } else { "data.load" };
+    match runs(data_kind)? {
+        Ok(w) => {
+            match stage_run(w, data_kind, &ws_root.join("stage_data"), &plan_value) {
                 Ok(v) => {
                     let rows = v.get("rows").and_then(serde_json::Value::as_u64).unwrap_or(0);
                     if rows == 0 && n_synthetic == 0 {
@@ -473,15 +494,15 @@ pub fn tune(manifest: Manifest, spec: &TuneSpec) -> Result<TuneOutcome> {
                 Err(e) => return Err(e),
             }
         }
-        None => stages.push(stage("data", false, format!("needs devbox or cluster, not {}", backend.as_str()))),
+        Err(why) => stages.push(stage("data", false, why)),
     }
 
     // ---- stage 2: prompt search (depth >= prompt) ----
     let mut prompt_meta = serde_json::json!({});
     let mut tuned_prompt: Vec<String> = Vec::new();
     if prompt_depth(&depth) {
-        match &worker {
-            Some(w) => match stage_run(w, backend.as_str(), "prompt.search", &ws_root.join("stage_prompt"), &plan_value) {
+        match runs("prompt.search")? {
+            Ok(w) => match stage_run(w, "prompt.search", &ws_root.join("stage_prompt"), &plan_value) {
                 Ok(v) => {
                     if let Some(p) = v.get("best_prompt").and_then(serde_json::Value::as_str).filter(|_| v.get("_placeholder").is_none()) {
                         tuned_prompt = vec![p.to_string()];
@@ -495,7 +516,7 @@ pub fn tune(manifest: Manifest, spec: &TuneSpec) -> Result<TuneOutcome> {
                 }
                 Err(e) => return Err(e),
             },
-            None => stages.push(stage("prompt", false, format!("needs devbox or cluster, not {}", backend.as_str()))),
+            Err(why) => stages.push(stage("prompt", false, why)),
         }
     }
     let with_prompt = |s: &Stack| {
@@ -563,15 +584,15 @@ pub fn tune(manifest: Manifest, spec: &TuneSpec) -> Result<TuneOutcome> {
     // ---- stage 4: fine-tune (depth >= ft) ----
     let mut ft_meta = serde_json::json!({});
     if ft_depth(&depth) {
-        match &worker {
-            Some(w) => {
+        match runs("ft.lora")? {
+            Ok(w) => {
                 let ft_plan = serde_json::json!({
                     "depth": depth,
                     "data": spec.data,
                     "data_mode": data_mode,
                     "trainset_digest": data_meta.get("digest").cloned().unwrap_or(serde_json::Value::Null),
                 });
-                match stage_run(w, backend.as_str(), "ft.lora", &ws_root.join("stage_ft"), &ft_plan) {
+                match stage_run(w, "ft.lora", &ws_root.join("stage_ft"), &ft_plan) {
                     Ok(v) if v.get("adapter_digest").is_some() && v.get("_placeholder").is_none() => {
                         stages.push(stage("finetune", true, "trained"));
                         ft_meta = v;
@@ -584,7 +605,7 @@ pub fn tune(manifest: Manifest, spec: &TuneSpec) -> Result<TuneOutcome> {
                     Err(e) => return Err(e),
                 }
             }
-            None => stages.push(stage("finetune", false, format!("needs devbox or cluster, not {}", backend.as_str()))),
+            Err(why) => stages.push(stage("finetune", false, why)),
         }
     }
 
@@ -786,7 +807,7 @@ fn build_tuned_lock(
         }
         tune["data"] = data;
     }
-    // provenance: union run ids + budget (gpu-h / spend) aggregated across stages
+    // provenance: Flyte run ids + budget (gpu-h / spend) aggregated across stages
     let metas = [prompt_meta, ft_meta, data_meta];
     let run_ids: Vec<String> = metas.iter().filter_map(|m| str_field(m, "run")).collect();
     let stage_gpu: f64 = metas.iter().map(|m| num_field(m, "gpu_h").unwrap_or(0.0)).sum();
@@ -821,15 +842,9 @@ fn ft_depth(depth: &str) -> bool {
     matches!(depth, "ft" | "full")
 }
 
-/// Run a single stage against the Python worker and normalize its metadata.
-fn stage_run(
-    worker: &crate::worker::PythonWorker,
-    backend: &str,
-    kind: &str,
-    ws: &PathBuf,
-    plan: &serde_json::Value,
-) -> Result<serde_json::Value> {
-    let r = worker.call(kind, backend, None, None, 0, ws, plan)?;
+/// Run a single stage on the backend and normalize its metadata.
+fn stage_run(worker: &crate::worker::Worker, kind: &str, ws: &PathBuf, plan: &serde_json::Value) -> Result<serde_json::Value> {
+    let r = worker.call(kind, None, None, 0, ws, plan)?;
     let mut m = r.model_digests;
     if m.is_null() {
         m = serde_json::json!({});

@@ -2954,9 +2954,9 @@ pub fn measure(p: &Prepared, reg: &crate::profiles::Registry, ctx: &Ctx) -> Resu
             Entry::Native(n) => cand.tools.push(n.name.clone()),
         }
     }
-    let backend = crate::worker::Backend::parse(&manifest.backend_target());
+    let backend = crate::worker::Backend::resolve(&manifest, None)?;
     let workdir = ctx.cwd.join(".hlock");
-    let mut resolver = crate::resolver::Resolver::with_backend(manifest.clone(), &workdir, backend);
+    let mut resolver = crate::resolver::Resolver::with_backend(manifest.clone(), &workdir, backend.clone());
     resolver.harness_override = Some(p.harness.clone());
     resolver.prepare_trials()?;
     // a code harness gets each side's skills and MCP servers, the way `hlock launch` passes them
@@ -3019,7 +3019,7 @@ pub fn measure(p: &Prepared, reg: &crate::profiles::Registry, ctx: &Ctx) -> Resu
         seeds,
         without,
         with,
-        adapter: if backend.needs_worker() && !adapter.starts_with("code harness") { format!("worker ({})", manifest.backend_target()) } else { adapter },
+        adapter: if backend.needs_worker() && !adapter.starts_with("code harness") { format!("worker ({})", backend.as_str()) } else { adapter },
         staged,
     })
 }

@@ -1,4 +1,4 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 620" role="img" aria-label="hlock architecture: the Python CLI and API call the Rust core through PyO3; the core runs trials in process on the local backend, or hands them to a Python worker on devbox and cluster, which runs heavy stages and can lift them to Flyte or Union tasks.">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 620" role="img" aria-label="hlock architecture: the Python CLI and API call the Rust core through PyO3; the core runs trials in process on the offline backend, or hands them to a backend: the Python worker on local and flyte, which runs heavy stages and can lift them to Flyte tasks, or a backend you write.">
   <defs>
     <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
       <path d="M0 0L10 5L0 10z" fill="#8b949e"/>
@@ -49,9 +49,9 @@
 
   <!-- backends -->
   <path class="wire" d="M230 302V370" marker-end="url(#arrow)"/>
-  <text x="244" y="341" class="e">backend = local</text>
+  <text x="244" y="341" class="e">backend = offline</text>
   <path class="wire" d="M690 302V370" marker-end="url(#arrow)"/>
-  <text x="704" y="332" class="e">backend = devbox | cluster</text>
+  <text x="704" y="332" class="e">backend = local | flyte | yours</text>
   <text x="704" y="350" class="s">versioned JSON contract</text>
 
   <rect x="80" y="374" width="300" height="84" rx="14" fill="#22c55e" fill-opacity=".08" stroke="#22c55e" stroke-opacity=".7"/>
@@ -73,7 +73,7 @@
   <text x="560" y="587" class="s" text-anchor="middle">grading · prompt search · LoRA</text>
 
   <rect x="720" y="516" width="200" height="80" rx="14" fill="#a78bfa" fill-opacity=".08" stroke="#a78bfa" stroke-opacity=".8" stroke-dasharray="6 5"/>
-  <text x="820" y="546" class="t" text-anchor="middle">Flyte / Union tasks</text>
+  <text x="820" y="546" class="t" text-anchor="middle">Flyte tasks</text>
   <text x="820" y="570" class="s" text-anchor="middle">CPU + GPU images</text>
   <text x="820" y="587" class="s" text-anchor="middle">caching · lineage</text>
 </svg>

@@ -86,7 +86,7 @@ def test_tune_starts_from_the_lock_and_picks_the_simplest_of_equals(project):
     assert invoke("resolve").exit_code == 0
     r = invoke("tune", "--depth", "hpo")
     assert r.exit_code == 0, r.output
-    assert flat("data ✗ needs devbox or cluster, not local") in flat(r.output) and "hpo ✓" in r.output
+    assert flat("data ✗ not on offline: use local, flyte or another backend") in flat(r.output) and "hpo ✓" in r.output
     assert flat("baseline: the lock's own configuration, measured") in flat(r.output)
     assert "next → hlock tune apply" in r.output
     tuned = json.loads(invoke("--lock", "harness.tune.lock", "show", "--json").output)
@@ -95,7 +95,7 @@ def test_tune_starts_from_the_lock_and_picks_the_simplest_of_equals(project):
     assert tuned["llm"][0]["provider"] == "reference" and tuned["llm"][0]["model"] == "qwen-7b"
     # stages that didn't run aren't recorded; the backend is
     assert set(tuned["tune"]) == {"hpo", "provenance"}
-    assert tuned["provenance"]["backend"] == "local" and tuned["evidence"]["latency-s-per-task"]["p50"] > 0
+    assert tuned["provenance"]["backend"] == "offline" and tuned["evidence"]["latency-s-per-task"]["p50"] > 0
 
 
 def test_tune_max_trials_caps_the_whole_grid(project):

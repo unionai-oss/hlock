@@ -1,8 +1,8 @@
 # Architecture
 
 `hlock` splits its work by what each part needs. Everything deterministic lives in a
-Rust core. Anything that needs the Python ML ecosystem or a GPU runs in a Python worker,
-which can lift each piece of work to a Flyte task on a cluster.
+Rust core. Anything that needs the Python ML ecosystem or a GPU runs on a backend: hlock's
+Python worker on this machine, Flyte tasks on a cluster, or a backend you write.
 
 ```mermaid
 flowchart TB
@@ -19,11 +19,12 @@ flowchart TB
 
     py -- "PyO3 bindings" --> core
 
-    core -- "backend = local" --> LOCAL["⚡ in-process reference harness<br/><sub>deterministic · offline · CI-friendly</sub>"]
-    core -- "backend = devbox / cluster<br/><sub>versioned JSON contract</sub>" --> W["🐍 Python worker<br/><sub>hlock.tasks.worker</sub>"]
+    core -- "backend = offline" --> LOCAL["⚡ in-process reference harness<br/><sub>deterministic · offline · CI-friendly</sub>"]
+    core -- "backend = local / flyte<br/><sub>versioned JSON contract</sub>" --> W["🐍 Python worker<br/><sub>hlock.tasks.worker</sub>"]
+    core -- "your backend<br/><sub>same contract</sub>" --> X["🔌 a command, or a Python backend<br/><sub>Rust · Python · anything</sub>"]
 
     W --> HEAVY["real LLM calls · trace loading · synthetic data<br/>grading · prompt search · LoRA fine-tuning"]
-    W -. "optional" .-> FLYTE["☁️ Flyte / Union tasks<br/><sub>CPU + GPU images · caching · lineage</sub>"]
+    W -. "flyte" .-> FLYTE["☁️ Flyte tasks<br/><sub>CPU + GPU images · caching · lineage</sub>"]
 ```
 
 ## The Rust core
@@ -51,26 +52,52 @@ The `hlock` package is a thin layer over the core:
   [Python API](../reference/python-api.md).
 - **The CLI** (`hlock.cli`) is built on those bindings, so the CLI and the API
   always behave the same.
-- **The worker** (`hlock.tasks.worker`) runs the heavy stages.
+- **The worker** (`hlock.tasks.worker`) runs the heavy stages, for every Python backend.
+- **Backends** (`hlock.backends`) decide where the worker runs each stage: `local`
+  in process, `flyte` as Flyte tasks, or a third-party backend.
 
-## The worker contract
+## The backend contract
 
-On the `devbox` and `cluster` backends, the Rust core shells each work item out to:
+On every backend but `offline`, the Rust core sends each work item to a backend
+process. For Python backends (`local`, `flyte`, and any registered in
+`hlock.backends`), that's hlock's worker:
 
 ```bash
 $HL_PYTHON -m hlock.tasks.worker request.json response.json
 ```
 
-Requests and responses follow a versioned JSON contract (`CONTRACT_VERSION = 2`). The
-core only ever sees the response, so it doesn't depend on where the work ran: in
-process, on this machine, or as a Flyte task on a GPU node.
+A command backend (`[backends.<name>] command`, or `hlock-backend-<name>` on `PATH`) is
+run the same way, as `<command…> request.json response.json`. Requests and responses
+follow a versioned JSON contract (`CONTRACT_VERSION = 3`). The core only ever sees the
+response, so it doesn't depend on where the work ran: in process, on this machine, or
+as a Flyte task on a GPU node.
 
-Each worker handler owns one stage of [`hlock tune`](../guides/tune.md):
+| Request field | Meaning |
+|---|---|
+| `version` | The contract version (3). A backend refuses one it doesn't know |
+| `kind` | `backend.describe`, `llm.run_trial`, `data.load`, `data.synthetic`, `grade`, `prompt.search`, or `ft.lora` |
+| `backend` | The backend's name |
+| `backend_options` | `[backends.<name>] options`, or `{}` |
+| `backend_object` | `[backends.<name>] python`, when set: the `module:attr` the worker loads |
+| `stack`, `task`, `seed` | The trial's configuration, task, and seed (empty for stages) |
+| `workdir` | A directory the item works in. A trial's holds the task's fixtures, and hlock grades what's left there |
+| `plan` | The tune plan: depth, data source, axes |
+
+The response is `{"version": 3, "ok": true, "result": {...}}`, or
+`{"version": 3, "ok": false, "error": "..."}` with a non-zero exit. A result has
+`success`, `score`, `cost_usd` (`null` when unknown), `simulated`, `gpu_h`,
+`latency_s`, `steps`, `trace`, `artifact_digests`, and `model_digests` (stage metadata;
+a `run` key there is recorded as the run in the tune lock). Every field is optional.
+
+`backend.describe` comes first, and its result says what the backend runs: `name`,
+`kinds`, `model_endpoint` (its trials call `HL_LLM_BASE_URL`), and `about`. A stage the
+backend doesn't list is skipped. See [Write your own backend](../guides/backends.md#write-your-own-backend).
+
+Each stock handler owns one stage of [`hlock tune`](../guides/tune.md):
 LLM trials, trace loading, synthetic data, grading, prompt search, and LoRA
-fine-tuning. On `cluster`, the worker lifts each body to a Flyte 2 task: CPU images
-for data, prompt, grading, and LLM trials; a GPU image with an accelerator request for
-fine-tuning; `cache="auto"` for durable trial caching; and dataset and adapter
-offloading through `flyte.io`.
+fine-tuning. The `flyte` backend runs each one inside a Flyte 2 task: a CPU
+environment for data, prompt, and LLM trials, a GPU environment for fine-tuning, and
+`cache="auto"` so re-runs reuse finished items.
 
 The heavy libraries are optional. Without them, the worker falls back to a
 deterministic offline LLM and reports which capabilities are unavailable, so it stays

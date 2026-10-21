@@ -158,7 +158,7 @@ space = SearchSpace(
     budget=Budget(max_trials=50),
     evals=json.dumps({"packs": ["./evals"], "seeds": 2}),
 )
-lock = hlock.resolve(space, backend="local")   # writes ./harness.lock
+lock = hlock.resolve(space, backend="offline")   # writes ./harness.lock
 print(lock.summary())
 
 agent = hlock.load("harness.lock")
@@ -176,11 +176,11 @@ print(agent.run("clean ./data/orders.csv"))   # {"success": true, "model": "qwen
 ## Architecture
 
 A Rust core does all the deterministic work. Anything that needs the Python ML
-ecosystem or a GPU runs in a Python worker, which can lift each piece of work to a
-Flyte task on a cluster.
+ecosystem or a GPU runs on a backend: hlock's Python worker on this machine, Flyte tasks on
+a cluster, or a backend you write in Rust or Python.
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/unionai-oss/hlock/main/docs/assets/architecture.svg" alt="hlock architecture: Python CLI and API over a Rust core via PyO3; local runs in process, devbox and cluster hand work to a Python worker that can lift stages to Flyte or Union tasks" width="860">
+  <img src="https://raw.githubusercontent.com/unionai-oss/hlock/main/docs/assets/architecture.svg" alt="hlock architecture: Python CLI and API over a Rust core via PyO3; offline runs in process, local and flyte hand work to a Python worker that can lift stages to Flyte tasks, and custom backends speak the same contract" width="860">
 </p>
 
 | Path | What lives there |
@@ -197,18 +197,21 @@ Flyte task on a cluster.
 
 | Backend | Where trials run | Use it for |
 |---|---|---|
-| `local` *(default)* | in-process Rust reference harness | trying it out, CI, deterministic tests |
-| `devbox` | Python worker on this machine | real LLM calls, your own traces, `flyte local` |
-| `cluster` | Python worker that lifts each stage to Flyte/Union | GPUs, fan-out, durable caching, shared results |
+| `offline` *(default)* | in-process Rust reference harness | trying it out, CI, deterministic tests |
+| `local` | Python worker on this machine | real LLM calls, your own traces, LoRA on a local GPU |
+| `flyte` | each work item as a Flyte 2 task on your cluster | GPUs, durable caching, shared results |
+| your own | wherever your backend sends it | Ray, Modal, Kubernetes, Slurm, an internal runner |
 
 ```bash
-hlock tune --backend devbox --depth probe --max-trials 10
+hlock tune --backend local --depth probe --max-trials 10
 # real LLM calls: export HL_LLM_BASE_URL=http://… HL_LLM_MODEL=qwen-32b [HL_LLM_API_KEY=…]
-hlock tune --backend cluster --depth ft --data user:./runs   # LoRA on a GPU worker
+hlock tune --backend flyte --depth ft --data user:./runs   # LoRA on a GPU worker
 ```
 
-See [Backends](https://docs.hlock.ai/guides/backends/) for setup and
-the `HL_*` environment variables.
+Backends are pluggable: a Python class registered in the `hlock.backends` entry point
+group, or any executable named `hlock-backend-<name>` (Rust has a `serve` helper). See
+[Backends](https://docs.hlock.ai/guides/backends/) for setup, the `HL_*` environment
+variables, and how to write your own.
 
 ## Related projects
 
@@ -263,7 +266,7 @@ What works today: `pin`, `check`, `sync`, and `launch` for the
 SBOMs), `localize`, manifest and
 lockfile schema v1, a content-addressed store, eval packs (`hlock evals`) with graders, the
 reference provider and harness, grid search with Pareto selection, `upgrade`
-(plan/apply/rollback), `tune` across the `local`, `devbox`, and `cluster` backends, and the
+(plan/apply/rollback), `tune` across the `offline`, `local`, and `flyte` backends and pluggable backends, and the
 `meta` harness. The [design specs](https://github.com/unionai-oss/hlock/tree/main/specs) describe the full design,
 much of which is still on the roadmap.
 

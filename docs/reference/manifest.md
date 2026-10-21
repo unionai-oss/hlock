@@ -85,7 +85,7 @@ The search space. The resolver tries every combination.
 
 v0.1 ships the `reference` provider (models `qwen-1.5b`, `qwen-7b`, `qwen-32b`) and the
 `reference` harness. Real providers run through the worker on the
-[`devbox` and `cluster` backends](../guides/backends.md).
+[`local` and `flyte` backends](../guides/backends.md).
 
 ## `[objective]`
 
@@ -146,7 +146,33 @@ entrypoint = "triage.agent:run"
 
 | Key | Default | Description |
 |---|---|---|
-| `target` | `"local"` | `local`, `devbox`, or `cluster`. See [Backends](../guides/backends.md). |
+| `target` | `"offline"` | `offline`, `local`, `flyte`, or the name of a [custom backend](../guides/backends.md#write-your-own-backend). The old names `devbox` (now `local`) and `cluster` (now `flyte`) still work and print a note. See [Backends](../guides/backends.md). |
+
+## `[backends.<name>]`
+
+Defines a backend, or configures a built-in one. hlock finds a backend that has no table
+here as an `hlock-backend-<name>` executable on `PATH`, or as an installed
+`hlock.backends` entry point.
+
+```toml title="harness.toml"
+[backends.ray]
+command = ["ray-backend", "--address", "auto"]
+
+[backends.logged]
+python = "my_backend:LoggedBackend"
+
+[backends.flyte]
+options = { project = "agents", domain = "development" }
+```
+
+| Key | Description |
+|---|---|
+| `command` | An executable that speaks the [backend contract](../concepts/architecture.md#the-backend-contract): a program, or a list of a program and its arguments. hlock appends the request and response paths |
+| `python` | A Python backend as `"module:attribute"`, a `hlock.backends.Backend` class or instance, loaded by hlock's worker |
+| `options` | A table sent to the backend with every work item, as `backend_options` |
+
+A table has at most one of `command` and `python`. `local` and `flyte` take only
+`options`, and `offline` can't be configured.
 
 ## Dependencies
 

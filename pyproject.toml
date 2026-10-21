@@ -36,7 +36,9 @@ dev = [
     "pytest>=7.0",
 ]
 flyte = [
-    # flyteplugins-rs registers Rust-backed tasks with a Flyte/Union backend.
+    # The `flyte` backend runs each work item as a Flyte 2 task.
+    "flyte>=2.0; python_version >= '3.10'",
+    # flyteplugins-rs registers Rust-backed tasks with a Flyte backend.
     "flyteplugins-rs; python_version >= '3.10'",
 ]
 
@@ -56,6 +58,12 @@ docs = [
 [project.scripts]
 hlock = "hlock.cli:main"
 harness-lock = "hlock.cli:main"
+
+# Backends are found by name in this group (see hlock.backends); the built-ins are
+# registered the same way a third-party backend is.
+[project.entry-points."hlock.backends"]
+local = "hlock.backends.local:LocalBackend"
+flyte = "hlock.backends.flyte:FlyteBackend"
 
 # The wheel ships two importable packages: `hlock` (the implementation, with the
 # compiled `hlock._hlock` module) and `harness_lock` (a re-export shim, so

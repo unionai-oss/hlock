@@ -45,6 +45,7 @@ from hlock import (
     WorkerError,
     __version__,
     agent_run,
+    backend_describe,
     harness_profile,
     harnesses,
     is_pull_source,
@@ -217,7 +218,7 @@ click.rich_click.COMMAND_GROUPS = {
 }
 
 
-# Code harnesses and the devbox worker default to the interpreter running hlock.
+# Code harnesses and the Python worker default to the interpreter running hlock.
 os.environ.setdefault("HL_PYTHON", sys.executable)
 
 
@@ -1010,8 +1011,8 @@ def decide_hook(use_: str, fmt: str, event: str | None, input_: str | None, verb
 
 
 @main.command()
-@click.option("--backend", default=None, type=click.Choice(["local", "devbox", "cluster"]),
-              help="Override the manifest's \\[backend] target.")
+@click.option("--backend", default=None, metavar="NAME",
+              help="Override the manifest's \\[backend] target: offline, local, flyte, or a custom backend.")
 @click.option("--harness", "harness", default=None,
               help="Target harness, overriding \\[target] harness (e.g. claude, codex, pi, opencode).")
 @click.option("--workdir", default=None, help="Where to put trial artifacts.  [dim]\\[default: .hlock][/]")
@@ -1503,7 +1504,7 @@ def _print_measurement(name: str, m: dict) -> None:
     console.print(t)
     if m["adapter"] == "reference":
         console.print("[warn]![/] the offline reference harness doesn't read skills, MCP servers or instructions, so both "
-                      "sides score alike; set [key]\\[backend] target[/] to devbox or cluster to measure your harness")
+                      "sides score alike; set [key]\\[backend] target[/] to local or flyte to measure your harness")
 
 
 @main.command(context_settings={"ignore_unknown_options": False})
@@ -2689,8 +2690,8 @@ def upgrade(target: str | None, to: str | None, all_: bool, apply: bool, rollbac
 @click.option("--apply", is_flag=True, help="Also adopt the result into harness.lock (keeping harness.lock.prev).")
 @click.option("--max-trials", default=None, type=int,
               help="Cap the grid's trials in total, spread round-robin across the configurations.")
-@click.option("--backend", default=None, type=click.Choice(["local", "devbox", "cluster"]),
-              help="Override the manifest's \\[backend] target.")
+@click.option("--backend", default=None, metavar="NAME",
+              help="Override the manifest's \\[backend] target: offline, local, flyte, or a custom backend.")
 @click.option("--workdir", default=None, help="Where to put trial artifacts.")
 @click.option("-d", "--detach", is_flag=True,
               help="Run in the background as a tune job. See [cmd]hlock tune list[/].")
@@ -3230,24 +3231,78 @@ def backend() -> None:
 
 
 @backend.command("status")
-def backend_status() -> None:
-    """Show the configured backend and the environment it will use."""
+@click.option("--backend", "name", default=None, metavar="NAME", help="A backend other than the manifest's target.")
+def backend_status(name: str | None) -> None:
+    """Show the backend, how it was found, what it runs, and the environment it uses."""
+    has_manifest = Path(_m()).exists()
     try:
-        target = Manifest.load(_m()).backend
+        info = json.loads(backend_describe(_m() if has_manifest else None, backend=name))
+    except ValueError as e:
+        _fail(str(e))
+    if name:
+        source = "from --backend"
+    elif has_manifest:
         source = f"from {_md()}"
-    except ValueError:
-        target, source = "local", f"no {_md()}, using the default"
+    else:
+        source = f"no {_md()}, using the default"
+    if info.get("renamed_from"):
+        source += f"; '{info['renamed_from']}' is its old name"
 
     t = _kv_table()
-    t.add_row("backend", f"[bold]{target}[/]  [muted]({source})[/]")
-    t.add_row("HL_PYTHON", os.environ.get("HL_PYTHON") or "[muted]python3 (default)[/]")
-    llm = os.environ.get("HL_LLM_BASE_URL")
-    t.add_row("HL_LLM_BASE_URL", llm or "[muted]unset: offline reference LLM[/]")
-    if llm:
-        t.add_row("HL_LLM_MODEL", os.environ.get("HL_LLM_MODEL") or "[muted]unset[/]")
-        t.add_row("HL_LLM_API_KEY", "[ok]set[/]" if os.environ.get("HL_LLM_API_KEY") else "[muted]unset[/]")
-    flyte_cfg = Path.home() / ".flyte" / "config.yaml"
-    t.add_row("flyte config", f"[path]{flyte_cfg}[/]" if flyte_cfg.exists() else "[muted]not found[/]")
+    t.add_row("backend", f"[bold]{info['name']}[/]  [muted]({source})[/]")
+    t.add_row("found", info["source"])
+    if info.get("options"):
+        t.add_row("options", ", ".join(f"{k}={v}" for k, v in info["options"].items()))
+    d = info.get("describe")
+    if d:
+        t.add_row("runs", ", ".join(d.get("kinds") or []) or "[warn]nothing[/]")
+        if d.get("about"):
+            t.add_row("about", d["about"])
+    elif info.get("error"):
+        t.add_row("runs", f"[err]{escape(info['error'])}[/]")
+    else:
+        t.add_row("runs", "trials, in process on the reference harness")
+    if "Python" in info["source"] or "hlock.backends" in info["source"]:
+        t.add_row("HL_PYTHON", os.environ.get("HL_PYTHON") or "[muted]python3 (default)[/]")
+    if (d or {}).get("model_endpoint"):
+        llm = os.environ.get("HL_LLM_BASE_URL")
+        t.add_row("HL_LLM_BASE_URL", llm or "[muted]unset: offline reference LLM[/]")
+        if llm:
+            t.add_row("HL_LLM_MODEL", os.environ.get("HL_LLM_MODEL") or "[muted]unset[/]")
+            t.add_row("HL_LLM_API_KEY", "[ok]set[/]" if os.environ.get("HL_LLM_API_KEY") else "[muted]unset[/]")
+    if info["name"] == "flyte":
+        flyte_cfg = Path(os.path.expanduser((info.get("options") or {}).get("config") or "~/.flyte/config.yaml"))
+        t.add_row("flyte config", f"[path]{flyte_cfg}[/]" if flyte_cfg.exists() else "[muted]not found[/]")
+    console.print(t)
+
+
+@backend.command("list")
+def backend_list() -> None:
+    """List the backends you can select: built in, in the manifest, on PATH, and installed."""
+    from hlock.backends import BUILTIN, _entry_points
+
+    rows: dict[str, str] = {"offline": "built in, in process"}
+    rows.update({n: "built in, Python worker" for n in BUILTIN})
+    try:
+        defined = json.loads(Manifest.load(_m()).backends()) if Path(_m()).exists() else {}
+    except ValueError:
+        defined = {}
+    for n, d in defined.items():
+        if n not in rows:
+            rows[n] = f"{_md()}: " + ("command " + " ".join(d["command"] if isinstance(d.get("command"), list) else [d["command"]])
+                                      if d.get("command") else f"Python object {d['python']}" if d.get("python") else "no command or python")
+    for d in os.environ.get("PATH", "").split(os.pathsep):
+        for exe in sorted(Path(d).glob("hlock-backend-*")) if d and Path(d).is_dir() else []:
+            n = exe.name.removeprefix("hlock-backend-")
+            if n and n not in rows and os.access(exe, os.X_OK):
+                rows[n] = f"{exe.name} on PATH"
+    for n, spec in sorted(_entry_points().items()):
+        rows.setdefault(n, f"Python entry point {spec}")
+    t = Table(box=None, padding=(0, 2), show_header=True, header_style="muted")
+    t.add_column("backend")
+    t.add_column("found")
+    for n, src in rows.items():
+        t.add_row(f"[bold]{n}[/]", src)
     console.print(t)
 
 
@@ -3845,7 +3900,7 @@ strategy = "grid"
 max-trials = 200
 
 [backend]
-target = "local"
+target = "offline"
 """
 
 
