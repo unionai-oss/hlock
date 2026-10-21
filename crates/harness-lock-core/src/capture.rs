@@ -812,7 +812,7 @@ fn walk(dir: &Path) -> (Vec<PathBuf>, Vec<PathBuf>) {
     (out, links)
 }
 
-fn walk_files(dir: &Path) -> Vec<PathBuf> {
+pub(crate) fn walk_files(dir: &Path) -> Vec<PathBuf> {
     walk(dir).0
 }
 

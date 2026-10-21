@@ -159,7 +159,7 @@ Component kinds and where they come from:
 | `skill` | `[[skill]]` (SKILL.md and text files) | 1 |
 | `tool-guidance` | New: a per-tool instructions file the harness loads with the tool | 2 |
 | `guardrails` | Rendered from `[policy]` and `[[decider]]` policy files | 2 |
-| `subagent` | New: needs subagent capture ([reviewable diffs](reviewable-diffs.md) §6) | 2 |
+| `subagent` | New: needs subagent capture ([reviewable diffs](reviewable-diffs.md) §7) | 2 |
 | `memory` | A memory seed ([memory](memory.md) §2.4), never the user's memory | 3 |
 | `script`, `hook`, tool code | Skill scripts, hooks | 3, with a sandbox |
 

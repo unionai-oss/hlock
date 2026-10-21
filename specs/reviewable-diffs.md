@@ -1,6 +1,6 @@
 # Reviewable lock diffs: show the content behind every digest
 
-Status: proposed · Owner: Niels Bantilan · Last updated: 2026-10-21 · Builds on [v0](v0.md) §5.4, [audit](audit.md) §6
+Status: phase 1 implemented · Owner: Niels Bantilan · Last updated: 2026-10-21 · Builds on [v0](v0.md) §5.4, [audit](audit.md) §6
 
 > A lock pins content by digest, so `git diff harness.lock` shows that a prompt, skill
 > or config changed but not how. `hlock diff` resolves each changed digest to the text
@@ -212,7 +212,24 @@ a re-pin that touches twenty skills shouldn't scroll the terminal.
    §2.1 fixes a reproducibility bug and should land first, on its own if needed.
 2. §2.4 `--setup-git`, §2.5 CI comment.
 
-## 5. Open questions
+## 5. As built (phase 1)
+
+Where the implementation differs from §2:
+
+- **§2.1 where a tuned prompt goes.** Not `system-prompt.md`: a harness reads only its own
+  instruction files, so `tune` appends the prompt to the project instruction file the harness
+  reads (the base lock's own, else the profile's first, such as `CLAUDE.md`; `AGENTS.md` for
+  the reference harness) and writes that whole file to `.hlock/tuned/<digest>/`. `tune` writes
+  the `[[instructions]]` entry into the tune lock itself (`source = "tune"`), so `tune apply`
+  only copies the lock, and the tuned files when the lock lives in another directory.
+- **§2.3 notation.** Hidden characters are shown as `<U+202E>`, the notation `sync` and
+  `launch` already use for commands, not `⟦U+202E⟧`.
+- **§2.6 `check`.** `check` compares a lock with the live setup, not two locks, so it doesn't
+  print the `hlock diff` hint. `pin`, `tune apply` and `tune --apply` do. `upgrade` changes
+  models, which the summary already shows in full.
+- **Removed components** are listed, not diffed.
+
+## 6. Open questions
 
 - Should `.hlock/tuned/` keep artifacts from tunes that weren't applied? Proposal: `tune`
   writes them; `tune apply` leaves only the applied one plus whatever `.prev` references,
@@ -221,7 +238,7 @@ a re-pin that touches twenty skills shouldn't scroll the terminal.
   namespace from the old side's file name, which may have been renamed. Follow git's rename
   detection, or require `A B` in that case?
 
-## 6. Follow-ups
+## 7. Follow-ups
 
 - **Subagent capture.** v0 §5.4 lists `subagent` as a portable kind (`.claude/agents/`,
   OpenCode agents) with a prompt digest, model role and tool list, but `pin` doesn't capture

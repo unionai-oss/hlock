@@ -625,7 +625,12 @@ pub fn tune(manifest: Manifest, spec: &TuneSpec) -> Result<TuneOutcome> {
     }
 
     let simulated = resolver.adapter_for(&winner.stack) == "reference" && base.harness != "reference";
-    let tune_lock = build_tuned_lock(&manifest, base_lock.as_ref(), &winner, &measured, &split, scored.len(), backend.as_str(), &prompt_meta, prompt_gain, &ft_meta, &data_meta, &spec.data, data_mode, simulated, &plan_value);
+    let out_dir = spec.out.parent().filter(|p| !p.as_os_str().is_empty()).map(PathBuf::from).unwrap_or_else(|| PathBuf::from("."));
+    let tuned_file = match tuned_prompt.first() {
+        Some(p) => Some(write_tuned_instructions(base_lock.as_ref(), &manifest, &base.harness, &out_dir, lock_path.parent().filter(|d| !d.as_os_str().is_empty()).unwrap_or(std::path::Path::new(".")), p)?),
+        None => None,
+    };
+    let tune_lock = build_tuned_lock(&manifest, base_lock.as_ref(), &winner, &measured, &split, scored.len(), backend.as_str(), &prompt_meta, prompt_gain, tuned_file.as_ref(), &ft_meta, &data_meta, &spec.data, data_mode, simulated, &plan_value);
 
     if let Some(parent) = spec.out.parent() {
         std::fs::create_dir_all(parent)?;
@@ -673,6 +678,7 @@ pub fn tune_apply(tuned: &std::path::Path, lock_path: &std::path::Path, manifest
             return Err(Error::Tuning(format!("{} is for harness {:?}, but harness.toml targets {want:?}; re-run hlock tune", tuned.display(), t.harness.name)));
         }
     }
+    copy_tuned_files(&t, tuned, lock_path)?;
     let prev = PathBuf::from(format!("{}.prev", lock_path.display()));
     let kept = if lock_path.is_file() {
         std::fs::copy(lock_path, &prev)?;
@@ -703,6 +709,7 @@ fn build_tuned_lock(
     backend: &str,
     prompt_meta: &serde_json::Value,
     prompt_gain: Option<f64>,
+    tuned_file: Option<&TunedFile>,
     ft_meta: &serde_json::Value,
     data_meta: &serde_json::Value,
     data_arg: &str,
@@ -781,12 +788,34 @@ fn build_tuned_lock(
         },
     });
     if let Some(gain) = prompt_gain {
-        tune["prompt"] = serde_json::json!({"applied": [{
+        let mut applied = serde_json::json!({
             "component": "harness.system-prompt",
             "before": str_field(prompt_meta, "before_digest").unwrap_or_else(|| sha256_text("base system prompt")),
             "after": str_field(prompt_meta, "after_digest").unwrap_or_else(|| sha256_text(prompt_meta["best_prompt"].as_str().unwrap_or_default())),
             "gain": {"success-rate": format!("{gain:+.2}")},
-        }]});
+        });
+        // the instruction file the prompt went into: its text is next to the lock, and the
+        // lock's [[instructions]] entry for it is what sync and launch place
+        if let Some(f) = tuned_file {
+            applied["file"] = serde_json::json!(f.name);
+            applied["before"] = serde_json::json!(f.before);
+            applied["after"] = serde_json::json!(f.after);
+            applied["path"] = serde_json::json!(f.rel);
+            let entry = crate::lockfile::Instructions {
+                name: f.name.clone(),
+                digest: Some(f.after.clone()),
+                scope: "project".into(),
+                vendored: Some(f.rel.clone()),
+                source: Some("tune".into()),
+                scan: Some(f.scan.clone()),
+                ..Default::default()
+            };
+            match lf.instructions.iter_mut().find(|i| i.name == f.name) {
+                Some(i) => *i = entry,
+                None => lf.instructions.push(entry),
+            }
+        }
+        tune["prompt"] = serde_json::json!({"applied": [applied]});
     }
     if let Some(d) = str_field(ft_meta, "adapter_digest") {
         tune["finetune"] = serde_json::json!([{
@@ -818,6 +847,77 @@ fn build_tuned_lock(
     });
     lf.tune = Some(tune);
     lf
+}
+
+/// A tuned system prompt, written into the instruction file the harness reads.
+pub struct TunedFile {
+    /// The instruction file, as the lock names it (`CLAUDE.md`).
+    pub name: String,
+    /// Digests of the file before and after the prompt was added.
+    pub before: String,
+    pub after: String,
+    /// Where its new text is, relative to the tune lock (`.hlock/tuned/<digest>/CLAUDE.md`).
+    pub rel: String,
+    /// The hidden-Unicode scan of the new text.
+    pub scan: String,
+}
+
+/// The project instruction file a tuned prompt goes into: the base lock's own, else the
+/// first one the harness reads from the project, else `AGENTS.md`.
+fn tuned_instructions_name(base: Option<&Lockfile>, manifest: &Manifest, harness: &str) -> String {
+    let plain = |n: &str| crate::fsutil::safe_rel(n) && !n.contains('{') && !n.starts_with('~');
+    if let Some(i) = base.and_then(|l| l.instructions.iter().find(|i| i.scope == "project" && plain(&i.name))) {
+        return i.name.clone();
+    }
+    let ctx = crate::profiles::Ctx::from_process();
+    let reg = crate::profiles::Registry::load_for(&ctx, Some(manifest)).ok();
+    reg.and_then(|r| r.harness(harness).and_then(|p| p.instructions.iter().find(|t| plain(t)).cloned())).unwrap_or_else(|| "AGENTS.md".into())
+}
+
+/// Write the instruction file with the tuned `prompt` added at its end, under
+/// `<out_dir>/.hlock/tuned/<digest>/`, so the tune lock points at text a reviewer can read
+/// and `sync` can place. The base text is the base lock's vendored copy, else the
+/// project's file next to the base lock. The prompt is redacted like any text drafted
+/// from traces.
+fn write_tuned_instructions(base: Option<&Lockfile>, manifest: &Manifest, harness: &str, out_dir: &std::path::Path, base_dir: &std::path::Path, prompt: &str) -> Result<TunedFile> {
+    let name = tuned_instructions_name(base, manifest, harness);
+    let entry = base.and_then(|l| l.instructions.iter().find(|i| i.name == name));
+    let from = entry.and_then(|i| i.vendored.as_deref()).filter(|v| crate::fsutil::safe_rel(v)).map(|v| base_dir.join(v)).filter(|p| p.is_file()).unwrap_or_else(|| base_dir.join(&name));
+    let before = crate::fsutil::read_regular_text(&from, 1 << 20).unwrap_or_default();
+    let prompt = crate::capture::redact_text(prompt.trim());
+    let after = if before.trim().is_empty() { format!("{prompt}\n") } else { format!("{}\n\n{prompt}\n", before.trim_end()) };
+    let digest = crate::hash::sha256_bytes(after.as_bytes());
+    let file = std::path::Path::new(&name).file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_else(|| "AGENTS.md".into());
+    let short: String = digest.trim_start_matches("sha256:").chars().take(8).collect();
+    let rel = format!(".hlock/tuned/{short}/{file}");
+    let dest = out_dir.join(&rel);
+    if let Some(parent) = dest.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    crate::fsutil::write_atomic(&dest, &after)?;
+    let scan = crate::scan::record(&crate::scan::scan_text(&after, &rel), false);
+    Ok(TunedFile { name, before: crate::hash::sha256_bytes(before.as_bytes()), after: digest, rel, scan })
+}
+
+/// A tune lock's tuned files, copied next to `lock_path` when it lives in another directory,
+/// so the applied lock's vendored paths resolve.
+fn copy_tuned_files(t: &Lockfile, tuned: &std::path::Path, lock_path: &std::path::Path) -> Result<()> {
+    let dir = |p: &std::path::Path| crate::fsutil::absolute(p.parent().filter(|d| !d.as_os_str().is_empty()).unwrap_or(std::path::Path::new(".")));
+    let (from, to) = (dir(tuned), dir(lock_path));
+    if crate::fsutil::normalize(&from) == crate::fsutil::normalize(&to) {
+        return Ok(());
+    }
+    for rel in t.instructions.iter().filter(|i| i.source.as_deref() == Some("tune")).filter_map(|i| i.vendored.as_deref()).filter(|v| crate::fsutil::safe_rel(v)) {
+        let src = from.join(rel);
+        if src.is_file() {
+            let dest = to.join(rel);
+            if let Some(parent) = dest.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            std::fs::copy(&src, &dest)?;
+        }
+    }
+    Ok(())
 }
 
 fn round6(v: f64) -> f64 {

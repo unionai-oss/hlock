@@ -92,6 +92,7 @@ from hlock import export_sbom as _export_sbom
 from hlock import grade_eval_task as _grade_eval_task
 from hlock import jobs as _jobs
 from hlock import localize as _localize
+from hlock import lock_diff as _lock_diff
 from hlock import migrate as _migrate
 from hlock import pin as _pin
 from hlock import policy_check as _policy_check
@@ -209,7 +210,7 @@ click.rich_click.COMMAND_GROUPS = {
         {"name": "Optimize", "commands": ["evals", "init", "resolve", "tune", "upgrade", "decide"]},
         {"name": "Switch", "commands": ["migrate", "localize"]},
         {"name": "Harness", "commands": ["harness", "runtime"]},
-        {"name": "Inspect", "commands": ["show", "tree", "backend"]},
+        {"name": "Inspect", "commands": ["show", "diff", "tree", "backend"]},
         {"name": "Meta", "commands": ["meta"]},
     ],
     "hlock meta": [
@@ -1189,6 +1190,7 @@ def pin(harness: str | None, out: str | None, user: bool, include: tuple[str, ..
             for line in result["diff"]:
                 style = {"+": "ok", "-": "fail", "~": "warn"}.get(line[:1], "muted")
                 console.print(f"  [{style}]{line}[/]")
+            _diff_hint(result["diff"], out)
         else:
             console.print("[muted]no changes since the last pin[/]")
     _next("hlock check", "hlock sync")
@@ -2375,6 +2377,169 @@ def _packs_changed(lf) -> bool:
         return False
 
 
+_BODY_KINDS = ("instructions", "skill", "config")
+
+
+def _diff_hint(lines: list[str], lock: str) -> None:
+    """Point at `hlock diff` when a change has content behind it (a skill, an instruction
+    or config file), which the summary shows only as digests."""
+    if any(line[:1] in "~+" and line[2:].split(" ", 1)[0] in _BODY_KINDS for line in lines):
+        arg = "" if Path(lock).resolve() == Path(_l()).resolve() else f" --lock {_show(lock)}"
+        console.print(f"[muted]see the content:[/] [cmd]hlock diff{arg}[/]")
+
+
+def _tuned_text(path: str | None) -> bool:
+    """Whether a tune lock carries a tuned instruction file."""
+    try:
+        d = json.loads(Lockfile.load(str(path)).to_json())
+    except (ValueError, OSError):
+        return False
+    return any(i.get("source") == "tune" for i in d.get("instructions") or [])
+
+
+@main.command("diff")
+@click.argument("old", required=False)
+@click.argument("new", required=False)
+@click.option("--lock", "lock", default=None, metavar="FILE", help="The lock to compare (default: the project's).")
+@click.option("--stat", is_flag=True, help="Only the summary and per-file line counts.")
+@click.option("--format", "fmt", type=click.Choice(["text", "markdown"]), default="text", show_default=True,
+              help="markdown: for a pull request comment, with each diff in a <details> block.")
+@click.option("--json", "as_json", is_flag=True, help="Print components, where their content came from, and hunks.")
+@click.option("--fetch", is_flag=True, help="Fetch declared dependencies that aren't in the store.")
+@click.option("--ci", is_flag=True, help="Exit 1 when a changed component's content can't be found.")
+def diff_cmd(old: str | None, new: str | None, lock: str | None, stat: bool, fmt: str, as_json: bool,
+             fetch: bool, ci: bool) -> None:
+    """Show what changed between two locks, including the text behind changed digests.
+
+    A lock pins skills, instruction files and config by digest. [cmd]diff[/] finds the content
+    behind each changed one (a vendored or tuned copy, the project's file, the dependency
+    store) and checks it against the digest before showing a unified diff. OLD and NEW are
+    lock files or git revisions. With neither, it compares [path]harness.lock.prev[/] (or
+    [cmd]HEAD[/]'s lock) with [path]harness.lock[/]; with only OLD, OLD with [path]harness.lock[/].
+    """
+    lock = lock or _l()
+    with _working("Diffing…"):
+        d = json.loads(_lock_diff(lock, old=old, new=new, fetch=fetch))
+    d["old"], d["new"] = _show(d["old"]), _show(d["new"])
+    if as_json:
+        sys.stdout.write(json.dumps(d, indent=2, ensure_ascii=False) + "\n")
+    elif fmt == "markdown":
+        sys.stdout.write(_diff_markdown(d, stat))
+    else:
+        _print_diff(d, stat)
+    if ci and d["unresolved"]:
+        sys.exit(1)
+
+
+def _diff_counts(d: dict) -> str:
+    """`1 skill, 1 instructions changed · evidence …` for the last line."""
+    n: dict[str, int] = {}
+    for c in d["components"]:
+        n[c["kind"]] = n.get(c["kind"], 0) + 1
+    llm = sum(1 for line in d["summary"] if line[2:].startswith("llm "))
+    if llm:
+        n["model"] = llm
+    noun = {"instructions": "instruction file", "config": "config file"}
+    parts = [f"{v} {noun.get(k, k)}{'' if v == 1 else 's'}" for k, v in n.items()]
+    return (", ".join(parts) + " changed") if parts else "no component changes"
+
+
+def _diff_component_lines(d: dict) -> dict[str, dict]:
+    """Components by the summary line that names them, so each diff prints under its line."""
+    out = {}
+    for c in d["components"]:
+        for line in d["summary"]:
+            rest = line[2:]
+            if line[:1] == c["change"] and rest.startswith(f"{c['kind']} {c['name']}"):
+                out[line] = c
+                break
+    return out
+
+
+def _print_diff(d: dict, stat: bool) -> None:
+    console.print(f"[muted]{escape(d['old'])} → {escape(d['new'])}[/]")
+    if not d["summary"] and not d["evidence"]:
+        _ok("no changes")
+        return
+    console.print()
+    by_line = _diff_component_lines(d)
+    shown = set()
+    for line in d["summary"]:
+        style = {"+": "ok", "-": "fail", "~": "warn"}.get(line[:1], "muted")
+        c = by_line.get(line)
+        tag = "  [muted](tune)[/]" if c and c.get("source") == "tune" else ""
+        console.print(f"[{style}]{escape(line)}[/]{tag}", soft_wrap=True)
+        if c:
+            shown.add(id(c))
+            _print_component(c, stat)
+    # a component whose summary line names it differently (an instruction file `pin` didn't list)
+    for c in d["components"]:
+        if id(c) not in shown:
+            console.print(f"[warn]{c['change']} {c['kind']} {escape(c['name'])}[/]")
+            _print_component(c, stat)
+    for line in d["evidence"]:
+        console.print(f"[warn]{escape(line)}[/]")
+    console.print()
+    console.print(f"[muted]{_diff_counts(d)}[/]")
+    if d["unresolved"]:
+        fetchable = any("--fetch" in u["reason"] for c in d["components"] for u in c.get("unavailable") or [])
+        console.print(f"[warn]![/] the content of {d['unresolved']} component{'s' if d['unresolved'] != 1 else ''} "
+                      "couldn't be shown" + ("  [muted](--fetch fetches declared dependencies)[/]" if fetchable else ""))
+
+
+def _print_component(c: dict, stat: bool) -> None:
+    for u in c.get("unavailable") or []:
+        console.print(f"    [warn]{u['side']} content unavailable:[/] {escape(u['reason'])}", soft_wrap=True)
+    for f in c.get("files") or []:
+        counts = "" if f.get("binary") else f"  [ok]+{f.get('added', 0)}[/] [fail]-{f.get('removed', 0)}[/]"
+        console.print(f"    [path]{escape(f['path'])}[/]  [muted]{f['status']}[/]{counts}")
+        if f.get("hidden"):
+            console.print(f"    [fail]![/] hidden characters: {escape(f['hidden'])}  [muted](shown as <U+…>)[/]")
+        if f.get("binary"):
+            console.print(f"    [muted]binary, {f.get('old_bytes') or 0} → {f.get('new_bytes') or 0} bytes[/]")
+        elif f.get("too_large"):
+            console.print(f"    [muted]too large to show, {f.get('old_bytes') or 0} → {f.get('new_bytes') or 0} bytes[/]")
+        elif not stat:
+            for h in (f.get("hunks") or "").splitlines():
+                style = "ok" if h.startswith("+") else "fail" if h.startswith("-") else "key" if h.startswith("@@") else "muted"
+                console.print(Text("    " + h, style=style), soft_wrap=True)
+
+
+def _diff_markdown(d: dict, stat: bool) -> str:
+    out = [f"### Lock changes: `{d['old']}` → `{d['new']}`", ""]
+    if d["evidence"]:
+        out += ["**Evidence**", ""] + [f"- {line[2:].removeprefix('evidence ')}" for line in d["evidence"]] + [""]
+    if not d["summary"]:
+        out.append("No component changes.")
+        return "\n".join(out) + "\n"
+    out += ["| | Change |", "|---|---|"]
+    for line in d["summary"]:
+        cell = line[2:].replace("|", "\\|")
+        out.append(f"| `{line[:1]}` | {cell} |")
+    out.append("")
+    for c in d["components"]:
+        if c.get("unavailable"):
+            for u in c["unavailable"]:
+                out.append(f"- **{c['kind']} {c['name']}**: {u['side']} content unavailable: {u['reason']}")
+            continue
+        for f in c.get("files") or []:
+            head = f"{c['kind']} {c['name']}: `{f['path']}` {f['status']}"
+            if not f.get("binary"):
+                head += f" (+{f.get('added', 0)} −{f.get('removed', 0)})"
+            if c.get("source") == "tune":
+                head += " · tuned"
+            if f.get("hidden"):
+                head += f" · ⚠ hidden characters: {f['hidden']}"
+            if stat or f.get("binary") or f.get("too_large") or not f.get("hunks"):
+                out.append(f"- {head}")
+                continue
+            out += [f"<details><summary>{head}</summary>", "", "```diff", f["hunks"].rstrip("\n"), "```", "", "</details>", ""]
+    out += ["", f"_{_diff_counts(d)}_"]
+    if d["unresolved"]:
+        out.append(f"\n⚠ The content of {d['unresolved']} component(s) couldn't be shown.")
+    return "\n".join(out) + "\n"
+
+
 @main.command()
 def tree() -> None:
     """Print the locked component dependency graph."""
@@ -2731,6 +2896,8 @@ def tune(ctx: click.Context, depth: str, data: str, harness: str | None, out: st
     if apply:
         kept = f"  [muted](previous kept in {_show(report['previous'])})[/]" if report.get("previous") else ""
         _ok(f"applied to [path]{_ld()}[/]{kept}")
+        if report.get("previous"):
+            _diff_hint(["~ instructions"] if _tuned_text(result.get("path")) else [], _l())
     else:
         _next("hlock tune apply" + (f" {out}" if out != "harness.tune.lock" else ""))
 
@@ -2839,6 +3006,8 @@ def tune_apply_cmd(path: str) -> None:
         prev = _tune_apply(path, _l(), manifest=_m() if Path(_m()).exists() else None)
     kept = f"  [muted](previous kept in {_show(prev)})[/]" if prev else ""
     _ok(f"applied [path]{_show(path)}[/] to [path]{_ld()}[/]{kept}")
+    if prev and _tuned_text(path):
+        _diff_hint(["~ instructions"], _l())
     _next("hlock check", "hlock upgrade --rollback" if prev else "hlock show")
 
 

@@ -19,6 +19,7 @@ pub mod decide;
 pub mod deps;
 pub mod launch;
 pub mod localize;
+pub mod lockdiff;
 pub mod error;
 pub mod fsutil;
 pub mod graders;

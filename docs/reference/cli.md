@@ -573,6 +573,28 @@ hlock show [--json]
 |---|---|
 | `--json` | Print the full lockfile as JSON |
 
+## `diff`
+
+Show what changed between two locks, including the text behind changed digests: each changed
+skill, instruction file and config file as a unified diff, checked against its digest first.
+See [Review lock changes](../guides/diff.md).
+
+```bash
+hlock diff [OLD] [NEW] [--lock FILE] [--stat] [--format text|markdown] [--json] [--fetch] [--ci]
+```
+
+OLD and NEW are lock files or git revisions. With neither, it compares `harness.lock.prev`
+(or `HEAD`'s lock, without one) with `harness.lock`; with only OLD, OLD with `harness.lock`.
+
+| Option | Description |
+|---|---|
+| `--lock FILE` | The lock to compare (default: the project's) |
+| `--stat` | Only the summary and per-file line counts |
+| `--format markdown` | For a pull request comment: a summary table, each diff in a `<details>` block |
+| `--json` | Components, where their content came from, and hunks |
+| `--fetch` | Fetch declared dependencies that aren't in the store |
+| `--ci` | Exit 1 when a changed component's content can't be found |
+
 ## `tree`
 
 Print the locked components as a tree.

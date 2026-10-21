@@ -57,6 +57,7 @@ skill when they disagree.
 | Switch to another harness (Claude Code → Codex, …) | `hlock migrate --to H`, then `hlock sync harness.H.lock` | [migrate](https://docs.hlock.ai/guides/migrate/) |
 | Run everything on local models | `hlock localize` | [localize](https://docs.hlock.ai/guides/localize/) |
 | See what's locked | `hlock show`, `hlock tree` | [CLI](https://docs.hlock.ai/reference/cli/) |
+| Review what a lock change did to skills, instructions and config | `hlock diff` (`hlock diff main`, `--format markdown` for a PR) | [diff](https://docs.hlock.ai/guides/diff/) |
 | See which harnesses hlock supports | `hlock harness list`, `hlock harness show NAME` | [harnesses](https://docs.hlock.ai/reference/harnesses/) |
 
 For the details of each workflow, the flags that matter, and what the output means, read

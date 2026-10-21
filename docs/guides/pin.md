@@ -221,7 +221,9 @@ A config file's digest covers what `sync` restores from it, parsed and with secr
 redacted, so reformatting the file or using a different value for a secret isn't drift.
 
 Running `hlock pin` again overwrites the pin and prints the same kind of diff under
-"changes since the last pin".
+"changes since the last pin". When a skill, instruction file or config file changed, it adds
+`see the content: hlock diff`, which shows the text behind those digests (see
+[Review lock changes](diff.md)).
 
 ## Pinned and resolved locks
 
