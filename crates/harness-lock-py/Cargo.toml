@@ -16,7 +16,7 @@ name = "harness_lock"
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-harness-lock-core = { path = "../harness-lock-core", version = "=0.4.0" }
+harness-lock-core = { path = "../harness-lock-core", version = "=0.5.0" }
 pyo3 = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
