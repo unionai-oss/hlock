@@ -178,7 +178,7 @@ trials = 16
 | `lock-version` | Schema version. This release reads and writes `1`. |
 | `generated-by` | The `harness-lock` version that wrote the lock |
 | `manifest-hash` | Hash of the `harness.toml` the lock was resolved from (for a pinned lock with declared dependencies, of its dependency sections only). Used by `hlock check`. |
-| `kind` | `pin` for a [pinned lock](#pinned-locks), `localized` for a [localized one](#localized-locks); absent for a resolved lock |
+| `kind` | `pin` for a [pinned lock](#pinned-locks), `localized` for a [localized one](#localized-locks), `migrated` for a [migrated one](#migrated-locks); absent for a resolved lock |
 
 ## Sections
 
@@ -262,6 +262,16 @@ declares), its `apm.yml` `version` and `license`, what it held that hlock doesn'
 entries that point the harness at the local endpoint, and a `[localize]` table recording what
 was replaced, the candidates considered, the memory budget, whether it was evaluated, and the
 source lock's evidence as a baseline.
+
+## Migrated locks
+
+[`hlock migrate`](../guides/migrate.md) writes a lock with `kind = "migrated"`, `base-lock`
+naming the source lock, the new `[harness]`, `[[skill]]` and `[[instructions]]` entries at
+the paths the new harness reads (with a `vendored` copy under `.hlock/vendor/<harness>/migrate/<lock>/`
+when they moved), `[[decider]]` wiring for its hooks, a `[[config]]` entry that sets its model
+and MCP servers, and a `[migrate]` table: the harness it came from, how many of each part
+carried over, what was replaced, notes on what didn't carry, and the source's evidence as a
+baseline. Its own `[evidence]` is empty until you resolve it.
 
 ## `harness.tune.lock`
 

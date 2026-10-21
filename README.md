@@ -122,9 +122,10 @@ hlock resolve                             # measure every combination -> harness
 hlock run "count the words in words.txt"  # run the locked agent
 ```
 
-**Go local.** `hlock localize` turns a lock into an equivalent on an open-source harness
-and models served by Ollama or LM Studio, keeping your MCP servers, skills, and
-instructions.
+**Switch harnesses, or go local.** `hlock migrate --to codex` moves a lock onto another
+harness, with your MCP servers, skills, and instructions rewritten to where it reads them.
+`hlock localize` does the same onto an open-source harness and models served by Ollama or
+LM Studio.
 
 **Let an agent do the busywork.** `hlock meta` hands work that needs judgment (installing
 what a lock needs on a new machine, filling in an eval pack, updating skills and MCP
@@ -139,6 +140,7 @@ hlock meta run install          # install what harness.lock still needs, then ve
 See [Finding the best stack](https://docs.hlock.ai/guides/resolve/),
 [Eval packs](https://docs.hlock.ai/guides/eval-packs/),
 [Tuning](https://docs.hlock.ai/guides/tune/), and
+[Switching harnesses](https://docs.hlock.ai/guides/migrate/),
 [Going local](https://docs.hlock.ai/guides/localize/), and
 [The meta harness](https://docs.hlock.ai/guides/meta/).
 

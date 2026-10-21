@@ -866,7 +866,7 @@ const MAX_VENDOR_BYTES: u64 = 20 * 1024 * 1024;
 
 /// Vendor the files under `dir` as `dest/…`: all of them, or none (an unreadable file
 /// is an error, not an empty file). Symlinks aren't followed; each one is a warning.
-fn vendor_tree(dir: &Path, dest: &str, out: &mut Vec<VendorFile>, warnings: &mut Vec<String>) -> std::result::Result<(), String> {
+pub(crate) fn vendor_tree(dir: &Path, dest: &str, out: &mut Vec<VendorFile>, warnings: &mut Vec<String>) -> std::result::Result<(), String> {
     let (files, links) = walk(dir);
     let total: u64 = files.iter().filter_map(|f| std::fs::metadata(dir.join(f)).ok()).map(|m| m.len()).sum();
     if total > MAX_VENDOR_BYTES {

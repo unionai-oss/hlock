@@ -122,7 +122,11 @@ hlock pin -o .hlock/locks/harness.alice.lock         # your harness and model, w
 hlock launch --lock .hlock/locks/harness.bob.lock    # try a teammate's, isolated from yours
 ```
 
-## Go local
+## Switch harnesses, or go local
+
+[`hlock migrate`](guides/migrate.md) moves a lock onto another harness, Claude Code to Codex
+say: skills, MCP servers, and instructions go where the new harness reads them, and models
+move to a provider it supports.
 
 [`hlock localize`](guides/localize.md) turns any lock into an equivalent on an open-source
 harness and models served by a local runtime like Ollama or LM Studio. It's like
