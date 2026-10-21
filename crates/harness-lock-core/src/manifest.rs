@@ -50,7 +50,7 @@ pub const SELECTS: &[&str] = &["min-cost", "max-quality"];
 /// The keys of the manifest's fixed-shape tables; anything else is reported by
 /// [`Manifest::problems`]. Tables holding names (`[skills]`, `[harnesses]`, …) aren't
 /// checked, and neither are the reserved `[context]` and `[enforce]`.
-const TOP_KEYS: &[&str] = &["project", "evals", "tasks", "candidates", "tools", "skills", "instructions", "mcp", "plugins", "packages", "context", "objective", "budget", "enforce", "backend", "backends", "target", "harnesses", "deciders"];
+const TOP_KEYS: &[&str] = &["project", "evals", "tasks", "candidates", "tools", "skills", "instructions", "mcp", "plugins", "packages", "context", "objective", "budget", "enforce", "backend", "backends", "target", "harnesses", "deciders", "tune"];
 const BUDGET_KEYS: &[&str] = &["max-spend-usd", "max-trials", "strategy", "random-seed", "max_spend_usd", "max_trials", "random_seed"];
 const OBJECTIVE_KEYS: &[&str] = &["primary", "constraints", "select"];
 const EVALS_KEYS: &[&str] = &["packs", "seeds", "splits", "judge"];
@@ -58,6 +58,8 @@ const SPLITS_KEYS: &[&str] = &["search"];
 const CANDIDATES_KEYS: &[&str] = &["llm", "decision", "harness", "policy"];
 const BACKEND_KEYS: &[&str] = &["target"];
 const TARGET_KEYS: &[&str] = &["harness", "also"];
+const TUNE_KEYS: &[&str] = &["optimizer", "edit", "proposer", "budget", "trials", "alpha", "max-cost-increase"];
+const TUNE_BUDGET_KEYS: &[&str] = &["rollouts", "usd"];
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(default)]
@@ -172,6 +174,9 @@ pub struct Manifest {
     /// Decision models by what they decide (`[deciders.<use>]`).
     #[serde(default)]
     pub deciders: BTreeMap<String, serde_json::Value>,
+    /// How `tune` edits the harness (`[tune]`): the optimizer, what it may edit, its budget.
+    #[serde(default)]
+    pub tune: BTreeMap<String, serde_json::Value>,
     #[serde(skip)]
     pub source_path: Option<PathBuf>,
     /// The text this manifest was parsed from, which [`Manifest::manifest_hash`] hashes.
@@ -246,6 +251,8 @@ impl Manifest {
                 report(table(&["backends", name]), crate::worker::BACKEND_DEF_KEYS, &format!("[backends.{name}]"));
             }
             report(table(&["target"]), TARGET_KEYS, "[target]");
+            report(table(&["tune"]), TUNE_KEYS, "[tune]");
+            report(table(&["tune", "budget"]), TUNE_BUDGET_KEYS, "[tune.budget]");
         }
         let mut supported = |key: &str, value: &str, allowed: &[&str]| {
             if !value.is_empty() && !allowed.contains(&value) {

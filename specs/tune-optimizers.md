@@ -1,6 +1,6 @@
 # Tune optimizers: pluggable harness search behind one protocol
 
-Status: proposed · Owner: Niels Bantilan · Last updated: 2026-10-21 · Builds on [backends](backends.md), [reviewable diffs](reviewable-diffs.md), [resolve and tune DX](resolve-tune-dx.md)
+Status: phase 1 implemented · Owner: Niels Bantilan · Last updated: 2026-10-21 · Builds on [backends](backends.md), [reviewable diffs](reviewable-diffs.md), [resolve and tune DX](resolve-tune-dx.md)
 
 > `tune` can only search system prompts today, with a stand-in that never runs the real
 > harness. Harness optimizers (Harness², GEPA, ACE, RRSI, AutoSaddler and others) edit more
@@ -366,7 +366,38 @@ for [backends](backends.md).
    adapter; `ablate`.
 3. `memory` seeds, scripts and hooks in a sandbox; code-editing optimizers.
 
-## 7. Open questions
+## 7. As built (phase 1)
+
+Where the implementation differs from §3:
+
+- **§3.1 defaults.** `edit` defaults to `["instructions"]` from `--depth prompt` on, and the
+  default depth (`auto`, which is `hpo`) is past `prompt`. So a plain `hlock tune` on `local` or
+  `flyte` runs the built-in optimizer, within a 100-rollout default budget. `trials` defaults to 2.
+- **§3.3 splits.** Train and dev come from the pack's search split: every third task by id is
+  dev when there are at least 3, otherwise dev is train (with a note). Test is the pack's
+  holdout split. A pack without one is checked on dev, and the acceptance records `split = "dev"`.
+- **§3.4 the callback.** Results carry the trial's `workspace` directory, not a trace file.
+  The Python wrapper is `hlock.optimize.Session`, not `hlock.tune.Session`: `hlock.tune` is
+  already the tune function. Evaluations run one at a time; nothing locks the session against
+  concurrent callers. The noise-band runs and the acceptance runs don't count against the budget.
+- **§3.6 acceptance.** The noise band is the standard deviation, over trial seeds, of the
+  lock's success rate on dev (0 with one trial). The leak check looks only at lines an edit
+  added, for task ids, grader `equals`/`contains` strings and fixture file names, skipping
+  strings under 6 characters unless they contain `_`. `ablate` isn't built (phase 2).
+  A rejected candidate doesn't block `tune apply`: the tune lock carries no edits, and its
+  grid result may still be worth adopting.
+- **§3.7 recording.** `[tune.optimizer]` has `evaluator = "optimizer"` when the optimizer ran no
+  trials through the session. An edit to an instruction file the lock had no entry for is
+  recorded as `op = "add"`.
+- **What a trial sees.** On `local` and `flyte`, a trial is one completion, so the candidate's
+  instruction files are its system prompt (`stack.system_prompt`). Skills reach only code
+  harness trials (`HLOCK_SKILLS_DIR`; instruction files in the new `HLOCK_INSTRUCTIONS_DIR`).
+  Agent CLIs still run on the reference stand-in in `tune`, so an edit to a skill can't be
+  measured for one yet. A declared dependency isn't editable.
+- **§3.8 the built-in optimizer.** Without a proposer model or `HL_LLM_BASE_URL`, it tries a
+  fixed list of general guidance, so it runs (deterministically) everywhere `local` does.
+
+## 8. Open questions
 
 - **Significance test.** A sign test over tasks is simple and assumption-free but weak on
   small packs. A paired bootstrap gives an interval to record. Which goes in the lock?

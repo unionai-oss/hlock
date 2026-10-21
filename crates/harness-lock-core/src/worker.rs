@@ -183,14 +183,14 @@ impl Backend {
 /// Current version of the backend contract. 2: a trial's `cost_usd` may be null
 /// (unknown), and `simulated` says the offline reference ran it. 3: backends are named
 /// (`backend_options`, `backend_object`) and answer `backend.describe`.
-pub const CONTRACT_VERSION: u64 = 3;
+pub const CONTRACT_VERSION: u64 = 4;
 
 /// One unit of work sent to a backend.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TaskRequest {
     pub version: u64,
     /// Handler id: `backend.describe | llm.run_trial | data.load | data.synthetic |
-    /// grade | prompt.search | ft.lora`.
+    /// grade | prompt.search | harness.optimize | ft.lora`.
     pub kind: String,
     /// The backend's name.
     #[serde(default)]
@@ -211,6 +211,10 @@ pub struct TaskRequest {
     pub workdir: String,
     #[serde(default)]
     pub plan: serde_json::Value,
+    /// `harness.optimize`'s payload: the bundle, the splits, how to evaluate, the budget
+    /// (`specs/tune-optimizers.md` §3.3).
+    #[serde(default, skip_serializing_if = "serde_json::Value::is_null")]
+    pub optimize: serde_json::Value,
 }
 
 impl TaskRequest {
@@ -230,6 +234,7 @@ impl TaskRequest {
             seed: 0,
             workdir: workdir.to_string_lossy().to_string(),
             plan: json!({}),
+            optimize: serde_json::Value::Null,
         }
     }
 
@@ -253,6 +258,12 @@ impl TaskRequest {
     /// The tune plan: depth, data, axes.
     pub fn plan(mut self, plan: &serde_json::Value) -> TaskRequest {
         self.plan = plan.clone();
+        self
+    }
+
+    /// What `harness.optimize` works on.
+    pub fn optimize(mut self, payload: serde_json::Value) -> TaskRequest {
+        self.optimize = payload;
         self
     }
 }
@@ -282,6 +293,18 @@ pub struct TaskResult {
     pub artifact_digests: Vec<String>,
     #[serde(default)]
     pub model_digests: serde_json::Value,
+    /// `harness.optimize`: the best candidate, a bundle directory.
+    #[serde(default)]
+    pub candidate: Option<String>,
+    /// `harness.optimize`: its edits, one JSON object per line.
+    #[serde(default)]
+    pub ledger: Option<String>,
+    /// `harness.optimize`: the optimizer's name, version and proposer model.
+    #[serde(default)]
+    pub optimizer: serde_json::Value,
+    /// `harness.optimize`: what the search used (rollouts, proposer spend).
+    #[serde(default)]
+    pub usage: serde_json::Value,
 }
 
 /// A backend's answer to `backend.describe`: what it runs.
@@ -399,6 +422,11 @@ impl Worker {
     /// Run a `kind` work item in `workspace`.
     pub fn call(&self, kind: &str, stack: Option<&Stack>, task: Option<&Task>, seed: u64, workspace: &Path, plan: &serde_json::Value) -> Result<TaskResult> {
         self.exec.call(&TaskRequest::new(&self.backend, kind, workspace).trial(stack, task, seed).plan(plan))
+    }
+
+    /// Run `harness.optimize` on `payload`, in `workspace`.
+    pub fn optimize(&self, workspace: &Path, plan: &serde_json::Value, payload: serde_json::Value) -> Result<TaskResult> {
+        self.exec.call(&TaskRequest::new(&self.backend, "harness.optimize", workspace).plan(plan).optimize(payload))
     }
 
     /// Fail before any trial when the backend can't run one of `stacks`: it doesn't run

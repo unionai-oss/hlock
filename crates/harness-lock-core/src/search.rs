@@ -29,6 +29,17 @@ pub struct Stack {
     pub tool_timeout_seconds: Option<u64>,
     /// Decision models, by use (`approve` → `ollama:kev:4b`).
     pub deciders: BTreeMap<String, String>,
+    /// Instruction files and skills a tune candidate puts in place of the lock's.
+    pub overlay: Option<Overlay>,
+}
+
+/// A tune candidate's content, as a trial gets it (`crate::optimize::overlay`).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Overlay {
+    /// The candidate's digest, so each candidate is its own stack.
+    pub digest: String,
+    /// Its instruction files, which a single-completion trial gets as the system prompt.
+    pub system_prompt: String,
 }
 
 impl Default for Stack {
@@ -47,6 +58,7 @@ impl Default for Stack {
             temperature: None,
             tool_timeout_seconds: None,
             deciders: BTreeMap::new(),
+            overlay: None,
         }
     }
 }
@@ -73,6 +85,10 @@ impl Stack {
         });
         if !self.deciders.is_empty() {
             v["deciders"] = json!(self.deciders); // only when set, so other stacks keep their hashes
+        }
+        if let Some(o) = &self.overlay {
+            v["overlay"] = json!(o.digest);
+            v["system_prompt"] = json!(o.system_prompt);
         }
         v
     }

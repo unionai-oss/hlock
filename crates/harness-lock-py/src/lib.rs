@@ -574,6 +574,17 @@ fn tune_apply(path: String, lock: String, manifest: Option<String>) -> PyResult<
     Ok(prev.map(|p| p.to_string_lossy().into_owned()))
 }
 
+/// Run a tune candidate on a split of a tune session (`hlock tune eval`): its trials,
+/// graded, as JSON. Counts against the session's budget; never runs the test split.
+#[pyfunction]
+#[pyo3(signature = (session, candidate, split="train".to_string(), tasks=None, trials=None))]
+fn tune_eval(py: Python<'_>, session: String, candidate: String, split: String, tasks: Option<Vec<String>>, trials: Option<u32>) -> PyResult<String> {
+    interruptible(py, move || {
+        let v = core::optimize::evaluate(Path::new(&session), Path::new(&candidate), &split, tasks.as_deref(), trials).map_err(py_err)?;
+        Ok(json_str(v))
+    })
+}
+
 /// The content behind the changed digests between two locks (`hlock diff`), as JSON.
 /// `old` and `new` are lock files or git revisions; without them, `<lock>.prev` (or
 /// `HEAD`'s lock) and `lock`.
@@ -669,7 +680,7 @@ fn upgrade(
 }
 
 #[pyfunction]
-#[pyo3(signature = (manifest=None, depth="auto".to_string(), data="user".to_string(), harness=None, out=None, strict=false, apply=false, max_trials=None, backend=None, workdir=None, lock=None))]
+#[pyo3(signature = (manifest=None, depth="auto".to_string(), data="user".to_string(), harness=None, out=None, strict=false, apply=false, max_trials=None, backend=None, workdir=None, lock=None, optimizer=None, edit=None, budget_rollouts=None, budget_usd=None))]
 fn tune(
     py: Python<'_>,
     manifest: Option<PyObject>,
@@ -683,10 +694,18 @@ fn tune(
     backend: Option<String>,
     workdir: Option<String>,
     lock: Option<String>,
+    optimizer: Option<String>,
+    edit: Option<Vec<String>>,
+    budget_rollouts: Option<u64>,
+    budget_usd: Option<f64>,
 ) -> PyResult<String> {
     let m = resolve_manifest(py, manifest, backend.as_deref())?;
     let root = m.root();
     let spec = core::ops::TuneSpec {
+        optimizer,
+        edit,
+        budget_rollouts,
+        budget_usd,
         depth,
         data,
         harness,
@@ -1996,6 +2015,7 @@ fn _hlock(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(resolve, m)?)?;
     m.add_function(wrap_pyfunction!(load, m)?)?;
     m.add_function(wrap_pyfunction!(lock_diff, m)?)?;
+    m.add_function(wrap_pyfunction!(tune_eval, m)?)?;
     m.add_function(wrap_pyfunction!(upgrade, m)?)?;
     m.add_function(wrap_pyfunction!(tune, m)?)?;
     m.add_function(wrap_pyfunction!(harnesses, m)?)?;

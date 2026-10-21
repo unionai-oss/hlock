@@ -174,6 +174,32 @@ options = { project = "agents", domain = "development" }
 A table has at most one of `command` and `python`. `local` and `flyte` take only
 `options`, and `offline` can't be configured.
 
+## `[tune]`
+
+How [`hlock tune`](../guides/tune.md#tune-the-harness-text) edits the harness's text.
+
+```toml title="harness.toml"
+[tune]
+edit = ["instructions", "skill"]
+optimizer = "hlock"
+proposer = "anthropic:opus"
+trials = 2
+alpha = 0.05
+max-cost-increase = 0.25
+budget = { rollouts = 100, usd = 20 }
+```
+
+| Key | Default | Description |
+|---|---|---|
+| `edit` | `["instructions"]` from `--depth prompt` on, else none | What the optimizer may change: `instructions`, `skill`. Empty means no optimize stage |
+| `optimizer` | `"hlock"` | The built-in optimizer, or a backend that runs `harness.optimize` ([Write an optimizer](../guides/backends.md#write-an-optimizer)) |
+| `proposer` | | The model that drafts edits. The built-in optimizer tries fixed guidance without one |
+| `trials` | `2` | Trials per task in each evaluation and in the acceptance runs |
+| `alpha` | `0.05` | The sign test's significance level an accepted candidate must reach |
+| `max-cost-increase` | `0.25` | How much more per trial an accepted candidate may cost |
+| `budget.rollouts` | `100` | The most trials the optimizer may run |
+| `budget.usd` | | The most it may spend on trials |
+
 ## Dependencies
 
 `[skills]`, `[mcp]`, `[instructions]`, `[plugins]` and `[packages]` declare dependencies:
