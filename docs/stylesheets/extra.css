@@ -13,6 +13,19 @@
   font-weight: 700;
 }
 
+/* Scrollbars: a muted violet on hover instead of the theme's bright pink accent. */
+.md-typeset pre > code:hover,
+.md-sidebar__scrollwrap:focus-within,
+.md-sidebar__scrollwrap:hover {
+  scrollbar-color: color-mix(in srgb, var(--md-primary-fg-color) 45%, transparent) #0000;
+}
+.md-typeset pre > code::-webkit-scrollbar-thumb:hover,
+.md-sidebar__scrollwrap:focus-within::-webkit-scrollbar-thumb:hover,
+.md-sidebar__scrollwrap:hover::-webkit-scrollbar-thumb:hover,
+.md-tooltip2__inner::-webkit-scrollbar-thumb:hover {
+  background-color: color-mix(in srgb, var(--md-primary-fg-color) 45%, transparent);
+}
+
 /* Footer: the logo's violet → pink gradient, drifting slowly like the animated logo. */
 .md-footer-meta {
   --md-footer-fg-color: #fff;
