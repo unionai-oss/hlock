@@ -13,7 +13,7 @@ use crate::scan::{Finding, Severity};
 /// Content a lock entry places in a harness, and where to read it now.
 #[derive(Debug, Clone, Serialize)]
 pub struct Content {
-    /// `skill`, `instructions`, `config`.
+    /// `skill`, `instructions`, `config`, `subagent`, `script`, `middleware`.
     pub kind: String,
     pub name: String,
     /// What findings are named by: the entry's path as the lock records it.
@@ -55,6 +55,11 @@ pub fn contents(lock: &Lockfile, lock_dir: &Path, profile: Option<&HarnessProfil
     for c in &lock.config {
         let at = profile.and_then(|p| p.file_path(&c.id, ctx));
         push("config", &c.id, c.path.clone(), c.vendored.as_ref(), None, at, &c.scan);
+    }
+    for (kind, items) in [("subagent", &lock.subagent), ("script", &lock.script), ("middleware", &lock.middleware)] {
+        for c in items.iter() {
+            push(kind, &c.name, c.path.clone(), c.vendored.as_ref(), c.digest.as_ref(), Some(installed(&c.path)), &c.scan);
+        }
     }
     out
 }
@@ -124,6 +129,16 @@ pub fn scan_capture(lock: &mut Lockfile, profile: &HarnessProfile, ctx: &Ctx, ve
         let f = crate::scan::scan_path(&ctx.expand(&i.name, Some(&root)), &i.name);
         note("instructions", &i.name, &f);
         i.scan = Some(crate::scan::summary(&f));
+    }
+    for (kind, items) in [("subagent", &mut lock.subagent), ("script", &mut lock.script), ("middleware", &mut lock.middleware)] {
+        for c in items.iter_mut() {
+            let f = match c.vendored.as_ref().and_then(|v| vendor.iter().find(|x| &x.rel == v)) {
+                Some(v) => crate::scan::scan_bytes(&v.bytes, &c.path),
+                None => crate::scan::scan_path(&ctx.expand(&c.path, Some(&root)), &c.path),
+            };
+            note(kind, &c.name, &f);
+            c.scan = Some(crate::scan::summary(&f));
+        }
     }
     for c in lock.config.iter_mut() {
         // what's restored: the vendored (redacted) copy, else the file itself
@@ -246,6 +261,9 @@ fn integrity(lock: &Lockfile, dir: &Path, contents: &[Content]) -> Vec<Problem> 
         let want = match c.kind.as_str() {
             "skill" => lock.skill.iter().find(|s| s.name == c.name).and_then(|s| s.digest.clone()),
             "instructions" => lock.instructions.iter().find(|i| i.name == c.name).and_then(|i| i.digest.clone()),
+            "subagent" => lock.subagent.iter().find(|s| s.name == c.name).and_then(|s| s.digest.clone()),
+            "script" => lock.script.iter().find(|s| s.name == c.name).and_then(|s| s.digest.clone()),
+            "middleware" => lock.middleware.iter().find(|s| s.name == c.name).and_then(|s| s.digest.clone()),
             _ => None,
         };
         if let Some(want) = want {

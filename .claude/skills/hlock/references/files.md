@@ -50,6 +50,10 @@ The main sections:
   each with a digest. A skill's `origin` is `harness-builtin`, `bundled` (from a plugin),
   `third-party` (pinned to a git commit), `first-party` (in the project), or `local`
   (hand-written, so vendored). `declared = true` means it came from `harness.toml`.
+- `[[subagent]]`, `[[script]]`, `[[middleware]]`: subagent definitions, helper scripts in
+  `.agents/scripts/`, and middleware files (OpenCode plugins, Codex's `.codex/hooks.json`).
+  An `[[instructions]]` entry's `role` (`guardrails`, `memory`, `tool-guidance`) or
+  `sections` say which of those always-on parts it holds.
 - `[evidence]`: on a resolved lock, the success rate, cost, and latency it was measured
   with.
 - `[provenance]`: how it was made (`backend = "pin"`, or the resolve backend) and the

@@ -20,8 +20,30 @@ use crate::error::{Error, Result};
 use crate::hash::sha256_bytes;
 use crate::lockfile::{Instructions, Lockfile};
 
-/// The component kinds an optimizer may edit in this version.
-pub const KINDS: &[&str] = &["instructions", "skill"];
+/// The component kinds an optimizer may edit.
+pub const KINDS: &[&str] = &["instructions", "skill", "subagent", "script", "middleware"];
+
+/// The bundle directory each kind of file component lives in, and its lock kind.
+const FILE_DIRS: &[(&str, &str)] = &[("subagents", "subagent"), ("scripts", "script"), ("middleware", "middleware")];
+
+/// The lock's name for a file component: a script keeps its file name; a subagent or
+/// middleware file is named by its stem.
+fn file_name_of(kind: &str, file: &str) -> String {
+    if kind == "script" { file.to_string() } else { file.split('.').next().unwrap_or(file).to_string() }
+}
+
+/// Where a new file component of `kind` goes in `profile`'s harness, if it has a place.
+pub fn file_dest(profile: Option<&crate::profiles::HarnessProfile>, kind: &str, file: &str) -> Option<String> {
+    match kind {
+        "script" => Some(format!("{}/{file}", crate::components::SCRIPTS_DIR)),
+        "subagent" => profile?.subagents.as_ref().and_then(|s| s.write.clone().or_else(|| s.dirs.first().cloned())).map(|d| format!("{d}/{file}")),
+        "middleware" => {
+            let m = profile?.middleware.as_ref()?;
+            m.write.clone().or_else(|| m.dirs.first().cloned()).map(|d| format!("{d}/{file}")).or_else(|| m.files.iter().find(|f| f.ends_with(&format!("/{file}")) || f.as_str() == file).cloned())
+        }
+        _ => None,
+    }
+}
 const MAX_COMPONENT_BYTES: usize = 15 * 1024;
 const MAX_CHANGED_LINES: usize = 120;
 
@@ -42,6 +64,12 @@ pub struct Component {
     /// Why it can't be edited, when it can't.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub why: Option<String>,
+    /// An instruction file's role (`guardrails`, `memory`, `tool-guidance`), and the roles it
+    /// holds as sections.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sections: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -84,7 +112,7 @@ fn located(lock_dir: &Path, vendored: Option<&str>, project: &[Option<&str>]) ->
 /// Write the base lock's instruction files and skills into `dest` as a bundle, with the
 /// kinds in `edit` editable. `default_instructions` (the harness's own instruction file) is
 /// always there, empty when the lock has none, so an optimizer can write a system prompt.
-pub fn write_seed(base: Option<&Lockfile>, lock_dir: &Path, harness: &str, default_instructions: &str, edit: &[String], dest: &Path) -> Result<BundleSpec> {
+pub fn write_seed(base: Option<&Lockfile>, profile: Option<&crate::profiles::HarnessProfile>, lock_dir: &Path, harness: &str, default_instructions: &str, edit: &[String], dest: &Path) -> Result<BundleSpec> {
     let _ = std::fs::remove_dir_all(dest);
     std::fs::create_dir_all(dest)?;
     let can = |kind: &str| edit.iter().any(|e| e == kind);
@@ -109,7 +137,7 @@ pub fn write_seed(base: Option<&Lockfile>, lock_dir: &Path, harness: &str, defau
         } else {
             None
         };
-        components.push(Component { id, kind: "instructions".into(), name: i.name.clone(), digest: sha256_bytes(&text), editable: why.is_none(), why });
+        components.push(Component { id, kind: "instructions".into(), name: i.name.clone(), digest: sha256_bytes(&text), editable: why.is_none(), why, role: i.role.clone(), sections: i.sections.clone() });
     }
     for s in base.map(|l| l.skill.as_slice()).unwrap_or_default().iter().filter(|s| s.enabled) {
         let source = s.source.as_deref().and_then(|p| p.strip_prefix("./"));
@@ -126,22 +154,47 @@ pub fn write_seed(base: Option<&Lockfile>, lock_dir: &Path, harness: &str, defau
         } else {
             None
         };
-        components.push(Component { id: id.clone(), kind: "skill".into(), name: s.name.clone(), digest: crate::capture::tree_digest(&dest.join(&id)), editable: why.is_none(), why });
+        components.push(Component { id: id.clone(), kind: "skill".into(), name: s.name.clone(), digest: crate::capture::tree_digest(&dest.join(&id)), editable: why.is_none(), why, role: None, sections: Vec::new() });
     }
+    // subagents, scripts and middleware: one file each, under the kind's directory
+    for (dir, kind) in FILE_DIRS {
+        let items: &[crate::lockfile::FileComponent] = match (*kind, base) {
+            ("subagent", Some(l)) => &l.subagent,
+            ("script", Some(l)) => &l.script,
+            ("middleware", Some(l)) => &l.middleware,
+            _ => &[],
+        };
+        for c in items {
+            let Some(from) = located(lock_dir, c.vendored.as_deref(), &[Some(&c.path)]).filter(|p| p.is_file()) else { continue };
+            let file = from.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+            if !crate::fsutil::plain_name(&file) {
+                continue;
+            }
+            let id = format!("{dir}/{file}");
+            let bytes = crate::fsutil::read_regular(&from, 1 << 20)?;
+            std::fs::create_dir_all(dest.join(dir))?;
+            std::fs::write(dest.join(&id), &bytes)?;
+            let why = (!can(kind)).then(|| "not in [tune] edit".to_string());
+            components.push(Component { id, kind: kind.to_string(), name: c.name.clone(), digest: sha256_bytes(&bytes), editable: why.is_none(), why, role: None, sections: Vec::new() });
+        }
+    }
+    // a kind can be added only where the harness has a place for it
+    let placeable = |k: &str| !matches!(k, "subagent" | "middleware") || file_dest(profile, k, "x").is_some();
     let spec = BundleSpec {
         harness: harness.to_string(),
         components,
-        may_add: edit.iter().filter(|k| KINDS.contains(&k.as_str())).cloned().collect(),
+        may_add: edit.iter().filter(|k| KINDS.contains(&k.as_str()) && placeable(k)).cloned().collect(),
         limits: Limits { max_component_bytes: MAX_COMPONENT_BYTES, max_changed_lines: MAX_CHANGED_LINES },
     };
     std::fs::write(dest.join("bundle.json"), serde_json::to_string_pretty(&spec)? + "\n")?;
     Ok(spec)
 }
 
-/// A candidate's identity: the digest of its instruction files and skills.
+/// A candidate's identity: the digest of everything in it but `bundle.json`.
 pub fn candidate_digest(dir: &Path) -> String {
     let part = |d: &str| crate::capture::tree_digest(&dir.join(d));
-    sha256_bytes(format!("{}\n{}", part("instructions"), part("skills")).as_bytes())
+    let parts: Vec<String> = ["instructions", "skills", "subagents", "scripts", "middleware"].iter().map(|d| part(d)).collect();
+    sha256_bytes(parts.join("\n").as_bytes())
 }
 
 /// The components in a bundle directory, by id, with their files (relative to the
@@ -166,6 +219,16 @@ fn components_in(dir: &Path) -> Result<BTreeMap<String, BTreeMap<String, Vec<u8>
                 files.insert(rel.to_string_lossy().replace('\\', "/"), read(&e.path().join(&rel))?);
             }
             out.insert(format!("skills/{name}"), files);
+        }
+    }
+    for (sub, _) in FILE_DIRS {
+        let Ok(rd) = std::fs::read_dir(dir.join(sub)) else { continue };
+        for e in rd.flatten() {
+            let name = e.file_name().to_string_lossy().into_owned();
+            if !e.file_type().map(|t| t.is_file()).unwrap_or(false) {
+                return Err(err(format!("{sub}/{name} isn't a file")));
+            }
+            out.insert(format!("{sub}/{name}"), BTreeMap::from([(String::new(), read(&e.path())?)]));
         }
     }
     Ok(out)
@@ -223,8 +286,8 @@ pub fn validate(seed: &Path, spec: &BundleSpec, candidate: &Path) -> Result<Vec<
     let rd = std::fs::read_dir(candidate).map_err(|e| err(format!("can't read the candidate {}: {e}", candidate.display())))?;
     for e in rd.flatten() {
         let name = e.file_name().to_string_lossy().into_owned();
-        if !matches!(name.as_str(), "instructions" | "skills" | "bundle.json") {
-            return Err(err(format!("the candidate has {name}, which isn't part of a bundle (instructions/, skills/)")));
+        if !matches!(name.as_str(), "instructions" | "skills" | "subagents" | "scripts" | "middleware" | "bundle.json") {
+            return Err(err(format!("the candidate has {name}, which isn't part of a bundle (instructions/, skills/, subagents/, scripts/, middleware/)")));
         }
     }
     let (old, new) = (components_in(seed)?, components_in(candidate)?);
@@ -238,14 +301,20 @@ pub fn validate(seed: &Path, spec: &BundleSpec, candidate: &Path) -> Result<Vec<
         if old.contains_key(id) && &before == files {
             continue;
         }
-        let kind = if id.starts_with("skills/") { "skill" } else { "instructions" };
-        let name = id.split_once('/').map(|(_, n)| n.to_string()).unwrap_or_default();
+        let (top, rest) = id.split_once('/').unwrap_or((id.as_str(), ""));
+        let kind = match top {
+            "skills" => "skill",
+            "instructions" => "instructions",
+            other => FILE_DIRS.iter().find(|(d, _)| *d == other).map(|(_, k)| *k).unwrap_or("instructions"),
+        };
+        let name = by_id.get(id.as_str()).map(|c| c.name.clone()).unwrap_or_else(|| if matches!(kind, "skill" | "instructions") { rest.to_string() } else { file_name_of(kind, rest) });
         let op = match by_id.get(id.as_str()) {
             Some(c) if !c.editable => return Err(err(format!("{id} isn't editable ({})", c.why.as_deref().unwrap_or("bundle.json"))))?,
             Some(_) => "modify",
             None if !spec.may_add.iter().any(|k| k == kind) => return Err(err(format!("the candidate adds {id}, but the bundle may only add {:?}", spec.may_add))),
             None if kind == "skill" && !crate::fsutil::plain_name(&name) => return Err(err(format!("{id}: a skill's name must be a plain directory name"))),
             None if kind == "skill" && !files.contains_key("SKILL.md") => return Err(err(format!("{id} has no SKILL.md"))),
+            None if !matches!(kind, "skill" | "instructions") && !crate::fsutil::plain_name(rest) => return Err(err(format!("{id}: a file name must be plain"))),
             None if !plain_path(&name) => return Err(err(format!("{id} isn't a plain relative path"))),
             None => "add",
         };
@@ -304,6 +373,34 @@ pub fn trial_lock(base: Option<&Lockfile>, dir: &Path, spec: &BundleSpec) -> Res
     // a skill the bundle doesn't carry (one that couldn't be read) keeps its lock entry
     lock.skill.retain(|s| !spec.components.iter().any(|c| c.kind == "skill" && c.name == s.name));
     lock.skill.extend(skills);
+    for (sub, kind) in FILE_DIRS {
+        let entries: Vec<crate::lockfile::FileComponent> = have
+            .iter()
+            .filter_map(|(id, files)| id.strip_prefix(&format!("{sub}/")).map(|f| (f, files)))
+            .map(|(file, files)| {
+                let name = file_name_of(kind, file);
+                let prev = match *kind {
+                    "subagent" => lock.subagent.iter().find(|c| c.name == name),
+                    "script" => lock.script.iter().find(|c| c.name == name),
+                    _ => lock.middleware.iter().find(|c| c.name == name),
+                };
+                crate::lockfile::FileComponent {
+                    path: prev.map(|p| p.path.clone()).unwrap_or_else(|| format!("{sub}/{file}")),
+                    format: prev.and_then(|p| p.format.clone()),
+                    name,
+                    scope: "project".into(),
+                    vendored: Some(format!("{leaf}/{sub}/{file}")),
+                    digest: files.get("").map(|b| sha256_bytes(b)),
+                    ..Default::default()
+                }
+            })
+            .collect();
+        match *kind {
+            "subagent" => lock.subagent = entries,
+            "script" => lock.script = entries,
+            _ => lock.middleware = entries,
+        }
+    }
     let path = dir.with_file_name(format!("{leaf}.trial.lock"));
     lock.save(&path)?;
     Ok((lock, path))
@@ -576,10 +673,14 @@ pub fn revert(seed: &Path, candidate: &Path, id: &str) -> Result<()> {
 
 /// Write each change's content next to the tune lock, under `.hlock/tuned/<digest>/`, and
 /// point the lock's entry for it there. Returns the `[[tune.edit]]` entries.
-pub fn apply_to_lock(lf: &mut Lockfile, out_dir: &Path, candidate: &Path, changes: &[Change], ledger: &[Value]) -> Result<Vec<Value>> {
+pub fn apply_to_lock(lf: &mut Lockfile, profile: Option<&crate::profiles::HarnessProfile>, out_dir: &Path, candidate: &Path, changes: &[Change], ledger: &[Value]) -> Result<Vec<Value>> {
     let mut edits = Vec::new();
     for c in changes {
         let src = candidate.join(&c.id);
+        if matches!(c.kind.as_str(), "subagent" | "script" | "middleware") {
+            edits.push(apply_file(lf, profile, out_dir, &src, c, ledger)?);
+            continue;
+        }
         let (after, before) = if c.kind == "skill" {
             (crate::capture::tree_digest(&src), lf.skill.iter().find(|s| s.name == c.name).and_then(|s| s.digest.clone()))
         } else {
@@ -636,6 +737,52 @@ pub fn apply_to_lock(lf: &mut Lockfile, out_dir: &Path, candidate: &Path, change
     Ok(edits)
 }
 
+/// [`apply_to_lock`] for a subagent, script or middleware file.
+fn apply_file(lf: &mut Lockfile, profile: Option<&crate::profiles::HarnessProfile>, out_dir: &Path, src: &Path, c: &Change, ledger: &[Value]) -> Result<Value> {
+    let bytes = std::fs::read(src)?;
+    let after = sha256_bytes(&bytes);
+    let file = src.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let short: String = after.trim_start_matches("sha256:").chars().take(8).collect();
+    let sub = FILE_DIRS.iter().find(|(_, k)| *k == c.kind).map(|(d, _)| *d).unwrap_or("files");
+    let rel = format!(".hlock/tuned/{short}/{sub}/{file}");
+    let dest = out_dir.join(&rel);
+    std::fs::create_dir_all(dest.parent().unwrap_or(out_dir))?;
+    std::fs::write(&dest, &bytes)?;
+    #[cfg(unix)]
+    if c.kind == "script" {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&dest, std::fs::Permissions::from_mode(0o755));
+    }
+    let scan = crate::scan::record(&crate::scan::scan_bytes(&bytes, &rel), false);
+    let items = match c.kind.as_str() {
+        "subagent" => &mut lf.subagent,
+        "script" => &mut lf.script,
+        _ => &mut lf.middleware,
+    };
+    let before = items.iter().find(|x| x.name == c.name).and_then(|x| x.digest.clone());
+    match items.iter_mut().find(|x| x.name == c.name) {
+        Some(x) => {
+            x.digest = Some(after.clone());
+            x.vendored = Some(rel.clone());
+            x.source = Some("tune".into());
+            x.scan = Some(scan);
+        }
+        None => {
+            let path = file_dest(profile, &c.kind, &file).ok_or_else(|| err(format!("{} has no place for a {}", profile.map(|p| p.name.as_str()).unwrap_or("the harness"), c.kind)))?;
+            let format = if c.kind == "middleware" { profile.and_then(|p| p.middleware.as_ref()).and_then(|m| m.format.clone()) } else { None };
+            items.push(crate::lockfile::FileComponent { name: c.name.clone(), path, digest: Some(after.clone()), scope: "project".into(), vendored: Some(rel.clone()), format, source: Some("tune".into()), scan: Some(scan) });
+        }
+    }
+    let mut e = json!({"component": c.id, "kind": c.kind, "op": if before.is_none() { "add" } else { "modify" }, "after": after, "path": rel});
+    if let Some(b) = before {
+        e["before"] = json!(b);
+    }
+    if let Some(r) = ledger.iter().rev().find(|l| l["component"].as_str() == Some(c.id.as_str())).and_then(|l| l["rationale"].as_str()) {
+        e["rationale"] = json!(r);
+    }
+    Ok(e)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -658,7 +805,7 @@ mod tests {
         };
         let edit: Vec<String> = edit.iter().map(|s| s.to_string()).collect();
         let dest = d.join("seed");
-        let spec = write_seed(Some(&lock), d, "claude-code", "CLAUDE.md", &edit, &dest).unwrap();
+        let spec = write_seed(Some(&lock), None, d, "claude-code", "CLAUDE.md", &edit, &dest).unwrap();
         (dest, spec)
     }
 
@@ -702,6 +849,39 @@ mod tests {
     }
 
     #[test]
+    fn subagents_scripts_and_middleware_are_bundle_files() {
+        let d = tmp("files");
+        std::fs::create_dir_all(d.join(".claude/agents")).unwrap();
+        std::fs::write(d.join(".claude/agents/reviewer.md"), "---\nname: reviewer\n---\nRead.\n").unwrap();
+        let lock = Lockfile {
+            subagent: vec![crate::lockfile::FileComponent { name: "reviewer".into(), path: ".claude/agents/reviewer.md".into(), scope: "project".into(), ..Default::default() }],
+            ..Default::default()
+        };
+        let edit: Vec<String> = ["subagent", "script"].iter().map(|s| s.to_string()).collect();
+        let seed = d.join("seed");
+        let spec = write_seed(Some(&lock), None, &d, "claude-code", "CLAUDE.md", &edit, &seed).unwrap();
+        assert!(spec.components.iter().any(|c| c.id == "subagents/reviewer.md" && c.kind == "subagent" && c.name == "reviewer" && c.editable));
+        // with no harness profile there's no place for a new subagent: only scripts can be added
+        assert_eq!(spec.may_add, ["script"]);
+        let cand = d.join("cand");
+        crate::fsutil::copy_tree(&seed, &cand).unwrap();
+        std::fs::write(cand.join("subagents/reviewer.md"), "---\nname: reviewer\n---\nRead, then test.\n").unwrap();
+        std::fs::create_dir_all(cand.join("scripts")).unwrap();
+        std::fs::write(cand.join("scripts/check.py"), "print('ok')\n").unwrap();
+        let ch = validate(&seed, &spec, &cand).unwrap();
+        let by: BTreeMap<&str, (&str, &str, &str)> = ch.iter().map(|c| (c.id.as_str(), (c.kind.as_str(), c.name.as_str(), c.op.as_str()))).collect();
+        assert_eq!(by, BTreeMap::from([("scripts/check.py", ("script", "check.py", "add")), ("subagents/reviewer.md", ("subagent", "reviewer", "modify"))]));
+        let mut lf = lock.clone();
+        let edits = apply_to_lock(&mut lf, None, &d, &cand, &ch, &[]).unwrap();
+        assert_eq!(edits.len(), 2);
+        assert_eq!(lf.script[0].path, ".agents/scripts/check.py");
+        assert_eq!(lf.subagent[0].source.as_deref(), Some("tune"));
+        assert!(lf.subagent[0].vendored.as_deref().unwrap().ends_with("/subagents/reviewer.md"));
+        let (tl, _) = trial_lock(None, &cand, &spec).unwrap();
+        assert_eq!(tl.subagent[0].vendored.as_deref(), Some("cand/subagents/reviewer.md"));
+    }
+
+    #[test]
     fn the_sign_test() {
         assert!((sign_test(5, 0) - 1.0 / 32.0).abs() < 1e-12);
         assert!((sign_test(0, 0) - 1.0).abs() < 1e-12);
@@ -734,7 +914,7 @@ mod tests {
         let changes = validate(&s, &spec, &cand).unwrap();
         let mut lf = Lockfile { instructions: vec![Instructions { name: "CLAUDE.md".into(), digest: Some(sha256_bytes(b"Be brief.\n")), ..Default::default() }], ..Default::default() };
         let ledger = vec![json!({"component": "instructions/CLAUDE.md", "op": "modify", "rationale": "tests were skipped"})];
-        let edits = apply_to_lock(&mut lf, &d, &cand, &changes, &ledger).unwrap();
+        let edits = apply_to_lock(&mut lf, None, &d, &cand, &changes, &ledger).unwrap();
         let i = &lf.instructions[0];
         assert_eq!(i.source.as_deref(), Some("tune"));
         let rel = i.vendored.clone().unwrap();

@@ -1569,7 +1569,8 @@ pub fn capture(profile: &HarnessProfile, reg: &Registry, ctx: &Ctx, project: Opt
             continue;
         }
         let name = portable_path(&p, Some(&root), ctx);
-        let mut ins = Instructions { name: name.clone(), digest: Some(sha256_bytes(&bytes)), scope: if project { "project" } else { "user" }.into(), ..Default::default() };
+        let sections = crate::components::sections_in(&String::from_utf8_lossy(&bytes));
+        let mut ins = Instructions { name: name.clone(), digest: Some(sha256_bytes(&bytes)), scope: if project { "project" } else { "user" }.into(), sections, ..Default::default() };
         if !project {
             // by file name; a second file of the same name (two AGENTS.md) gets `-2`
             let file = Path::new(p.file_name().unwrap_or_default());
@@ -1583,6 +1584,77 @@ pub fn capture(profile: &HarnessProfile, reg: &Registry, ctx: &Ctx, project: Opt
         }
         instructions.push(ins);
     }
+    // the project's rules directory: every file there is always-on, and a file named for a
+    // role (guardrails.md, memory.md, tool-guidance.md) has that role
+    if let Some(rules) = &profile.rules {
+        let dir = ctx.cwd.join(&rules.dir);
+        for p in walk_files(&dir).into_iter().map(|r| dir.join(r)).filter(|p| p.to_string_lossy().ends_with(&rules.ext)) {
+            let name = portable_path(&p, Some(&root), ctx);
+            let Ok(bytes) = std::fs::read(&p) else { continue };
+            if instructions.iter().any(|i: &Instructions| i.name == name) {
+                continue;
+            }
+            instructions.push(Instructions { name: name.clone(), digest: Some(sha256_bytes(&bytes)), scope: "project".into(), role: crate::components::role_of_file(&name).map(str::to_string), ..Default::default() });
+        }
+    }
+
+    // ---- subagents, scripts, middleware ----
+    let mut component_files = |spec: Option<&crate::profiles::ComponentDirs>, extra: Option<PathBuf>, kind: &str, vendor: &mut Vec<VendorFile>| -> Vec<crate::lockfile::FileComponent> {
+        let mut found: Vec<PathBuf> = Vec::new();
+        if let Some(s) = spec {
+            for d in &s.dirs {
+                let dir = ctx.expand(d, Some(&root));
+                let Ok(rd) = std::fs::read_dir(&dir) else { continue };
+                let mut files: Vec<PathBuf> = rd.flatten().filter(|e| e.file_type().is_ok_and(|t| t.is_file())).map(|e| e.path()).collect();
+                files.sort();
+                found.extend(files.into_iter().filter(|p| {
+                    let n = p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                    (s.ext.is_empty() || s.ext.iter().any(|e| n.ends_with(e.as_str()))) && !s.skip.contains(&n)
+                }));
+            }
+            found.extend(s.files.iter().map(|f| ctx.expand(f, Some(&root))).filter(|p| p.is_file()));
+        }
+        if let Some(dir) = extra {
+            found.extend(walk_files(&dir).into_iter().map(|r| dir.join(r)));
+        }
+        let mut out: Vec<crate::lockfile::FileComponent> = Vec::new();
+        for p in found {
+            let real = std::fs::canonicalize(&p).unwrap_or(p.clone());
+            let project = is_project_path(&p, &root, ctx);
+            if !project && !users.allows(Some(&p)) {
+                skip(kind, 1);
+                continue;
+            }
+            let Ok(bytes) = std::fs::read(&real) else {
+                warnings.push(format!("{kind} {}: can't read it", p.display()));
+                continue;
+            };
+            let file = p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+            // a script keeps its file name; a subagent or plugin is named by its file's stem
+            let name = if kind == "script" { file.clone() } else { file.split('.').next().unwrap_or(&file).to_string() };
+            if out.iter().any(|c| c.name == name && c.scope == if project { "project" } else { "user" }) {
+                continue;
+            }
+            let mut c = crate::lockfile::FileComponent {
+                name,
+                path: portable_path(&p, Some(&root), ctx),
+                digest: Some(sha256_bytes(&bytes)),
+                scope: if project { "project" } else { "user" }.into(),
+                format: spec.and_then(|s| s.format.clone()),
+                ..Default::default()
+            };
+            if !project {
+                let rel = format!("{vroot}/{kind}/{file}");
+                vendor.push(VendorFile { rel: rel.clone(), bytes, executable: is_executable(&real) });
+                c.vendored = Some(rel);
+            }
+            out.push(c);
+        }
+        out
+    };
+    let subagents = component_files(profile.subagents.as_ref(), None, "subagent", &mut vendor);
+    let scripts = component_files(None, Some(ctx.cwd.join(crate::components::SCRIPTS_DIR)), "script", &mut vendor);
+    let middleware = component_files(profile.middleware.as_ref(), None, "middleware", &mut vendor);
 
     // ---- config files ----
     let mut configs = Vec::new();
@@ -1708,6 +1780,9 @@ pub fn capture(profile: &HarnessProfile, reg: &Registry, ctx: &Ctx, project: Opt
         tool: tools,
         skill: skills,
         instructions,
+        subagent: subagents,
+        script: scripts,
+        middleware,
         context: Context { isolation: "locked-only".into(), ..Default::default() },
         provenance: Provenance {
             backend: "pin".into(),
@@ -1841,7 +1916,17 @@ pub fn diff_locks(old: &Lockfile, new: &Lockfile) -> Vec<String> {
     };
     let (om, nm) = (models(old), models(new));
     diff_maps(&mut out, "model", om.iter().map(|(k, v)| (k.clone(), v)).collect(), nm.iter().map(|(k, v)| (k.clone(), v)).collect(), |v: &&String| short(&Some((*v).clone())));
-    diff_maps(&mut out, "instructions", index(&old.instructions, |i| i.name.clone()), index(&new.instructions, |i| i.name.clone()), |i: &&Instructions| short(&i.digest));
+    let ins_sig = |i: &&Instructions| {
+        let role = i.role.as_deref().map(|r| format!(" ({r})")).unwrap_or_default();
+        let sections = if i.sections.is_empty() { String::new() } else { format!(" [{}]", i.sections.join(", ")) };
+        format!("{}{role}{sections}", short(&i.digest))
+    };
+    diff_maps(&mut out, "instructions", index(&old.instructions, |i| i.name.clone()), index(&new.instructions, |i| i.name.clone()), ins_sig);
+    let file_key = |c: &crate::lockfile::FileComponent| format!("{} ({})", c.name, c.scope);
+    let file_sig = |c: &&crate::lockfile::FileComponent| short(&c.digest);
+    diff_maps(&mut out, "subagent", index(&old.subagent, file_key), index(&new.subagent, file_key), file_sig);
+    diff_maps(&mut out, "script", index(&old.script, file_key), index(&new.script, file_key), file_sig);
+    diff_maps(&mut out, "middleware", index(&old.middleware, file_key), index(&new.middleware, file_key), file_sig);
     diff_maps(&mut out, "config", index(&old.config, |c| c.path.clone()), index(&new.config, |c| c.path.clone()), |c: &&ConfigFile| short(&c.digest));
     out
 }
@@ -1873,6 +1958,8 @@ fn relocate_vendored(cap: &mut Capture, id: &str, ns: &str) {
     cap.lock.skill.iter_mut().filter_map(|s| s.vendored.as_mut()).for_each(mv);
     cap.lock.instructions.iter_mut().filter_map(|i| i.vendored.as_mut()).for_each(mv);
     cap.lock.config.iter_mut().filter_map(|c| c.vendored.as_mut()).for_each(mv);
+    let lock = &mut cap.lock;
+    lock.subagent.iter_mut().chain(lock.script.iter_mut()).chain(lock.middleware.iter_mut()).filter_map(|c| c.vendored.as_mut()).for_each(mv);
 }
 
 /// Replace the vendor directory `vdir` with `files` (each `rel` is `prefix` and a path
@@ -2012,6 +2099,10 @@ pub fn pin(
             i.vendored = None;
         }
         for c in cap.lock.config.iter_mut() {
+            c.vendored = None;
+        }
+        let lock = &mut cap.lock;
+        for c in lock.subagent.iter_mut().chain(lock.script.iter_mut()).chain(lock.middleware.iter_mut()) {
             c.vendored = None;
         }
     }

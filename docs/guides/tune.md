@@ -70,7 +70,7 @@ keeps the edits only if they beat the lock on tasks the optimizer never saw:
 
 ```toml title="harness.toml"
 [tune]
-edit = ["instructions"]          # what it may change: "instructions", "skill"
+edit = ["instructions"]          # what it may change: instructions, skill, subagent, script, middleware
 optimizer = "hlock"              # the built-in one, or a backend that runs harness.optimize
 proposer = "anthropic:opus"      # the model that drafts edits (optional for the built-in one)
 trials = 1                       # trials per task, in each evaluation
@@ -105,8 +105,8 @@ next → hlock tune apply
 
 How it works:
 
-1. **The bundle.** Tune writes the lock's instruction files and skills as files, with a
-   `bundle.json` that says which the optimizer may edit, and size limits (15 KiB per
+1. **The bundle.** Tune writes the lock's instruction files (with their roles), skills,
+   subagents, scripts and middleware as files, with a `bundle.json` that says which the optimizer may edit, and size limits (15 KiB per
    component, 120 changed lines). The harness's own instruction file (`CLAUDE.md`, `AGENTS.md`)
    is always there, empty when the lock has none. A declared dependency isn't editable: change
    it at its source.
@@ -189,6 +189,57 @@ guidance from the failures and the graders' feedback. It reruns the same tasks, 
 edit when it does better there and no worse on dev. The lines it may add per step decay from
 3 to 1. Without a `proposer` (or without `HL_LLM_BASE_URL`), it tries a fixed list of general
 guidance instead. It's small on purpose: a better optimizer is a [backend](backends.md#write-an-optimizer).
+
+### Harness²
+
+[Harness²](https://github.com/google-research/harness2) (Google Cloud AI Research and
+Northwestern) refines a harness without labels: for each task it proposes edits, probes them
+on that task, composes what helped, and keeps lessons for the tasks after it. hlock runs it as
+a black box, in the environment Harness² is installed in, with its own proposer, selector,
+library, and OpenCode or Codex executor:
+
+```toml title="harness.toml"
+[tune]
+optimizer = "harness2"
+edit = ["instructions", "skill", "subagent", "script", "middleware"]
+
+[backends.harness2]
+options = { python = "~/src/harness2/.venv/bin/python", k = 1, mode = "parallel" }
+```
+
+```console
+$ hlock backend status --backend harness2
+backend    harness2  (from --backend)
+found      looked up as 'harness2' in the hlock.backends entry points
+runs       harness.optimize
+about      Harness² (google-research/harness2), run as a black box in its own environment
+```
+
+Install Harness² and its executor as its README says (`uv pip install -e .`, then
+`harness2-setup`), and set its models the way it reads them (`HARNESS2_SOLVER_MODEL`,
+`HARNESS2_IMPROVER_MODEL`, or its `.env`). `python` (or `HARNESS2_PYTHON`) is that
+environment's interpreter; Harness² needs Python 3.12 or later, and hlock doesn't import it.
+
+hlock hands Harness² the lock's [components](pin.md#harness-components) as its eight-part
+tree: the instruction file is the system prompt; guardrails, memory and tool guidance come
+from their role files or sections; skills, subagents (OpenCode), scripts (in Harness²'s
+`scripts/`, mapped back to `.agents/scripts/`) and middleware (OpenCode plugin files, Codex's
+hooks file) go where Harness² keeps them. A part Harness² has no place for, such as a second
+rules file, is left as it is. Harness² runs over the train and dev tasks; each task's adopted
+harness is a candidate, and when they differ hlock runs them on dev and keeps the best.
+Harness² never sees the graders: it refines without labels, and hlock's
+[checks](#tune-the-harness-text) decide what's accepted, on the held-out tasks, as for any
+optimizer. The tune lock records `evaluator = "optimizer"`, since Harness² ran its own
+rollouts, and each `[[tune.edit]]`'s `rationale` is the lesson Harness² recorded.
+
+| Option | Default | |
+|---|---|---|
+| `python` | `HARNESS2_PYTHON` | The interpreter Harness² is installed in |
+| `substrate` | `cx` for a Codex lock, else `oc` | Harness²'s executor: OpenCode or Codex |
+| `k` | `1` | Its task-level recursion budget |
+| `mode` | `parallel` | `parallel` or `sequential` recursion |
+| `timeout` | `1800` | Seconds per rollout |
+| `work` | | A description of the work, for Harness²'s prompts |
 
 ### What a trial sees
 

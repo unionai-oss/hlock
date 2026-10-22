@@ -244,6 +244,24 @@ pub struct RulesSpec {
     pub ext: String,
 }
 
+/// Files a harness loads as components of their own: every file with one of `ext` directly
+/// in one of `dirs`, and each of `files`. `write` is where a new one goes.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default, rename_all = "kebab-case")]
+pub struct ComponentDirs {
+    pub dirs: Vec<String>,
+    pub ext: Vec<String>,
+    pub files: Vec<String>,
+    pub write: Option<String>,
+    /// The harness's format for them (middleware: `opencode-plugin`, `codex-hooks`).
+    pub format: Option<String>,
+    /// File names hlock owns there (its decider plugin), which aren't captured.
+    pub skip: Vec<String>,
+    /// Frontmatter lines a file needs to be loaded (OpenCode: `mode: subagent`), which
+    /// `migrate` adds to a file moved from another harness.
+    pub frontmatter: Vec<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(default, rename_all = "kebab-case")]
 pub struct BundleSpec {
@@ -420,6 +438,10 @@ pub struct HarnessProfile {
     /// `hlock add instructions` installs one. Without it, a declared instruction file
     /// becomes the project's own instruction file.
     pub rules: Option<RulesSpec>,
+    /// Where the harness reads subagent definitions, one file each.
+    pub subagents: Option<ComponentDirs>,
+    /// Where the harness reads middleware code (OpenCode plugin files, Codex's hooks file).
+    pub middleware: Option<ComponentDirs>,
     pub install: Vec<InstallMethod>,
     pub files: BTreeMap<String, FileSpec>,
     pub model: ModelSpec,

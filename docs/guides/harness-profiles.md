@@ -165,6 +165,8 @@ harness expands references everywhere hlock writes secrets in that file. See
 | `bundles` | Plugins/packages: `kind`, `extractor` (`claude-plugins`, `pi-packages`, `npm-list`), `source`, `lockfile` |
 | `instructions` | Instruction files the harness reads |
 | `rules` | A project directory the harness reads every instruction file in, and the extension one needs there: `{ dir = ".claude/rules", ext = ".md" }`. Where [`hlock add instructions`](dependencies.md) installs a file; without it, a declared instruction file becomes the harness's own project instruction file |
+| `subagents` | Where the harness reads subagent definitions, one file each: `dirs`, `ext`, `write` (where a new one goes), and `frontmatter`, lines a file needs to be loaded, which [`migrate`](migrate.md) adds (OpenCode: `["mode: subagent"]`) |
+| `middleware` | Code the harness loads into its tool loop: `dirs` and `ext` (OpenCode plugin files), or `files` (Codex's `.codex/hooks.json`); `format`, which `migrate` matches; `write`; `skip`, file names hlock owns there |
 | `launch` | `args`, `model-flag`; `prompt`: the arguments that run one prompt non-interactively, with `{prompt}` replaced (`hlock run`, and [`hlock meta run --headless`](meta.md)); `interactive`: the arguments that start a session with `{prompt}` as its first message (`hlock meta run`) |
 | `api-keys` | API providers the harness talks to, and the variable each reads its key from: `[{ provider = "anthropic", env = "ANTHROPIC_API_KEY" }]` |
 | `api-provider` | How [`hlock meta`](meta.md) sets an API provider and model: a list of `{ file, set }` like `local-provider`, with `{provider}` and `{model}` substituted |

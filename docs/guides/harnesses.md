@@ -186,6 +186,7 @@ workspace:
 | `HLOCK_MCP_CONFIG` | A `{"mcpServers": …}` file for the lock's MCP servers, readable only by you. Its `${HLOCK_SECRET_…}` placeholders are filled from the environment and your [secret sources](secrets.md); other `${…}` are left as written. |
 | `HLOCK_SKILLS_DIR` | A directory holding the lock's skills |
 | `HLOCK_INSTRUCTIONS_DIR` | A directory holding the lock's instruction files that have a copy next to it, such as a tune candidate's |
+| `HLOCK_SUBAGENTS_DIR`, `HLOCK_SCRIPTS_DIR`, `HLOCK_MIDDLEWARE_DIR` | Directories holding the lock's subagents, scripts and middleware files that have a copy next to it, such as a tune candidate's |
 | `HLOCK_LOCK` | The lockfile |
 | `HLOCK_OUTPUT` | Where the harness may write a JSON result |
 | `HLOCK_SEED`, `HLOCK_HARNESS` | The trial seed and the harness id |

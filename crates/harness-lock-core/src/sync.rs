@@ -870,7 +870,8 @@ pub fn plan(lock: &Lockfile, lock_path: &Path, reg: &Registry, ctx: &Ctx, opts: 
     for i in &lock.instructions {
         let dest = expand(&i.name, &root, &t);
         let id = format!("instructions:{}", i.name);
-        let in_rules = i.dep.declared && rules_dir.as_ref().is_some_and(|d| fsutil::normalize(&dest).parent() == Some(d.as_path()));
+        // a declared file, or one the harness reads from its rules directory (a role's file)
+        let in_rules = rules_dir.as_ref().is_some_and(|d| fsutil::normalize(&dest).parent() == Some(d.as_path()));
         if !instruction_files.contains(&fsutil::normalize(&dest)) && !in_rules {
             steps.push(refused(id, "instructions", format!("Write {}", pretty(&dest, ctx)), format!("{} isn't a file {} reads instructions from", i.name, profile.name)));
             continue;
@@ -904,6 +905,59 @@ pub fn plan(lock: &Lockfile, lock_path: &Path, reg: &Registry, ctx: &Ctx, opts: 
             step.reason = "project instruction file differs from the lock; it comes from the repo".into();
         }
         steps.push(step);
+    }
+
+    // ---- subagents, scripts, middleware: each where the harness reads it ----
+    let dirs_of = |spec: Option<&crate::profiles::ComponentDirs>| -> (Vec<PathBuf>, Vec<PathBuf>) {
+        let dirs = spec.map(|s| s.dirs.iter().chain(s.write.iter()).map(|d| fsutil::normalize(&expand(d, &root, &t))).collect()).unwrap_or_default();
+        let files = spec.map(|s| s.files.iter().map(|f| fsutil::normalize(&expand(f, &root, &t))).collect()).unwrap_or_default();
+        (dirs, files)
+    };
+    let scripts_dir = fsutil::normalize(&t.cwd.join(crate::components::SCRIPTS_DIR));
+    let kinds: [(&str, &Vec<crate::lockfile::FileComponent>, (Vec<PathBuf>, Vec<PathBuf>)); 3] = [
+        ("subagent", &lock.subagent, dirs_of(profile.subagents.as_ref())),
+        ("script", &lock.script, (vec![scripts_dir], Vec::new())),
+        ("middleware", &lock.middleware, dirs_of(profile.middleware.as_ref())),
+    ];
+    for (kind, items, (dirs, files)) in kinds {
+        for c in items.iter() {
+            let id = format!("{kind}:{}", c.name);
+            let dest = fsutil::normalize(&expand(&c.path, &root, &t));
+            let allowed = files.contains(&dest) || dest.parent().is_some_and(|p| dirs.iter().any(|d| d == p) || (kind == "script" && p.starts_with(&dirs[0])));
+            if !allowed {
+                let why = if dirs.is_empty() && files.is_empty() { format!("{} has no place for a {kind}", profile.name) } else { format!("{} isn't where {} reads a {kind}", c.path, profile.name) };
+                steps.push(refused(id, kind, format!("Write {}", pretty(&dest, ctx)), why));
+                continue;
+            }
+            let ok = std::fs::read(&dest).map(|b| Some(crate::hash::sha256_bytes(&b)) == c.digest).unwrap_or(false);
+            let mut step = Step { id, kind: kind.into(), title: pretty(&dest, ctx), ..Default::default() };
+            if ok {
+                step.status = "satisfied".into();
+                step.reason = "matches the lock".into();
+            } else if let Some(v) = &c.vendored {
+                match vendored_path(&lock_dir, v) {
+                    Some(from) if tampered(&from, c.digest.as_ref()).or_else(|| hidden(&from, v, c.scan.as_deref(), opts)).is_some() => {
+                        step.status = "manual".into();
+                        step.title = format!("Write {}", pretty(&dest, ctx));
+                        step.reason = tampered(&from, c.digest.as_ref()).or_else(|| hidden(&from, v, c.scan.as_deref(), opts)).unwrap_or_default();
+                    }
+                    Some(from) => {
+                        step.status = "auto".into();
+                        step.title = format!("Write {}", pretty(&dest, ctx));
+                        step.action = Some(Action::CopyFile { from, to: dest });
+                    }
+                    None => {
+                        step.status = "manual".into();
+                        step.reason = format!("its vendored copy {v:?} isn't a path inside the lock's directory; refusing to copy it");
+                    }
+                }
+            } else {
+                step.status = "manual".into();
+                step.optional = true;
+                step.reason = format!("the project's {kind} differs from the lock; it comes from the repo");
+            }
+            steps.push(step);
+        }
     }
 
     // ---- MCP launchers ----

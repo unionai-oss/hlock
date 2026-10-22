@@ -359,8 +359,44 @@ pub struct Instructions {
     /// `allowed:critical` (let through on purpose with `--allow-hidden`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scan: Option<String>,
+    /// What the file is for, when it's one of the always-on parts besides the system
+    /// prompt: `guardrails`, `memory` (authored durable facts, never the harness's own
+    /// memory store) or `tool-guidance`. See [`crate::components`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role: Option<String>,
+    /// The roles written into this file as headed sections (`## Guardrails`), on a
+    /// harness that reads only one instruction file.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sections: Vec<String>,
     #[serde(flatten)]
     pub dep: Declared,
+}
+
+/// A file a harness loads as a component of its own: a subagent definition
+/// (`[[subagent]]`), a helper script (`[[script]]`), or middleware such as an OpenCode
+/// plugin file or Codex's hooks file (`[[middleware]]`).
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+#[serde(default)]
+pub struct FileComponent {
+    pub name: String,
+    /// Where the harness reads it, as a portable path (`.claude/agents/review.md`, `{root}/agents/x.md`).
+    pub path: String,
+    pub digest: Option<String>,
+    /// `project` or `user`.
+    pub scope: String,
+    /// A copy next to the lock (`.hlock/vendor/…`, `.hlock/tuned/…`), for a file the
+    /// project's repository doesn't hold.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub vendored: Option<String>,
+    /// Middleware only: the harness's format (`opencode-plugin`, `codex-hooks`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub format: Option<String>,
+    /// `tune` when an optimizer wrote it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+    /// The hidden-Unicode scan of its content.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scan: Option<String>,
 }
 
 /// A harness-native component: plugin, package, extension, or marketplace (§5.3).
@@ -536,6 +572,15 @@ pub struct Lockfile {
     pub skill: Vec<Skill>,
     #[serde(default)]
     pub instructions: Vec<Instructions>,
+    /// Subagent definitions the harness delegates to.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub subagent: Vec<FileComponent>,
+    /// Helper scripts the instructions tell the agent to run.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub script: Vec<FileComponent>,
+    /// Middleware code the harness runs in its tool loop.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub middleware: Vec<FileComponent>,
     #[serde(default)]
     pub policy: Policy,
     #[serde(default)]
@@ -591,6 +636,9 @@ impl Default for Lockfile {
             tool: Vec::new(),
             skill: Vec::new(),
             instructions: Vec::new(),
+            subagent: Vec::new(),
+            script: Vec::new(),
+            middleware: Vec::new(),
             policy: Policy::default(),
             context: Context::default(),
             evidence: Evidence::default(),

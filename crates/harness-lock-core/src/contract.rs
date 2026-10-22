@@ -184,6 +184,22 @@ pub fn invocation(
             }
             env.insert("HLOCK_INSTRUCTIONS_DIR".into(), dir.to_string_lossy().into_owned());
         }
+        // and its subagents, scripts and middleware, one directory each
+        for (env_var, sub, items) in [("HLOCK_SUBAGENTS_DIR", "subagents", &l.subagent), ("HLOCK_SCRIPTS_DIR", "scripts", &l.script), ("HLOCK_MIDDLEWARE_DIR", "middleware", &l.middleware)] {
+            let files: Vec<PathBuf> = items.iter().filter_map(|c| c.vendored.as_ref().filter(|v| fsutil::safe_rel(v)).map(|v| lock_dir.join(v))).filter(|p| p.is_file()).collect();
+            if files.is_empty() {
+                continue;
+            }
+            let dir = hl.join(sub);
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir)?;
+            for f in files {
+                if let Some(name) = f.file_name() {
+                    std::fs::copy(&f, dir.join(name))?;
+                }
+            }
+            env.insert(env_var.into(), dir.to_string_lossy().into_owned());
+        }
         if !skills.is_empty() {
             let dir = hl.join("skills");
             let _ = std::fs::remove_dir_all(&dir);

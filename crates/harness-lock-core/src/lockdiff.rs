@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 use serde_json::{json, Value};
 
 use crate::error::{Error, Result};
-use crate::lockfile::{ConfigFile, Instructions, Lockfile, Skill};
+use crate::lockfile::{ConfigFile, FileComponent, Instructions, Lockfile, Skill};
 
 /// Files larger than this are listed with their size, not diffed.
 const MAX_DIFF_BYTES: usize = 64 * 1024;
@@ -153,6 +153,7 @@ enum Body<'a> {
     Instructions(&'a Instructions),
     Skill(&'a Skill),
     Config(&'a ConfigFile),
+    File(&'a FileComponent),
 }
 
 impl Body<'_> {
@@ -161,6 +162,7 @@ impl Body<'_> {
             Body::Instructions(i) => i.digest.as_deref(),
             Body::Skill(s) => s.digest.as_deref(),
             Body::Config(c) => c.digest.as_deref(),
+            Body::File(c) => c.digest.as_deref(),
         }
     }
 
@@ -183,6 +185,13 @@ impl Body<'_> {
             }
             Body::Config(c) if c.restore == "record" => out.extend(Some(c.path.clone()).filter(|p| plain(p)).map(|p| ("project", p))),
             Body::Config(c) => out.extend(c.vendored.clone().map(|v| ("vendored", v))),
+            Body::File(c) => {
+                let from = if c.source.as_deref() == Some("tune") { "tuned" } else { "vendored" };
+                out.extend(c.vendored.clone().map(|v| (from, v)));
+                if plain(&c.path) {
+                    out.push(("project", c.path.clone()));
+                }
+            }
         }
         out
     }
@@ -379,6 +388,15 @@ pub fn diff(old: &Side, new: &Side, project: &Path, opts: &DiffOptions, ctx: &cr
     let (oc, nc) = (index(&old.lock.config, |c| c.path.clone()), index(&new.lock.config, |c| c.path.clone()));
     for k in oc.keys().chain(nc.keys()).collect::<BTreeSet<_>>() {
         push("config", k.clone(), oc.get(k).copied().map(Body::Config), nc.get(k).copied().map(Body::Config), None);
+    }
+    let key = |c: &FileComponent| format!("{} ({})", c.name, c.scope);
+    for (kind, o, n) in [("subagent", &old.lock.subagent, &new.lock.subagent), ("script", &old.lock.script, &new.lock.script), ("middleware", &old.lock.middleware, &new.lock.middleware)] {
+        let (oi, ni) = (index(o, key), index(n, key));
+        for k in oi.keys().chain(ni.keys()).collect::<BTreeSet<_>>() {
+            let nb = ni.get(k).copied();
+            let name = nb.or(oi.get(k).copied()).map(|c| c.name.clone()).unwrap_or_default();
+            push(kind, name, oi.get(k).copied().map(Body::File), nb.map(Body::File), nb.and_then(|c| c.source.as_deref()).filter(|s| *s == "tune"));
+        }
     }
 
     json!({

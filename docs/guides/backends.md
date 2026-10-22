@@ -379,7 +379,8 @@ An optimizer is a backend that runs `harness.optimize`: [`hlock tune`](tune.md#t
 hands it the lock's instruction files and skills, and it returns a better version of them.
 hlock keeps the grading, the budget, the held-out tasks and the decision to accept, so an
 optimizer only searches. Select one with `[tune] optimizer = "<name>"`, found like any backend;
-the trials it asks for run on `[backend] target`.
+the trials it asks for run on `[backend] target`. hlock ships one besides its built-in:
+[`harness2`](tune.md#harness2), which runs Harness² as a black box.
 
 The request carries an `optimize` object:
 
