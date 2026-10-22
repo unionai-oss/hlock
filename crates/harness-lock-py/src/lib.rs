@@ -127,6 +127,10 @@ impl PyManifest {
         serde_json::to_string(&self.inner.backends).map_err(|e| py_err(e.into()))
     }
 
+    fn optimizers(&self) -> PyResult<String> {
+        serde_json::to_string(&self.inner.optimizers).map_err(|e| py_err(e.into()))
+    }
+
     fn manifest_hash(&self) -> String {
         self.inner.manifest_hash()
     }
@@ -968,6 +972,24 @@ fn backend_describe(py: Python<'_>, manifest: Option<PyObject>, backend: Option<
             }),
         }
     }
+    to_json(&out)
+}
+
+/// The optimizer `optimizer` names (else the manifest's `[tune] optimizer`, else `hlock`)
+/// and how it was found, as JSON (`hlock optimizer status`): `name`, `source`, `options`,
+/// and the `object` or `command` that runs it.
+#[pyfunction]
+#[pyo3(signature = (manifest=None, optimizer=None))]
+fn optimizer_describe(py: Python<'_>, manifest: Option<PyObject>, optimizer: Option<String>) -> PyResult<String> {
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let m = match manifest {
+        None if core::find_manifest(&cwd).is_none() => core::Manifest::from_str("").map_err(py_err)?,
+        manifest => resolve_manifest(py, manifest, None)?,
+    };
+    let name = optimizer.or_else(|| m.tune.get("optimizer").and_then(|v| v.as_str()).map(str::to_string)).unwrap_or_else(|| "hlock".into());
+    let o = core::optimize::Optimizer::resolve(&m, &name).map_err(py_err)?;
+    let mut out = o.to_value();
+    out["source"] = serde_json::json!(o.source());
     to_json(&out)
 }
 
@@ -2027,6 +2049,7 @@ fn _hlock(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(pull_find, m)?)?;
     m.add_function(wrap_pyfunction!(pull_parse, m)?)?;
     m.add_function(wrap_pyfunction!(backend_describe, m)?)?;
+    m.add_function(wrap_pyfunction!(optimizer_describe, m)?)?;
     m.add_function(wrap_pyfunction!(pull_list, m)?)?;
     m.add_function(wrap_pyfunction!(pull_remove, m)?)?;
     m.add_function(wrap_pyfunction!(pull_env, m)?)?;

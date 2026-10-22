@@ -226,8 +226,8 @@ see [Running in the background](tune.md#running-in-the-background).
 ## Write your own backend
 
 A backend is anything that runs hlock's *work items*: a trial (`llm.run_trial`), or a
-tune stage (`data.load`, `data.synthetic`, `harness.optimize`, `ft.lora`; `prompt.search` is
-the old prompt stage, used only by a backend that doesn't run `harness.optimize`). The core sends
+tune stage (`data.load`, `data.synthetic`, `ft.lora`, and `harness.optimize`, which hosts an
+[optimizer](optimizers.md)'s search; `prompt.search` is the old prompt stage). The core sends
 one item at a time and gets one result back, so a backend decides *where* work runs
 and hlock keeps deciding *what* to run. You can write one in Python or in Rust, and
 neither needs changes to hlock. The design is in
@@ -358,96 +358,28 @@ Any language works, as long as the executable speaks the contract: hlock runs
 and reads the response.
 
 ```json title="request.json"
-{"version": 4, "kind": "llm.run_trial", "backend": "ray", "backend_options": {"address": "auto"},
+{"version": 5, "kind": "llm.run_trial", "backend": "ray", "backend_options": {"address": "auto"},
  "stack": {"llm": {"planner": "openai:gpt-5"}}, "task": {"id": "count_words", "prompt_text": "...",
  "expected": ["answer.md"]}, "seed": 0, "workdir": "/abs/.hlock/runs/...", "plan": {}}
 ```
 
 ```json title="response.json"
-{"version": 4, "ok": true, "result": {"success": true, "cost_usd": 0.002, "latency_s": 3.1, "steps": 1}}
+{"version": 5, "ok": true, "result": {"success": true, "cost_usd": 0.002, "latency_s": 3.1, "steps": 1}}
 ```
 
 The first request is always `backend.describe`, answered with what the backend runs:
 `{"name": "ray", "kinds": ["llm.run_trial"], "model_endpoint": false, "about": "..."}`.
-A failure is `{"version": 4, "ok": false, "error": "..."}` and a non-zero exit. For a
+A failure is `{"version": 5, "ok": false, "error": "..."}` and a non-zero exit. For a
 trial, the backend writes its result into `workdir`, and hlock grades what's there. The
 full field list is in [Architecture](../concepts/architecture.md#the-backend-contract).
 
-## Write an optimizer
+## Optimizers aren't backends
 
-An optimizer is a backend that runs `harness.optimize`: [`hlock tune`](tune.md#tune-the-harness-text)
-hands it the lock's instruction files and skills, and it returns a better version of them.
-hlock keeps the grading, the budget, the held-out tasks and the decision to accept, so an
-optimizer only searches. Select one with `[tune] optimizer = "<name>"`, found like any backend;
-the trials it asks for run on `[backend] target`. hlock ships one besides its built-in:
-[`harness2`](tune.md#harness2), which runs Harness² as a black box.
-
-The request carries an `optimize` object:
-
-| Field | What it is |
-|---|---|
-| `session` | The tune session's directory, for `hlock tune eval --session` or `hlock.optimize.Session` |
-| `seed` | The bundle: `instructions/<file>`, `skills/<name>/`, and `bundle.json` (each component's `id`, `kind`, `editable`; the kinds it may add; size limits) |
-| `tasks` | Task ids: `train` and `dev`. The test split isn't there |
-| `task_meta` | Each task's prompt |
-| `evaluate` | The command that evaluates a candidate: `hlock tune eval --session <dir>` |
-| `budget`, `trials` | The most trials (`rollouts`) or dollars (`usd`) it may spend, and trials per task |
-| `models` | The task model, and the `proposer` from `[tune]` |
-| `noise` | `dev_success_sd`: how much the lock's own text varies on dev |
-
-A candidate is a directory in the seed's layout. The result names the best one, and a ledger:
-
-```json title="result"
-{"candidate": "/abs/.../best", "ledger": "/abs/.../ledger.jsonl",
- "optimizer": {"name": "mine", "version": "1.0", "proposer": "anthropic:opus"}}
-```
-
-Each ledger line is an edit hlock records with the change: `{"component": "skills/review",
-"op": "modify", "rationale": "..."}`. In Python, `hlock.optimize.Session` runs the trials:
-
-```python title="mine_opt.py"
-import json
-import shutil
-from pathlib import Path
-
-from hlock.backends import Backend
-from hlock.optimize import BudgetExhausted, Session
-
-
-class Mine(Backend):
-    name = "mine"
-    kinds = ("harness.optimize",)
-
-    def run(self, request):
-        opt = request["optimize"]
-        session, ws = Session(opt["session"]), Path(request["workdir"])
-        best = ws / "best"
-        shutil.copytree(opt["seed"], best)
-        f = best / "instructions" / "AGENTS.md"
-        f.write_text(f.read_text() + "Check your result before you finish.\n")
-        try:
-            out = session.evaluate(best, "train")   # graded results, and the budget left
-        except BudgetExhausted:
-            pass
-        (ws / "ledger.jsonl").write_text(json.dumps(
-            {"component": "instructions/AGENTS.md", "op": "modify", "rationale": "..."}) + "\n")
-        return {"candidate": str(best), "ledger": str(ws / "ledger.jsonl"),
-                "optimizer": {"name": "mine", "version": "1.0"}}
-```
-
-```toml title="harness.toml"
-[backends.mine]
-python = "mine_opt:Mine"
-
-[tune]
-optimizer = "mine"
-```
-
-`session.evaluate` raises `ValueError` for a candidate that changes what `bundle.json` doesn't
-allow, a task outside the split, or the test split, and `BudgetExhausted` once the budget is
-spent. Whatever the optimizer returns, hlock checks it again before accepting it (see
-[Tuning](tune.md#tune-the-harness-text)). The design is in
-[`specs/tune-optimizers.md`](https://github.com/unionai-oss/hlock/blob/main/specs/tune-optimizers.md).
+A backend says where tune's work runs. What searches for harness edits is an
+[optimizer](optimizers.md), chosen separately with `[tune] optimizer`: Harness² can search
+while Flyte runs its trials. A backend that lists `harness.optimize` hosts that search (the
+`local` backend does); for any other backend, including `flyte`, the search runs on this
+machine and each trial it evaluates runs on the backend.
 
 ## Environment variables
 

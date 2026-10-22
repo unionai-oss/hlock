@@ -47,6 +47,7 @@ nav = [
       "guides/tune.md",
       "guides/upgrade.md",
       "guides/backends.md",
+      "guides/optimizers.md",
       "guides/ci.md",
     ] },
     { "Switch harnesses" = [

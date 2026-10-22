@@ -145,15 +145,14 @@ def test_the_session_keeps_the_test_split_and_the_budget(project):
 OPTIMIZER = '''
 import json, shutil
 from pathlib import Path
-from hlock.backends import Backend
+from hlock.optimizers import Optimizer
 from hlock.optimize import Session
 
 
-class Mine(Backend):
+class Mine(Optimizer):
     name = "mine"
-    kinds = ("harness.optimize",)
 
-    def run(self, request):
+    def optimize(self, request):
         opt = request["optimize"]
         ws = Path(request["workdir"])
         cand = ws / "best"
@@ -168,12 +167,12 @@ class Mine(Backend):
 '''
 
 
-def test_an_optimizer_backend_whose_edit_copies_the_pack_is_dropped(project, monkeypatch):
+def test_an_optimizer_whose_edit_copies_the_pack_is_dropped(project, monkeypatch):
     path, _ = project
     (path / "mine_opt.py").write_text(OPTIMIZER)
     monkeypatch.setenv("PYTHONPATH", str(path))
     with open(path / "harness.toml", "a") as f:
-        f.write('\n[backends.mine]\npython = "mine_opt:Mine"\n')
+        f.write('\n[optimizers.mine]\npython = "mine_opt:Mine"\n')
     report = json.loads(hlock.tune(backend="local", depth="prompt", max_trials=2, optimizer="mine"))["report"]
     assert any("dropped the edit to instructions/AGENTS.md" in n and "say_3" in n for n in report["notes"])
     d = tune_lock(path)

@@ -64,7 +64,12 @@ harness-lock = "hlock.cli:main"
 [project.entry-points."hlock.backends"]
 local = "hlock.backends.local:LocalBackend"
 flyte = "hlock.backends.flyte:FlyteBackend"
-harness2 = "hlock.backends.harness2:Harness2Backend"
+
+# Optimizers are found by name in this group (see hlock.optimizers); the built-ins are
+# registered the same way a third-party optimizer is.
+[project.entry-points."hlock.optimizers"]
+hlock = "hlock.optimizers.hlock:HlockOptimizer"
+harness2 = "hlock.optimizers.harness2:Harness2Optimizer"
 
 # The wheel ships two importable packages: `hlock` (the implementation, with the
 # compiled `hlock._hlock` module) and `harness_lock` (a re-export shim, so

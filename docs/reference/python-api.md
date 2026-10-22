@@ -114,6 +114,22 @@ or `error`. `offline` has neither, since it runs in process.
 '{"describe":{"about":"hlock\'s stock handlers, in process on this machine","kinds":["llm.run_trial","data.load","data.synthetic","grade","prompt.search","harness.optimize","ft.lora"],"model_endpoint":true,"name":"local"},"name":"local","options":{},"renamed_from":null,"source":"built in, Python worker"}'
 ```
 
+### `optimizer_describe`
+
+```python
+optimizer_describe(manifest=None, optimizer=None) -> str
+```
+
+The optimizer `optimizer` names (else the manifest's `[tune] optimizer`, else `hlock`), like
+[`hlock optimizer status`](cli.md#optimizer-status). Returns JSON with `name`, `source` (how
+it was found), `options`, and the `object` or `command` that runs it (`null` for a built-in
+or an entry point).
+
+```python
+>>> hlock.optimizer_describe(hlock.Manifest.from_str("[optimizers.harness2]\noptions = { k = 2 }\n"), optimizer="harness2")
+'{"command":null,"name":"harness2","object":null,"options":{"k":2},"source":"built in"}'
+```
+
 ### `tune`
 
 ```python
@@ -143,7 +159,7 @@ tune_eval(session, candidate, split="train", tasks=None, trials=None) -> str
 Run a tune candidate's trials, like [`hlock tune eval`](cli.md#tune-eval). Returns JSON with
 `candidate` (its digest), `split`, `results` (each with `task`, `trial`, `success`, `score`,
 `feedback`, `workspace`, `cost_usd`, `latency_s`, `cached`), and `budget`. An optimizer
-written in Python uses [`hlock.optimize.Session`](../guides/backends.md#write-an-optimizer),
+written in Python uses [`hlock.optimize.Session`](../guides/optimizers.md#write-an-optimizer),
 which wraps it and raises `BudgetExhausted` when the budget is spent.
 
 ### `lock_diff`

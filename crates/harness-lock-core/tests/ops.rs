@@ -210,7 +210,9 @@ fn a_custom_backend_runs_what_it_says_it_runs() {
     let stages = o.report["stages"].as_array().unwrap();
     let detail = |name: &str| stages.iter().find(|s| s["stage"] == name).map(|s| (s["ran"].clone(), s["detail"].clone())).unwrap();
     assert_eq!(detail("data"), (serde_json::json!(false), serde_json::json!("the mine backend doesn't run data.load")));
-    assert_eq!(detail("optimize"), (serde_json::json!(false), serde_json::json!("the mine backend doesn't run harness.optimize")));
+    // it doesn't host the search, so hlock's local worker does, when this machine has one
+    let (ran, why) = detail("optimize");
+    assert!(ran == true || why.as_str().unwrap().starts_with("the mine backend doesn't host the search, and hlock's local worker can't"), "{why}");
     // the trials ran on it, for real: the backend's cost, not the reference's
     assert_eq!(o.report["best"]["success_rate"], 1.0);
     assert_eq!(o.report["best"]["cost_usd"], 0.001);

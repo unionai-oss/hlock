@@ -1,4 +1,4 @@
-"""Harness² as a tune optimizer (hlock.backends.harness2).
+"""Harness² as a tune optimizer (hlock.optimizers.harness2).
 
 The conversion tests run everywhere. The end-to-end test runs the real Harness² library
 (its recursion, selection, library and tree handling) in its own interpreter, set with
@@ -16,7 +16,7 @@ from pathlib import Path
 import pytest
 
 import hlock
-from hlock.backends.harness2 import bundle_to_tree, tree_to_bundle
+from hlock.optimizers.harness2 import bundle_to_tree, tree_to_bundle
 
 
 def seed(tmp_path: Path, components: list[dict], files: dict[str, str], may_add=("instructions",)) -> Path:
@@ -165,7 +165,7 @@ edit = ["instructions"]
 trials = 1
 alpha = 0.2
 
-[backends.harness2]
+[optimizers.harness2]
 options = { k = 1, mode = "parallel", proposer = "h2_seams:Scripted", launcher = "h2_seams:launcher", channel = { kind = "opencode", model = "local/scripted" } }
 """)
     endpoint = _Endpoint("Check your result")

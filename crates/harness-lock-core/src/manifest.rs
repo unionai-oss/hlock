@@ -50,7 +50,7 @@ pub const SELECTS: &[&str] = &["min-cost", "max-quality"];
 /// The keys of the manifest's fixed-shape tables; anything else is reported by
 /// [`Manifest::problems`]. Tables holding names (`[skills]`, `[harnesses]`, …) aren't
 /// checked, and neither are the reserved `[context]` and `[enforce]`.
-const TOP_KEYS: &[&str] = &["project", "evals", "tasks", "candidates", "tools", "skills", "instructions", "mcp", "plugins", "packages", "context", "objective", "budget", "enforce", "backend", "backends", "target", "harnesses", "deciders", "tune"];
+const TOP_KEYS: &[&str] = &["project", "evals", "tasks", "candidates", "tools", "skills", "instructions", "mcp", "plugins", "packages", "context", "objective", "budget", "enforce", "backend", "backends", "optimizers", "target", "harnesses", "deciders", "tune"];
 const BUDGET_KEYS: &[&str] = &["max-spend-usd", "max-trials", "strategy", "random-seed", "max_spend_usd", "max_trials", "random_seed"];
 const OBJECTIVE_KEYS: &[&str] = &["primary", "constraints", "select"];
 const EVALS_KEYS: &[&str] = &["packs", "seeds", "splits", "judge"];
@@ -165,6 +165,10 @@ pub struct Manifest {
     /// a `python` object, and `options`. See [`crate::worker::Backend::resolve`].
     #[serde(default)]
     pub backends: BTreeMap<String, serde_json::Value>,
+    /// Optimizers the project defines or configures (`[optimizers.<name>]`): a `command`
+    /// or a `python` object, and `options`. See [`crate::optimize::Optimizer::resolve`].
+    #[serde(default)]
+    pub optimizers: BTreeMap<String, serde_json::Value>,
     /// The harness this lock is for (`[target] harness = "claude-code"`).
     #[serde(default)]
     pub target: BTreeMap<String, serde_json::Value>,
@@ -249,6 +253,9 @@ impl Manifest {
             report(table(&["backend"]), BACKEND_KEYS, "[backend]");
             for name in table(&["backends"]).into_iter().flat_map(|t| t.keys()) {
                 report(table(&["backends", name]), crate::worker::BACKEND_DEF_KEYS, &format!("[backends.{name}]"));
+            }
+            for name in table(&["optimizers"]).into_iter().flat_map(|t| t.keys()) {
+                report(table(&["optimizers", name]), crate::worker::BACKEND_DEF_KEYS, &format!("[optimizers.{name}]"));
             }
             report(table(&["target"]), TARGET_KEYS, "[target]");
             report(table(&["tune"]), TUNE_KEYS, "[tune]");
