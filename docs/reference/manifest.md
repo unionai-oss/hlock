@@ -192,7 +192,7 @@ budget = { rollouts = 100, usd = 20 }
 | Key | Default | Description |
 |---|---|---|
 | `edit` | `["instructions"]` from `--depth prompt` on, else none | What the optimizer may change: `instructions` (with their roles: guardrails, memory, tool guidance), `skill`, `subagent`, `script`, `middleware`. Empty means no optimize stage |
-| `optimizer` | `"hlock"` | The built-in optimizer, or a backend that runs `harness.optimize` ([Write an optimizer](../guides/backends.md#write-an-optimizer)) |
+| `optimizer` | `"hlock"` | The built-in optimizer, [`"harness2"`](../guides/tune.md#harness2), or a backend that runs `harness.optimize` ([Write an optimizer](../guides/backends.md#write-an-optimizer)) |
 | `proposer` | | The model that drafts edits. The built-in optimizer tries fixed guidance without one |
 | `trials` | `2` | Trials per task in each evaluation and in the acceptance runs |
 | `alpha` | `0.05` | The sign test's significance level an accepted candidate must reach |

@@ -64,6 +64,7 @@ harness-lock = "hlock.cli:main"
 [project.entry-points."hlock.backends"]
 local = "hlock.backends.local:LocalBackend"
 flyte = "hlock.backends.flyte:FlyteBackend"
+harness2 = "hlock.backends.harness2:Harness2Backend"
 
 # The wheel ships two importable packages: `hlock` (the implementation, with the
 # compiled `hlock._hlock` module) and `harness_lock` (a re-export shim, so

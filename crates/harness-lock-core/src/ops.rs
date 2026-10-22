@@ -475,7 +475,12 @@ fn optimize_stage(
         "session": dir,
         "seed": seed,
         "tasks": {"train": session.train, "dev": session.dev},
-        "task_meta": train.iter().chain(dev.iter()).map(|t| (t.id.clone(), serde_json::json!({"prompt_text": t.prompt_text}))).collect::<serde_json::Map<_, _>>(),
+        // what an optimizer that runs its own trials needs: the prompt, the files the task
+        // starts from, and what it should leave (never how it's graded)
+        "task_meta": train.iter().chain(dev.iter()).map(|t| {
+            let fixtures = t.fixtures.as_ref().zip(t.pack_dir.as_ref()).map(|(f, p)| crate::fsutil::absolute(&p.join(f)));
+            (t.id.clone(), serde_json::json!({"prompt_text": t.prompt_text, "fixtures": fixtures, "expected": t.expected_artifacts()}))
+        }).collect::<serde_json::Map<_, _>>(),
         "evaluate": {"command": [hlock_bin, "tune", "eval", "--session", dir.to_string_lossy()]},
         "budget": cfg.budget,
         "trials": cfg.trials,
