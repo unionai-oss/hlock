@@ -57,6 +57,10 @@ in git), and update `[target] harness` in `harness.toml` if it names the old har
 | Project instructions | Kept if the new harness reads the file. Otherwise renamed to the file it does read: `CLAUDE.md` → `AGENTS.md` for Codex, `GEMINI.md` for Gemini CLI. If the project already has that file, the lock pins the project's file instead. |
 | User instructions | Into the new harness's user instruction file (`~/.codex/AGENTS.md`, …), or dropped with a note when it has none |
 | Decision models | Rewired onto the new harness's hooks. A use it has no hook for is dropped, with a note. |
+| Guardrails, memory, tool guidance | Into the new harness's rules directory, if it has one. Otherwise they become `## Guardrails`, `## Memory` and `## Tool guidance` sections of the instruction file it reads |
+| Subagents | Into the new harness's subagent directory (`.opencode/agent/`, `.claude/agents/`), with the frontmatter it needs (`mode: subagent` for OpenCode). Dropped, with a note, on a harness without subagents |
+| Scripts | Kept in `.agents/scripts/`, which is the same for every harness |
+| Middleware | Kept only if the new harness loads the same format (an OpenCode plugin file needs OpenCode); otherwise dropped, with a note |
 
 A file that moves needs a copy for `sync` to put in its new place. When the lock doesn't
 already vendor it or fetch it from git, `migrate` vendors the copy it finds in the project or

@@ -17,7 +17,8 @@ use crate::profiles::{Ctx, HarnessProfile};
 /// Something a lock would run.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Executable {
-    /// `mcp` (a stdio server), `plugin`, `hook`, `script` (a skill's scripts), `harness`.
+    /// `mcp` (a stdio server), `plugin`, `hook`, `script` (a skill's scripts, or a helper
+    /// script), `middleware`, `harness`.
     pub kind: String,
     pub name: String,
     /// What runs: the command line, the plugin and its source, the hook's command.
@@ -363,6 +364,11 @@ pub fn hidden_exceptions(lock: &Lockfile) -> Vec<Executable> {
         let step = if c.pointers.is_empty() { format!("config:{}", c.id) } else { format!("config:{}#{}", c.id, c.pointers.join(",")) };
         push("config", &c.path, &c.digest, step, None);
     }
+    for (kind, items) in [("subagent", &lock.subagent), ("script", &lock.script), ("middleware", &lock.middleware)] {
+        for c in items.iter().filter(|c| allowed(&c.scan)) {
+            push(kind, &c.name, &c.digest, format!("{kind}:{}", c.name), c.source.clone());
+        }
+    }
     out
 }
 
@@ -403,6 +409,22 @@ fn script_executables(lock: &Lockfile, lock_dir: &Path, profile: Option<&Harness
             steps: vec![format!("skill:{}", s.name)],
             status: String::new(),
         });
+    }
+    // helper scripts and middleware run as they are: each is approved by its content
+    for (kind, items) in [("script", &lock.script), ("middleware", &lock.middleware)] {
+        for c in items.iter() {
+            let what = c.format.as_deref().map(|f| format!(" ({f})")).unwrap_or_default();
+            out.push(Executable {
+                kind: kind.into(),
+                name: c.name.clone(),
+                detail: format!("{}{what}", c.path),
+                digest: digest(&json!({"kind": kind, "name": c.name, "path": c.path, "content": c.digest})),
+                via: None,
+                source: None,
+                steps: vec![format!("{kind}:{}", c.name)],
+                status: String::new(),
+            });
+        }
     }
     out
 }

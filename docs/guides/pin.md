@@ -142,11 +142,33 @@ everything, and `check` treats them that way.
 | `[[tool]]` with `kind = "mcp"` | Each MCP server, normalized across config formats: `transport`, `command`/`args` or `url`, `env`, `headers`, `scope` (`user` or `project`), and the package it launches (`npm:…`, `pypi:…`, `oci:…`) |
 | `[[skill]]` | Each skill with a tree digest and an origin: `harness-builtin` (shipped with the harness), `bundled` (from a plugin), `third-party` (a git checkout, pinned to its commit), `first-party` (in the project), or `local` (hand-written; vendored) |
 | `[[native]]` | Plugins, packages and marketplaces: Claude Code plugins (version and commit) and their marketplaces, Pi packages (version and npm integrity), OpenCode plugins, and the Python packages of a code harness |
-| `[[instructions]]` | Instruction files the harness reads, like `CLAUDE.md` and `AGENTS.md`, with digests |
+| `[[instructions]]` | Instruction files the harness reads, like `CLAUDE.md` and `AGENTS.md`, with digests, and every file in its rules directory (Claude Code's `.claude/rules/`). A rules file named `guardrails.md`, `memory.md` or `tool-guidance.md` gets that `role`; on a harness with one instruction file, `## Guardrails`, `## Memory` and `## Tool guidance` sections are listed in `sections` (see [Harness components](#harness-components)) |
+| `[[subagent]]` | Subagent definitions: Claude Code's `.claude/agents/*.md` and `~/.claude/agents/`, OpenCode's `.opencode/agent/*.md` and its config root's `agent/` |
+| `[[script]]` | Helper scripts in `.agents/scripts/`, which the instructions tell the agent to run. They're executables, so [`hlock trust`](audit.md) approves them by digest |
+| `[[middleware]]` | Code the harness runs in its tool loop: OpenCode plugin files (`.opencode/plugin/*.ts`, `*.js`) and Codex's project hooks file (`.codex/hooks.json`), approved by digest like scripts. Claude Code's hooks are in its settings, pinned with `[[config]]` |
 | `[[config]]` | The harness's config files with digests, and what `sync` restores from each: the whole file, only some subtrees (`pointers`, e.g. `/mcpServers` of `~/.claude.json`), or nothing (`record`, for project files that are already in git) |
 
 Paths are written portably: `{root}` is the harness's config root, `~` is the home
 directory, and relative paths are relative to the project.
+
+### Harness components
+
+Harness optimizers such as [Harness²](https://github.com/google-research/harness2) edit eight
+parts of a harness. A pinned lock tracks each of them, so a tuned harness is reproducible and
+its changes show up in [`hlock diff`](diff.md):
+
+| Part | In the lock |
+|---|---|
+| System prompt | The harness's instruction file (`[[instructions]]`) |
+| Guardrails, memory, tool guidance | `[[instructions]]` with `role = "guardrails"`, `"memory"` or `"tool-guidance"`: a file in the rules directory on a harness that has one (`.claude/rules/guardrails.md`), else a headed section of the instruction file, listed in its `sections` |
+| Subagents | `[[subagent]]` |
+| Skills | `[[skill]]` |
+| Scripts | `[[script]]` |
+| Plugins and middleware | `[[middleware]]` for files the harness loads as code; packaged plugins are `[[native]]` |
+
+"Memory" here is text you write for the agent to always read, such as facts about the
+project. A harness's own memory store, what the agent writes down as it works, is never
+pinned.
 
 ## Secrets stay out
 

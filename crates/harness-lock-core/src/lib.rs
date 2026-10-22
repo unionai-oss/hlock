@@ -14,6 +14,7 @@ pub mod agent;
 pub mod apm;
 pub mod audit;
 pub mod capture;
+pub mod components;
 pub mod contract;
 pub mod decide;
 pub mod deps;

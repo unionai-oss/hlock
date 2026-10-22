@@ -2378,7 +2378,7 @@ def _packs_changed(lf) -> bool:
         return False
 
 
-_BODY_KINDS = ("instructions", "skill", "config")
+_BODY_KINDS = ("instructions", "skill", "config", "subagent", "script", "middleware")
 
 
 def _diff_hint(lines: list[str], lock: str) -> None:

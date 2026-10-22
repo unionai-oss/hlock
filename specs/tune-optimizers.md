@@ -394,6 +394,11 @@ Where the implementation differs from §3:
   harness trials (`HLOCK_SKILLS_DIR`; instruction files in the new `HLOCK_INSTRUCTIONS_DIR`).
   Agent CLIs still run on the reference stand-in in `tune`, so an edit to a skill can't be
   measured for one yet. A declared dependency isn't editable.
+- **§3.2 kinds (later).** The lock now tracks every part Harness² edits (role instruction
+  files, `[[subagent]]`, `[[script]]`, `[[middleware]]`; see `docs/guides/pin.md#harness-components`),
+  so all of them are bundle kinds: `instructions` (with `role` and `sections`), `skill`,
+  `subagent`, `script`, `middleware`. Memory is authored always-on text, not the harness's
+  memory store, which stays out of the lock as [memory](memory.md) says.
 - **§3.8 the built-in optimizer.** Without a proposer model or `HL_LLM_BASE_URL`, it tries a
   fixed list of general guidance, so it runs (deterministically) everywhere `local` does.
 

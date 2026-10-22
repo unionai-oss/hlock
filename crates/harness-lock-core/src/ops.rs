@@ -411,7 +411,9 @@ fn optimize_stage(
     std::fs::create_dir_all(&dir)?;
     let lock_dir = crate::fsutil::absolute(lock_path.parent().filter(|d| !d.as_os_str().is_empty()).unwrap_or(std::path::Path::new(".")));
     let seed = dir.join("seed");
-    let bundle = opt::write_seed(base_lock, &lock_dir, &base.harness, &tuned_instructions_name(base_lock, manifest, &base.harness), &cfg.edit, &seed)?;
+    let reg = crate::profiles::Registry::load_for(&crate::profiles::Ctx::from_process(), Some(manifest)).ok();
+    let profile = reg.as_ref().and_then(|r| r.harness(&base.harness));
+    let bundle = opt::write_seed(base_lock, profile, &lock_dir, &base.harness, &tuned_instructions_name(base_lock, manifest, &base.harness), &cfg.edit, &seed)?;
 
     // train and dev from the search split; the holdout is the test split, which only hlock runs
     let mut ids: Vec<&crate::tasks::Task> = search.iter().collect();
@@ -961,7 +963,7 @@ pub fn tune(manifest: Manifest, spec: &TuneSpec) -> Result<TuneOutcome> {
         let mut t = tune_lock.tune.take().unwrap_or_else(|| serde_json::json!({}));
         t["optimizer"] = o.optimizer.clone();
         t["acceptance"] = o.acceptance.clone();
-        let edits = if o.accepted { crate::optimize::apply_to_lock(&mut tune_lock, &out_dir, &o.candidate, &o.changes, &o.ledger)? } else { Vec::new() };
+        let edits = if o.accepted { crate::optimize::apply_to_lock(&mut tune_lock, crate::profiles::Registry::load_for(&crate::profiles::Ctx::from_process(), Some(&manifest)).ok().as_ref().and_then(|r| r.harness(&base.harness)), &out_dir, &o.candidate, &o.changes, &o.ledger)? } else { Vec::new() };
         if !edits.is_empty() {
             t["edit"] = serde_json::json!(edits);
         }
@@ -1245,7 +1247,8 @@ fn copy_tuned_files(t: &Lockfile, tuned: &std::path::Path, lock_path: &std::path
     if crate::fsutil::normalize(&from) == crate::fsutil::normalize(&to) {
         return Ok(());
     }
-    let tuned = t.instructions.iter().filter_map(|i| i.vendored.as_deref()).chain(t.skill.iter().filter_map(|s| s.vendored.as_deref()));
+    let files = t.subagent.iter().chain(t.script.iter()).chain(t.middleware.iter()).filter_map(|c| c.vendored.as_deref());
+    let tuned = t.instructions.iter().filter_map(|i| i.vendored.as_deref()).chain(t.skill.iter().filter_map(|s| s.vendored.as_deref())).chain(files);
     for rel in tuned.filter(|v| v.starts_with(".hlock/tuned/") && crate::fsutil::safe_rel(v)) {
         let (src, dest) = (from.join(rel), to.join(rel));
         if src.is_dir() {

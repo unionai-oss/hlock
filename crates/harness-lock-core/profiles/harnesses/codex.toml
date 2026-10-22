@@ -13,6 +13,8 @@ version = { args = ["--version"] }
 active-env = ["CODEX_THREAD_ID", "CODEX_SANDBOX", "CODEX_MANAGED_BY_NPM", "CODEX_MANAGED_BY_BUN"]
 config-root = { env = "CODEX_HOME", default = "~/.codex" }
 instructions = ["AGENTS.md", "AGENTS.override.md", "{root}/AGENTS.md"]
+# a project's hooks file (the user's hooks are in config.toml, captured with it)
+middleware = { files = [".codex/hooks.json"], format = "codex-hooks" }
 
 api-keys = [{ provider = "openai", env = "OPENAI_API_KEY" }]
 

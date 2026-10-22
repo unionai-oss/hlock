@@ -190,7 +190,8 @@ trials = 16
 | `[harness]` | Harness `name` and `pattern`. For a harness with a profile, also the installed `version`, its install `source` (e.g. `brew-cask:claude-code@2.1.285`), and the `adapter` that ran the trials. |
 | `[policy]` | `retries`, `max-steps`, `human-approval`, `risky-actions`, `tool-allowlist`, `sandbox` |
 | `[context]` | Context `isolation` and `compaction` settings |
-| `[[tool]]`, `[[skill]]`, `[[instructions]]` | MCP servers, skills, and instruction files, each with a source or digest. A pinned lock fills these in; see below. |
+| `[[tool]]`, `[[skill]]`, `[[instructions]]` | MCP servers, skills, and instruction files, each with a source or digest. A pinned lock fills these in; see below. An `[[instructions]]` entry may have a `role` (`guardrails`, `memory`, `tool-guidance`) and `sections`, the roles it holds as `## Guardrails`-style sections |
+| `[[subagent]]`, `[[script]]`, `[[middleware]]` | Subagent definitions, helper scripts, and middleware files (OpenCode plugin files, Codex's `.codex/hooks.json`): `name`, `path`, `digest`, `scope`, `vendored`, `format` (middleware), `source` (`tune` when an optimizer wrote it), and `scan`. See [Harness components](../guides/pin.md#harness-components) |
 | `[[decider]]` | One per [decision model](../guides/deciders.md) the stack uses (see below) |
 | `[evidence]` | `simulated = true` when an agent CLI's trials ran on the reference harness rather than the agent itself. The eval packs measured: their paths (`eval-pack`), `name@version` (`eval-pack-version`), and a digest of every file in them (`eval-pack-digest`), which `hlock check` compares with the packs on disk, warning when they've changed. Then the split measured (`holdout` when `resolve` checked the winner on it, with the search score kept as `success-rate.search`; `search` otherwise), the trial count, and success-rate, cost, and latency statistics. `[evidence.judge]` records the judge of [`judge` and `trace` graders](../guides/eval-packs.md#judges): its `model`, the model that `answered`, its `protocol`, a `fallback`, the share of `uncertain-grades`, and `cost-usd-per-task` when
 the provider publishes a price. |
@@ -219,7 +220,7 @@ MCP servers carry `transport`, `command`, `args`, `url`, `env`, `headers`, `scop
 
 ## Scans
 
-Each `[[skill]]`, `[[instructions]]` and `[[config]]` entry has a `scan` key: the
+Each `[[skill]]`, `[[instructions]]`, `[[config]]`, `[[subagent]]`, `[[script]]` and `[[middleware]]` entry has a `scan` key: the
 [hidden-character scan](../guides/audit.md#hidden-characters) of what it places. `clean`;
 `warnings:N` (invisible characters such as zero-width spaces); `critical:N` (characters that
 hide text, which `sync` won't place); or `allowed:critical`, when they were let through on

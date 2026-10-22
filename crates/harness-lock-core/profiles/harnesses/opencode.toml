@@ -13,6 +13,10 @@ active-env = ["OPENCODE", "OPENCODE_SESSION_ID"]
 # OpenCode reads $XDG_CONFIG_HOME/opencode, so isolation relocates XDG_CONFIG_HOME.
 config-root = { env = "XDG_CONFIG_HOME", suffix = "opencode", default = "~/.config/opencode" }
 instructions = ["AGENTS.md", "CLAUDE.md", "{root}/AGENTS.md"]
+# subagents (`mode: subagent` in their frontmatter) and plugin files, project or user level;
+# hlock's own decider plugin isn't the project's
+subagents = { dirs = [".opencode/agent", ".opencode/agents", "{root}/agent", "{root}/agents"], ext = [".md"], write = ".opencode/agent", frontmatter = ["mode: subagent"] }
+middleware = { dirs = [".opencode/plugin", ".opencode/plugins", "{root}/plugin", "{root}/plugins"], ext = [".ts", ".js"], write = ".opencode/plugin", format = "opencode-plugin", skip = ["hlock-deciders.js"] }
 
 api-keys = [{ provider = "anthropic", env = "ANTHROPIC_API_KEY" }, { provider = "openai", env = "OPENAI_API_KEY" }, { provider = "google", env = "GOOGLE_GENERATIVE_AI_API_KEY" }]
 

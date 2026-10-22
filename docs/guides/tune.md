@@ -70,7 +70,7 @@ keeps the edits only if they beat the lock on tasks the optimizer never saw:
 
 ```toml title="harness.toml"
 [tune]
-edit = ["instructions"]          # what it may change: "instructions", "skill"
+edit = ["instructions"]          # what it may change: instructions, skill, subagent, script, middleware
 optimizer = "hlock"              # the built-in one, or a backend that runs harness.optimize
 proposer = "anthropic:opus"      # the model that drafts edits (optional for the built-in one)
 trials = 1                       # trials per task, in each evaluation
@@ -105,8 +105,8 @@ next → hlock tune apply
 
 How it works:
 
-1. **The bundle.** Tune writes the lock's instruction files and skills as files, with a
-   `bundle.json` that says which the optimizer may edit, and size limits (15 KiB per
+1. **The bundle.** Tune writes the lock's instruction files (with their roles), skills,
+   subagents, scripts and middleware as files, with a `bundle.json` that says which the optimizer may edit, and size limits (15 KiB per
    component, 120 changed lines). The harness's own instruction file (`CLAUDE.md`, `AGENTS.md`)
    is always there, empty when the lock has none. A declared dependency isn't editable: change
    it at its source.

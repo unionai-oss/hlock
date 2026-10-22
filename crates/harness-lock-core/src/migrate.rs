@@ -191,8 +191,50 @@ pub(crate) fn carry_over(lock: &mut Lockfile, source: &Lockfile, src: Option<&Ha
         c.notes.push(format!("{} has no place for user instructions {}", target.name, names.join(", ")));
     }
 
-    // project instruction files: where the target reads them
+    // a role's file (guardrails, memory, tool guidance) on a target without a rules
+    // directory: a headed section of the target's own instruction file
     let src_rules = src.and_then(|p| p.rules.as_ref()).map(|r| r.dir.clone());
+    if target.rules.is_none() {
+        let roles: Vec<usize> = lock.instructions.iter().enumerate().filter(|(_, i)| i.scope != "user" && i.role.is_some()).map(|(n, _)| n).collect();
+        if !roles.is_empty() {
+            let lock_dir = ctx.cwd.clone();
+            let read = |i: &Instructions| -> Option<String> {
+                i.vendored.as_deref().filter(|v| crate::fsutil::safe_rel(v)).and_then(|v| std::fs::read_to_string(lock_dir.join(v)).ok()).or_else(|| std::fs::read_to_string(old_place(&i.name)).ok())
+            };
+            let main = lock.instructions.iter().position(|i| i.scope != "user" && i.role.is_none());
+            let main_name = main.map(|n| lock.instructions[n].name.clone()).and_then(|n| instructions_dest(target, &n)).or_else(|| target.instructions.iter().find(|i| !user_level(i)).cloned());
+            if let Some(dest) = main_name {
+                let base = main.and_then(|n| read(&lock.instructions[n])).or_else(|| std::fs::read_to_string(ctx.cwd.join(&dest)).ok()).unwrap_or_default();
+                let (own, mut sections) = crate::components::split_sections(&base);
+                for &n in &roles {
+                    let i = &lock.instructions[n];
+                    match read(i) {
+                        Some(body) => sections.push((i.role.clone().unwrap_or_default(), body)),
+                        None => c.notes.push(format!("no copy of {} to move; sync it on {} first, or re-pin", i.name, source.harness.name)),
+                    }
+                }
+                let text = crate::components::compose(&own, &sections);
+                let rel = format!("{vroot}/instructions/project/{}", file_name(&dest));
+                c.vendor.push(VendorFile { rel: rel.clone(), bytes: text.clone().into_bytes(), executable: false });
+                let names: Vec<String> = roles.iter().map(|&n| lock.instructions[n].name.clone()).collect();
+                c.replaced.push(format!("instructions {} → sections of {dest}", names.join(", ")));
+                let entry = Instructions { name: dest.clone(), digest: Some(crate::hash::sha256_bytes(text.as_bytes())), scope: "project".into(), vendored: Some(rel), sections: crate::components::sections_in(&text), scan: Some(crate::scan::summary(&crate::scan::scan_text(&text, &dest))), ..Default::default() };
+                match main {
+                    Some(n) => lock.instructions[n] = entry,
+                    None => lock.instructions.push(entry),
+                }
+                let mut k = 0;
+                lock.instructions.retain(|_| {
+                    k += 1;
+                    !roles.contains(&(k - 1))
+                });
+            } else {
+                c.notes.push(format!("{} has no instruction file to hold the guardrails, memory and tool guidance", target.name));
+            }
+        }
+    }
+
+    // project instruction files: where the target reads them
     let mut taken: BTreeSet<String> = BTreeSet::new();
     let mut pinned_instead: Vec<(usize, Instructions)> = Vec::new();
     // files the target already reads claim their names first
@@ -268,6 +310,55 @@ pub(crate) fn carry_over(lock: &mut Lockfile, source: &Lockfile, src: Option<&Ha
         n += 1;
         !dropped.contains(&(n - 1))
     });
+
+    // subagents: into the target's subagent directory, with the frontmatter it needs
+    let mut gone = Vec::new();
+    for s in lock.subagent.iter_mut() {
+        let Some(spec) = target.subagents.as_ref() else {
+            gone.push(s.name.clone());
+            continue;
+        };
+        let write = spec.write.clone().or_else(|| spec.dirs.first().cloned()).unwrap_or_default();
+        let ext = spec.ext.first().cloned().unwrap_or_else(|| ".md".into());
+        let dest = format!("{write}/{}{ext}", s.name);
+        let from = s.vendored.as_deref().filter(|v| crate::fsutil::safe_rel(v)).map(|v| ctx.cwd.join(v)).unwrap_or_else(|| old_place(&s.path));
+        let Ok(mut text) = std::fs::read_to_string(&from) else {
+            c.notes.push(format!("subagent {}: no copy at {} to move; sync it on {} first, or re-pin", s.name, s.path, source.harness.name));
+            gone.push(s.name.clone());
+            continue;
+        };
+        for line in &spec.frontmatter {
+            let key = line.split(':').next().unwrap_or(line);
+            if !text.lines().any(|l| l.starts_with(&format!("{key}:"))) {
+                text = match text.strip_prefix("---\n") {
+                    Some(rest) => format!("---\n{line}\n{rest}"),
+                    None => format!("---\n{line}\n---\n\n{text}"),
+                };
+            }
+        }
+        if dest != s.path {
+            c.replaced.push(format!("subagent {}: {} → {dest}", s.name, s.path));
+        }
+        let rel = format!("{vroot}/subagent/{}{ext}", s.name);
+        c.vendor.push(VendorFile { rel: rel.clone(), bytes: text.clone().into_bytes(), executable: false });
+        s.path = dest;
+        s.scope = "project".into();
+        s.digest = Some(crate::hash::sha256_bytes(text.as_bytes()));
+        s.vendored = Some(rel);
+    }
+    if !gone.is_empty() {
+        lock.subagent.retain(|s| !gone.contains(&s.name));
+        if target.subagents.is_none() {
+            c.notes.push(format!("{} has no subagents; dropped {}", target.name, gone.join(", ")));
+        }
+    }
+    // helper scripts stay where they are; middleware carries only to a harness of its format
+    let fmt = target.middleware.as_ref().and_then(|m| m.format.clone());
+    let dropped: Vec<String> = lock.middleware.iter().filter(|m| m.format != fmt).map(|m| m.name.clone()).collect();
+    if !dropped.is_empty() {
+        c.notes.push(format!("{}'s middleware doesn't carry over to {}: {}", source.harness.name, target.name, dropped.join(", ")));
+        lock.middleware.retain(|m| m.format == fmt);
+    }
 
     // deciders: onto the target's hooks
     let mut unwired = Vec::new();
@@ -430,6 +521,7 @@ pub(crate) fn save_to(lock: &mut Lockfile, vendor: &[VendorFile], source_path: &
     lock.skill.iter_mut().for_each(|s| fix(&mut s.vendored));
     lock.instructions.iter_mut().for_each(|i| fix(&mut i.vendored));
     lock.config.iter_mut().for_each(|c| fix(&mut c.vendored));
+    lock.subagent.iter_mut().chain(lock.script.iter_mut()).chain(lock.middleware.iter_mut()).for_each(|c| fix(&mut c.vendored));
     let base = dir_of(out, ctx);
     let _ = std::fs::remove_dir_all(base.join(&to));
     for f in vendor {
