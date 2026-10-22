@@ -192,6 +192,7 @@ impl Resolver {
                         temperature: policy_axis_float(&self.manifest.candidates.policy, "temperature"),
                         tool_timeout_seconds: None,
                         deciders,
+                        overlay: None,
                     });
                   }
                 }

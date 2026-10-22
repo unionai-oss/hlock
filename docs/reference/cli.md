@@ -726,10 +726,30 @@ hlock tune [--depth LEVEL] [--data SOURCE] [OPTIONS]
 | `--max-trials N` | | Cap the grid's trials in total, spread round-robin across the configurations |
 | `--backend` | manifest `[backend] target` | `offline`, `local`, `flyte`, or a [custom backend](../guides/backends.md#write-your-own-backend) |
 | `--workdir DIR` | `.hlock` | Where trial artifacts go |
+| `--optimizer NAME` | `[tune] optimizer` | `hlock`, or a backend that runs `harness.optimize` |
+| `--edit KINDS` | `[tune] edit` | What the optimizer may change: `instructions`, `skill`, comma-separated |
+| `--budget-rollouts N`, `--budget-usd X` | `[tune.budget]` | The optimizer's budget |
 | `-d`, `--detach` | | Run in the background as a tune job; can't be combined with `--apply` |
 
 The job commands below take a `JOB`: a job id or a unique prefix of one. Without it,
 they use the newest job. See [Running in the background](../guides/tune.md#running-in-the-background).
+
+### `tune eval`
+
+Run a tune candidate's trials for an optimizer, graded, within its session's budget. See
+[Evaluating a candidate](../guides/tune.md#evaluating-a-candidate).
+
+```bash
+hlock tune eval --session DIR CANDIDATE [--split train|dev] [--tasks IDS] [--trials N] [--json]
+```
+
+| Option | Description |
+|---|---|
+| `--session DIR` | The tune session, from `harness.optimize`'s request |
+| `--split` | `train` (default) or `dev`; the test split is hlock's |
+| `--tasks IDS` | Comma-separated task ids (default: the whole split) |
+| `--trials N` | Trials per task (default: the session's) |
+| `--json` | Each result with its grader feedback and workspace, and the budget |
 
 ### `tune apply`
 

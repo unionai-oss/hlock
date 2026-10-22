@@ -112,6 +112,7 @@ from hlock import trust_approve as _trust_approve
 from hlock import trust_list as _trust_list
 from hlock import tune as al_tune
 from hlock import tune_apply as _tune_apply
+from hlock import tune_eval as _tune_eval
 from hlock import upgrade as al_upgrade
 
 MANIFEST = "harness.toml"
@@ -2859,11 +2860,18 @@ def upgrade(target: str | None, to: str | None, all_: bool, apply: bool, rollbac
 @click.option("--backend", default=None, metavar="NAME",
               help="Override the manifest's \\[backend] target: offline, local, flyte, or a custom backend.")
 @click.option("--workdir", default=None, help="Where to put trial artifacts.")
+@click.option("--optimizer", default=None, metavar="NAME",
+              help="Override \\[tune] optimizer: hlock (built in) or a backend that runs harness.optimize.")
+@click.option("--edit", "edit", default=None, metavar="KINDS",
+              help="Override \\[tune] edit: what the optimizer may change (instructions,skill).")
+@click.option("--budget-rollouts", default=None, type=int, help="Override \\[tune.budget] rollouts.")
+@click.option("--budget-usd", default=None, type=float, help="Override \\[tune.budget] usd.")
 @click.option("-d", "--detach", is_flag=True,
               help="Run in the background as a tune job. See [cmd]hlock tune list[/].")
 @click.pass_context
 def tune(ctx: click.Context, depth: str, data: str, harness: str | None, out: str, strict: bool, apply: bool,
-         max_trials: int | None, backend: str | None, workdir: str | None, detach: bool) -> None:
+         max_trials: int | None, backend: str | None, workdir: str | None, optimizer: str | None,
+         edit: str | None, budget_rollouts: int | None, budget_usd: float | None, detach: bool) -> None:
     """Tune prompts, hyperparameters and small models into [path]harness.tune.lock[/].
 
     Tune starts from [path]harness.lock[/]'s stack (its harness, models, skills and config)
@@ -2871,19 +2879,26 @@ def tune(ctx: click.Context, depth: str, data: str, harness: str | None, out: st
     model. It measures the lock's own configuration first, as the baseline. Adopt the
     result with [cmd]hlock tune apply[/].
 
+    With [cmd]--depth prompt[/] or [key]\\[tune] edit[/], an optimizer edits the lock's
+    instruction files (and skills, with [cmd]--edit instructions,skill[/]), and hlock keeps the
+    edits only if they beat the lock on held-out tasks.
+
     Long tunes can run in the background: [cmd]hlock tune --detach[/] starts a tune job,
     and [cmd]hlock tune fetch[/] collects its result when it finishes.
     """
     if ctx.invoked_subcommand is not None:
         return
+    kinds = [k.strip() for k in edit.split(",") if k.strip()] if edit is not None else None
+    extra = {k: v for k, v in (("optimizer", optimizer), ("edit", kinds), ("budget_rollouts", budget_rollouts),
+                               ("budget_usd", budget_usd)) if v is not None}
     if detach:
         _tune_detach(depth=depth, data=data, harness=harness, strict=strict, apply=apply,
-                     max_trials=max_trials, backend=backend, workdir=workdir)
+                     max_trials=max_trials, backend=backend, workdir=workdir, **extra)
         return
     with _working(f"Tuning (depth={depth}, data={data})…"):
         result = json.loads(
             al_tune(_m(), depth=depth, data=data, harness=harness, out=out, strict=strict, apply=apply,
-                    max_trials=max_trials, backend=backend, workdir=workdir, lock=_l())
+                    max_trials=max_trials, backend=backend, workdir=workdir, lock=_l(), **extra)
         )
     report = result.get("report", {})
     for line in report.get("notes") or []:
@@ -2920,6 +2935,19 @@ def _tune_panel(r: dict, title: str = "[brand]⚙ tune[/]") -> Panel:
         if k in ("success_rate", "cost_usd", "trials"):
             continue
         chosen.add_row(k.replace("_", " "), f"[bold]{v}[/]")
+
+    opt = r.get("optimize") or {}
+    if opt:
+        acc = opt.get("acceptance") or {}
+        test = acc.get("test") or {}
+        if acc.get("accepted"):
+            line = f"[ok]{len(opt.get('edits') or [])} edit{'' if len(opt.get('edits') or []) == 1 else 's'} accepted[/]"
+        else:
+            line = f"[warn]no edits accepted[/] [muted]{escape(acc.get('reason') or '')}[/]"
+        if test:
+            line += (f"  [muted]{test.get('split')}: {_pct(test.get('base'))} → {_pct(test.get('candidate'))} on "
+                     f"{test.get('tasks')} tasks, p = {test.get('p')}[/]")
+        run_info.add_row("optimizer", f"{escape(str((opt.get('optimizer') or {}).get('name')))}  {line}")
 
     measured = (r.get("baseline") or {}).get("measured")
     result_row = Text.assemble(
@@ -2993,6 +3021,40 @@ def _job_errors():
         elif " is queued" in msg or " is running" in msg:
             hint = "wait for it with [cmd]--wait[/], or check on it with [cmd]hlock tune show[/]"
         _fail(msg, hint)
+
+
+@tune.command("eval")
+@click.option("--session", required=True, metavar="DIR", help="The tune session (from harness.optimize's request).")
+@click.argument("candidate")
+@click.option("--split", default="train", show_default=True, type=click.Choice(["train", "dev"]),
+              help="Which tasks: the test split is hlock's, never an optimizer's.")
+@click.option("--tasks", default=None, metavar="IDS", help="Comma-separated task ids (default: the whole split).")
+@click.option("--trials", default=None, type=int, help="Trials per task (default: the session's).")
+@click.option("--json", "as_json", is_flag=True, help="Print the results as JSON.")
+def tune_eval_cmd(session: str, candidate: str, split: str, tasks: str | None, trials: int | None, as_json: bool) -> None:
+    """Run a tune candidate's trials for an optimizer, graded, within the session's budget.
+
+    CANDIDATE is a bundle directory: the seed's [path]instructions/[/] and [path]skills/[/],
+    edited only where [path]bundle.json[/] allows. Trials are cached, so re-running one costs nothing.
+    """
+    ids = [t.strip() for t in tasks.split(",") if t.strip()] if tasks else None
+    with _working(f"Running {split} trials…"):
+        out = json.loads(_tune_eval(session, candidate, split, ids, trials))
+    if as_json:
+        sys.stdout.write(json.dumps(out, indent=2, ensure_ascii=False) + "\n")
+        return
+    rs = out["results"]
+    ok = sum(1 for r in rs if r["success"])
+    _ok(f"ran {len(rs)} trial{'' if len(rs) == 1 else 's'} on {split}: {ok} passed  [muted]candidate {out['candidate'][7:19]}[/]")
+    for r in rs:
+        mark = "[ok]✓[/]" if r["success"] else "[fail]✗[/]"
+        cached = "  [muted](cached)[/]" if r["cached"] else ""
+        console.print(f"  {mark} {escape(r['task'])} #{r['trial']}  [muted]{escape(r['feedback'])}[/]{cached}", soft_wrap=True)
+    b = out["budget"]
+    left = "" if b.get("rollouts_left") is None else f", {b['rollouts_left']} left"
+    console.print(f"[muted]budget: {b['rollouts_used']} rollouts used{left}[/]")
+    if b.get("exhausted"):
+        console.print(f"[warn]![/] {escape(b['exhausted'])}")
 
 
 @tune.command("apply")

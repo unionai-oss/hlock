@@ -88,6 +88,7 @@ from ._hlock import (
     trust_list,
     tune,
     tune_apply,
+    tune_eval,
     upgrade,
 )
 
@@ -176,5 +177,6 @@ __all__ = [
     "trust_list",
     "tune",
     "tune_apply",
+    "tune_eval",
     "upgrade",
 ]

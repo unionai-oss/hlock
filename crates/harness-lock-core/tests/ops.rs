@@ -175,10 +175,10 @@ fn trials_only_backend(dir: &Path) -> std::path::PathBuf {
         &script,
         r#"#!/bin/sh
 if grep -q '"kind":"backend.describe"' "$1"; then
-  echo '{"version": 3, "ok": true, "result": {"name": "trials-only", "kinds": ["llm.run_trial"], "about": "test"}}' > "$2"
+  echo '{"version": 4, "ok": true, "result": {"name": "trials-only", "kinds": ["llm.run_trial"], "about": "test"}}' > "$2"
 else
   echo done > "$(dirname "$1")/summary.md"
-  echo '{"version": 3, "ok": true, "result": {"success": true, "cost_usd": 0.001, "steps": 1}}' > "$2"
+  echo '{"version": 4, "ok": true, "result": {"success": true, "cost_usd": 0.001, "steps": 1}}' > "$2"
 fi
 "#,
     )
@@ -210,7 +210,7 @@ fn a_custom_backend_runs_what_it_says_it_runs() {
     let stages = o.report["stages"].as_array().unwrap();
     let detail = |name: &str| stages.iter().find(|s| s["stage"] == name).map(|s| (s["ran"].clone(), s["detail"].clone())).unwrap();
     assert_eq!(detail("data"), (serde_json::json!(false), serde_json::json!("the mine backend doesn't run data.load")));
-    assert_eq!(detail("prompt"), (serde_json::json!(false), serde_json::json!("the mine backend doesn't run prompt.search")));
+    assert_eq!(detail("optimize"), (serde_json::json!(false), serde_json::json!("the mine backend doesn't run harness.optimize")));
     // the trials ran on it, for real: the backend's cost, not the reference's
     assert_eq!(o.report["best"]["success_rate"], 1.0);
     assert_eq!(o.report["best"]["cost_usd"], 0.001);

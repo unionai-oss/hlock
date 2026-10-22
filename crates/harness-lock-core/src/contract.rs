@@ -172,6 +172,18 @@ pub fn invocation(
                 skills.push((s.name.clone(), dir));
             }
         }
+        // the lock's instruction files that have a copy next to it (a tune candidate's)
+        let instructions: Vec<(&str, PathBuf)> = l.instructions.iter().filter_map(|i| i.vendored.as_ref().filter(|v| fsutil::safe_rel(v) && fsutil::safe_rel(&i.name)).map(|v| (i.name.as_str(), lock_dir.join(v)))).filter(|(_, p)| p.is_file()).collect();
+        if !instructions.is_empty() {
+            let dir = hl.join("instructions");
+            let _ = std::fs::remove_dir_all(&dir);
+            for (name, src) in instructions {
+                let dest = dir.join(name);
+                std::fs::create_dir_all(dest.parent().unwrap_or(&dir))?;
+                std::fs::copy(&src, &dest)?;
+            }
+            env.insert("HLOCK_INSTRUCTIONS_DIR".into(), dir.to_string_lossy().into_owned());
+        }
         if !skills.is_empty() {
             let dir = hl.join("skills");
             let _ = std::fs::remove_dir_all(&dir);

@@ -21,7 +21,7 @@
 | `HLOCK_META_MANIFEST` | `harness.meta.toml` next to the lock | The [meta harness](../guides/meta.md)'s manifest |
 | `HLOCK_META_LOCK` | `harness.meta.lock` next to the lock | The meta harness's lock |
 | `HLOCK_JUDGE_AUTO` | on | `0` stops hlock from picking a judge (Kev on a local Ollama or Ollaya, or Jev with `TYPESAFE_API_KEY`) when none is set |
-| `HLOCK_BIN` | the `hlock` on `PATH` | The command the hooks `sync` writes for [decision models](../guides/deciders.md) run |
+| `HLOCK_BIN` | the `hlock` on `PATH` | The command the hooks `sync` writes for [decision models](../guides/deciders.md) run, and the one an optimizer is told to call for `hlock tune eval` |
 | `HLOCK_DECIDE_VERBOSE` | unset | `1` makes `hlock decide hook` say what it decided on stderr |
 | `HLOCK_DECIDE_LOCK` | set for code harnesses | The lock whose deciders `ctx.decide` and `hlock decide hook --format plugin` ask |
 | `TYPESAFE_API_KEY`, `TYPESAFE_BASE_URL` | unset | TypeSafe's key and endpoint, for `typesafe:` deciders |

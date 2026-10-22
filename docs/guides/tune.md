@@ -1,8 +1,8 @@
 # Tuning
 
 `hlock resolve` *chooses* among the components you list. `hlock tune` goes further
-and *produces* improvements: tuned prompts, tuned hyperparameters, and, at the deepest
-levels, fine-tuned small models. The result goes into a separate `harness.tune.lock`, so
+and *produces* improvements: edited instruction files and skills, tuned hyperparameters,
+and, at the deepest levels, fine-tuned small models. The result goes into a separate `harness.tune.lock`, so
 your base lock stays untouched until you adopt it.
 
 Tune starts from your `harness.lock`: its harness, models, skills, tools, instructions and
@@ -19,7 +19,7 @@ $ hlock tune --depth hpo
 │  backend  offline                                                                                │
 │  data     user-traces                                                                            │
 │  grid     12 configurations                                                                      │
-│  stages   data ✗ not on offline: use local, flyte or another backend  ·  prompt ✗ not on         │
+│  stages   data ✗ not on offline: use local, flyte or another backend  ·  optimize ✗ not on       │
 │           offline: use local, flyte or another backend  ·  hpo ✓                                 │
 │                                                                                                  │
 │  Best configuration                                                                              │
@@ -40,10 +40,9 @@ harness. When configurations tie, tune keeps the one closest to your lock: the f
 retries, then your temperature, then your model. Here every configuration solved the demo
 tasks, so it kept the lock's own `retries = 1` and `temperature = 0.2`.
 
-`stages` lists what ran. On the `offline` backend only the HPO grid runs; the data, prompt
+`stages` lists what ran. On the `offline` backend only the HPO grid runs; the data, optimize
 and fine-tune stages need `local`, `flyte`, or another [backend](backends.md) that runs
-them. A stage that didn't run isn't recorded in the tune lock. When the prompt stage runs, its gain is
-measured: the winner with the tuned prompt, minus the winner without it.
+them. A stage that didn't run isn't recorded in the tune lock.
 
 ## Depth
 
@@ -52,7 +51,7 @@ measured: the winner with the tuned prompt, minus the winner without it.
 | Depth | Adds | Search grid |
 |---|---|---|
 | `probe` | Cheap policy probes, no retraining | models × retries `[0]` |
-| `prompt` | System prompt and instructions search | models × retries `[0, 1]` |
+| `prompt` | An [optimizer](#tune-the-harness-text) edits the instruction files | models × retries `[0, 1]` |
 | `hpo` | Hyperparameter search | models × retries `[0, 1, 3]` × temperature `[0.2, 0.7]` |
 | `ft` | LoRA fine-tuning of a small model on your data | `hpo` grid |
 | `full` | Holdout re-validation and a tool-timeout sweep | `ft` grid × tool timeout `[30, 120]` s |
@@ -62,6 +61,160 @@ measured: the winner with the tuned prompt, minus the winner without it.
 training, and a GPU for anything beyond a tiny model. On `offline`, tune says so before it
 runs, and runs only the grid. "models" is your lock's model, or the planner candidates
 when there are several.
+
+## Tune the harness text
+
+From `--depth prompt` on, or whenever `[tune] edit` is set, an **optimizer** edits the
+lock's instruction files (and with `edit = ["instructions", "skill"]`, its skills), and hlock
+keeps the edits only if they beat the lock on tasks the optimizer never saw:
+
+```toml title="harness.toml"
+[tune]
+edit = ["instructions"]          # what it may change: "instructions", "skill"
+optimizer = "hlock"              # the built-in one, or a backend that runs harness.optimize
+proposer = "anthropic:opus"      # the model that drafts edits (optional for the built-in one)
+trials = 1                       # trials per task, in each evaluation
+alpha = 0.2                      # the significance level edits must reach
+budget = { rollouts = 100 }      # the most trials the optimizer may run (default 100); usd too
+```
+
+```console
+$ hlock tune --backend local
+! the pack holds out 4 tasks: a gain measured on fewer than 20 is unlikely to be real
+✓ wrote harness.tune.lock
+╭─ ⚙ tune ─────────────────────────────────────────────────────────────────────────────────╮
+│                                                                                          │
+│  depth      hpo                                                                          │
+│  backend    local                                                                        │
+│  data       synthetic                                                                    │
+│  grid       6 configurations                                                             │
+│  stages     data ✓  ·  optimize ✓  ·  hpo ✓                                              │
+│  optimizer  hlock  1 edit accepted  holdout: 0% → 100% on 4 tasks, p = 0.0625            │
+│                                                                                          │
+│  Best configuration                                                                      │
+│  model                 reference:qwen-7b                                                 │
+│  retries               1                                                                 │
+│  temperature           0.2                                                               │
+│  tool timeout seconds  120                                                               │
+│                                                                                          │
+│  success rate  0%  →  100%   +100%   (baseline: the lock's own configuration, measured)  │
+│                                                                                          │
+╰──────────────────────────────────────────────────────────────────────────────────────────╯
+next → hlock tune apply
+```
+
+How it works:
+
+1. **The bundle.** Tune writes the lock's instruction files and skills as files, with a
+   `bundle.json` that says which the optimizer may edit, and size limits (15 KiB per
+   component, 120 changed lines). The harness's own instruction file (`CLAUDE.md`, `AGENTS.md`)
+   is always there, empty when the lock has none. A declared dependency isn't editable: change
+   it at its source.
+2. **The splits.** The pack's search tasks are split into train and dev for the optimizer.
+   The holdout tasks are the test split, which only hlock runs. Without a holdout, hlock
+   checks the edits on dev and says so.
+3. **The noise band.** Before the search, hlock runs the lock's own text on dev, once per
+   trial seed, and records the spread.
+4. **The search.** The optimizer proposes candidates and evaluates them through
+   [`hlock tune eval`](#evaluating-a-candidate), inside the budget.
+5. **The checks.** hlock drops any edit that copies text from the eval pack (task ids, the
+   strings graders check for, fixture file names), then runs the lock's text and the candidate
+   on the test split, paired. It accepts the edits only when the candidate's success rate
+   beats the lock's by more than the noise band, a sign test over the tasks gives p ≤ `alpha`
+   (default 0.05), and cost per trial rose no more than `max-cost-increase` (default 25%).
+6. **The result.** Accepted edits are written under `.hlock/tuned/<digest>/`, the tune lock's
+   `[[instructions]]` and `[[skill]]` entries point at them, and the grid that follows runs
+   with them. Rejected or not, `[tune.optimizer]` and `[tune.acceptance]` record what ran and
+   why.
+
+A small pack rarely gets past the sign test: with 4 held-out tasks, even 4 wins and no losses
+give p = 0.0625. The example above sets `alpha = 0.2` for that reason. A real gain needs
+enough held-out tasks to show it.
+
+```toml title="harness.tune.lock"
+[tune.acceptance]
+accepted = true
+noise-band = 0.0
+runs = 8
+
+[tune.acceptance.cost-usd-per-trial]
+base = 0.0
+candidate = 0.0
+
+[tune.acceptance.test]
+base = 0.0
+better = 4
+candidate = 1.0
+p = 0.0625
+split = "holdout"
+tasks = 4
+trials = 1
+worse = 0
+
+[[tune.edit]]
+after = "sha256:c0a118cc4aa915e05467ff49e0be0e8b281fa705b6fcfe730e71a9834bd9146c"
+component = "instructions/AGENTS.md"
+kind = "instructions"
+op = "add"
+path = ".hlock/tuned/c0a118cc/AGENTS.md"
+rationale = """built-in guidance, tried after: artifact:answer.md: answer.md doesn't contain "OK""""
+```
+
+After `hlock tune apply`, [`hlock diff`](diff.md) shows the edit's text:
+
+```console
+$ hlock diff
+harness.lock.prev → harness.lock
+
++ instructions AGENTS.md  (tune)
+    AGENTS.md  added  +3 -0
+    @@ -0,0 +1,3 @@
+    +Be careful.
+    +
+    +Check your result against what the task asks for before you finish.
+~ evidence success-rate: 0.00 → 1.00  (n=12 → 24)
+~ evidence split: holdout → search
+
+1 instruction file changed
+```
+
+Commit `.hlock/tuned/` with the lock.
+
+### The built-in optimizer
+
+`optimizer = "hlock"` runs on the trial backend's worker (`local`, or `flyte`, where the search
+runs on your machine and its trials on the cluster). It runs the lock's text on the train
+split, picks an editable component in turn, and asks the `proposer` model for a few lines of
+guidance from the failures and the graders' feedback. It reruns the same tasks, and keeps the
+edit when it does better there and no worse on dev. The lines it may add per step decay from
+3 to 1. Without a `proposer` (or without `HL_LLM_BASE_URL`), it tries a fixed list of general
+guidance instead. It's small on purpose: a better optimizer is a [backend](backends.md#write-an-optimizer).
+
+### What a trial sees
+
+On the `local` and `flyte` backends a trial is one completion, and the candidate's instruction
+files reach the model as its system prompt. Skills reach only a
+[code harness](harnesses.md)'s trials, which get the candidate's skills in `HLOCK_SKILLS_DIR`
+and its instruction files in `HLOCK_INSTRUCTIONS_DIR`. After an optimize stage, the baseline
+and every grid configuration run with the lock's text, or the accepted edits, the same way.
+
+### Evaluating a candidate
+
+`hlock tune eval` is the optimizer's way to run trials: a candidate bundle, on the train or
+dev split, graded by hlock, counted against the budget, and cached.
+
+```console
+$ hlock tune eval --session .hlock/tune/7d6d9a18 .hlock/tune/7d6d9a18/final --split dev
+✓ ran 2 trials on dev: 2 passed  candidate 3c2071b983e1
+  ✓ question_11 #0  passed
+  ✓ question_4 #0  passed
+budget: 37 rollouts used, 63 left
+```
+
+It refuses the test split, a task that isn't in the split, a candidate that changes what
+`bundle.json` doesn't allow, and new trials once the budget is spent. `--json` prints each
+result with the grader's feedback and the trial's workspace, for a reflective optimizer to
+read.
 
 ## Data
 
