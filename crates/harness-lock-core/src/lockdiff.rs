@@ -427,6 +427,14 @@ fn evidence(old: &Lockfile, new: &Lockfile) -> Vec<String> {
         let f = |v: Option<f64>| v.map(|v| format!("{v:.4}")).unwrap_or_else(|| "—".into());
         out.push(format!("~ evidence cost-usd-per-task: {} → {}", f(cost(o)), f(cost(n))));
     }
+    if o.sandbox != n.sandbox {
+        let f = |s: &Option<crate::lockfile::EvidenceSandbox>| match s {
+            None => "—".to_string(),
+            Some(s) if s.applies_to.is_empty() => format!("{} (nothing sandboxed)", s.runner),
+            Some(s) => format!("{} network {} ({})", s.runner, s.network, s.applies_to.join(", ")),
+        };
+        out.push(format!("~ evidence sandbox: {} → {}", f(&o.sandbox), f(&n.sandbox)));
+    }
     if o.split != n.split && !(o.split.is_empty() && n.split.is_empty()) {
         out.push(format!("~ evidence split: {} → {}", if o.split.is_empty() { "—" } else { &o.split }, if n.split.is_empty() { "—" } else { &n.split }));
     }

@@ -76,7 +76,8 @@ settings that run a command or load code (a status line command, an API key help
 `NODE_OPTIONS` in `env`, enabled plugins and their marketplaces, Codex's `notify`, Gemini's tool
 discovery command, OpenCode's `plugin`), skill scripts (a skill's `scripts/`), and the harness
 itself from its install source. A remote MCP server a package brings counts too: it gets what
-the agent sends it. `sync` marks each one it would install, and it needs an approval that
+the agent sends it. So does the lock's [sandbox](sandbox.md) (kind `sandbox`): its image, its
+profile, and a runner the project defines run the agent. `sync` marks each one it would install, and it needs an approval that
 `--yes` doesn't give:
 
 ```console

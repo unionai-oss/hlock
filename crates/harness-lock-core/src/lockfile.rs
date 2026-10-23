@@ -518,6 +518,22 @@ pub struct Evidence {
     /// the reference adapter), not on the harness itself.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub simulated: bool,
+    /// What trials and grading ran under. Absent in locks measured before sandboxes.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sandbox: Option<EvidenceSandbox>,
+}
+
+/// The sandbox a resolve or tune measured under: the runner and network, and the kinds
+/// that ran sandboxed (`trials`, `graders`).
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+#[serde(default, rename_all = "kebab-case")]
+pub struct EvidenceSandbox {
+    pub runner: String,
+    pub network: String,
+    pub applies_to: Vec<String>,
+    /// `agent-CLI trials are simulated`, `backend flyte`.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub note: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]

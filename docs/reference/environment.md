@@ -26,6 +26,9 @@
 | `HLOCK_DECIDE_LOCK` | set for code harnesses | The lock whose deciders `ctx.decide` and `hlock decide hook --format plugin` ask |
 | `TYPESAFE_API_KEY`, `TYPESAFE_BASE_URL` | unset | TypeSafe's key and endpoint, for `typesafe:` deciders |
 | `OLLAYA_HOST`, `OLLAYA_API_KEY` | `127.0.0.1:11435` | Where Ollaya serves `ollaya:` deciders, and its key if it has one |
+| `HLOCK_NO_SANDBOX` | unset | `1` runs without the lock's [sandbox](../guides/sandbox.md), like `--no-sandbox`. Ignored inside an hlock sandbox |
+| `HLOCK_IN_SANDBOX` | set inside a sandbox | Marks a sandboxed run, so a nested hlock ignores `HLOCK_NO_SANDBOX`. Don't set it yourself |
+| `HLOCK_SANDBOX_FILE` | `~/.config/hlock/sandbox.toml` | Where your [sandbox runners](../guides/sandbox.md#define-your-own-runner) are defined |
 | `HLOCK_META_RESTORE` | set by `hlock meta run` | Inside a meta harness session: the config variables isolation changed, with their original values. `hlock` commands put them back. Don't set it yourself. |
 
 The variables below are used by hlock's Python worker (the `local` and `flyte`

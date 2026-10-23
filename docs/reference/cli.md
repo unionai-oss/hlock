@@ -154,7 +154,7 @@ task's solution. It grades a copy, so the directory isn't changed. Exits `1` if 
 fails. Takes `--json`.
 
 ```bash
-hlock evals grade TASK [WORKSPACE] [--pack DIR] [--json]
+hlock evals grade TASK [WORKSPACE] [--pack DIR] [--trust] [--no-sandbox] [--json]
 ```
 
 | Option | Default | Description |
@@ -162,6 +162,10 @@ hlock evals grade TASK [WORKSPACE] [--pack DIR] [--json]
 | `TASK` | | The task id |
 | `WORKSPACE` | the task's fixtures and solution | The directory to grade |
 | `--pack` | [the pack](#evals) | The pack |
+| `--trust` | | Approve the lock's sandbox without asking |
+| `--no-sandbox` | | Run without the lock's [sandbox](../guides/sandbox.md) (also `HLOCK_NO_SANDBOX=1`) |
+
+`tests` graders run in the lock's [sandbox](../guides/sandbox.md) when it covers `graders`.
 
 Judges use `[evals.judge]` from the project's `harness.toml`, else the pack's
 `[pack.judge]`, else `[deciders.judge]` or `[deciders.default]`, else one hlock finds (see
@@ -177,7 +181,7 @@ score, time and workspace, and the graders that failed. Exits `1` if a run fails
 [Try tasks on your agent](../guides/eval-packs.md#try-tasks-on-your-agent).
 
 ```bash
-hlock evals run [TASK]... [--pack DIR] [--seeds N] [--workdir DIR] [--trust] [--json]
+hlock evals run [TASK]... [--pack DIR] [--seeds N] [--workdir DIR] [--trust] [--no-sandbox] [--json]
 ```
 
 | Option | Default | Description |
@@ -187,6 +191,7 @@ hlock evals run [TASK]... [--pack DIR] [--seeds N] [--workdir DIR] [--trust] [--
 | `--seeds` | `1` | Runs per task |
 | `--workdir` | a new temporary directory | Where the workspaces (`<task>-<seed>/`) and agent logs (`<task>-<seed>.log`) go |
 | `--trust` | | Approve every executable the lock would run |
+| `--no-sandbox` | | Run without the lock's [sandbox](../guides/sandbox.md) (also `HLOCK_NO_SANDBOX=1`) |
 
 An agent CLI runs through its non-interactive mode, as [`run`](#run) runs it, with the
 workspace as its working directory and the lock's project-scoped skills and instruction
@@ -259,7 +264,7 @@ write `harness.lock`, and print every stack's scores and the chosen stack with i
 evidence. See [Finding the best stack](../guides/resolve.md).
 
 ```bash
-hlock resolve [--backend NAME] [--harness NAME] [--workdir DIR] [--dry-run] [--no-cache] [--json]
+hlock resolve [--backend NAME] [--harness NAME] [--workdir DIR] [--dry-run] [--no-cache] [--no-sandbox] [--json]
 ```
 
 | Option | Default | Description |
@@ -269,6 +274,7 @@ hlock resolve [--backend NAME] [--harness NAME] [--workdir DIR] [--dry-run] [--n
 | `--workdir` | `.hlock` | Where trial artifacts, the trial cache (`trials/`) and `report.md` go |
 | `--dry-run` | | List the stacks, the tasks in each split, and the trial counts, and run nothing |
 | `--no-cache` | | Run every trial again, even ones an earlier resolve ran |
+| `--no-sandbox` | | Run code-harness trials and `tests` graders without `[sandbox]` (also `HLOCK_NO_SANDBOX=1`); the lock's evidence records it |
 | `--json` | | Print `{"lock", "report", "notes"}`: the lock, every stack's scores and the holdout check, and the notes |
 
 Before any trial, `resolve` fails on an unknown manifest key, an unsupported `strategy`,
@@ -459,6 +465,7 @@ hlock sync [LOCK] [OPTIONS]
 | `--in-place` | Write into your own config (`~/.claude`, …) instead of an isolated root |
 | `--docker` | Write a Docker build context to `.hlock/docker/<harness>/` |
 | `--build` | With `--docker`, also run `docker build` |
+| `--base IMAGE` | With `--docker`, build on IMAGE (Debian-based) instead of `node:22-bookworm` |
 | `--skill` | Write an Agent Skill that guides an agent through the remaining steps |
 | `--skill-dir DIR` | Where `--skill` writes `SKILL.md` (default `.agents/skills/hlock-rehydrate`) |
 | `--exact` | Also move aside skills that aren't in the lock |
@@ -496,8 +503,10 @@ hlock launch [HARNESS] [OPTIONS] [-- HARNESS_ARGS...]
 | `--trust` | Approve every executable the lock would run. Without it, `launch` asks on a terminal, and fails without one |
 | `--allow-hidden FILE` | Let through hidden characters in FILE |
 | `--json` | With `--dry-run`, print the launch plan as JSON |
+| `--no-sandbox` | Run without the lock's [sandbox](../guides/sandbox.md) (also `HLOCK_NO_SANDBOX=1`) |
 
-Other arguments are passed to the harness. hlock's own options count anywhere before `--`.
+With a sandbox, `launch` restores the lock into `.hlock/sandbox-env/` and runs the harness
+through its runner; `--dry-run` prints the runner's command too. Other arguments are passed to the harness. hlock's own options count anywhere before `--`.
 
 Where the harness's config can reference environment variables (Claude Code's MCP servers,
 OpenCode's config), secrets are written as references, and their values are passed in the
@@ -691,13 +700,24 @@ Load `harness.lock` and run the locked agent on `PROMPT`. Exits `0` when it succ
 | `reference` | Runs the locked model on the offline reference provider. `--json` prints `success`, `model` and `cost_usd`. |
 
 ```bash
-hlock run PROMPT [--trust] [--json]
+hlock run PROMPT [--trust] [--no-sandbox] [--json]
 ```
 
 | Option | Description |
 |---|---|
 | `--trust` | Approve every executable the lock would run. Without it, an agent CLI starts without what isn't [trusted](../guides/audit.md#executables) here, and a code harness doesn't start |
 | `--json` | Capture the outcome and print it as JSON |
+| `--no-sandbox` | Run without the lock's [sandbox](../guides/sandbox.md) (also `HLOCK_NO_SANDBOX=1`) |
+
+## `sandbox`
+
+Show the lock's [sandbox](../guides/sandbox.md): its runner and whether it's installed and
+trusted, the image, network, secrets, what runs inside, the profile, and whether
+`harness.toml`'s `[sandbox]` or the evidence differ. Takes `--json`.
+
+```bash
+hlock sandbox [--json]
+```
 
 ## `upgrade`
 
@@ -749,6 +769,7 @@ hlock tune [--depth LEVEL] [--data SOURCE] [OPTIONS]
 | `--edit KINDS` | `[tune] edit` | What the optimizer may change: `instructions`, `skill`, comma-separated |
 | `--budget-rollouts N`, `--budget-usd X` | `[tune.budget]` | The optimizer's budget |
 | `-d`, `--detach` | | Run in the background as a tune job; can't be combined with `--apply` |
+| `--no-sandbox` | | Run code-harness trials and `tests` graders without `[sandbox]` (also `HLOCK_NO_SANDBOX=1`) |
 
 The job commands below take a `JOB`: a job id or a unique prefix of one. Without it,
 they use the newest job. See [Running in the background](../guides/tune.md#running-in-the-background).

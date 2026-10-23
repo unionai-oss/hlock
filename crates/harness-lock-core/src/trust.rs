@@ -330,7 +330,17 @@ pub fn executables(lock: &Lockfile, lock_dir: &Path, profile: Option<&HarnessPro
     }
     out.extend(script_executables(lock, lock_dir, profile, ctx));
     out.extend(hidden_exceptions(lock));
+    out.extend(sandbox_executable(lock, lock_dir, ctx));
     out
+}
+
+/// The lock's sandbox: its runner's template (when the project defines it), its images and
+/// its profile run the agent, so they're approved like the rest.
+pub fn sandbox_executable(lock: &Lockfile, lock_dir: &Path, ctx: &Ctx) -> Option<Executable> {
+    let spec = crate::sandbox::Spec::from_lock(lock).ok()??;
+    let table = crate::sandbox::project_table(lock_dir);
+    let runner = crate::sandbox::runners(ctx, table.as_ref()).ok().and_then(|r| r.get(&spec.runner).cloned());
+    Some(crate::sandbox::executable(&spec, runner.as_ref()))
 }
 
 /// Content the lock lets through with critical hidden characters (`scan =

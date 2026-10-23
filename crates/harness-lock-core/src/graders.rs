@@ -229,6 +229,8 @@ pub struct GradeOptions {
     /// The environment judges read their API keys and endpoints from; `None` reads the
     /// process's, as [`Ctx::from_process`](crate::profiles::Ctx::from_process) sees it.
     pub env: Option<BTreeMap<String, String>>,
+    /// The sandbox `tests` graders run in, when the lock's covers `graders`.
+    pub sandbox: Option<crate::sandbox::Sandbox>,
 }
 
 impl GradeOptions {
@@ -536,7 +538,7 @@ pub fn grade(task: &Task, workspace: &Path, opts: &GradeOptions) -> Vec<Grade> {
             Ok(Grader::Artifact { paths, equals, same_as, contains }) => {
                 artifact(paths, equals.as_deref(), same_as.as_deref(), contains, workspace, &pack_dir)
             }
-            Ok(g @ Grader::Tests { .. }) => tests(g, task, workspace, &pack_dir, opts.trace.as_ref()),
+            Ok(g @ Grader::Tests { .. }) => tests(g, task, workspace, &pack_dir, opts.trace.as_ref(), opts.sandbox.as_ref()),
             Ok(g @ Grader::Judge { .. }) => judge_run(g, task, workspace, &pack_dir, judge, &var),
             Ok(g @ Grader::Trace { .. }) => match &opts.trace {
                 Some(trace) => trace_run(g, task, trace, judge, &var),
@@ -671,7 +673,7 @@ fn tail(text: &str) -> String {
     lines[lines.len().saturating_sub(DETAIL_LINES)..].join("\n")
 }
 
-fn tests(g: &Grader, task: &Task, ws: &Path, pack_dir: &Path, trace: Option<&Value>) -> Grade {
+fn tests(g: &Grader, task: &Task, ws: &Path, pack_dir: &Path, trace: Option<&Value>, sandbox: Option<&crate::sandbox::Sandbox>) -> Grade {
     let label = g.label();
     let Grader::Tests { command, script, files, timeout_seconds } = g else {
         return Grade::new(label, false, 0.0, "not a tests grader");
@@ -681,23 +683,21 @@ fn tests(g: &Grader, task: &Task, ws: &Path, pack_dir: &Path, trace: Option<&Val
             return Grade::new(label, false, 0.0, format!("can't copy {f} into the workspace: {e}"));
         }
     }
-    let shell = |line: &str| {
-        let mut c = if cfg!(windows) { Command::new("cmd") } else { Command::new("sh") };
-        c.args([if cfg!(windows) { "/C" } else { "-c" }, line]);
-        c
-    };
-    let mut cmd = match (command, script) {
-        (Some(line), _) => shell(line),
+    let argv: Vec<String> = match (command, script) {
+        (Some(line), _) if cfg!(windows) => vec!["cmd".into(), "/C".into(), line.clone()],
+        (Some(line), _) => vec!["sh".into(), "-c".into(), line.clone()],
         (None, Some(s)) => {
-            let path = pack_dir.join(s);
-            if path.extension().is_some_and(|e| e == "py") {
-                let py = crate::profiles::python_for(None, &crate::profiles::Ctx::from_process())
-                    .unwrap_or_else(|| PathBuf::from(if cfg!(windows) { "python" } else { "python3" }));
-                let mut c = Command::new(py);
-                c.arg(&path);
-                c
+            let path = pack_dir.join(s).to_string_lossy().into_owned();
+            if s.ends_with(".py") {
+                // inside a sandbox the image's python runs it
+                let py = match sandbox {
+                    Some(_) => PathBuf::from("python3"),
+                    None => crate::profiles::python_for(None, &crate::profiles::Ctx::from_process())
+                        .unwrap_or_else(|| PathBuf::from(if cfg!(windows) { "python" } else { "python3" })),
+                };
+                vec![py.to_string_lossy().into_owned(), path]
             } else {
-                Command::new(&path)
+                vec![path]
             }
         }
         (None, None) => return Grade::new(label, false, 0.0, "no command or script"),
@@ -709,19 +709,36 @@ fn tests(g: &Grader, task: &Task, ws: &Path, pack_dir: &Path, trace: Option<&Val
         Err(e) => return Grade::new(label, false, 0.0, format!("can't make a directory for the grade: {e}")),
     };
     let result = scratch.0.join("grade.json");
+    let mut env: BTreeMap<String, String> = BTreeMap::new();
     if let Some(t) = trace {
         let f = scratch.0.join("trace.json");
         if let Err(e) = crate::fsutil::write_private(&f, serde_json::to_vec(t).unwrap_or_default()) {
             return Grade::new(label, false, 0.0, format!("can't write the trace for the grader: {e}"));
         }
-        cmd.env("HLOCK_TRACE", f);
+        env.insert("HLOCK_TRACE".into(), f.to_string_lossy().into_owned());
     }
-    cmd.current_dir(ws)
-        .env("HLOCK_WORKSPACE", ws)
-        .env("HLOCK_PACK_DIR", pack_dir)
-        .env("HLOCK_TASK", &task.id)
-        .env("HLOCK_GRADE", &result);
-    let (code, output) = run_limited(cmd, Duration::from_secs(*timeout_seconds));
+    env.insert("HLOCK_WORKSPACE".into(), ws.to_string_lossy().into_owned());
+    env.insert("HLOCK_PACK_DIR".into(), pack_dir.to_string_lossy().into_owned());
+    env.insert("HLOCK_TASK".into(), task.id.clone());
+    env.insert("HLOCK_GRADE".into(), result.to_string_lossy().into_owned());
+    let limit = Duration::from_secs(*timeout_seconds);
+    let (code, output) = match sandbox {
+        Some(sb) => {
+            use crate::sandbox::Mount;
+            let mounts = vec![Mount::rw(&scratch.0), Mount::ro(pack_dir)];
+            let limits = Limits { max_bytes: MAX_TEST_OUTPUT, ..Limits::timeout(limit) };
+            match sb.run_command("graders", &argv, ws, env, mounts, &crate::profiles::Ctx::from_process(), &limits) {
+                Err(e) => (None, format!("can't run it in the sandbox: {e}")),
+                Ok(out) if out.timed_out => (None, format!("{}\ntimed out after {}s", out.text(), limit.as_secs())),
+                Ok(out) => (out.code.or(Some(-1)), out.text()),
+            }
+        }
+        None => {
+            let mut cmd = Command::new(&argv[0]);
+            cmd.args(&argv[1..]).current_dir(ws).envs(&env);
+            run_limited(cmd, limit)
+        }
+    };
     let reported: Option<Value> = read_regular(&result, 1 << 20).ok().and_then(|b| serde_json::from_slice(&b).ok());
     drop(scratch);
     let passed = code == Some(0);

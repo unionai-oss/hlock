@@ -1753,6 +1753,11 @@ pub fn capture(profile: &HarnessProfile, reg: &Registry, ctx: &Ctx, project: Opt
             Err(e) => warnings.push(format!("{}: {e}", mpath.display())),
         }
     }
+    // the sandbox the lock runs in, as harness.toml declares it; a bad one stops the pin
+    let sandbox = match crate::manifest::find_manifest(&ctx.cwd) {
+        Some(mpath) => crate::manifest::Manifest::load(&mpath)?.sandbox_spec()?,
+        None => None,
+    };
     warnings.extend(src.warnings.borrow().iter().cloned());
     for pat in users.unmatched() {
         warnings.push(format!("--include-user-scope {pat:?} matched nothing in {}'s user config ({})", profile.name, portable_path(&root, None, ctx)));
@@ -1784,6 +1789,7 @@ pub fn capture(profile: &HarnessProfile, reg: &Registry, ctx: &Ctx, project: Opt
         script: scripts,
         middleware,
         context: Context { isolation: "locked-only".into(), ..Default::default() },
+        policy: crate::lockfile::Policy { sandbox: sandbox.map(|s| s.to_map()).unwrap_or_default(), ..Default::default() },
         provenance: Provenance {
             backend: "pin".into(),
             scopes: if *user == UserScope::None { vec!["project".into()] } else { vec!["project".into(), "user".into()] },
@@ -1928,7 +1934,35 @@ pub fn diff_locks(old: &Lockfile, new: &Lockfile) -> Vec<String> {
     diff_maps(&mut out, "script", index(&old.script, file_key), index(&new.script, file_key), file_sig);
     diff_maps(&mut out, "middleware", index(&old.middleware, file_key), index(&new.middleware, file_key), file_sig);
     diff_maps(&mut out, "config", index(&old.config, |c| c.path.clone()), index(&new.config, |c| c.path.clone()), |c: &&ConfigFile| short(&c.digest));
+    out.extend(diff_sandbox(old, new));
     out
+}
+
+/// The sandbox's change, marked `weakened` when it protects less than before.
+fn diff_sandbox(old: &Lockfile, new: &Lockfile) -> Vec<String> {
+    let (o, n) = (crate::sandbox::Spec::from_lock(old).ok().flatten(), crate::sandbox::Spec::from_lock(new).ok().flatten());
+    if o == n {
+        return Vec::new();
+    }
+    let show = |s: &crate::sandbox::Spec| {
+        let mut t = s.summary();
+        if let Some(i) = &s.image {
+            t.push_str(&format!(" {i}"));
+        }
+        t
+    };
+    let line = match (&o, &n) {
+        (None, Some(b)) => format!("+ sandbox {}", show(b)),
+        (Some(a), None) => format!("- sandbox {}", show(a)),
+        (Some(a), Some(b)) => format!("~ sandbox: {} → {}", show(a), show(b)),
+        (None, None) => return Vec::new(),
+    };
+    let weaker = crate::sandbox::weakened(o.as_ref(), n.as_ref());
+    if weaker.is_empty() {
+        vec![line]
+    } else {
+        vec![format!("{line}  weakened: {}", weaker.join("; "))]
+    }
 }
 
 // --------------------------------------------------------------------------- //

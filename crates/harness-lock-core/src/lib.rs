@@ -37,6 +37,7 @@ pub mod profiles;
 pub mod providers;
 pub mod pull;
 pub mod resolver;
+pub mod sandbox;
 pub mod sbom;
 pub mod scan;
 pub mod search;

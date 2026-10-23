@@ -218,8 +218,12 @@ $ hlock sync --docker
 …
 ✓ wrote .hlock/docker/pi/Dockerfile
 next →
-  docker build -t hlock-pi .hlock/docker/pi
-  docker run -it --rm -e HLOCK_SECRET_… -v "$PWD:/workspace" hlock-pi
+  docker build -t hlock-pi:8f489e60629b .hlock/docker/pi
+  docker run -it --rm -e HLOCK_SECRET_… -v "$PWD:/workspace" hlock-pi:8f489e60629b
+  or run the lock in it as a sandbox: add to harness.toml, then re-pin
+    [sandbox]
+    runner = "docker"
+    image = "hlock-pi:8f489e60629b"  # push it, and pin @sha256:, to share it
 ```
 
 `--docker` writes a build context to `.hlock/docker/<harness>/`. The restored config, skills
@@ -230,13 +234,15 @@ entrypoint fills `${HLOCK_SECRET_*}` placeholders when the container starts, fro
 variables or from secret files mounted at `/run/secrets` (Docker and Compose secrets; see
 [Secrets](secrets.md#in-docker)). Model weights stay on the host. A local runtime is reached at
 `http://host.docker.internal:<port>`, which the Dockerfile notes. `--build` also runs
-`docker build`.
+`docker build`. The image is tagged with the lock's hash and labeled with the harness and
+its version, so it can be the lock's [sandbox](sandbox.md). `--base IMAGE` builds on your own
+Debian-based image instead of `node:22-bookworm`.
 
 ## Reference
 
 ```bash
 hlock sync [LOCK] [--plan | --json | --skill] [--yes] [--install] [--pull] [--all-models]
-           [--prefix DIR | --in-place | --docker [--build]] [--exact] [--verbose]
+           [--prefix DIR | --in-place | --docker [--build] [--base IMAGE]] [--exact] [--verbose]
 ```
 
 See the [CLI reference](../reference/cli.md#sync) for every option.

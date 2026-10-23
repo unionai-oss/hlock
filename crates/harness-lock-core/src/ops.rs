@@ -971,7 +971,8 @@ pub fn tune(manifest: Manifest, spec: &TuneSpec) -> Result<TuneOutcome> {
         Some(p) => Some(write_tuned_instructions(base_lock.as_ref(), &manifest, &base.harness, &out_dir, lock_path.parent().filter(|d| !d.as_os_str().is_empty()).unwrap_or(std::path::Path::new(".")), p)?),
         None => None,
     };
-    let mut tune_lock = build_tuned_lock(&manifest, base_lock.as_ref(), &winner, &measured, &split, scored.len(), backend.as_str(), &prompt_meta, prompt_gain, tuned_file.as_ref(), &ft_meta, &data_meta, &spec.data, data_mode, simulated, &plan_value);
+    let mut tune_lock = build_tuned_lock(&manifest, base_lock.as_ref(), &winner, &measured, &split, scored.len(), backend.as_str(), &prompt_meta, prompt_gain, tuned_file.as_ref(), &ft_meta, &data_meta, &spec.data, data_mode, simulated, &plan_value, Some(resolver.evidence_sandbox(&winner.stack.harness)));
+    resolver.approve_sandbox(&tune_lock)?;
     let mut optimize_report = serde_json::Value::Null;
     if let Some(o) = &optimized {
         let mut t = tune_lock.tune.take().unwrap_or_else(|| serde_json::json!({}));
@@ -1070,6 +1071,7 @@ fn build_tuned_lock(
     data_mode: &str,
     simulated: bool,
     plan: &serde_json::Value,
+    evidence_sandbox: Option<crate::lockfile::EvidenceSandbox>,
 ) -> Lockfile {
     let stack = &winner.stack;
     let mut lf = base.cloned().unwrap_or_default();
@@ -1112,6 +1114,8 @@ fn build_tuned_lock(
         None => lf.llm.push(crate::lockfile::LLM { role, provider, model, resolved_from: Some(spec.clone()), params: params.into_iter().collect(), ..Default::default() }),
     }
     lf.policy.retries = stack.retries;
+    // the sandbox is harness.toml's, whatever the base lock had
+    lf.policy.sandbox = manifest.sandbox_spec().ok().flatten().map(|s| s.to_map()).unwrap_or_default();
     let r4 = |v: f64| (v * 1e4).round() / 1e4;
     let mut success = BTreeMap::from([("mean".to_string(), r4(measured.success_rate()))]);
     if split == "holdout" {
@@ -1127,6 +1131,7 @@ fn build_tuned_lock(
         cost_usd_per_task: BTreeMap::from([("mean".to_string(), round6(measured.mean_cost()))]),
         latency_s_per_task: BTreeMap::from([("p50".to_string(), r4(measured.mean_latency())), ("p95".to_string(), r4(measured.p95_latency()))]),
         simulated,
+        sandbox: evidence_sandbox,
         ..Default::default()
     };
     lf.provenance.backend = backend.to_string();

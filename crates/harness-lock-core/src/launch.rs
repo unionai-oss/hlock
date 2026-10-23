@@ -46,6 +46,32 @@ pub struct LaunchOptions {
     /// project-scoped entries are set up and the agent runs (an `hlock evals run`
     /// workspace). Default: the project. The isolated config root stays the project's.
     pub project: Option<PathBuf>,
+    /// Run without the lock's sandbox (`--no-sandbox`).
+    pub no_sandbox: bool,
+    /// Variables the sandboxed agent gets from hlock (the proxy's base URLs and token).
+    /// With them, provider credentials stay out of the sandbox.
+    pub proxy_env: BTreeMap<String, String>,
+    /// Give a sandboxed agent a terminal (`docker run -t`).
+    pub tty: bool,
+}
+
+/// How a sandboxed launch runs: the runner's argv and environment, in place of `argv`.
+#[derive(Debug, Clone, Serialize, Default)]
+pub struct SandboxPrep {
+    pub spec: crate::sandbox::Spec,
+    /// `docker (network open, secrets env)`.
+    pub summary: String,
+    pub argv: Vec<String>,
+    /// The runner process's environment; it holds secret values, so it's never printed.
+    pub env: BTreeMap<String, String>,
+    pub env_names: Vec<String>,
+    pub kill: Vec<String>,
+    /// The project whose control files are checked after the run.
+    pub project: PathBuf,
+    /// For docker: the image, and the harness and version the lock pins, to compare with
+    /// the image's labels.
+    pub image: Option<String>,
+    pub harness_version: Option<String>,
 }
 
 /// What to `exec`, and what happened while preparing it.
@@ -68,6 +94,12 @@ pub struct LaunchPrep {
     /// Secret values the harness reads from its environment through the references
     /// written in its config. Added to the environment when it starts; never printed.
     pub secret_env: BTreeMap<String, String>,
+    /// Set when the run is sandboxed: start this instead of `argv`.
+    pub sandbox: Option<SandboxPrep>,
+}
+
+fn launch_sandbox(lock: &Lockfile, lock_path: &Path, project: &Path, ctx: &Ctx, opts: &LaunchOptions, prep: &mut LaunchPrep) -> Result<Option<crate::sandbox::Sandbox>> {
+    crate::sandbox::for_lock(lock, lock_path, project, ctx, opts.no_sandbox, opts.trust, &mut prep.notes)
 }
 
 /// The locked model to pass on the command line, if the target can use it.
@@ -517,6 +549,29 @@ pub fn prepare(lock: &Lockfile, lock_path: &Path, reg: &Registry, ctx: &Ctx, opt
         let workspace = opts.workspace.clone().unwrap_or_else(|| ctx.cwd.clone());
         let prompt = args.join(" ");
         let inv = crate::contract::invocation(target, Some(lock), Some(lock_path), None, &prompt, &workspace, 0, ctx)?;
+        let sandbox = launch_sandbox(lock, lock_path, &ctx.cwd, ctx, opts, &mut prep)?;
+        if sandbox.as_ref().is_some_and(|s| !s.spec.applies("trials")) {
+            prep.notes.push("the lock's sandbox doesn't cover trials (applies-to), so the code harness runs on this machine".into());
+        }
+        if let Some(sb) = sandbox.filter(|s| s.spec.applies("trials")) {
+            let mut env = crate::sandbox::provider_env(ctx, &[]);
+            env.extend(inv.env.clone());
+            let run = crate::sandbox::Run {
+                kind: "trials".into(),
+                argv: inv.argv.clone(),
+                cwd: workspace.clone(),
+                home: ctx.cwd.join(crate::sandbox::SANDBOX_ENV_DIR).join("trials-home"),
+                mounts: if std::fs::canonicalize(&workspace).ok() == std::fs::canonicalize(&ctx.cwd).ok() {
+                    crate::sandbox::project_mounts(&ctx.cwd)?
+                } else {
+                    crate::sandbox::project_ro_mounts(&ctx.cwd)?
+                },
+                env,
+                tty: opts.tty,
+                ..Default::default()
+            };
+            prep.sandbox = Some(sandbox_prep(&sb, &run, ctx, &mut prep.notes, None)?);
+        }
         prep.argv = inv.argv;
         prep.env = inv.env;
         return Ok(prep);
@@ -532,12 +587,28 @@ pub fn prepare(lock: &Lockfile, lock_path: &Path, reg: &Registry, ctx: &Ctx, opt
         }
         None => ctx,
     };
+    let sandbox = launch_sandbox(lock, lock_path, &project_dir, ctx, opts, &mut prep)?.filter(|s| s.spec.applies("agent"));
+    if sandbox.is_some() && opts.in_place {
+        return Err(Error::Profile("--in-place can't be sandboxed: it's your own config; drop --in-place, or run with --no-sandbox".into()));
+    }
+    if sandbox.is_some() && !same {
+        return Err(Error::Profile(format!("launching {} from a {} lock can't be sandboxed yet (the sandbox is for the lock's harness); run with --no-sandbox", target.name, lock.harness.name)));
+    }
+    let docker = sandbox.as_ref().is_some_and(|s| s.runner.name == "docker");
     let probe = probe_harness(target, ctx);
-    let bin = probe.binary.clone().ok_or_else(|| {
-        let hint = if same { "run `hlock sync --install`" } else { "install it first" };
-        Error::Profile(format!("{} isn't installed; {hint}", target.name))
-    })?;
-    if same {
+    // in a docker sandbox the image runs the harness; the host needn't have it
+    let bin = match (&probe.binary, docker) {
+        (Some(b), false) => b.clone(),
+        (_, true) => target.binaries.first().cloned().unwrap_or_else(|| target.id.clone()),
+        (None, false) => {
+            let hint = if same { "run `hlock sync --install`" } else { "install it first" };
+            return Err(Error::Profile(format!("{} isn't installed; {hint}", target.name)));
+        }
+    };
+    if !same {
+        prep.notes.push(format!("translating a {} lock into {}", source.map(|s| s.name.as_str()).unwrap_or(&lock.harness.name), target.name));
+    } else if !docker {
+        // (in a docker sandbox, the caller checks the image's labels instead)
         if let (Some(want), Some(have)) = (&lock.harness.version, &probe.version) {
             if want != have {
                 if !opts.allow_version_mismatch {
@@ -549,8 +620,6 @@ pub fn prepare(lock: &Lockfile, lock_path: &Path, reg: &Registry, ctx: &Ctx, opt
                 prep.notes.push(format!("running {} {have}; the lock pins {want}", target.name));
             }
         }
-    } else {
-        prep.notes.push(format!("translating a {} lock into {}", source.map(|s| s.name.as_str()).unwrap_or(&lock.harness.name), target.name));
     }
 
     let mut argv = vec![bin];
@@ -573,6 +642,9 @@ pub fn prepare(lock: &Lockfile, lock_path: &Path, reg: &Registry, ctx: &Ctx, opt
         let prefix = match opts.prefix.clone() {
             Some(p) if p.is_absolute() => p,
             Some(p) => project_dir.join(p),
+            // a sandboxed session gets a root of its own: nothing it writes reaches an
+            // unsandboxed launch
+            None if sandbox.is_some() => project_dir.join(crate::sandbox::SANDBOX_ENV_DIR),
             None => default_prefix,
         };
         sync::ignore_env(&sync::env_dir(target, &prefix, ctx))?;
@@ -583,7 +655,12 @@ pub fn prepare(lock: &Lockfile, lock_path: &Path, reg: &Registry, ctx: &Ctx, opt
         std::fs::create_dir_all(&root)?;
         if same {
             let plan = sync::plan(lock, lock_path, reg, ctx, &sopts)?;
-            for st in plan.steps.iter().filter(|s| s.status == "auto" && matches!(s.kind.as_str(), "config" | "skill" | "instructions" | "plugin" | "mcp")) {
+            // plugins install through the harness's own CLI, on this machine
+            let host_cli = probe.binary.is_some();
+            if !host_cli && plan.steps.iter().any(|s| s.status == "auto" && s.kind == "plugin") {
+                prep.notes.push(format!("{} isn't installed on this machine, so the lock's plugins aren't installed for the sandbox", target.name));
+            }
+            for st in plan.steps.iter().filter(|s| s.status == "auto" && matches!(s.kind.as_str(), "config" | "skill" | "instructions" | "plugin" | "mcp") && (host_cli || s.kind != "plugin")) {
                 match sync::run_step(st, ctx) {
                     Ok(_) => prep.done.push(st.title.clone()),
                     Err(e) => prep.notes.push(format!("{}: {e}", st.title)),
@@ -624,7 +701,59 @@ pub fn prepare(lock: &Lockfile, lock_path: &Path, reg: &Registry, ctx: &Ctx, opt
     prep.argv = argv;
     prep.missing_secrets.sort();
     prep.missing_secrets.dedup();
+    if let Some(sb) = &sandbox {
+        let root = prep.root.clone().ok_or_else(|| Error::Profile("a sandboxed launch needs an isolated config root".into()))?;
+        let mut env = prep.env.clone();
+        if sb.spec.secrets == "proxy" {
+            // the proxy holds the keys; a lock secret holding one of them stays out too
+            let real: Vec<String> = ["ANTHROPIC_API_KEY", "OPENAI_API_KEY"].iter().filter_map(|k| ctx.var(k).map(str::to_string)).collect();
+            let kept: Vec<String> = prep.secret_env.iter().filter(|(_, v)| !real.contains(v)).map(|(k, _)| k.clone()).collect();
+            env.extend(prep.secret_env.iter().filter(|(k, _)| kept.contains(k)).map(|(k, v)| (k.clone(), v.clone())));
+            if !kept.is_empty() {
+                prep.notes.push(format!("{} lock secret{} reach{} the sandbox by environment: {}", kept.len(), if kept.len() == 1 { "" } else { "s" }, if kept.len() == 1 { "es" } else { "" }, kept.join(", ")));
+            }
+            env.extend(opts.proxy_env.clone());
+        } else {
+            let keys: Vec<String> = target.api_keys.iter().map(|k| k.env.clone()).collect();
+            env.extend(crate::sandbox::provider_env(ctx, &keys));
+            env.extend(prep.secret_env.clone());
+        }
+        let home = sync::env_dir(target, &project_dir.join(crate::sandbox::SANDBOX_ENV_DIR), ctx).join("home");
+        let mounts = match &opts.project {
+            None => crate::sandbox::project_mounts(&project_dir)?,
+            Some(_) => vec![],
+        };
+        let run = crate::sandbox::Run {
+            kind: "agent".into(),
+            argv: prep.argv.clone(),
+            cwd: ctx.cwd.clone(),
+            home,
+            config: Some(root),
+            mounts,
+            env,
+            tty: opts.tty,
+            host_gateway: !opts.proxy_env.is_empty(),
+        };
+        let version = lock.harness.version.clone();
+        prep.sandbox = Some(sandbox_prep(sb, &run, ctx, &mut prep.notes, version)?);
+    }
     Ok(prep)
+}
+
+fn sandbox_prep(sb: &crate::sandbox::Sandbox, run: &crate::sandbox::Run, ctx: &Ctx, notes: &mut Vec<String>, version: Option<String>) -> Result<SandboxPrep> {
+    let w = sb.wrap(run, ctx)?;
+    notes.extend(w.notes.iter().cloned());
+    Ok(SandboxPrep {
+        spec: sb.spec.clone(),
+        summary: sb.spec.summary(),
+        argv: w.argv,
+        env: w.env,
+        env_names: w.env_names,
+        kill: w.kill,
+        project: sb.project.clone(),
+        image: if sb.runner.name == "docker" { if run.kind == "graders" { sb.spec.grader_image.clone().or(sb.spec.image.clone()) } else { sb.spec.image.clone() } } else { None },
+        harness_version: version,
+    })
 }
 
 #[cfg(test)]
