@@ -12,6 +12,7 @@
 pub mod adapters;
 pub mod agent;
 pub mod apm;
+pub mod apm_registry;
 pub mod audit;
 pub mod capture;
 pub mod components;
@@ -37,6 +38,7 @@ pub mod process;
 pub mod profiles;
 pub mod providers;
 pub mod pull;
+pub mod registry;
 pub mod resolver;
 pub mod sandbox;
 pub mod sbom;

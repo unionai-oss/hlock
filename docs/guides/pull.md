@@ -30,6 +30,9 @@ like the repository they came from. Nothing is written to your project, so you c
 `alice` from any directory. The name is the repository owner by default (`alice`, or
 `alice-fast` for a remote `harness.fast.lock`); pass `--as NAME` to choose another.
 
+To pull by name from a registry (`hlock pull alice/review-bot`) instead of from a
+repository, see [Sharing through a registry](registry.md).
+
 Pulling runs nothing from the lock. The summary shows what's in it, and the warning lists
 the programs its MCP servers start, because those run as soon as the harness does. Before it
 writes anything, `pull` scans the files the lock vendors for

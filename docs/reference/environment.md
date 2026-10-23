@@ -18,6 +18,8 @@
 | `HLOCK_KEYCHAIN` | on | `0` stops hlock from reading or writing the OS keychain |
 | `HLOCK_HOME` | `~/.hlock` | hlock's per-user directory: [pulled](../guides/pull.md) locks in `pulls/`, their isolated roots in `env/`, the shared git cache for [dependencies](../guides/dependencies.md) in `cache/git/`, and the [executables you've approved](../guides/audit.md#executables) in `trust.toml` |
 | `HLOCK_GITHUB_URL` | `https://github.com` | Base URL `github:` and `apm:` sources fetch from (for GitHub Enterprise). See [Pulling someone else's lock](../guides/pull.md#sources). |
+| `HLOCK_REGISTRY` | the URL `hlock login` saved | The [registry](../guides/registry.md) `push`, `search`, `whoami` and `pull NAMESPACE/NAME` use |
+| `HLOCK_REGISTRY_TOKEN` | the keychain, else `~/.hlock/credentials.toml` | The registry token, for CI |
 | `HLOCK_NPM_REGISTRY` | `https://registry.npmjs.org` | The npm registry `npm:` MCP servers resolve against |
 | `HLOCK_PYPI_URL` | `https://pypi.org` | The package index `pypi:` MCP servers resolve against |
 | `HLOCK_GITLAB_URL` | `https://gitlab.com` | Base URL `gitlab:` sources fetch from (for a self-hosted GitLab) |
