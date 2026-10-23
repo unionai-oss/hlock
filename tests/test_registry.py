@@ -76,6 +76,9 @@ def handler_for(reg: Registry):
             self.send_response(status)
             self.send_header("content-type", ctype)
             self.send_header("content-length", str(len(body)))
+            # an HTTP/1.0 server closes every connection; saying so keeps the client from
+            # reusing one it has already closed ("Peer disconnected")
+            self.send_header("connection", "close")
             for k, v in (headers or {}).items():
                 self.send_header(k, v)
             self.end_headers()
