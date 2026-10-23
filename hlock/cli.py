@@ -529,6 +529,8 @@ def init(name: str, pack: str, harness: str | None, force: bool) -> None:
     if harness:
         with _friendly_errors():
             target = json.loads(_select_harness(harness, manifest=_m()))
+        if _harness_kind(target["id"]) == "app":
+            _app_refusal(target["id"], "resolve runs the harness on an eval pack")
         if _harness_kind(target["id"]) == "cli":
             models = _locked_models(target["id"])
     p.write_text(_default_manifest(name, pack, target["id"] if target else None, models))
@@ -792,6 +794,8 @@ def evals_run(tasks: tuple[str, ...], pack: str | None, seeds: int, workdir: str
         lf = Lockfile.load(_l())
         ids = json.loads(_check_eval_pack(pack, manifest=manifest))["tasks"]
     kind = _harness_kind(lf.harness)
+    if kind == "app":
+        _app_refusal(lf.harness)
     if kind is None:
         _fail(f"{_ld()} is for the simulated {lf.harness} harness, so there's no agent to run",
               "pin your own setup with [cmd]hlock pin[/]; [cmd]hlock resolve[/] measures the reference harness")
@@ -2174,6 +2178,15 @@ def _tilde(path: str) -> str:
         return path
 
 
+def _print_reload(plan: dict, ran: list[dict]) -> None:
+    """After writing a desktop app's config: how the app picks it up."""
+    if not any(st["kind"] in ("config", "mcp", "skill", "instructions") for st in ran):
+        return
+    for name, how in (plan.get("reload") or {}).items():
+        if how == "restart":
+            console.print(f"[warn]quit and reopen {name}[/] [muted]to load the changes[/]")
+
+
 def _manual_steps(plan: dict) -> list[dict]:
     return [st for st in plan["steps"] if st["status"] == "manual" and not st.get("optional")]
 
@@ -2188,6 +2201,8 @@ def _manual_steps(plan: dict) -> list[dict]:
 @click.option("--all-models", is_flag=True, help="Include models a provider lists but no locked role uses.")
 @click.option("--prefix", default=None, help="Where isolated config roots live.  [dim]\\[default: .hlock/env][/]")
 @click.option("--in-place", is_flag=True, help="Write into your own config (~/.claude, …) instead of an isolated root.")
+@click.option("--apps", is_flag=True,
+              help="Write desktop apps' own config (Claude Desktop, VS Code): they don't read an isolated root.")
 @click.option("--docker", "docker", is_flag=True, help="Write a Docker build context and Dockerfile to .hlock/docker/<harness>.")
 @click.option("--build", is_flag=True, help="With --docker: also run docker build.")
 @click.option("--base", "base", default=None, metavar="IMAGE",
@@ -2202,8 +2217,8 @@ def _manual_steps(plan: dict) -> list[dict]:
               help="Let through hidden characters in FILE. Repeatable.")
 @click.option("-v", "--verbose", is_flag=True, help="List every step, including optional ones.")
 def sync(lock: str, plan_only: bool, as_json: bool, yes: bool, install: bool, pull: bool, all_models: bool,
-         prefix: str | None, in_place: bool, docker: bool, build: bool, base: str | None, skill: bool, skill_dir: str,
-         exact: bool, frozen: bool, trust: bool, allow_hidden: tuple[str, ...], verbose: bool) -> None:
+         prefix: str | None, in_place: bool, apps: bool, docker: bool, build: bool, base: str | None, skill: bool,
+         skill_dir: str, exact: bool, frozen: bool, trust: bool, allow_hidden: tuple[str, ...], verbose: bool) -> None:
     """Rehydrate the setup in [path]harness.lock[/] on this machine.
 
     Builds a plan in which each step is [ok]✓ satisfied[/], [brand]● automatic[/] (hlock does it), or
@@ -2214,14 +2229,19 @@ def sync(lock: str, plan_only: bool, as_json: bool, yes: bool, install: bool, pu
 
     The setup goes into an isolated config root in [path].hlock/env/[/] (the one [cmd]hlock launch[/]
     uses), so your own config isn't touched. Pass [cmd]--in-place[/] to write into it instead.
+    A desktop app reads only its own config, so hlock writes it only with [cmd]--apps[/].
     """
     if base and not docker:
         _fail("--base goes with --docker", "hlock sync --docker --base IMAGE")
     if in_place and (prefix or docker):
         _fail("--in-place doesn't work with --prefix or --docker", "pick one place to write the setup")
+    if apps and (prefix or docker):
+        _fail("--apps writes your own config; it doesn't work with --prefix or --docker", "pick one place to write the setup")
     lock, stored = _lock_ref(lock, as_json) if lock else (_l(), None)
+    default_prefix = None
     if stored and prefix is None and not in_place and not docker:
-        prefix = _pull_env(stored)  # the same isolated root `hlock launch --lock NAME` uses
+        # the same isolated root `hlock launch --lock NAME` uses (a desktop app's lock ignores it)
+        default_prefix = _pull_env(stored)
     if stored is None and Path(lock).resolve() == _Project.lock.resolve():
         # the project's own lock: declared dependencies that are new or changed are locked first
         _refresh_deps(plan_only or as_json or skill, frozen)
@@ -2239,7 +2259,8 @@ def sync(lock: str, plan_only: bool, as_json: bool, yes: bool, install: bool, pu
                                         refresh=own and (plan_only or as_json or skill) and not frozen,
                                         allow_hidden=list(allow_hidden),
                                         # a plan isn't a sync: --trust shows what it would do, recording nothing
-                                        trust=trust and (plan_only or as_json)))
+                                        trust=trust and (plan_only or as_json),
+                                        apps=apps, default_prefix=default_prefix))
 
     plan = make_plan()
     untrusted = [e for e in plan.get("executables") or [] if e["status"] == "untrusted"]
@@ -2254,6 +2275,8 @@ def sync(lock: str, plan_only: bool, as_json: bool, yes: bool, install: bool, pu
         return
     where = {"home": f"your config [path]{_tilde(plan['root'])}[/]", "prefix": f"[path]{_tilde(_rel(plan['root']))}[/]",
              "docker": f"[path]{docker_dir}[/]"}[plan["mode"]]
+    if plan["harness_name"] in (plan.get("apps") or []):
+        where += "  [warn](needs --apps)[/]"
     console.print(f"[bold]Sync plan[/] for {plan['harness_name']} {plan.get('version') or ''} → {where}")
     console.print(_plan_table(plan, verbose))
     for note in plan.get("notes") or []:
@@ -2265,6 +2288,15 @@ def sync(lock: str, plan_only: bool, as_json: bool, yes: bool, install: bool, pu
             with _friendly_errors():
                 # exactly what was shown, not whatever is untrusted by now
                 _trust_approve(lock=lock, only=[e["digest"] for e in untrusted], manifest=_m())
+            plan = make_plan()
+            console.print(_plan_table(plan, verbose))
+
+    if plan.get("apps") and not (apps or in_place or plan_only or as_json or skill or yes) and sys.stdin.isatty():
+        # a desktop app reads only its own config: offer to write it
+        names = ", ".join(plan["apps"])
+        if click.confirm(f"{names} read{'s' if len(plan['apps']) == 1 else ''} only {'its' if len(plan['apps']) == 1 else 'their'} own config. "
+                         f"Write it?", default=False):
+            apps = True
             plan = make_plan()
             console.print(_plan_table(plan, verbose))
 
@@ -2355,7 +2387,11 @@ def sync(lock: str, plan_only: bool, as_json: bool, yes: bool, install: bool, pu
         sys.exit(1 if failed else 0)
 
     remaining = _manual_steps(plan)
-    again = "hlock sync --in-place" if in_place else "hlock sync"
+    again = "hlock sync --in-place" if in_place else "hlock sync --apps" if apps or plan.get("app") else "hlock sync"
+    later = [st for st in plan["steps"] if st.get("needs") == "apps" and st.get("optional")]
+    if later:
+        console.print(f"\n[muted]{len(later)} step{'s' if len(later) != 1 else ''} for "
+                      f"{', '.join(plan.get('apps') or [])} wait{'s' if len(later) == 1 else ''} for[/] [cmd]hlock sync --apps[/]")
     if remaining:
         secrets = [st for st in remaining if st["kind"] == "secret"]
         others = [st for st in remaining if st["kind"] != "secret"]
@@ -2374,17 +2410,29 @@ def sync(lock: str, plan_only: bool, as_json: bool, yes: bool, install: bool, pu
                 console.print(f"     [cmd]hlock secret set {short}[/]  [muted]# {used.rstrip(')')}[/]")
             console.print("     [muted]or export each variable, or reference it in ~/.config/hlock/secrets.toml[/]")
         hints = []
+        needs_apps = any(st.get("needs") == "apps" for st in remaining)
+        if needs_apps:
+            hints.append("hlock sync --apps")
         if any("--install" in (st.get("reason") or "") for st in remaining):
             hints.append(f"{again} --install")
         if any("--pull" in (st.get("reason") or "") for st in remaining):
             hints.append(f"{again} --pull")
-        hints.append(f"{again} --skill [muted](let your agent do it)[/]")
+        # what --apps can't do: an agent can (the meta harness, for the project's own lock)
+        if any(st.get("needs") != "apps" for st in remaining):
+            flag = " --apps" if needs_apps or apps else ""
+            if plan.get("app") and own and Path(_ml()).is_file():
+                hints.append(f"hlock meta run install{flag} [muted](let the meta harness do it)[/]")
+            else:
+                hints.append(f"{again} --skill [muted](let your agent do it)[/]")
         _next(*hints)
     if failed:
         sys.exit(1)
     if remaining:
         sys.exit(MANUAL_EXIT)
-    if plan["mode"] == "prefix":
+    if plan["mode"] == "prefix" and plan.get("app"):
+        _ok(f"in sync at [path]{_rel(plan['root'])}[/]  [muted]a copy: {plan['harness_name']} reads only your own config[/]")
+        console.print("[muted]to write it there:[/] [cmd]hlock sync --apps[/]")
+    elif plan["mode"] == "prefix":
         env = " ".join(f"{k}={_rel(v)}" for k, v in plan["isolation"].items())
         _ok(f"in sync at [path]{_rel(plan['root'])}[/]  [muted]your own config wasn't touched[/]")
         console.print(f"[muted]use it:[/] [cmd]{env} {plan.get('binary') or plan['harness']}[/]", soft_wrap=True)
@@ -2392,6 +2440,7 @@ def sync(lock: str, plan_only: bool, as_json: bool, yes: bool, install: bool, pu
             console.print("[muted]to restore into your own config instead:[/] [cmd]hlock sync --in-place[/]")
     else:
         _ok(f"in sync with [path]{_show(lock)}[/]")
+    _print_reload(plan, auto)
 
 
 @main.command()
@@ -2434,7 +2483,8 @@ def check(prefix: str | None) -> None:
             err_console.print(f"[fail]✗ drift:[/] {which} changed since {_ld()} was pinned")
             for line in drift:
                 err_console.print(f"  {line}")
-            restore = f"hlock sync --prefix {prefix}" if prefix else "hlock sync --in-place"
+            restore = (f"hlock sync --prefix {prefix}" if prefix
+                       else "hlock sync --apps" if _harness_kind(lf.harness) == "app" else "hlock sync --in-place")
             err_console.print(f"  [muted]hint:[/] re-pin with [cmd]{escape(_pin_cmd(lf))}[/], or restore it with [cmd]{restore}[/]")
             sys.exit(1)
         if failed:
@@ -2740,6 +2790,8 @@ def run(prompt: str, trust: bool, as_json: bool, no_sandbox: bool) -> None:
         lf = Lockfile.load(_l())
         agent = load(_l())
     kind = _harness_kind(lf.harness)
+    if kind == "app":
+        _app_refusal(lf.harness)
     if kind == "custom":
         _run_code_harness(prompt, as_json, trust, no_sandbox)
         return
@@ -2761,8 +2813,15 @@ def run(prompt: str, trust: bool, as_json: bool, no_sandbox: bool) -> None:
     sys.exit(0 if ok else 1)
 
 
+def _app_refusal(harness_id: str, why: str = "") -> None:
+    """Stop: a desktop app can't be started by hlock."""
+    name = json.loads(harness_profile(harness_id, manifest=_m()))["profile"]["name"]
+    _fail(f"{name} is a desktop app, and hlock can't start it" + (f"; {why}" if why else ""),
+          "[cmd]hlock sync --apps[/] puts the setup in place; then open the app")
+
+
 def _harness_kind(name: str) -> str | None:
-    """`cli`, `custom` (a code harness), or None for the reference harness."""
+    """`cli`, `app` (a desktop app), `custom` (a code harness), or None for the reference harness."""
     try:
         return json.loads(harness_profile(name, manifest=_m()))["profile"]["kind"]
     except (ValueError, OSError):
@@ -3453,7 +3512,8 @@ def harness_list(as_json: bool) -> None:
     """List known harnesses and what's installed on this machine.
 
     [bold]cli[/] harnesses are agent CLIs, listed apart when they're autonomous agents (a
-    long-running gateway with chat channels, schedules and memory), [bold]framework[/]
+    long-running gateway with chat channels, schedules and memory), [bold]app[/] harnesses are
+    desktop apps whose config hlock pins and restores but never starts, [bold]framework[/]
     harnesses are agent libraries a project builds on, and [bold]custom[/] harnesses come from
     [key]\\[harnesses.<id>][/] in [path]harness.toml[/].
     """
@@ -3462,8 +3522,8 @@ def harness_list(as_json: bool) -> None:
     if as_json:
         console.print_json(data=rows)
         return
-    groups = (("cli", False, "Agent CLIs"), ("cli", True, "Autonomous agents"), ("framework", False, "Frameworks"),
-              ("custom", False, f"Project harnesses ({_md()})"))
+    groups = (("cli", False, "Agent CLIs"), ("cli", True, "Autonomous agents"), ("app", False, "Desktop apps"),
+              ("framework", False, "Frameworks"), ("custom", False, f"Project harnesses ({_md()})"))
     for kind, autonomous, title in groups:
         # only agent CLIs split on `autonomous`, so a framework that sets it still shows up
         group = [r for r in rows if r["kind"] == kind and (kind != "cli" or bool(r.get("autonomous")) == autonomous)]
@@ -3475,13 +3535,13 @@ def harness_list(as_json: bool) -> None:
         t.add_column("harness", style="key", no_wrap=True)
         t.add_column("installed", no_wrap=True)
         t.add_column("source", style="muted", overflow="fold")
-        if kind == "cli":
+        if kind in ("cli", "app"):
             t.add_column("support")
         for r in group:
             p = r["probe"]
             installed = f"[bold]{p.get('version') or 'yes'}[/]" if p["installed"] else "[muted]—[/]"
             cells = ["[ok]●[/]" if p["active"] else "", r["id"], installed, p.get("source") or ""]
-            if kind == "cli":
+            if kind in ("cli", "app"):
                 cells.append(_support_badge(r["support"]))
             t.add_row(*cells)
         console.print(t)
@@ -3511,8 +3571,9 @@ def harness_show(name: str | None, as_json: bool) -> None:
     t = _kv_table()
     t.add_row("id", f"[bold]{prof['id']}[/]  [muted]{', '.join(prof['aliases'])}[/]")
     t.add_row("kind", prof["kind"] + ("  [muted](autonomous agent)[/]" if prof.get("autonomous") else "")
+              + ("  [muted](desktop app: hlock restores its config, you start it)[/]" if prof["kind"] == "app" else "")
               + (f"  [muted](framework {prof['framework']})[/]" if prof.get("framework") else ""))
-    if prof["kind"] == "cli":
+    if prof["kind"] in ("cli", "app"):
         t.add_row("support", _support_badge(prof["support"]))
     run = prof.get("run") or {}
     if run.get("entrypoint"):
@@ -3522,7 +3583,7 @@ def harness_show(name: str | None, as_json: bool) -> None:
     for pkg in prof.get("packages") or []:
         have = (probe.get("packages") or {}).get(pkg)
         t.add_row("package", f"{pkg}  " + (f"[bold]{have}[/]" if have else "[muted]not installed[/]"))
-    if prof["kind"] == "cli":
+    if prof["kind"] in ("cli", "app"):
         if probe["installed"]:
             t.add_row("installed", f"[bold]{probe.get('version') or '?'}[/]  [muted]{probe.get('binary')}[/]")
             t.add_row("source", probe.get("source") or "[muted]unknown install method[/]")
@@ -3537,6 +3598,9 @@ def harness_show(name: str | None, as_json: bool) -> None:
     for d in paths["skills"]:
         mark = "" if d["exists"] else "  [muted](missing)[/]"
         t.add_row("skills", f"{d['path']}{mark}")
+    for u in prof.get("unmanaged") or []:
+        link = f"  [muted]{u['url']}[/]" if u.get("url") else ""
+        t.add_row("not restored", f"{u['what']}  [muted]in {u['where']}[/]{link}")
     t.add_row("profile", "[muted]built in[/]" if prof["origin"] == "builtin" else f"[path]{prof['origin']}[/]")
     console.print(Panel(t, title=f"[brand]{prof['name']}[/]", title_align="left", border_style="magenta",
                         expand=False, padding=(1, 2)))
@@ -4238,10 +4302,10 @@ def _print_verdict(v: dict) -> None:
         console.print(f"  [cmd]export {name}=…[/]")
 
 
-def _verify(job: str, out: str | None, count: int) -> dict:
+def _verify(job: str, out: str | None, count: int, apps: bool = False) -> dict:
     with _working(f"Checking the {job} job…"):
         return json.loads(meta_verify(job, lock=_l(), meta_lock=_ml(), meta_manifest=_mm(), manifest=_m(),
-                                      out=out, count=count))
+                                      out=out, count=count, apps=apps))
 
 
 @meta.command("run", context_settings={"ignore_unknown_options": True})
@@ -4255,11 +4319,12 @@ def _verify(job: str, out: str | None, count: int) -> dict:
               type=click.Choice([t for t in _evals.TEMPLATES if t != "hello-world"]),
               help="bootstrap-evals: the template to scaffold when there's no pack yet.")
 @click.option("--pin", "repin", is_flag=True, help="update: re-pin the project's lock when something changed.")
+@click.option("--apps", is_flag=True, help="install: let it write desktop apps' own config (hlock sync --apps).")
 @click.option("--allow-version-mismatch", is_flag=True, help="Run even if the installed meta harness differs from its lock.")
 @click.option("--dry-run", is_flag=True, help="Print the command and the prompt, and run nothing.")
 @click.option("--json", "as_json", is_flag=True, help="With --dry-run: print the run plan as JSON.")
 def meta_run_cmd(job: str, instructions: tuple[str, ...], headless: bool | None, out: str | None, count: int,
-                 template: str, repin: bool, allow_version_mismatch: bool, dry_run: bool, as_json: bool) -> None:
+                 template: str, repin: bool, apps: bool, allow_version_mismatch: bool, dry_run: bool, as_json: bool) -> None:
     """Run JOB in the meta harness, then check the result.
 
     hlock renders the job's prompt from the project's state, runs the locked meta
@@ -4281,7 +4346,7 @@ def meta_run_cmd(job: str, instructions: tuple[str, ...], headless: bool | None,
         prep = json.loads(meta_prepare(job, lock=_l(), meta_lock=_ml(), meta_manifest=_mm(), manifest=_m(), out=out,
                                        count=count, instructions=" ".join(instructions),
                                        guide=str(guide) if guide else None, headless=headless,
-                                       allow_version_mismatch=allow_version_mismatch, dry_run=dry_run))
+                                       allow_version_mismatch=allow_version_mismatch, dry_run=dry_run, apps=apps))
     secret_env = prep.pop("secret_env", {})  # values for the config's references; never shown
     prompt_file = run_dir / "prompt.md"
     prompt_file.write_text(prep["prompt"])
@@ -4328,7 +4393,7 @@ def meta_run_cmd(job: str, instructions: tuple[str, ...], headless: bool | None,
     except OSError as e:
         _fail(f"cannot start {prep['argv'][0]}: {e}")
 
-    v = _verify(job, out, count)
+    v = _verify(job, out, count, apps)
     if v["status"] == "unverified" and code not in (None, 0):
         v["status"] = "failed"
         v["summary"] = f"{prep['harness_name']} exited with {code}"
@@ -4449,13 +4514,14 @@ def _scaffold_evals(pack_dir: Path, template: str, count: int, run_dir: Path, dr
 @click.argument("job")
 @click.option("--out", default=None, help="bootstrap-evals: the pack directory.")
 @click.option("--count", default=0, help="bootstrap-evals: the number of tasks expected.")
+@click.option("--apps", is_flag=True, help="install: desktop apps' own config should be written too.")
 @click.option("--json", "as_json", is_flag=True, help="Print the verdict as JSON.")
-def meta_verify_cmd(job: str, out: str | None, count: int, as_json: bool) -> None:
+def meta_verify_cmd(job: str, out: str | None, count: int, apps: bool, as_json: bool) -> None:
     """Run only JOB's check: what [cmd]hlock meta run[/] does after the agent finishes.
 
     The meta harness runs it to know when it's done; CI can run it too.
     """
-    v = _verify(job, out, count)
+    v = _verify(job, out, count, apps)
     if as_json:
         console.print_json(data=v)
     else:

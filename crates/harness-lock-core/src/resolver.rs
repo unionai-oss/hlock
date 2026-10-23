@@ -418,6 +418,10 @@ impl Resolver {
             .map(|h| (h.id.clone(), h.clone()))
             .collect();
         self.profiles = self.manifest.candidates.harness.iter().filter_map(|h| registry.harness(&h.name).map(|p| (h.name.clone(), p.clone()))).collect();
+        // trials start the harness, and a desktop app can't be started
+        if let Some(e) = self.profiles.values().find_map(|p| p.app_refusal()) {
+            return Err(e);
+        }
         self.prepare_sandbox()
     }
 
@@ -909,6 +913,9 @@ pub fn apply_target(manifest: &mut Manifest, explicit: Option<&str>, registry: &
         return Ok(Some(name));
     }
     let profile = registry.require_harness(&name)?;
+    if let Some(e) = profile.app_refusal() {
+        return Err(e);
+    }
     let cands = &mut manifest.candidates.harness;
     let only_default = cands.iter().all(|h| h.name == "reference");
     if only_default {

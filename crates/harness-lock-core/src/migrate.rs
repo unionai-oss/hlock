@@ -382,12 +382,16 @@ pub(crate) fn carry_over(lock: &mut Lockfile, source: &Lockfile, src: Option<&Ha
 /// A disabled server is left out, as `launch` does, unless the shape can say it's disabled.
 pub(crate) fn mcp_settings(lock: &Lockfile, target: &HarnessProfile, per_file: &mut BTreeMap<String, Map<String, Value>>, notes: &mut Vec<String>) {
     let shape = target.mcp.shape.as_deref().unwrap_or("standard");
-    let servers: Map<String, Value> = lock
-        .tool
-        .iter()
-        .filter(|t| t.kind == "mcp" && (t.enabled != Some(false) || matches!(shape, "opencode" | "goose")))
-        .map(|t| (t.name.clone(), mcp_entry(t, shape)))
-        .collect();
+    let mut servers = Map::new();
+    for t in lock.tool.iter().filter(|t| t.kind == "mcp" && (t.enabled != Some(false) || matches!(shape, "opencode" | "goose"))) {
+        // a server the config can't hold (a remote one, for Claude Desktop) stays in the lock only
+        match crate::sync::transport_problem(t, target) {
+            Some(why) => notes.push(format!("MCP server {}: {why}", t.name)),
+            None => {
+                servers.insert(t.name.clone(), mcp_entry(t, shape));
+            }
+        }
+    }
     if servers.is_empty() {
         return;
     }
@@ -544,8 +548,8 @@ pub(crate) fn save_to(lock: &mut Lockfile, vendor: &[VendorFile], source_path: &
 /// next to the new lock.
 pub fn migrate(source: &Lockfile, source_path: &Path, reg: &Registry, ctx: &Ctx, opts: &MigrateOptions) -> Result<MigrateOutcome> {
     let target = reg.require_harness(&opts.to)?;
-    if target.kind != "cli" {
-        return Err(Error::Profile(format!("{} is a {} harness; migrate moves a lock between agent CLIs", target.name, target.kind)));
+    if target.kind != "cli" && !target.is_app() {
+        return Err(Error::Profile(format!("{} is a {} harness; migrate moves a lock between agent CLIs and desktop apps", target.name, target.kind)));
     }
     let src = reg.harness(&source.harness.name);
     if src.is_some_and(|p| p.id == target.id) {
@@ -591,7 +595,12 @@ pub fn migrate(source: &Lockfile, source_path: &Path, reg: &Registry, ctx: &Ctx,
     let default_idx = lock.llm.iter().position(|l| l.role == "default").or(if lock.llm.is_empty() { None } else { Some(0) });
     let fallback = target_model(target);
     let mut unknown = Vec::new();
-    for (n, l) in lock.llm.iter_mut().enumerate() {
+    // a desktop app picks its model in the app or the account: keep the roles as they are
+    let app_model = target.is_app() && target.model.default.is_empty();
+    if app_model && lock.llm.iter().any(|l| l.model != "harness-default") {
+        c.notes.push(format!("{} sets its model in the app; the lock's models aren't configured", target.name));
+    }
+    for (n, l) in lock.llm.iter_mut().enumerate().filter(|_| !app_model) {
         let from = format!("{}:{}", l.provider, l.model);
         // why the role can't stay as it is
         let why = if matches!(l.provider.as_str(), "reference" | "unknown") || l.model == "harness-default" {
@@ -627,7 +636,7 @@ pub fn migrate(source: &Lockfile, source_path: &Path, reg: &Registry, ctx: &Ctx,
 
     // ---- settings: the model and the MCP servers ----
     let mut per_file: BTreeMap<String, Map<String, Value>> = BTreeMap::new();
-    if let Some(l) = default_idx.and_then(|n| lock.llm.get(n)) {
+    if let Some(l) = default_idx.and_then(|n| lock.llm.get(n)).filter(|_| !app_model) {
         let set = if let Some(rt) = l.runtime.as_deref() {
             let base_url = l.endpoint.clone().or_else(|| lock.runtime.iter().find(|r| r.name == rt).and_then(|r| r.endpoint.clone())).unwrap_or_default();
             local_model_settings(target, rt, &l.model, &base_url, &mut per_file)
@@ -784,13 +793,64 @@ mod tests {
         let _ = std::fs::remove_dir_all(&d);
     }
 
-    /// Every agent CLI to every other: a lock with the source's own project and user
+    #[test]
+    fn claude_code_to_desktop_apps() {
+        let d = std::env::temp_dir().join(format!("hlock-migrate-apps-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        let proj = d.join("proj");
+        std::fs::create_dir_all(proj.join(".claude/skills/review")).unwrap();
+        std::fs::write(proj.join(".claude/skills/review/SKILL.md"), "---\nname: review\n---\n").unwrap();
+        std::fs::write(proj.join("CLAUDE.md"), "be brief\n").unwrap();
+        let ctx = Ctx { home: d.join("home"), cwd: proj.clone(), env: [("HLOCK_OS".to_string(), "macos".to_string())].into(), path: vec![] };
+        let source = Lockfile {
+            harness: Harness { name: "claude-code".into(), ..Default::default() },
+            llm: vec![LLM { role: "default".into(), provider: "anthropic".into(), model: "opus".into(), ..Default::default() }],
+            tool: vec![
+                Tool { name: "gh".into(), kind: "mcp".into(), transport: Some("stdio".into()), command: Some("npx".into()), args: vec!["gh-mcp".into()], ..Default::default() },
+                Tool { name: "web".into(), kind: "mcp".into(), transport: Some("http".into()), url: Some("https://x.dev/mcp".into()), ..Default::default() },
+            ],
+            skill: vec![Skill { name: "review".into(), origin: "first-party".into(), digest: Some(tree_digest(&proj.join(".claude/skills/review"))), path: Some(".claude/skills/review".into()), scope: Some("project".into()), enabled: true, ..Default::default() }],
+            instructions: vec![Instructions { name: "CLAUDE.md".into(), digest: Some(crate::hash::sha256_bytes(b"be brief\n")), scope: "project".into(), ..Default::default() }],
+            ..Default::default()
+        };
+        let reg = Registry::builtin();
+        source.save(&proj.join("harness.lock")).unwrap();
+        let notes = |o: &MigrateOutcome| o.report["notes"].as_array().unwrap().iter().map(|n| n.as_str().unwrap().to_string()).collect::<Vec<_>>();
+
+        // VS Code: servers in its own shape, AGENTS.md, and a skill directory it reads
+        let o = migrate(&source, &proj.join("harness.lock"), &reg, &ctx, &MigrateOptions { to: "vscode".into(), model: None }).unwrap();
+        let mcp = o.vendor.iter().find(|f| f.rel.contains("mcp")).unwrap();
+        let servers: Value = serde_json::from_slice(&mcp.bytes).unwrap();
+        let servers = servers.get("/servers").or_else(|| servers.get("servers")).unwrap_or(&servers);
+        assert_eq!(servers["gh"]["type"], "stdio", "{servers}");
+        assert_eq!(servers["web"], json!({"type": "http", "url": "https://x.dev/mcp"}));
+        assert_eq!(o.lock.instructions[0].name, "AGENTS.md");
+        assert!(o.lock.skill[0].path.as_deref().is_some_and(|p| p.starts_with(".agents/skills") || p.starts_with(".github/skills")), "{:?}", o.lock.skill[0].path);
+        // its model is set in the app: the role is kept as it was
+        assert_eq!((o.lock.llm[0].provider.as_str(), o.lock.llm[0].model.as_str()), ("anthropic", "opus"));
+        assert!(notes(&o).iter().any(|n| n.contains("VS Code sets its model in the app")), "{:?}", notes(&o));
+
+        // Claude Desktop holds only stdio servers: the remote one stays in the lock, with a note
+        let o = migrate(&source, &proj.join("harness.lock"), &reg, &ctx, &MigrateOptions { to: "claude-desktop".into(), model: None }).unwrap();
+        let cfg = o.vendor.iter().find(|f| f.rel.contains("config")).unwrap();
+        let text = String::from_utf8_lossy(&cfg.bytes);
+        assert!(text.contains("gh") && !text.contains("x.dev"), "{text}");
+        assert!(o.lock.tool.iter().any(|t| t.name == "web"));
+        assert!(notes(&o).iter().any(|n| n.contains("MCP server web") && n.contains("connectors")), "{:?}", notes(&o));
+
+        // a desktop app can't be localized: localize runs the harness on a local model
+        let err = crate::localize::localize(&source, &proj.join("harness.lock"), &reg, &ctx, &crate::localize::LocalizeOptions { harness: Some("vscode".into()), ..Default::default() }).unwrap_err();
+        assert!(err.to_string().contains("is a desktop app"), "{err}");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// Every agent CLI and desktop app to every other: a lock with the source's own project and user
     /// skills, instruction files, an MCP server and a decider, migrated, then planned by
     /// `sync`. Each part either lands where the target reads it, or is dropped with a note.
     #[test]
     fn every_pair() {
         let reg = Registry::builtin();
-        let clis: Vec<&HarnessProfile> = reg.harnesses.iter().filter(|h| h.kind == "cli").collect();
+        let clis: Vec<&HarnessProfile> = reg.harnesses.iter().filter(|h| h.kind == "cli" || h.is_app()).collect();
         let mut problems = Vec::new();
         let mut drops = Vec::new();
         for src in &clis {
@@ -798,7 +858,8 @@ mod tests {
             let _ = std::fs::remove_dir_all(&d);
             let proj = d.join("proj");
             std::fs::create_dir_all(&proj).unwrap();
-            let ctx = Ctx { home: d.join("home"), cwd: proj.clone(), env: BTreeMap::new(), path: vec![] };
+            // no desktop app counts as running (the real ones may be)
+            let ctx = Ctx { home: d.join("home"), cwd: proj.clone(), env: [("HLOCK_APPS_RUNNING".to_string(), String::new())].into(), path: vec![] };
             let root = src.config_root(&ctx);
             let mut lock = Lockfile { harness: Harness { name: src.id.clone(), ..Default::default() }, ..Default::default() };
             let mut skill = |name: &str, path: String, scope: &str| {
@@ -846,7 +907,7 @@ mod tests {
                 let out = proj.join(format!("harness.{}.lock", target.id));
                 let mut new = o.lock.clone();
                 save_to(&mut new, &o.vendor, &src_path, &out, &ctx, &format!("{}/migrate", target.id)).unwrap();
-                let plan = crate::sync::plan(&new, &out, &reg, &ctx, &crate::sync::SyncOptions { trust: true, ..Default::default() }).unwrap();
+                let plan = crate::sync::plan(&new, &out, &reg, &ctx, &crate::sync::SyncOptions { trust: true, apps: true, ..Default::default() }).unwrap();
                 for st in plan.steps.iter().filter(|s| s.status == "manual" && matches!(s.kind.as_str(), "skill" | "instructions" | "config")) {
                     problems.push(format!("{pair}: {} {}: {}", st.kind, st.title, st.reason));
                 }

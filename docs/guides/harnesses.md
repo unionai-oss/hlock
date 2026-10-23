@@ -145,6 +145,79 @@ record it in `harness.toml`.
 
 A harness that isn't installed (on a CI runner, say) skips the version check.
 
+## Desktop apps
+
+Claude Desktop and VS Code (with Copilot) keep their MCP servers, skills and instruction
+files in plain files, so hlock pins, checks, syncs and migrates them like an agent CLI. Their
+profiles have `kind = "app"`. hlock never starts an app, so `launch`, `run`, `resolve` and
+`tune` refuse one: you open the app yourself.
+
+An app's setup is in your user config, so `pin` takes the user scope by default:
+
+```console
+$ hlock pin --harness claude-desktop
+✓ pinned claude-desktop 3.1623.1 → harness.lock  (--harness)
+╭─ 📌 harness.lock · pinned ─────────────────────────────────────╮
+│                                                                │
+│  harness        claude-desktop 3.1623.1  app@3.1623.1          │
+│  scope          project + user                                 │
+│  llm · default  unknown:harness-default                        │
+│  mcp            filesystem (stdio)                             │
+│  config         {root}/claude_desktop_config.json /mcpServers  │
+│                                                                │
+╰────────────────────────────────────────────────────────────────╯
+vendored 1 files into .hlock/vendor/claude-desktop/  · review before committing
+next → hlock check  ·  hlock sync
+```
+
+hlock reads an app's version from its bundle on macOS (`/Applications/Claude.app`), or from
+its CLI shim (`code --version`). Apps update themselves, so a newer installed version isn't
+drift. Claude Desktop pins only the `mcpServers` in `claude_desktop_config.json`: the rest
+of that file is state the app writes. Its Code tab reads `~/.claude`, which is
+[Claude Code's](../reference/harnesses.md#agent-clis) profile.
+
+An app reads only its own config, not an isolated root, so `sync` writes it only with
+`--apps` (or `--in-place`). Without it, the steps that would write it wait for you, and an
+interactive `sync` asks first:
+
+```console
+$ hlock sync
+Sync plan for Claude Desktop 3.1623.1 → your config ~/Library/Application Support/Claude
+(needs --apps)
+✓  harness  Claude Desktop 3.1623.1
+✓  mcp      `npx` for MCP servers: filesystem
+○  config   Write ~/Library/Application Support/Claude/claude_desktop_config.json
+            /mcpServers  Claude Desktop reads only your own config; hlock sync --apps
+            writes it
+not restored: 3 parts of Claude Desktop that live outside files hlock restores (hlock
+harness show claude-desktop)
+
+1 step needs you:
+  1. Write ~/Library/Application Support/Claude/claude_desktop_config.json /mcpServers
+Claude Desktop reads only your own config; hlock sync --apps writes it
+next → hlock sync --apps
+$ hlock sync --apps --yes
+…
+✓ Write ~/Library/Application Support/Claude/claude_desktop_config.json /mcpServers
+✓ in sync with harness.lock
+quit and reopen Claude Desktop to load the changes
+```
+
+- **A running app isn't written.** Claude Desktop can overwrite its config while it runs,
+  so while it's open the step says to quit it first.
+- **What isn't in a file isn't restored.** Connectors (remote MCP servers), chat projects
+  and Desktop Extensions live in your account or the app. `hlock harness show
+  claude-desktop` lists them, with links. A remote MCP server can't go in Claude Desktop's
+  file, so hlock leaves it to you as a connector.
+- **Installing the app.** `sync --install` runs `brew install --cask` on macOS. Without
+  Homebrew, the app is a download, which the [meta harness](meta.md#install) can do for you:
+  `hlock meta run install --apps`.
+
+To keep using Claude Code and put the same MCP servers in Claude Desktop, name the app in
+`[target] also` (see [Mixed-harness teams](dependencies.md#mixed-harness-teams)). VS Code
+can also import Claude Desktop's servers itself (`chat.mcp.discovery.enabled`), so with both
+you may see a server listed twice.
+
 ## Your own agent: frameworks and custom scripts
 
 Agents built on a framework, or written from scratch, are declared in the manifest as

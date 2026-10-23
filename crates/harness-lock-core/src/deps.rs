@@ -1648,6 +1648,12 @@ pub fn install(r: &mut Resolved, env: &Env) -> Result<Installed> {
         }
         Entry::Tool(t) => {
             let scope = t.scope.clone().unwrap_or_else(|| "project".into());
+            if let Some(why) = crate::sync::transport_problem(t, profile) {
+                return Err(err(format!("mcp {}: {why}", t.name)));
+            }
+            if profile.app.as_ref().is_some_and(|a| a.quit_to_write) && crate::sync::app_running(profile, ctx) {
+                return Err(err(format!("{} is running and may overwrite its config; quit it, then add the server again", profile.name)));
+            }
             if let Some(pkg) = t.dep.required_by.last() {
                 // it starts a process, from a file the project didn't write: not until it's trusted here
                 let trusted = crate::trust::executables(&Lockfile { tool: vec![t.clone()], ..Default::default() }, &env.project, None, ctx).into_iter().next().is_some_and(|e| crate::trust::TrustStore::load(ctx).ok().and_then(|s| s.status(&e.digest)) == Some("trusted"));

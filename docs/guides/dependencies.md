@@ -239,6 +239,22 @@ also = ["codex", "cursor-agent"]
 stay with the primary harness, and the plan says so. The lock's evidence was measured on the
 primary harness only.
 
+`also` can name a [desktop app](harnesses.md#desktop-apps), such as `claude-desktop`, which
+gets the MCP servers in its own config:
+
+```toml title="harness.toml"
+[target]
+harness = "claude-code"
+also = ["claude-desktop"]
+```
+
+An app reads only its own config, so `hlock sync` writes it only with `--apps`, while the
+primary harness stays in its isolated root. Until then its steps are optional: `sync` lists
+them ("1 step for Claude Desktop waits for hlock sync --apps") and still exits `0`. An app
+has no project config, so a project-scoped dependency goes into its user config, and one it
+can't hold (a remote MCP server, for Claude Desktop) is left for you to add there. An app is
+left out of an explicit `--prefix` and of `--docker`.
+
 ## APM packages
 
 !!! tip "Already using APM?"
