@@ -7,9 +7,9 @@ files, with your network. The [isolated config root](launch.md) keeps your *conf
 a session; a sandbox keeps the *agent* in.
 
 hlock doesn't build sandboxes. It runs the agent through a runtime you already have:
-Docker, built in, or any command that wraps another command, like macOS's `sandbox-exec` or
-Linux's bubblewrap. The lock records which sandbox it runs in, so a teammate who pulls the
-lock gets the same one.
+Docker or [NVIDIA OpenShell](#run-the-lock-on-openshell), built in, or any command that wraps
+another command, like macOS's `sandbox-exec` or Linux's bubblewrap. The lock records which
+sandbox it runs in, so a teammate who pulls the lock gets the same one.
 
 ## Run the lock in Docker
 
@@ -70,6 +70,7 @@ next →
     [sandbox]
     runner = "docker"
     image = "hlock-claude-code:fe8fe2dd18e4"  # push it, and pin @sha256:, to share it
+    (runner = "openshell" runs it on an OpenShell gateway instead)
 ```
 
 `--base IMAGE` builds on your own image (a devcontainer, your CI image) instead of
@@ -92,8 +93,9 @@ unless it's local).
 ## Keep provider keys out of the agent's reach
 
 By default (`secrets = "env"`), the sandbox gets your provider keys as environment
-variables, and anything the agent runs can print them. With `secrets = "proxy"` (Docker
-only), it gets a session token instead:
+variables, and anything the agent runs can print them. With `secrets = "proxy"`, it gets a
+session token instead. (On [OpenShell](#run-the-lock-on-openshell), OpenShell's providers do
+this, and it's the default.)
 
 ```toml title="harness.toml"
 [sandbox]
@@ -114,6 +116,95 @@ it anywhere. A harness that ignores the base URL sends the token to the provider
 rejects it. The key must be an API key in your environment; a subscription login can't be
 proxied. Lock secrets (MCP servers' tokens) still reach the sandbox as environment
 variables, and `launch` names them.
+
+## Run the lock on OpenShell
+
+[NVIDIA OpenShell](https://github.com/NVIDIA/OpenShell) runs agents in sandboxes managed
+by a gateway, with a network policy that denies by default and credentials it injects
+itself. With a gateway running (`openshell status` says `Connected`), name it as the runner:
+
+```toml title="harness.toml"
+[sandbox]
+runner = "openshell"
+image = "hlock-claude-code:4479bd93bb3d"
+```
+
+```console
+$ hlock pin
+$ hlock sandbox
+runner      openshell  installed
+image       hlock-claude-code:4479bd93bb3d
+network     none
+secrets     proxy
+applies to  agent, trials, graders
+trust       trusted
+next → hlock launch --dry-run
+$ hlock launch --dry-run
+▶ Claude Code in openshell (network none, secrets proxy)  CLAUDE_CONFIG_DIR=.hlock/sandbox-env/claude-code/config claude --model sonnet
+  runs openshell sandbox exec hlock-b7c544b2d542 -- claude --model sonnet
+```
+
+The image comes from `hlock sync --docker --build`, as for Docker. OpenShell runs it as
+uid 1000 and needs its `WORKDIR` writable by that user, which the generated Dockerfile
+makes it. For a remote gateway, push the image where the gateway can pull it.
+
+OpenShell doesn't mount your files, so each run is a session:
+
+1. hlock creates a sandbox from the image (`hlock-<id>`) and uploads a copy of what the
+   run sees: the project (without its `.env` files, `.hlock/env/`, or `node_modules`,
+   virtualenvs and a Rust crate's `target/`, which the sandbox rebuilds for its own
+   platform, and which don't come back), and the session's config root and `HOME`. Paths in the command, its environment and the config
+   root's files are rewritten to where they are in the sandbox.
+2. For each provider key you have (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`), it creates an
+   OpenShell provider and attaches it. The agent gets a placeholder; OpenShell puts the key
+   in requests to the provider's host only (`api.anthropic.com`, `api.openai.com`), and only
+   from the harness's own binary (and its interpreter, when it's a script: then any program
+   that interpreter runs can use the key, and the run says so).
+3. The command runs with `openshell sandbox exec`.
+4. hlock downloads the project and copies back what the run changed, then deletes the
+   sandbox and its providers:
+
+```text
+✓ copied back from the sandbox: 2 added, 1 changed
+! the sandboxed run changed .envrc; control files and .env files aren't copied back, so yours is unchanged
+```
+
+A file comes back only if the run changed it and you didn't. When you both changed it,
+yours stays and the sandbox's copy is kept in `.hlock/sandbox-env/conflicts/`. Some of the
+project's paths never come back, even ones the run created, at any depth: control files
+(`harness.toml`, `harness*.lock`, `hlock-policy.toml`, `.envrc`), `.env` files, any `.git/`
+(commits made in the sandbox stay there), and `.hlock/`. (A trial's or an eval task's
+workspace is the task's own: everything in it comes back, as under Docker.) Nothing is written through a link,
+and a link the run made that points outside the project isn't made here. If copying back
+fails, the sandbox is kept and hlock says how to get your files out of it; its providers
+are deleted either way (and a provider a crashed session left behind is deleted by the
+next one).
+
+`network` is `none`, the only mode: the sandbox reaches the providers' hosts and nothing
+else (no host at all with `secrets = "env"`, which has no providers). To allow more (a package registry, an MCP server), write an OpenShell policy and pass
+it as `profile`; hlock pins it by digest and hands it to `openshell sandbox create
+--policy`. A wildcard can't allow everything, so `network = "open"` is refused.
+`secrets = "env"` puts the keys in the sandbox's environment instead, and your policy then
+has to allow their hosts. A provider sends a key to the provider's own host, so with
+`secrets = "proxy"` a run stops if `ANTHROPIC_BASE_URL` or `OPENAI_BASE_URL` points
+somewhere else (a company gateway): use `secrets = "env"` and a policy for it.
+
+Each session uploads the project again, which takes a few seconds (more for a big
+project), and the sandbox's `HOME` and config root start from hlock's copy each time,
+rather than being kept between runs as with Docker. A code harness's trials and `tests`
+graders run the same way, one session per trial or grade. Stopping the local
+`openshell` client doesn't stop the command inside, so a run's timeout stops it with the
+image's `timeout` command, just before hlock's deadline. A run that's interrupted, or that
+times out in an image without `timeout`, gets nothing copied back.
+
+On Docker Desktop, the gateway's supervisor needs bridge networking. If a sandbox fails
+with `failed to connect to OpenShell server`, add this to the gateway's config
+(`/opt/homebrew/var/openshell/gateway.toml` for a Homebrew install) and restart it:
+
+```toml
+[openshell.drivers.docker]
+supervisor_network_mode = "bridge"
+```
 
 ## Define your own runner
 
@@ -193,10 +284,10 @@ network-args = { none = [], open = ["--share-net"] }
 `networks` (or the keys of `network-args`) lists the network modes the runner enforces.
 That's your claim; hlock only refuses a mode the runner doesn't list. The runner process
 gets the sandbox's environment, plus what it needs to start from yours (`PATH`, `USER`,
-`TMPDIR`, `DOCKER_*`), and hlock never puts a value in its arguments.
+`TMPDIR`, `DOCKER_*`, `OPENSHELL_*`), and hlock never puts a value in its arguments.
 
 A project can define runners too, in `harness.toml`'s `[sandbox.runners.<name>]`. It can't
-redefine `docker` or one of yours, and since hlock runs it, it's
+redefine `docker`, `openshell` or one of yours, and since hlock runs it, it's
 [approved](audit.md#executables) like the lock's other executables.
 
 ## What the sandbox sees
@@ -210,7 +301,8 @@ redefine `docker` or one of yours, and since hlock runs it, it's
 
 Wherever the project is mounted, its `.env` files and the unsandboxed config roots in
 `.hlock/env/` (which hold filled-in secrets and logins) are covered, and so is
-`.hlock/docker/`.
+`.hlock/docker/`. On OpenShell, "read-write" means uploaded and copied back, and
+"read-only" means uploaded only; what's covered isn't uploaded.
 
 - **Its own config root.** A sandboxed session restores the lock into
   `.hlock/sandbox-env/<harness>/`, not `.hlock/env/`, so nothing it writes there reaches an
@@ -310,9 +402,9 @@ machine.
 - hlock doesn't check a runtime's claims. A command runner's network modes, and what its
   profile allows, are what you wrote.
 - Network is `open` or `none`. Per-host allowlists belong in a runtime that has them
-  (OpenShell's policy, a seatbelt or firewall profile, passed as `profile`).
-- The proxy covers model-provider keys for `docker`. A code harness's trials get keys by
-  environment, and so do MCP servers' tokens.
-- Docker's `sbx` and NVIDIA OpenShell run agents in microVMs with their own images and
-  credential handling. You can wire them as command runners, but hlock doesn't ship tested
-  presets for them yet.
+  (an OpenShell policy, a seatbelt or firewall profile, passed as `profile`).
+- Keys are held for you for Anthropic and OpenAI only: by hlock's proxy on `docker` (not
+  for a code harness's trials), by OpenShell's providers on `openshell`. MCP servers'
+  tokens reach the sandbox by environment.
+- Docker's `sbx` runs agents in microVMs with their own images and credential handling.
+  You can wire it as a command runner, but hlock doesn't ship a tested preset for it yet.

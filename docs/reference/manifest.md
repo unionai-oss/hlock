@@ -244,12 +244,12 @@ grader-image = "ghcr.io/acme/ci@sha256:9d03…"
 
 | Key | Default | Description |
 |---|---|---|
-| `runner` | `"none"` | `docker`, or a runner defined in `~/.config/hlock/sandbox.toml` or `[sandbox.runners.<name>]` |
-| `image` | | The image `docker` runs (required for it). Pin it `@sha256:` |
-| `network` | `"open"` | `open` or `none` |
-| `secrets` | `"env"` | `env` (provider keys as environment variables) or `proxy` (a [key proxy](../guides/sandbox.md#keep-provider-keys-out-of-the-agents-reach); `docker` only) |
+| `runner` | `"none"` | `docker`, [`openshell`](../guides/sandbox.md#run-the-lock-on-openshell), or a runner defined in `~/.config/hlock/sandbox.toml` or `[sandbox.runners.<name>]` |
+| `image` | | The image `docker` or `openshell` runs (required for them). Pin it `@sha256:` |
+| `network` | `"open"` (`"none"` for `openshell`) | `open` or `none`; `openshell` takes `none` only |
+| `secrets` | `"env"` (`"proxy"` for `openshell`) | `env` (provider keys as environment variables) or `proxy` (a [key proxy](../guides/sandbox.md#keep-provider-keys-out-of-the-agents-reach) on `docker`, OpenShell providers on `openshell`) |
 | `applies-to` | all three | What runs inside: `agent`, `trials`, `graders` |
-| `profile` | | A runtime policy file in the project (a seatbelt profile, an OpenShell policy), pinned by digest and passed as `{profile}` |
+| `profile` | | A runtime policy file in the project (a seatbelt profile, an OpenShell policy), pinned by digest and passed as `{profile}` (to `openshell`, as `--policy`) |
 | `grader-image` | `image` | The image `tests` graders run in |
 
 `[sandbox.runners.<name>]` defines a [command runner](../guides/sandbox.md#define-your-own-runner)

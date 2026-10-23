@@ -224,6 +224,7 @@ next →
     [sandbox]
     runner = "docker"
     image = "hlock-pi:8f489e60629b"  # push it, and pin @sha256:, to share it
+    (runner = "openshell" runs it on an OpenShell gateway instead)
 ```
 
 `--docker` writes a build context to `.hlock/docker/<harness>/`. The restored config, skills
@@ -235,8 +236,10 @@ variables or from secret files mounted at `/run/secrets` (Docker and Compose sec
 [Secrets](secrets.md#in-docker)). Model weights stay on the host. A local runtime is reached at
 `http://host.docker.internal:<port>`, which the Dockerfile notes. `--build` also runs
 `docker build`. The image is tagged with the lock's hash and labeled with the harness and
-its version, so it can be the lock's [sandbox](sandbox.md). `--base IMAGE` builds on your own
-Debian-based image instead of `node:22-bookworm`.
+its version, so it can be the lock's [sandbox](sandbox.md), on Docker or
+[OpenShell](sandbox.md#run-the-lock-on-openshell) (its `/workspace` is writable by uid 1000,
+which OpenShell runs as). `--base IMAGE` builds on your own Debian-based image instead of
+`node:22-bookworm`.
 
 ## Reference
 

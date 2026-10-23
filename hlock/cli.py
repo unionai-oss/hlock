@@ -878,9 +878,15 @@ def _run_task(kind: str, task: dict, ws: Path, log: Path, trust: bool, notes: li
         with log.open("w") as out:
             try:
                 code, timed_out = _sbx.run(sb, cwd=ws, stdout=out, timeout=timeout)
-            except OSError as e:
-                return {"started": False, "error": f"cannot start {sb['argv'][0]}: {e}", "latency_s": 0.0,
-                        "cost_usd": None, "log": str(log)}
+            except (OSError, ValueError) as e:
+                if not sb.get("began"):
+                    return {"started": False, "error": f"cannot start {sb['argv'][0]}: {e}", "latency_s": 0.0,
+                            "cost_usd": None, "log": str(log)}
+                # it ran; the session's end failed
+                return {"started": True, "error": f"the sandbox session failed: {e}",
+                        "latency_s": round(time.monotonic() - start, 3), "cost_usd": None, "log": str(log)}
+            finally:
+                _session_report(sb, notes)
         error = (f"stopped after the task's {timeout}s timeout" if timed_out
                  else None if code == 0 else f"{prep['harness_name']} exited {code}")
         return {"started": True, "error": error, "latency_s": round(time.monotonic() - start, 3), "cost_usd": None,
@@ -1880,7 +1886,7 @@ def sandbox_cmd(as_json: bool) -> None:
     """Show the sandbox the lock runs in, and whether it can run here.
 
     A lock names its sandbox in [key]\\[policy.sandbox][/], from [path]harness.toml[/]'s
-    [key]\\[sandbox][/]: a runner (docker, or one you define), a network mode, how
+    [key]\\[sandbox][/]: a runner (docker, openshell, or one you define), a network mode, how
     secrets reach it, and what runs inside. [cmd]hlock launch --dry-run[/] shows the
     command a launch would run.
     """
@@ -2345,6 +2351,7 @@ def sync(lock: str, plan_only: bool, as_json: bool, yes: bool, install: bool, pu
         console.print(f"  [muted]or run the lock in it as a sandbox: add to {MANIFEST}, then re-pin[/]")
         console.print(f"    [cmd]\\[sandbox][/]\n    [cmd]runner = \"docker\"[/]\n    [cmd]image = \"{tag}\"[/]  "
                       "[muted]# push it, and pin @sha256:, to share it[/]", soft_wrap=True)
+        console.print("    [muted](runner = \"openshell\" runs it on an OpenShell gateway instead)[/]", soft_wrap=True)
         sys.exit(1 if failed else 0)
 
     remaining = _manual_steps(plan)
@@ -2777,8 +2784,11 @@ def _run_cli_harness(prompt: str, as_json: bool, trust: bool = False, no_sandbox
     try:
         if sb:
             before = json.loads(_control_snapshot(sb["project"]))
-            with tempfile.TemporaryFile("w+") as out:
-                code, _ = _sbx.run(sb, stdout=out if as_json else None)
+            with tempfile.TemporaryFile("w+") as out, _friendly_errors():
+                try:
+                    code, _ = _sbx.run(sb, stdout=out if as_json else None)
+                finally:
+                    _session_report(sb, prep["notes"] if as_json else None)
                 out.seek(0)
                 r = subprocess.CompletedProcess(sb["argv"], code if code is not None else 1, out.read() if as_json else None, "")
             _control_report(sb["project"], before)
@@ -2908,6 +2918,7 @@ def launch(args: tuple[str, ...], lock: str | None, prefix: str | None, in_place
     secret_env = prep.pop("secret_env", {})  # values for the config's references; never shown
     if (dry_run or as_json) and prep.get("sandbox"):
         prep["sandbox"].pop("env", None)
+        prep["sandbox"].pop("session_env", None)
     if as_json:
         console.print_json(data=prep)
         return
@@ -2924,10 +2935,12 @@ def launch(args: tuple[str, ...], lock: str | None, prefix: str | None, in_place
         before = json.loads(_control_snapshot(sb["project"]))
         sys.stdout.flush()
         try:
-            code, _ = _sbx.run(sb, interactive=True)
+            with _friendly_errors():
+                code, _ = _sbx.run(sb, interactive=True)
         finally:
             if proxy:
                 proxy.stop()
+            _session_report(sb)
         _control_report(sb["project"], before)
         sys.exit(code or 0)
     env = {**os.environ, **prep["env"], **secret_env}
@@ -2945,7 +2958,8 @@ def _sandbox_proxy(lock: str, no_sandbox: bool):
     with _friendly_errors():
         info = json.loads(_sandbox_info(lock, manifest=manifest, no_sandbox=no_sandbox))
     spec = info.get("spec")
-    if not spec or info["off"] or spec.get("secrets") != "proxy":
+    # OpenShell holds the keys in its own providers: no proxy of hlock's
+    if not spec or info["off"] or spec.get("secrets") != "proxy" or spec.get("runner") != "docker":
         return None
     keys = _sbx.proxy_keys()
     if not keys:
@@ -2967,6 +2981,7 @@ def _sandbox_start(prep: dict, proxy) -> dict | None:
     if not sb:
         return None
     sb["env"] = sb.pop("env", {})
+    sb["session_env"] = sb.pop("session_env", {})
     try:
         prep["notes"].extend(_sbx.check_image(sb, prep["harness"]))
     except RuntimeError as e:
@@ -2984,6 +2999,19 @@ def _control_report(project: str, before: dict) -> None:
     for line in changed:
         err_console.print(f"[warn]![/] the sandboxed session {escape(line)}: review it before you run hlock (or direnv) again",
                           soft_wrap=True)
+
+
+def _session_report(sb: dict, notes: list[str] | None = None) -> None:
+    """What an OpenShell session said as it ended (what it copied back, what it didn't):
+    printed, or added to `notes`."""
+    for line in sb.get("after") or []:
+        if notes is not None:
+            if line not in notes:
+                notes.append(line)
+        elif line.startswith("copied back"):
+            err_console.print(f"[ok]✓[/] {escape(line)}", soft_wrap=True)
+        else:
+            err_console.print(f"[warn]![/] {escape(line)}", soft_wrap=True)
 
 
 def _print_prep(prep: dict) -> None:

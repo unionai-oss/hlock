@@ -1,6 +1,6 @@
 # Sandboxes: running a locked agent inside an isolation runtime
 
-Status: accepted, phase 1 in progress · Owner: Niels Bantilan · Last updated: 2026-10-22 · Builds on [v0 §7.5](v0.md#75-sandboxes), [secrets](secrets.md)
+Status: accepted, phase 1 in progress · Owner: Niels Bantilan · Last updated: 2026-10-23 · Builds on [v0 §7.5](v0.md#75-sandboxes), [secrets](secrets.md)
 
 > hlock pins *which* agent setup runs. It says nothing about *how* that setup runs: the
 > agent, its MCP servers and the eval graders all run as the user, with the user's files,
@@ -41,9 +41,9 @@ Status: accepted, phase 1 in progress · Owner: Niels Bantilan · Last updated: 
 - **Agent-CLI trials in `resolve`/`tune`.** They're simulated in process
   (`resolver.rs` sends non-code harnesses to the reference adapter): nothing runs. Code-
   harness trials and graders run for real, and those are sandboxed.
-- **Turnkey `sbx` / OpenShell support.** Both own their VM's image, mounts and credential
-  injection. They can be command runners (§4.3), but the proxy can't reach a VM, and
-  their exact CLIs aren't tested here. Phase 2.
+- **Turnkey `sbx` support.** It owns its VM's image, mounts and credential injection. It
+  can be a command runner (§4.3), but the proxy can't reach a VM, and its CLI isn't tested
+  here. Phase 2. (OpenShell is built in: §4.8.)
 
 ## 3. Model
 
@@ -51,9 +51,9 @@ A **sandbox** is a runner plus a policy:
 
 | Part | Meaning |
 |---|---|
-| **runner** | `none`, `docker`, or a named command runner |
+| **runner** | `none`, `docker`, `openshell` (§4.8), or a named command runner |
 | **network** | `open` or `none` |
-| **secrets** | `env` (today's behavior) or `proxy` (§6, `docker` only) |
+| **secrets** | `env` (today's behavior) or `proxy` (§6 on `docker`; OpenShell providers on `openshell`, §4.8) |
 | **profile** | Optional runtime-native policy file, pinned by digest |
 | **applies-to** | Which of hlock's process kinds run inside: `agent`, `trials`, `graders` |
 
@@ -251,6 +251,104 @@ Names must match `^[A-Za-z_][A-Za-z0-9_]*$`, or the run stops.
   `[sandbox]` lines to paste, with a reminder that a local tag isn't a digest: push it to a
   registry to share it, and pin `@sha256:`.
 
+### 4.8 The built-in `openshell` runner
+
+[NVIDIA OpenShell](https://github.com/NVIDIA/OpenShell) runs sandboxes on a gateway
+(Docker, Podman, Kubernetes or a microVM driver behind it). Two things set it apart from
+the other runners, and decide the design:
+
+- **It doesn't mount host directories.** Its Docker driver has bind mounts, but only when
+  the gateway's operator sets `enable_bind_mounts` and turns resource admission off, and
+  OpenShell warns they bypass its workspace isolation. Files go in with `sandbox upload`
+  and out with `sandbox download`.
+- **It holds credentials itself.** A *provider* stores a key on the gateway; the sandbox
+  gets a placeholder (`openshell:resolve:env:…`), and the supervisor puts the real value in
+  requests to the endpoints the provider's *profile* lists, from the binaries it lists.
+  Network is deny-by-default: a provider's profile contributes its endpoints to the policy.
+
+So an `openshell` run is a **session** (`openshell.rs`), not one argv. `wrap` returns a plan
+(`Wrapped.session`: the places, the argv, the environment's names) and an argv that only
+previews it; `begin` and `end` run around the command, from `run_command` in Rust and from
+`hlock.sandbox.run` in Python (through `sandbox_session_begin`/`_end`):
+
+1. **Begin.** `openshell status` must say `Connected`. Under `secrets = "proxy"` with no
+   `ANTHROPIC_API_KEY` or `OPENAI_API_KEY`, the agent stops here. `sandbox create --name
+   hlock-{id} --from {image} --detach --no-auto-providers [--policy {profile}]`, then wait for
+   phase `Ready`, then `pwd` for the image's working directory `W`.
+2. **Places.** The run's mounts (§4.5) become places: each read-write mount not nested in
+   another writable one is a place; read-only mounts inside it are *kept* (uploaded, never
+   copied back), covering mounts are *skipped* (not uploaded). The project goes to
+   `W/<its name>`, other top-level places to `W/.hlock/<n>-<name>`, nested ones under their
+   parent. Each is staged in a private temp dir (hard links, or copies) without `.env`
+   files, `.hlock/sandbox-env`, `node_modules`, `.venv`, `__pycache__`, a `target` beside a
+   `Cargo.toml` and a `venv` with a `pyvenv.cfg` (on the host, or for what comes back, in
+   the sandbox's copy), with a manifest (path → sha256, exec bit;
+   links; dirs), and uploaded. What the run puts in those directories stays in the sandbox,
+   and the run says how many.
+3. **Paths.** Host paths in the argv, the environment's values and the text files of the
+   config root and `HOME` are rewritten to the sandbox's (whole-path matches, longest first,
+   and the `/private`-less spelling on macOS). The program is the image's (as §4.4).
+4. **Environment.** `wrap` keeps the command's variables (`Wrapped.session_env`) apart
+   from the runner's (`Wrapped.env`). `exec --env` would put values on the host's command line, so the
+   command's variables go in a file uploaded to `W/.hlock-session/env` and sourced by the
+   `/bin/sh -c` wrapper. Under `proxy`, no provider variable is in it (trials included).
+   The `openshell` process itself gets only the runner's variables (`PATH`, `USER`,
+   `TMPDIR`, `OPENSHELL_*`), the real `HOME` (to find its gateway) and, for `provider
+   create`, the keys: never the command's (`XDG_CONFIG_HOME`, which opencode's root sets,
+   would point it at another gateway config; the host's is kept). Under `proxy`, a
+   `*_BASE_URL` pointing away from the provider's host stops the run: the provider would send
+   the key to the wrong host.
+5. **Providers** (`secrets = "proxy"`, not graders). The binary is found in the sandbox
+   (`command -v`, `readlink -f`, and a script's interpreter). For each key: a profile
+   `hlock-<route>-<hash of host, auth style, binaries>` (the provider's host on 443, REST,
+   enforced, those binaries; no secret, so it's kept for the next run), a provider
+   `hlock-{id}-<route>` created with `--credential VAR` (the value read from the
+   environment, never an argument), attached with `--wait`. A script's interpreter in the
+   binaries is noted: any program it runs can use the key.
+6. **Run** `openshell sandbox exec hlock-{id} --workdir <cwd> --tty|--no-tty --no-login-shell
+   -- /bin/sh -c … <env file> <seconds> <argv>`. Stopping the local client doesn't stop the
+   remote command, `exec --timeout` doesn't either, and one exec can't signal another's
+   processes (each is its own Landlock domain; `kill` is refused). So when the run has a
+   deadline and the image has `timeout`, the wrapper runs the command under `timeout -s KILL`
+   five seconds before the caller's (an exit of 124 or 137 at that deadline counts as a
+   timeout). An interrupted run, or a timed-out one without `timeout`, copies nothing back:
+   the command may still be writing; a killed exec without a timeout (a ^C's `stop_all`, in
+   `run_command`) counts as interrupted. A ^C while `begin` runs is held until the sandbox
+   exists, then ends the session. The CLI calls of `begin` and `end` are left out of
+   `stop_all` (`Limits.untracked`), and each `begin` sweeps away `hlock-<id>-<route>`
+   providers whose sandbox is gone, which a process that exited mid-session left.
+7. **End.** Each place that copies back (not the config root or `HOME`, whose paths were
+   rewritten) is downloaded and merged against its manifest: a path the sandbox changed is
+   applied only where the host still matches the manifest; otherwise the host's stays and
+   the sandbox's file goes to `.hlock/sandbox-env/conflicts/<name>/`; the same change on both
+   sides is no conflict. Never applied in the project (or a place inside it, as when
+   launched from a subdirectory), existing or not, at any depth: a
+   control file's name, a `.env*` name, anything under a `.git`, and `.hlock/` (except a
+   plain file at `.hlock/result.json`, the contract's output). A scratch workspace (a
+   trial's, an eval task's) is the task's own, as under docker: only its kept paths are
+   held. A change to one is reported
+   (for `.git`: `HEAD`, refs, packed refs, config and hooks). A link comes back only with a
+   relative target that stays inside the place (`..` only at its start, so a chain of links
+   can't climb out). A download that shares none of the baseline's top-level entries is
+   refused. Writes go through a temp file and rename,
+   after checking each parent is a real directory, never a link; a path that can't be
+   written is refused and the rest still comes back. An empty download is refused rather
+   than read as "everything removed". Then the providers are detached and deleted
+   (OpenShell won't delete an attached one), and the sandbox; one that can't be deleted is
+   named. A place that fails to copy back
+   keeps the sandbox (its providers detached and deleted) and says how to get the files
+   out. A failed begin removes what it created.
+
+Validation: `openshell` needs `image`; `network` defaults to `none` and `open` is refused
+(OpenShell's wildcards need three labels, so nothing allows everything); `secrets` defaults
+to `proxy`. A runners file can't define `openshell`. The image needs a `WORKDIR` writable by
+uid 1000 (OpenShell's default identity): `sync --docker` chowns `/workspace`. On Docker
+Desktop the gateway's supervisor needs `supervisor_network_mode = "bridge"`, which a
+startup failure's message suggests.
+
+Trade-offs: each session re-uploads the project; `HOME` and the config root start from
+hlock's copy each time instead of persisting; commits made inside stay inside.
+
 ## 5. Checks and trust
 
 Before anything starts, hlock checks and stops with a fix:
@@ -439,6 +537,8 @@ note = ""                            # "agent-CLI trials are simulated" | "backe
   in `diff_locks` and `lockdiff`.
 - **Docker image.** `LABEL`s and `--base` in `sync::dockerfile`; the tag and paste lines
   in the CLI.
+- **OpenShell, `openshell.rs`.** `plan` (in `wrap`), `begin`, `end`, `merge`; the session is
+  JSON across the PyO3 boundary (`sandbox_session_begin`/`_end`), holding no secret values.
 
 ## 10. Testing
 
@@ -456,6 +556,11 @@ note = ""                            # "agent-CLI trials are simulated" | "backe
   path, credential headers stripped, streaming, stopped when the run ends.
 - `sandbox-exec` on macOS CI runs a real command-runner test. Docker tests run only when
   the daemon is up.
+- OpenShell: Rust tests for path rewriting, places from mounts, staging, the merge
+  (conflicts, control files, `.env`, links), the profile; Python tests against a fake
+  `openshell` CLI (a sandbox is a directory) for the session, copy-back, conflicts, keys,
+  and code-harness trials and graders; one test against a live gateway, run with
+  `HLOCK_TEST_OPENSHELL=1`.
 
 ## 11. Order of work
 
@@ -471,8 +576,10 @@ Each step ships on its own:
 4. **Command runners**, with the `sandbox-exec` test.
 5. **Policy `require`.**
 6. **The proxy** for docker.
+7. **OpenShell** as a built-in runner (§4.8).
 
 Phase 2: per-host allowlists, the proxy for command runners and code-harness trials,
-per-MCP-server token proxying, sandboxed `meta` jobs, tested `sbx` and `openshell`
-presets, and remembering per machine that a project ran sandboxed, so dropping the sandbox
+per-MCP-server token proxying, sandboxed `meta` jobs, a tested `sbx` preset, OpenShell
+sessions that persist `HOME` between runs (a kept sandbox per project), OpenShell providers
+for MCP servers' tokens and more model providers, and remembering per machine that a project ran sandboxed, so dropping the sandbox
 asks first.

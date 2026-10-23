@@ -1984,7 +1984,8 @@ pub fn dockerfile_on(plan: &Plan, lock: &Lockfile, profile: &HarnessProfile, bas
     if !secrets.is_empty() {
         d.push_str(&format!("# Secrets (pass with -e): {}\n", one_line(&secrets.join(" "))));
     }
-    d.push_str("WORKDIR /workspace\nENTRYPOINT [\"/usr/local/bin/hlock-entrypoint\"]\n");
+    // OpenShell runs the image as uid 1000 and needs its WORKDIR writable by it
+    d.push_str("RUN mkdir -p /workspace && chown 1000:1000 /workspace\nWORKDIR /workspace\nENTRYPOINT [\"/usr/local/bin/hlock-entrypoint\"]\n");
     let bin = profile.binaries.first().cloned().unwrap_or_else(|| "bash".into());
     d.push_str(&format!("CMD [\"{bin}\"]\n"));
 

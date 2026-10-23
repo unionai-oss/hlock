@@ -68,10 +68,17 @@ pub struct SandboxPrep {
     pub kill: Vec<String>,
     /// The project whose control files are checked after the run.
     pub project: PathBuf,
-    /// For docker: the image, and the harness and version the lock pins, to compare with
-    /// the image's labels.
+    /// For docker and openshell: the image, and the harness and version the lock pins, to
+    /// compare with the image's labels.
     pub image: Option<String>,
     pub harness_version: Option<String>,
+    /// For openshell: the session `hlock.sandbox.run` begins and ends around `argv`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session: Option<crate::openshell::Session>,
+    /// For openshell: the command's variables, written into the sandbox by `begin`. Like
+    /// `env`, it holds secret values and is never printed.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub session_env: BTreeMap<String, String>,
 }
 
 /// What to `exec`, and what happened while preparing it.
@@ -594,9 +601,9 @@ pub fn prepare(lock: &Lockfile, lock_path: &Path, reg: &Registry, ctx: &Ctx, opt
     if sandbox.is_some() && !same {
         return Err(Error::Profile(format!("launching {} from a {} lock can't be sandboxed yet (the sandbox is for the lock's harness); run with --no-sandbox", target.name, lock.harness.name)));
     }
-    let docker = sandbox.as_ref().is_some_and(|s| s.runner.name == "docker");
+    let docker = sandbox.as_ref().is_some_and(|s| matches!(s.runner.name.as_str(), "docker" | "openshell"));
     let probe = probe_harness(target, ctx);
-    // in a docker sandbox the image runs the harness; the host needn't have it
+    // in a docker or openshell sandbox the image runs the harness; the host needn't have it
     let bin = match (&probe.binary, docker) {
         (Some(b), false) => b.clone(),
         (_, true) => target.binaries.first().cloned().unwrap_or_else(|| target.id.clone()),
@@ -608,7 +615,7 @@ pub fn prepare(lock: &Lockfile, lock_path: &Path, reg: &Registry, ctx: &Ctx, opt
     if !same {
         prep.notes.push(format!("translating a {} lock into {}", source.map(|s| s.name.as_str()).unwrap_or(&lock.harness.name), target.name));
     } else if !docker {
-        // (in a docker sandbox, the caller checks the image's labels instead)
+        // (in an image's sandbox, the caller checks the image's labels instead)
         if let (Some(want), Some(have)) = (&lock.harness.version, &probe.version) {
             if want != have {
                 if !opts.allow_version_mismatch {
@@ -751,8 +758,10 @@ fn sandbox_prep(sb: &crate::sandbox::Sandbox, run: &crate::sandbox::Run, ctx: &C
         env_names: w.env_names,
         kill: w.kill,
         project: sb.project.clone(),
-        image: if sb.runner.name == "docker" { if run.kind == "graders" { sb.spec.grader_image.clone().or(sb.spec.image.clone()) } else { sb.spec.image.clone() } } else { None },
+        image: if matches!(sb.runner.name.as_str(), "docker" | "openshell") { if run.kind == "graders" { sb.spec.grader_image.clone().or(sb.spec.image.clone()) } else { sb.spec.image.clone() } } else { None },
         harness_version: version,
+        session: w.session,
+        session_env: w.session_env,
     })
 }
 

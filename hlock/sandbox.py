@@ -20,6 +20,7 @@ import ssl
 import subprocess
 import tempfile
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -229,7 +230,8 @@ def check_image(sb: dict, harness: str) -> list[str]:
         return []
     labels = image_labels(image)
     if labels is None:
-        return [f"{image} isn't on this machine yet; Docker pulls it, and its harness version isn't checked"]
+        who = "the OpenShell gateway pulls" if (sb.get("spec") or {}).get("runner") == "openshell" else "Docker pulls"
+        return [f"{image} isn't on this machine yet; {who} it, and its harness version isn't checked"]
     notes = []
     if "@sha256:" not in image:
         notes.append(f"{image} isn't pinned by digest")
@@ -248,9 +250,48 @@ def run(sb: dict, *, cwd: str | os.PathLike | None = None, stdout=None, stdin=No
         interactive: bool = False) -> tuple[int | None, bool]:
     """Start the wrapped command and wait for it. Returns its exit code (None when it
     timed out) and whether it timed out. A timeout or an interrupt also runs the runner's
-    kill command, since stopping `docker run` leaves its container running."""
+    kill command, since stopping `docker run` leaves its container running.
+
+    An OpenShell run (``sb["session"]``) is begun first (the sandbox created, the project
+    uploaded) and ended after, however the command stops (its changes copied back, unless it
+    was interrupted and may still be running; the sandbox deleted); what the end says is left
+    in ``sb["after"]``."""
+    session = sb.get("session")
+    if not session:
+        return _run(sb, sb["argv"], sb["env"], cwd=cwd, stdout=stdout, stdin=stdin, timeout=timeout, interactive=interactive)
+    from hlock import sandbox_session_begin, sandbox_session_end
+
+    # a ^C while the sandbox is being made would leave it behind: hold it until it's made,
+    # then stop inside the try, which ends the session
+    interrupted: list[int] = []
+    main = threading.current_thread() is threading.main_thread()
+    old = signal.signal(signal.SIGINT, lambda *_: interrupted.append(1)) if main else None
+    try:
+        started = json.loads(sandbox_session_begin(json.dumps(session), sb["env"], sb.get("session_env") or {},
+                                                   int(timeout) if timeout else None))
+    finally:
+        if old is not None:
+            signal.signal(signal.SIGINT, old)
+    sb["began"] = True
+    stopped = "interrupt"  # unless the command comes back
+    t0 = time.monotonic()
+    try:
+        if interrupted:
+            raise KeyboardInterrupt
+        code, timed_out = _run(sb, started["argv"], started["env"], cwd=cwd, stdout=stdout, stdin=stdin,
+                               timeout=timeout, interactive=interactive)
+        # the deadline inside the sandbox stops the command just before ours
+        deadline = started.get("deadline") or 0
+        if deadline and code in (124, 137) and time.monotonic() - t0 + 1 >= deadline:
+            code, timed_out = None, True
+        stopped = "timeout" if timed_out else None
+        return code, timed_out
+    finally:
+        sb["after"] = json.loads(sandbox_session_end(json.dumps(started["session"]), sb["env"], stopped))["notes"]
+
+
+def _run(sb: dict, argv: list[str], env: dict, *, cwd, stdout, stdin, timeout, interactive) -> tuple[int | None, bool]:
     kill = sb.get("kill") or []
-    env = sb["env"]
 
     def stop():
         if kill:
@@ -260,7 +301,7 @@ def run(sb: dict, *, cwd: str | os.PathLike | None = None, stdout=None, stdin=No
     if not interactive:
         kwargs.update(stdin=stdin if stdin is not None else subprocess.DEVNULL, stdout=stdout,
                       stderr=subprocess.STDOUT if stdout is not None else None, start_new_session=True)
-    proc = subprocess.Popen(sb["argv"], **kwargs)
+    proc = subprocess.Popen(argv, **kwargs)
     # the session gets ^C from the terminal; hlock waits it out, then cleans up
     old = signal.signal(signal.SIGINT, signal.SIG_IGN) if interactive else None
     try:
