@@ -1113,6 +1113,26 @@ fn registry_push(py: Python<'_>, url: String, dir: String, name: Option<String>,
     interruptible(py, move || to_json(&core::registry::push(&url, Path::new(&dir), name.as_deref(), version.as_deref(), dry_run).map_err(py_err)?))
 }
 
+/// `hlock apm push`: pack the APM package in `dir` (`apm.yml` and `.apm/`) and publish it
+/// (or, with `dry_run`, say what would be published). Returns JSON.
+#[pyfunction]
+#[pyo3(signature = (url, dir=".".to_string(), name=None, dry_run=false))]
+fn registry_apm_push(py: Python<'_>, url: String, dir: String, name: Option<String>, dry_run: bool) -> PyResult<String> {
+    interruptible(py, move || to_json(&core::apm_registry::push(&url, Path::new(&dir), name.as_deref(), dry_run).map_err(py_err)?))
+}
+
+/// `hlock apm pull NS/NAME[@VERSION]`: download an APM package, check it, and write its
+/// files into `into` (default `./NAME`). Returns JSON.
+#[pyfunction]
+#[pyo3(signature = (url, spec, into=None, force=false, allow_hidden=None))]
+fn registry_apm_pull(py: Python<'_>, url: String, spec: String, into: Option<String>, force: bool, allow_hidden: Option<Vec<String>>) -> PyResult<String> {
+    let cwd = std::env::current_dir().unwrap_or_default();
+    interruptible(py, move || {
+        let into = into.map(|d| cwd.join(d));
+        to_json(&core::apm_registry::pull(&url, &spec, into.as_deref(), force, &allow_hidden.unwrap_or_default()).map_err(py_err)?)
+    })
+}
+
 /// `hlock pull NS/NAME[@VERSION]` (or a `registry:` spec): into the store as `name`, into
 /// the project lock file `out`, or every file of the setup into the directory `into`.
 #[pyfunction]
@@ -2315,6 +2335,8 @@ fn _hlock(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(registry_search, m)?)?;
     m.add_function(wrap_pyfunction!(registry_push, m)?)?;
     m.add_function(wrap_pyfunction!(registry_pull, m)?)?;
+    m.add_function(wrap_pyfunction!(registry_apm_push, m)?)?;
+    m.add_function(wrap_pyfunction!(registry_apm_pull, m)?)?;
     m.add_function(wrap_pyfunction!(check_pin, m)?)?;
     m.add_function(wrap_pyfunction!(deps_prepare, m)?)?;
     m.add_function(wrap_pyfunction!(deps_commit, m)?)?;

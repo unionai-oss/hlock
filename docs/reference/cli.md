@@ -641,6 +641,43 @@ came from.
 hlock whoami [--registry URL] [--json]
 ```
 
+## `apm push`
+
+Publish the APM package in a directory (`apm.yml` with `name` and `version`, and `.apm/`) to
+a registry, as the zip `apm publish` builds: `apm.yml`, `.apm/`, and `README.md`,
+`CHANGELOG.md` and `LICENSE` when present. Refuses values that look like credentials and
+hidden characters. See [APM packages](../guides/registry.md#apm-packages).
+
+```bash
+hlock apm push [NAMESPACE/NAME] [-C DIR] [--dry-run] [--registry URL] [--json]
+```
+
+| Option | Default | Description |
+|---|---|---|
+| `NAMESPACE/NAME` | your handle / `apm.yml`'s `name` | The package to publish; the version is `apm.yml`'s `version` |
+| `-C`, `--dir DIR` | `.` | The package to push |
+| `--dry-run` | | List the files, size and digest; push nothing |
+| `--registry URL` | `HLOCK_REGISTRY`, else the one you logged in to | The registry to push to |
+| `--json` | | Print the package, version, digest, size, files, warnings and `install` spec as JSON |
+
+## `apm pull`
+
+Download an APM package from a registry, check it against its digest and for unsafe paths,
+links and hidden characters, and write its files into a directory. Nothing in it runs.
+
+```bash
+hlock apm pull NAMESPACE/NAME[@VERSION] [--into DIR] [--force] [--allow-hidden FILE] [--registry URL] [--json]
+```
+
+| Option | Default | Description |
+|---|---|---|
+| `@VERSION` | the newest (highest semver, else the last published) | The version to pull |
+| `--into DIR` | `./NAME` | Where to write the package |
+| `--force` | | Replace files that already exist in DIR |
+| `--allow-hidden FILE` | | Let through hidden characters in FILE (a path in the package); repeatable |
+| `--registry URL` | `HLOCK_REGISTRY`, else the one you logged in to | The registry the package is in |
+| `--json` | | Print the package, version, digest, directory and files as JSON |
+
 ## `show`
 
 Print the locked stack (harness, models by role, decision model, backend) and the

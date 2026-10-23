@@ -12,6 +12,7 @@
 pub mod adapters;
 pub mod agent;
 pub mod apm;
+pub mod apm_registry;
 pub mod audit;
 pub mod capture;
 pub mod components;

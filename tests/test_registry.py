@@ -13,6 +13,7 @@ import stat
 import subprocess
 import tarfile
 import threading
+import zipfile
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
@@ -52,6 +53,7 @@ class Registry:
         self.polls = 0
         self.tamper = False
         self.searches: list[dict] = []
+        self.content_types: dict[tuple[str, str], str] = {}
 
     def add(self, package: str, version: str, archive: bytes, **meta):
         p = self.packages.setdefault(package, {"package": package, "type": "setup", "source": "hosted", "versions": []})
@@ -129,6 +131,8 @@ def handler_for(reg: Registry):
                     return self.problem(404, "Not Found", "no such package")
                 if len(parts) == 3:
                     return self.send(200, pkg)
+                if len(parts) == 4 and parts[3] == "versions":
+                    return self.send(200, {"package": pkg["package"], "versions": pkg["versions"]})
                 versions = [v for v in pkg["versions"] if not v["yanked"]]
                 v = versions[0] if parts[4] == "latest" else next((x for x in pkg["versions"] if x["version"] == parts[4]), None)
                 if v is None:
@@ -138,7 +142,8 @@ def handler_for(reg: Registry):
                 data = reg.archives[(pkg["package"], v["version"])]
                 if reg.tamper:
                     data = data[:-1] + bytes([data[-1] ^ 1])
-                return self.send(200, data, "application/gzip", {"x-hlock-digest": v["digest"]})
+                ctype = "application/zip" if data.startswith(b"PK") else "application/gzip"
+                return self.send(200, data, ctype, {"x-hlock-digest": v["digest"]})
             self.problem(404, "Not Found")
 
         def do_PUT(self):
@@ -151,12 +156,24 @@ def handler_for(reg: Registry):
             package, version = f"{parts[1]}/{parts[2]}", parts[4]
             if (package, version) in reg.archives:
                 return self.problem(409, "Conflict", "version exists")
-            try:
-                with tarfile.open(fileobj=io.BytesIO(data), mode="r:gz") as t:
-                    names = t.getnames()
-            except tarfile.TarError:
-                return self.problem(422, "Unprocessable", errors=["not a tar.gz"])
-            digest = reg.add(package, version, data)
+            meta = {}
+            if self.headers.get("content-type") == "application/zip":
+                # an APM package, as APM's registry API checks it (§6)
+                with zipfile.ZipFile(io.BytesIO(data)) as z:
+                    names = z.namelist()
+                    if "apm.yml" not in names:
+                        return self.problem(422, "Unprocessable", errors=["no apm.yml at the root"])
+                    if f"version: {version}" not in z.read("apm.yml").decode():
+                        return self.problem(422, "Unprocessable", errors=["apm.yml's version doesn't match the URL"])
+                meta["type"] = "apm-package"
+            else:
+                try:
+                    with tarfile.open(fileobj=io.BytesIO(data), mode="r:gz") as t:
+                        names = t.getnames()
+                except tarfile.TarError:
+                    return self.problem(422, "Unprocessable", errors=["not a tar.gz"])
+            reg.content_types[(package, version)] = self.headers.get("content-type")
+            digest = reg.add(package, version, data, **meta)
             self.send(201, {"package": package, "version": version, "digest": digest, "published_at": "2026-10-22T00:00:00Z",
                             "size_bytes": len(data), "files": names, "url": f"http://registry/{package}"})
 
@@ -390,6 +407,7 @@ def test_an_apm_package_points_at_apm(world):
     world["reg"].add("alice/skills", "1.0.0", tarball({"apm.yml": b"name: skills\nversion: 1.0.0\n"}), type="apm-package")
     r = invoke("pull", "alice/skills", "--registry", world["url"])
     assert r.exit_code == 1 and "APM package" in r.output and "apm install alice/skills" in r.output
+    assert "hlock apm pull alice/skills" in r.output
 
 
 def git(repo: Path, *args: str) -> str:
@@ -441,3 +459,104 @@ def test_json_output_stays_clean_when_a_terminal_is_forced(world, monkeypatch):
     r = runner.invoke(main, ["whoami", "--json"])
     assert r.exit_code == 0, r.output
     assert json.loads(r.stdout)["user"]["handle"]
+
+
+def apm_package(root: Path, version: str = "1.0.0") -> Path:
+    pkg = root / "review-skills"
+    (pkg / ".apm/skills/review").mkdir(parents=True, exist_ok=True)
+    (pkg / ".apm/skills/review/SKILL.md").write_text("Review the diff.\n")
+    (pkg / "apm.yml").write_text(f"name: review-skills\nversion: {version}\n")
+    (pkg / "README.md").write_text("# Review skills\n")
+    (pkg / "notes.txt").write_text("not part of the package")
+    return pkg
+
+
+def test_apm_push_publishes_a_zip_like_apm_publish(world):
+    login(world)
+    pkg = apm_package(world["tmp"])
+    r = invoke("apm", "push", "-C", str(pkg), "--dry-run", "--json")
+    assert r.exit_code == 0, r.output
+    dry = json.loads(r.stdout)
+    assert dry["package"] == "alice/review-skills" and dry["version"] == "1.0.0" and dry["dry_run"]
+    assert [f["path"] for f in dry["files"]] == [".apm/skills/review/SKILL.md", "README.md", "apm.yml"]
+    assert world["reg"].packages == {}
+
+    r = invoke("apm", "push", "-C", str(pkg))
+    assert r.exit_code == 0, r.output
+    assert "pushed APM package alice/review-skills@1.0.0" in r.output
+    assert f"{world['url']}/api" in r.output and "alice/review-skills#1.0.0" in r.output
+    archive = world["reg"].archives[("alice/review-skills", "1.0.0")]
+    assert world["reg"].content_types[("alice/review-skills", "1.0.0")] == "application/zip"
+    with zipfile.ZipFile(io.BytesIO(archive)) as z:
+        assert z.namelist() == [".apm/skills/review/SKILL.md", "README.md", "apm.yml"]
+    assert "sha256:" + hashlib.sha256(archive).hexdigest() == dry["digest"]
+
+    # the same files again are already published; changed files under the same version aren't allowed
+    r = invoke("apm", "push", "-C", str(pkg))
+    assert r.exit_code == 0 and "already published" in r.output, r.output
+    (pkg / ".apm/skills/review/SKILL.md").write_text("Review it twice.\n")
+    r = invoke("apm", "push", "-C", str(pkg))
+    assert r.exit_code == 1 and "Bump `version` in apm.yml" in r.output
+
+
+def test_apm_push_needs_a_package(world):
+    login(world)
+    r = invoke("apm", "push", "-C", str(world["author"]))
+    assert r.exit_code == 1 and ".apm/" in r.output and "hlock push" in r.output
+    r = invoke("apm", "push", "alice/x@2", "-C", str(apm_package(world["tmp"])))
+    assert r.exit_code == 1 and "comes from apm.yml" in r.output
+
+
+def test_apm_pull_writes_the_newest_version(world):
+    login(world)
+    pkg = apm_package(world["tmp"])
+    assert invoke("apm", "push", "-C", str(pkg)).exit_code == 0
+    (pkg / "apm.yml").write_text("name: review-skills\nversion: 1.10.0\n")
+    assert invoke("apm", "push", "-C", str(pkg)).exit_code == 0
+
+    r = invoke("apm", "pull", "alice/review-skills", "--json")
+    assert r.exit_code == 0, r.output
+    got = json.loads(r.stdout)
+    assert got["version"] == "1.10.0" and got["install"] == "alice/review-skills#1.10.0"
+    assert (world["me"] / "review-skills/apm.yml").read_text().endswith("1.10.0\n")
+    assert (world["me"] / "review-skills/.apm/skills/review/SKILL.md").is_file()
+    assert not (world["me"] / "review-skills/notes.txt").exists()
+
+    # an older version, into a directory that has it already
+    r = invoke("apm", "pull", "alice/review-skills@1.0.0")
+    assert r.exit_code == 1 and "--force" in r.output
+    r = invoke("apm", "pull", "alice/review-skills@1.0.0", "--force")
+    assert r.exit_code == 0 and "@ 1.0.0" in r.output, r.output
+    assert (world["me"] / "review-skills/apm.yml").read_text().endswith("1.0.0\n")
+    r = invoke("apm", "pull", "alice/review-skills@9.9.9", "--into", "x")
+    assert r.exit_code == 1 and "no version 9.9.9" in r.output and "1.10.0" in r.output
+
+
+def test_apm_pull_checks_what_it_downloads(world):
+    login(world)
+    world["reg"].add("alice/tar", "1", tarball({"apm.yml": b"name: tar\nversion: 1\n", ".apm/x.md": b"hi\n"}),
+                     type="apm-package")
+    r = invoke("apm", "pull", "alice/tar")
+    assert r.exit_code == 0, r.output
+    assert (world["me"] / "tar/.apm/x.md").read_text() == "hi\n"
+
+    world["reg"].add("alice/evil", "1", tarball({"apm.yml": b"name: evil\nversion: 1\n", "../escape": b"x"}))
+    r = invoke("apm", "pull", "alice/evil")
+    assert r.exit_code == 1 and "outside the archive" in r.output
+    assert not (world["me"] / "escape").exists() and not (world["me"] / "evil").exists()
+
+    world["reg"].add("alice/hidden", "1", tarball({"apm.yml": b"name: hidden\nversion: 1\n",
+                                                   ".apm/x.md": "hi\u202ethere\n".encode()}))
+    r = invoke("apm", "pull", "alice/hidden")
+    assert r.exit_code == 1 and "--allow-hidden" in r.output and not (world["me"] / "hidden").exists()
+    assert invoke("apm", "pull", "alice/hidden", "--allow-hidden", ".apm/x.md").exit_code == 0
+
+    world["reg"].add("alice/review-bot", "1.0.0", tarball({"harness.lock": LOCK.encode()}))
+    r = invoke("apm", "pull", "alice/review-bot")
+    assert r.exit_code == 1 and "hlock pull alice/review-bot" in r.output
+
+    pkg = apm_package(world["tmp"])
+    assert invoke("apm", "push", "-C", str(pkg)).exit_code == 0
+    world["reg"].tamper = True
+    r = invoke("apm", "pull", "alice/review-skills")
+    assert r.exit_code == 1 and "doesn't match its digest" in r.output

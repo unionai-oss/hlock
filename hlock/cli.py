@@ -106,6 +106,8 @@ from hlock import pull_into as _pull_into
 from hlock import pull_list as _pull_list
 from hlock import pull_parse as _pull_parse
 from hlock import pull_remove as _pull_remove
+from hlock import registry_apm_pull as _registry_apm_pull
+from hlock import registry_apm_push as _registry_apm_push
 from hlock import registry_device_poll as _registry_device_poll
 from hlock import registry_device_start as _registry_device_start
 from hlock import registry_login_token as _registry_login_token
@@ -229,7 +231,7 @@ click.rich_click.COMMAND_GROUPS = {
         {"name": "Switch", "commands": ["migrate", "localize"]},
         {"name": "Harness", "commands": ["harness", "runtime"]},
         {"name": "Inspect", "commands": ["show", "diff", "tree", "backend", "optimizer"]},
-        {"name": "Share", "commands": ["pull", "list", "rm", "push", "search", "login", "logout", "whoami"]},
+        {"name": "Share", "commands": ["pull", "list", "rm", "push", "search", "login", "logout", "whoami", "apm"]},
         {"name": "Meta", "commands": ["meta"]},
     ],
     "hlock meta": [
@@ -1736,9 +1738,100 @@ def search(query: tuple[str, ...], type_: str | None, kind: str | None, source: 
         console.print(f"[muted]{len(results)} of {total} · --limit N for more[/]")
     first = results[0]
     if first.get("type") == "apm-package":
-        _next(f"apm install {first.get('ref')}")
+        _next(f"hlock apm pull {first.get('ref')}")
     elif first.get("pull"):
         _next(f"hlock pull {first['pull']}")
+
+
+@main.group()
+def apm() -> None:
+    """Publish and fetch APM packages through your registry.
+
+    For a package with an [path]apm.yml[/] and a [path].apm/[/] directory, the way [cmd]apm publish[/]
+    does, but on the registry you logged in to with [cmd]hlock login[/]. To install them with APM,
+    put [path]URL/api[/] in [path]apm.yml[/]'s [key]registries:[/]. A project's own [path]apm.yml[/] and
+    [path]apm.lock.yaml[/] are published with [cmd]hlock push[/].
+    """
+
+
+@apm.command("push")
+@click.argument("name", required=False, metavar="[NAMESPACE/NAME]")
+@click.option("-C", "--dir", "directory", default=".", metavar="DIR", help="The package to push.  [dim]\\[default: .][/]")
+@click.option("--dry-run", is_flag=True, help="Show what would be pushed, and push nothing.")
+@click.option("--registry", default=None, metavar="URL", help="The registry to push to.  [dim]\\[default: your default registry][/]")
+@click.option("--json", "as_json", is_flag=True, help="Print the result as JSON.")
+def apm_push(name: str | None, directory: str, dry_run: bool, registry: str | None, as_json: bool) -> None:
+    """Publish the APM package in this directory to a registry.
+
+    Packs [path]apm.yml[/], everything under [path].apm/[/], and the README, CHANGELOG and LICENSE
+    into a zip, the same archive [cmd]apm publish[/] makes, checked first for credentials and
+    hidden characters. The version is [path]apm.yml[/]'s [key]version[/]; NAMESPACE/NAME defaults to
+    your namespace and the package's [key]name[/].
+    """
+    url = _registry(registry)
+    with _working(f"{'Packing' if dry_run else 'Pushing to ' + url}…"):
+        r = json.loads(_registry_apm_push(url, directory, name=name, dry_run=dry_run))
+    if as_json:
+        console.print_json(data=r)
+        return
+    for w in r.get("warnings", []):
+        console.print(f"[warn]![/] {w}")
+    ref = f"{r['package']}@{r['version']}"
+    summary = f"[muted]({len(r['files'])} files, {_size(r.get('size_bytes'))}, {r['digest'][:19]}…)[/]"
+    if r.get("dry_run"):
+        console.print(f"would push APM package [key]{escape(ref)}[/] to [path]{escape(url)}[/] {summary}", soft_wrap=True)
+        t = Table(box=None, header_style="bold", pad_edge=False)
+        for col in ("file", "size", "digest"):
+            t.add_column(col)
+        for f in r["files"]:
+            t.add_row(f"[path]{escape(f['path'])}[/]", _size(f["size"]), f"[muted]{f['digest'][:12]}[/]")
+        console.print(t)
+        _next(f"hlock apm push{' ' + name if name else ''}")
+        return
+    if r.get("already_published"):
+        _ok(f"[key]{escape(ref)}[/] is already published with these files {summary}", soft_wrap=True)
+    else:
+        _ok(f"pushed APM package [key]{escape(ref)}[/] {summary}", soft_wrap=True)
+    console.print(f"  [muted]install with APM:[/] [cmd]{escape(r['install'])}[/] [muted]from the registry[/] "
+                  f"[path]{escape(r['apm_registry'])}[/]", soft_wrap=True)
+    _next(f"hlock apm pull {ref}")
+
+
+@apm.command("pull")
+@click.argument("package", metavar="NAMESPACE/NAME[@VERSION]")
+@click.option("--into", "into", default=None, metavar="DIR", help="Where to write the package.  [dim]\\[default: ./NAME][/]")
+@click.option("--force", is_flag=True, help="Replace files that already exist in DIR.")
+@click.option("--allow-hidden", "allow_hidden", multiple=True, metavar="FILE",
+              help="Let through hidden characters in FILE (a path in the package). Repeatable.")
+@click.option("--registry", default=None, metavar="URL", help="The registry the package is in.  [dim]\\[default: your default registry][/]")
+@click.option("--json", "as_json", is_flag=True, help="Print the result as JSON.")
+def apm_pull(package: str, into: str | None, force: bool, allow_hidden: tuple[str, ...], registry: str | None,
+             as_json: bool) -> None:
+    """Download an APM package from a registry, to read or vendor it.
+
+    Without [cmd]@VERSION[/], takes the newest. The download is checked against the version's
+    digest, and refused if it has a path outside it, a link, or characters that hide text,
+    before anything is written. Nothing in it runs; install it with APM to use it.
+    """
+    url = _registry(registry)
+    with _working(f"Pulling {package}…"):
+        r = json.loads(_registry_apm_pull(url, package, into=into, force=force, allow_hidden=list(allow_hidden)))
+    if as_json:
+        console.print_json(data=r)
+        return
+    files = r["files"]
+    _ok(f"pulled APM package [key]{escape(r['package'])}[/] [muted]@ {escape(r['version'])}[/] → "
+        f"[path]{_show(r['into'])}[/]  [muted]({len(files)} {'file' if len(files) == 1 else 'files'})[/]", soft_wrap=True)
+    primitives = [f for f in files if f.startswith(".apm/")]
+    for f in files:
+        if not f.startswith(".apm/"):
+            console.print(f"  [path]{escape(f)}[/]")
+    if primitives:
+        console.print(f"  [path].apm/[/] [muted]{len(primitives)} {'file' if len(primitives) == 1 else 'files'}[/]")
+    if r.get("replaced"):
+        console.print(f"[warn]![/] replaced {r['replaced']} existing {'file' if r['replaced'] == 1 else 'files'}")
+    console.print(f"  [muted]install with APM:[/] [cmd]{escape(r['install'])}[/] [muted]from the registry[/] "
+                  f"[path]{escape(r['apm_registry'])}[/]", soft_wrap=True)
 
 
 # --------------------------------------------------------------------------- #

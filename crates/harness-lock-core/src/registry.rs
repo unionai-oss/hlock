@@ -410,8 +410,18 @@ impl Client {
         self.get_json(&format!("/packages/{}/{}/versions/{}", enc(&r.namespace), enc(&r.name), enc(version)))
     }
 
+    /// APM's version list: `{package, versions: [{version, digest, published_at, …}]}`.
+    pub fn versions(&self, r: &Ref) -> Result<Value> {
+        self.get_json(&format!("/packages/{}/{}/versions", enc(&r.namespace), enc(&r.name)))
+    }
+
     /// A version's archive and the digest the server sent with it (`X-Hlock-Digest`).
     pub fn download(&self, r: &Ref, version: &str) -> Result<(Vec<u8>, Option<String>)> {
+        self.download_at_most(r, version, MAX_ARCHIVE)
+    }
+
+    /// [`Client::download`], refusing an archive larger than `limit` bytes.
+    pub fn download_at_most(&self, r: &Ref, version: &str, limit: usize) -> Result<(Vec<u8>, Option<String>)> {
         let url = self.endpoint(&format!("/packages/{}/{}/versions/{}/download", enc(&r.namespace), enc(&r.name), enc(version)));
         let mut resp = self.auth(self.agent.get(&url)).header("accept", "application/gzip").call().map_err(|e| self.unreachable(e))?;
         let status = resp.status().as_u16();
@@ -420,17 +430,22 @@ impl Client {
             return Err(self.problem(status, &text));
         }
         let header = resp.headers().get("x-hlock-digest").and_then(|h| h.to_str().ok()).map(str::to_string);
-        let bytes = resp.body_mut().with_config().limit(MAX_ARCHIVE as u64 + 1).read_to_vec().map_err(|e| err(format!("can't download {url}: {e}")))?;
-        if bytes.len() > MAX_ARCHIVE {
-            return Err(err(format!("{} is larger than {} MiB; refusing it", r.package(), MAX_ARCHIVE >> 20)));
+        let bytes = resp.body_mut().with_config().limit(limit as u64 + 1).read_to_vec().map_err(|e| err(format!("can't download {url}: {e}")))?;
+        if bytes.len() > limit {
+            return Err(err(format!("{} is larger than {} MiB; refusing it", r.package(), limit >> 20)));
         }
         Ok((bytes, header))
     }
 
     /// Publish an archive. `Ok(None)` when the version already exists (409).
     pub fn publish(&self, r: &Ref, version: &str, bytes: &[u8]) -> Result<Option<Value>> {
+        self.publish_as(r, version, bytes, "application/gzip")
+    }
+
+    /// [`Client::publish`] with another archive type (`application/zip` for APM packages).
+    pub fn publish_as(&self, r: &Ref, version: &str, bytes: &[u8], content_type: &str) -> Result<Option<Value>> {
         let url = self.endpoint(&format!("/packages/{}/{}/versions/{}", enc(&r.namespace), enc(&r.name), enc(version)));
-        let mut resp = self.auth(self.agent.put(&url)).header("content-type", "application/gzip").header("accept", "application/json").send(bytes).map_err(|e| self.unreachable(e))?;
+        let mut resp = self.auth(self.agent.put(&url)).header("content-type", content_type).header("accept", "application/json").send(bytes).map_err(|e| self.unreachable(e))?;
         let status = resp.status().as_u16();
         let text = resp.body_mut().read_to_string().unwrap_or_default();
         match status {
@@ -484,7 +499,7 @@ pub fn slug(s: &str) -> String {
 }
 
 /// Strings in a parsed file that look like a credential, as `file: key` lines.
-fn secret_lines(v: &Value, file: &str, key: &str, out: &mut Vec<String>) {
+pub(crate) fn secret_lines(v: &Value, file: &str, key: &str, out: &mut Vec<String>) {
     match v {
         Value::String(s) => {
             let named = !key.is_empty() && crate::capture::is_secret_key(key) && s.len() >= 8 && !s.contains("HLOCK_SECRET_") && !s.trim_start().starts_with('$');
@@ -498,7 +513,7 @@ fn secret_lines(v: &Value, file: &str, key: &str, out: &mut Vec<String>) {
     }
 }
 
-fn parsed(path: &str, bytes: &[u8]) -> Option<Value> {
+pub(crate) fn parsed(path: &str, bytes: &[u8]) -> Option<Value> {
     let text = std::str::from_utf8(bytes).ok()?;
     match path.rsplit_once('.').map(|(_, e)| e) {
         Some("toml") | Some("lock") => toml::from_str::<toml::Value>(text).ok().and_then(|v| serde_json::to_value(v).ok()),
@@ -788,9 +803,11 @@ pub fn pull(url_flag: Option<&str>, spec: &str, dest: Dest<'_>, force: bool, all
     let ty = pkg["type"].as_str().unwrap_or("setup");
     if ty == "apm-package" {
         return Err(err(format!(
-            "{} is an APM package, not a setup: install it with APM (`apm install {}` with this registry in apm.yml's `registries:`)",
+            "{} is an APM package, not a setup: fetch it with `hlock apm pull {}`, or install it with APM (`apm install {}` with {}/api in apm.yml's `registries:`)",
             r.package(),
-            r.package()
+            r.package(),
+            r.package(),
+            url
         )));
     }
     let source = pkg["source"].as_str().unwrap_or("hosted");

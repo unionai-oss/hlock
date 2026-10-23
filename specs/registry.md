@@ -1,10 +1,11 @@
 # The hlock registry HTTP API v1
 
-Status: implemented (client) · Last updated: 2026-10-22 · Builds on [pull](pull.md)
+Status: implemented (client) · Last updated: 2026-10-23 · Builds on [pull](pull.md)
 
 > A registry keeps published agent setups and finds them by name. This is the protocol
 > between `hlock` and a registry. It's open: any server that implements it works with
-> `hlock login`, `push`, `search` and `pull NAMESPACE/NAME`, and hlock has no default one.
+> `hlock login`, `push`, `search`, `pull NAMESPACE/NAME` and `apm push`/`pull`, and hlock has
+> no default one.
 
 ---
 
@@ -16,6 +17,8 @@ hlock push                                    # → <handle>/<project>@<version>
 hlock search "code review" --kind apm
 hlock pull alice/review-bot[@1.0.0]           # into ~/.hlock/pulls/review-bot/
 hlock pull alice/review-bot --into .          # the whole setup into a project
+hlock apm push                                # an APM package (apm.yml + .apm/), as `apm publish` does
+hlock apm pull alice/review-skills[@1.0.0]    # into ./review-skills/
 ```
 
 A **setup** is whichever of `harness.toml`, `harness.lock` (with the files it vendors under
@@ -64,9 +67,10 @@ signatures, and a registry server (implementations live elsewhere).
 | `GET /whoami` | | `200 {user: {handle, name}, namespaces: [string], scopes: [string]}`; `401` without a valid token |
 | `GET /search?q=&type=&kind=&source=&harness=&page=&per_page=` | | `200 {total, page, per_page, results: [Result]}` |
 | `GET /packages/{ns}/{name}` | | `200 Package` |
+| `GET /packages/{ns}/{name}/versions` | | `200 {package, versions: [Version]}` (APM's version list) |
 | `GET /packages/{ns}/{name}/versions/{version}` | | `200 Version` |
 | `GET /packages/{ns}/{name}/versions/{version}/download` | | `200` the archive bytes, `Content-Type: application/gzip`, `X-Hlock-Digest: sha256:<hex>` (and optionally `Digest: sha-256=<base64>`) |
-| `PUT /packages/{ns}/{name}/versions/{version}` | the archive bytes, `Content-Type: application/gzip` | `201 {package, version, digest, published_at, size_bytes, files, url}`; `409` if the version exists; `413` if too large; `422` (with `extensions.errors`) if invalid; `401` / `403` |
+| `PUT /packages/{ns}/{name}/versions/{version}` | the archive bytes, `Content-Type: application/gzip` (a setup) or `application/zip` (an APM package) | `201 {package, version, digest, published_at, size_bytes, files, url}`; `409` if the version exists; `413` if too large; `422` (with `extensions.errors`) if invalid; `401` / `403` |
 
 ```text
 Result  = {ref, type, source, kinds, description, latest_version, harness, models, mcp,
@@ -145,12 +149,30 @@ at = "2026-10-22T21:08:32Z"
 `hlock pull` with no source refreshes it from `from`. `--into DIR` writes every file of the
 setup into DIR, refusing to replace existing files without `--force`.
 
+**APM packages.** These go over APM's own endpoints, which an hlock registry serves under the
+same `/api/v1` prefix, so its APM base URL (for `apm.yml`'s `registries:`) is `{url}/api`.
+`hlock apm push` needs `apm.yml` with `name` and `version` and a non-empty `.apm/`, and packs
+the flat zip `apm publish` makes: `apm.yml` (from `apm.yaml` if that's the file), `.apm/`,
+and the root's `README.md`, `CHANGELOG.md` and `LICENSE`/`LICENCE` (case-insensitive), without
+symlinks, `.DS_Store` or `._*`. Entries are sorted, deflated, dated 1980-01-01 and mode
+`0644`. It runs `push`'s credential and hidden-character checks, then `PUT`s the zip as
+`apm.yml`'s version (at most 50 MiB). On `409`, the version list decides between "already
+published" and an error. `hlock apm pull` reads the version list, takes `@VERSION` or the
+newest that isn't yanked (the highest semver, else the last `published_at`), downloads it,
+checks its digest, and unpacks a zip or a tar.gz into a scratch directory, refusing links,
+absolute paths, `..`, more than 5000 entries and more than 256 MiB. It refuses an archive with
+no `apm.yml` (pointing at `hlock pull` when it's a setup) and critical hidden characters
+outside `--allow-hidden`, then writes the files into `--into` (default `./NAME`), replacing
+existing ones only with `--force`.
+
 ## 7. Design notes
 
-- **Why not `hlock apm push`?** APM packages already have `apm publish` and APM's registry
-  API; an hlock command for them would duplicate it. A project's `apm.yml` + `apm.lock.yaml`
-  isn't an APM package (APM publishes only packages with `.apm/`), and it usually sits next to
-  `harness.lock`, which hlock reconciles with it, so one `push` carries all four files.
+- **Why `hlock apm push` as well as `push`?** A project's `apm.yml` + `apm.lock.yaml` isn't an
+  APM package (APM publishes only packages with `.apm/`), and it usually sits next to
+  `harness.lock`, which hlock reconciles with it, so one `push` carries all four files. An APM
+  package is something else, which `apm publish` already handles; `hlock apm push` and `pull`
+  are a convenience that reuse `hlock login`'s token and registry and `push`'s checks, and
+  publish the same archive `apm publish` would, so APM installs it unchanged.
 - **Why tar.gz and not OCI?** One request to publish and one to fetch, digests anyone can
   compute with `sha256sum`, and the same shape as APM's archives. An OCI mapping can come
   later without changing the client's checks.

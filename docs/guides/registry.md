@@ -16,9 +16,9 @@ A published setup is whichever of these files your project has:
 | `apm.lock.yaml` | APM's lock |
 | `README.md` | Shown on the registry's page for it |
 
-A project that uses only APM can publish its `apm.yml` and `apm.lock.yaml` the same way. (A
-reusable APM *package*, with an `.apm/` directory, is published with `apm publish` to a
-registry that speaks APM's protocol, not with hlock.)
+A project that uses only APM can publish its `apm.yml` and `apm.lock.yaml` the same way. A
+reusable APM *package*, with an `.apm/` directory, is published with
+[`hlock apm push`](#apm-packages) instead.
 
 ## Log in
 
@@ -162,6 +162,68 @@ next → hlock sync --plan  ·  apm install --frozen
 It refuses to replace a file that's already there unless you pass `--force`. `--into` works
 with git sources too (`hlock pull github:alice/agent-setup --into .`).
 
+## APM packages
+
+An [APM](../getting-started/apm.md) package is a directory with an `apm.yml` (with `name` and
+`version`) and an `.apm/` directory of skills, prompts and instructions. `hlock apm push`
+publishes one to your registry, the way `apm publish` does, using the token `hlock login`
+saved:
+
+```console
+$ hlock apm push --dry-run
+would push APM package alice/review-skills@1.0.0 to https://registry.example.com (4 files, 640 B, sha256:3f8140bf1a98…)
+file                              size  digest
+.apm/prompts/summarize.prompt.md  22 B  f6b68658adb4
+.apm/skills/review/SKILL.md       65 B  00890eadd9f3
+README.md                         16 B  fc63a00ec400
+apm.yml                           67 B  a9f8e5ab051f
+next → hlock apm push
+$ hlock apm push
+✓ pushed APM package alice/review-skills@1.0.0 (4 files, 640 B, sha256:3f8140bf1a98…)
+  install with APM: alice/review-skills#1.0.0 from the registry https://registry.example.com/api
+next → hlock apm pull alice/review-skills@1.0.0
+```
+
+- **The archive** is the one `apm publish` builds: a zip of `apm.yml`, everything under
+  `.apm/`, and `README.md`, `CHANGELOG.md` and `LICENSE` when they're there. Symlinks and
+  macOS `.DS_Store` and `._*` files are left out. Entries are sorted and have no timestamps,
+  so the same files give the same digest.
+- **The version** is `apm.yml`'s `version`. The name defaults to your namespace and
+  `apm.yml`'s `name`; pass `NAMESPACE/NAME` for another.
+- **The same checks as `push`** run first: no credential-looking values, no hidden characters.
+  An archive is at most 50 MiB.
+
+`hlock apm pull` downloads a package to read it or vendor it. It takes the newest version
+unless you name one with `@VERSION`, and writes the package into `./NAME`, or into the
+directory you pass with `--into DIR`:
+
+```console
+$ hlock apm pull alice/review-skills
+✓ pulled APM package alice/review-skills @ 1.0.0 → review-skills  (4 files)
+  README.md
+  apm.yml
+  .apm/ 2 files
+  install with APM: alice/review-skills#1.0.0 from the registry https://registry.example.com/api
+```
+
+The download is checked against the version's digest, and refused if it has a path outside
+it, a link, or [hidden characters](audit.md#hidden-characters) (`--allow-hidden FILE` lets
+those through), before anything is written. A file that's already there is replaced only with
+`--force`. Nothing in the package runs.
+
+To install a package with APM, add the registry to `apm.yml` with the URL followed by `/api`,
+where it serves APM's [Registry HTTP API](https://microsoft.github.io/apm/reference/registry-http-api/):
+
+```yaml
+registries:
+  team:
+    url: https://registry.example.com/api
+  default: team
+dependencies:
+  apm:
+    - alice/review-skills#1.0.0
+```
+
 ## Reference
 
 ```bash
@@ -171,6 +233,8 @@ hlock whoami [--registry URL] [--json]
 hlock push [NAMESPACE/NAME] [--version V] [-C DIR] [--dry-run] [--registry URL] [--json]
 hlock search [QUERY...] [--type T] [--kind K] [--source S] [--limit N] [--registry URL] [--json]
 hlock pull NAMESPACE/NAME[@VERSION] [--as NAME | -o FILE | --into DIR] [--force] [--registry URL] [--json]
+hlock apm push [NAMESPACE/NAME] [-C DIR] [--dry-run] [--registry URL] [--json]
+hlock apm pull NAMESPACE/NAME[@VERSION] [--into DIR] [--force] [--allow-hidden FILE] [--registry URL] [--json]
 ```
 
 See the [CLI reference](../reference/cli.md#push) for every option.

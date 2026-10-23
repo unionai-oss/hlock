@@ -40,6 +40,8 @@ similar = "2"
 # The registry client (`hlock push` / `pull NS/NAME`): deterministic tar.gz archives.
 flate2 = "1"
 tar = { version = "0.4", default-features = false }
+# `hlock apm push` / `apm pull`: APM's registry archives are flat zips.
+zip = { version = "6", default-features = false, features = ["deflate-flate2"] }
 
 [features]
 default = []
