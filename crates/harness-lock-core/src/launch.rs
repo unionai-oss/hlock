@@ -165,6 +165,27 @@ pub fn mcp_entry(t: &Tool, shape: &str) -> Value {
             }
             e
         }
+        ("vscode", false) => {
+            let mut e = json!({"type": "stdio", "command": t.command, "args": t.args});
+            if !t.env.is_empty() {
+                e["env"] = env;
+            }
+            e
+        }
+        ("vscode", true) => {
+            let mut e = json!({"type": if t.transport.as_deref() == Some("sse") { "sse" } else { "http" }, "url": t.url});
+            if !t.headers.is_empty() {
+                e["headers"] = headers;
+            }
+            e
+        }
+        ("zed", true) => {
+            let mut e = json!({"url": t.url});
+            if !t.headers.is_empty() {
+                e["headers"] = headers;
+            }
+            e
+        }
         ("codex", true) => {
             let mut e = json!({"url": t.url});
             if !t.headers.is_empty() {
@@ -546,6 +567,9 @@ pub fn prepare(lock: &Lockfile, lock_path: &Path, reg: &Registry, ctx: &Ctx, opt
     let source = reg.harness(&lock.harness.name);
     let target_name = opts.target.clone().unwrap_or_else(|| lock.harness.name.clone());
     let target = reg.require_harness(&target_name)?;
+    if let Some(e) = target.app_refusal() {
+        return Err(e);
+    }
     let same = source.is_some_and(|s| s.id == target.id);
     let mut prep = LaunchPrep { harness: target.id.clone(), harness_name: target.name.clone(), kind: target.kind.clone(), translated: !same, ..Default::default() };
 
@@ -770,6 +794,22 @@ mod tests {
     use super::*;
 
     #[test]
+    fn desktop_apps_are_never_started() {
+        let reg = Registry::builtin();
+        let ctx = Ctx { home: "/h".into(), cwd: "/w".into(), env: BTreeMap::new(), path: vec![] };
+        let lock = Lockfile { harness: crate::lockfile::Harness { name: "claude-code".into(), ..Default::default() }, ..Default::default() };
+        for app in ["claude-desktop", "vscode"] {
+            let opts = LaunchOptions { target: Some(app.into()), ..Default::default() };
+            let err = prepare(&lock, Path::new("/w/harness.lock"), &reg, &ctx, &opts, &[]).unwrap_err();
+            assert!(err.to_string().contains("is a desktop app, and hlock can't start it"), "{err}");
+        }
+        // nor resolved or tuned against: trials start the harness
+        let mut m = crate::manifest::Manifest::from_str("[project]\nname = \"x\"\n").unwrap();
+        let err = crate::resolver::apply_target(&mut m, Some("vscode"), &reg).unwrap_err();
+        assert!(err.to_string().contains("desktop app"), "{err}");
+    }
+
+    #[test]
     fn mcp_shapes() {
         let stdio = Tool { name: "gh".into(), kind: "mcp".into(), transport: Some("stdio".into()), command: Some("npx".into()), args: vec!["pkg".into()], env: [("T".to_string(), "v".to_string())].into(), ..Default::default() };
         let http = Tool { name: "r".into(), kind: "mcp".into(), transport: Some("http".into()), url: Some("https://x/mcp".into()), headers: [("Authorization".to_string(), "Bearer t".to_string())].into(), ..Default::default() };
@@ -782,6 +822,18 @@ mod tests {
         assert_eq!(mcp_entry(&http, "openclaw"), json!({"transport": "streamable-http", "url": "https://x/mcp", "headers": {"Authorization": "Bearer t"}}));
         assert_eq!(mcp_entry(&stdio, "openclaw"), mcp_entry(&stdio, "standard"));
         assert_eq!(mcp_entry(&http, "nanobot")["type"], "streamableHttp");
+        assert_eq!(mcp_entry(&stdio, "vscode")["type"], "stdio");
+        assert_eq!(mcp_entry(&http, "vscode"), json!({"type": "http", "url": "https://x/mcp", "headers": {"Authorization": "Bearer t"}}));
+        assert_eq!(mcp_entry(&http, "zed"), json!({"url": "https://x/mcp", "headers": {"Authorization": "Bearer t"}}));
+        // Zed's local servers are the standard shape
+        assert_eq!(mcp_entry(&stdio, "zed"), mcp_entry(&stdio, "standard"));
+        // every shape reads back as the same server
+        for shape in ["standard", "opencode", "codex", "goose", "openclaw", "nanobot", "vscode", "zed"] {
+            for t in [&stdio, &http] {
+                let back = crate::capture::mcp_tool(&t.name, &mcp_entry(t, shape), "user").unwrap();
+                assert_eq!((back.command.as_deref(), &back.args, back.url.as_deref()), (t.command.as_deref(), &t.args, t.url.as_deref()), "{shape}");
+            }
+        }
     }
 
     #[test]

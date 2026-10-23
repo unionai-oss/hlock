@@ -54,6 +54,12 @@ pub struct SyncOptions {
     /// Treat every executable the lock would run as approved (`--trust`): the caller has
     /// reviewed the lock some other way, and records the approvals.
     pub trust: bool,
+    /// Write desktop apps' own config (`--apps`; `in_place` implies it): an app reads
+    /// only its real config, so it can't be restored into an isolated root.
+    pub apps: bool,
+    /// `prefix` is the caller's default (a pulled lock's environment), not one the user
+    /// named: it's dropped for an app lock, which plans against the app's real config.
+    pub default_prefix: bool,
 }
 
 /// One concrete thing an `auto` step does.
@@ -132,6 +138,9 @@ pub struct Step {
     /// Not needed for the locked roles (e.g. extra models a provider lists).
     pub optional: bool,
     pub size_bytes: Option<u64>,
+    /// `apps`: the step writes a desktop app's own config, which needs `--apps`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub needs: Option<String>,
 }
 
 impl Default for Step {
@@ -147,6 +156,7 @@ impl Default for Step {
             verify: None,
             optional: false,
             size_bytes: None,
+            needs: None,
         }
     }
 }
@@ -178,6 +188,16 @@ pub struct Plan {
     /// What the lock would run here, each with its trust status (`specs/audit.md` §4).
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub executables: Vec<crate::trust::Executable>,
+    /// The harness is a desktop app (`kind = "app"`): its config is written only with `--apps`.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub app: bool,
+    /// Desktop apps (by name) whose config steps need `--apps`.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub apps: Vec<String>,
+    /// How each desktop app this plan writes picks up the change, by app name
+    /// (`restart`, `auto`; `[app] reload` in its profile).
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub reload: BTreeMap<String, String>,
 }
 
 impl Plan {
@@ -193,6 +213,7 @@ impl Plan {
                 (format!("hlock sync --prefix {p}"), format!("hlock check --prefix {p}"))
             }
             ("docker", _) => ("hlock sync --docker".into(), "hlock check".into()),
+            _ if self.app => ("hlock sync --apps".into(), "hlock check".into()),
             _ => ("hlock sync --in-place".into(), "hlock check".into()),
         }
     }
@@ -409,8 +430,15 @@ fn resolver(ctx: &Ctx) -> impl Fn(&str) -> Option<String> + '_ {
 pub(crate) fn target_ctx(profile: &HarnessProfile, ctx: &Ctx, opts: &SyncOptions) -> (Ctx, String, BTreeMap<String, String>) {
     let mut t = ctx.clone();
     let mut iso = BTreeMap::new();
+    // `{app-config}` reads these: with a relocated home they'd still name the real directory
+    let relocate_home = |t: &mut Ctx, home: PathBuf| {
+        t.home = home;
+        for var in ["XDG_CONFIG_HOME", "APPDATA"] {
+            t.env.remove(var);
+        }
+    };
     if let Some(dir) = &opts.docker {
-        t.home = dir.join("home");
+        relocate_home(&mut t, dir.join("home"));
         if let Some(var) = &profile.config_root.env {
             t.env.remove(var);
         }
@@ -428,7 +456,7 @@ pub(crate) fn target_ctx(profile: &HarnessProfile, ctx: &Ctx, opts: &SyncOptions
                 iso.insert(var, value.to_string_lossy().into_owned());
             }
             None => {
-                t.home = base.join("home");
+                relocate_home(&mut t, base.join("home"));
                 iso.insert("HOME".into(), t.home.to_string_lossy().into_owned());
             }
         }
@@ -649,7 +677,12 @@ fn install_step(id: String, kind: &str, what: &str, version: Option<&str>, sourc
 /// Build the sync plan for a lock. Nothing is changed.
 pub fn plan(lock: &Lockfile, lock_path: &Path, reg: &Registry, ctx: &Ctx, opts: &SyncOptions) -> Result<Plan> {
     let profile = reg.require_harness(&lock.harness.name)?;
-    let opts = &isolated(opts, lock_path, ctx);
+    if profile.is_app() && opts.docker.is_some() {
+        return Err(Error::Profile(format!("{} is a desktop app, and can't run in a container", profile.name)));
+    }
+    // a prefix the user named: also-apps are left out of it (they'd be written for real)
+    let explicit_prefix = opts.prefix.is_some() && !opts.default_prefix;
+    let opts = &isolated(profile, opts, lock_path, ctx);
     let (t, mode, isolation) = target_ctx(profile, ctx, opts);
     let root = profile.config_root(&t);
     let prefix = opts.prefix.as_ref().filter(|_| mode == "prefix").map(|p| pretty(&if p.is_absolute() { p.clone() } else { ctx.cwd.join(p) }, ctx));
@@ -662,20 +695,36 @@ pub fn plan(lock: &Lockfile, lock_path: &Path, reg: &Registry, ctx: &Ctx, opts: 
     let mut all_secrets: BTreeSet<String> = BTreeSet::new();
 
     // ---- harness ----
-    if profile.kind == "cli" && !docker {
+    if (profile.kind == "cli" || profile.is_app()) && !docker {
         let probe = probe_harness(profile, ctx);
         let want = lock.harness.version.as_deref();
         let bin = profile.binaries.first().cloned().unwrap_or_default();
-        let verify = Some(format!("{bin} {}", profile.version.args.join(" ")));
-        let matches = probe.installed && (want.is_none() || probe.version.as_deref() == want);
+        let verify = Some(if profile.is_app() { format!("hlock harness show {}", profile.id) } else { format!("{bin} {}", profile.version.args.join(" ")) });
+        // an app updates itself, and installers only offer its current version: any is fine
+        let matches = probe.installed && (want.is_none() || probe.version.as_deref() == want || profile.is_app());
         if matches {
+            let reason = match (want, probe.version.as_deref()) {
+                (Some(w), Some(v)) if w != v => format!("installed {v}; the lock pins {w}, and {} updates itself", profile.name),
+                _ => "installed".into(),
+            };
             steps.push(Step {
                 id: "harness".into(),
                 kind: "harness".into(),
                 title: format!("{} {}", profile.name, probe.version.clone().unwrap_or_default()),
-                reason: "installed".into(),
+                reason,
                 ..Default::default()
             });
+        } else if profile.is_app() {
+            // casks are macOS-only; elsewhere `brew` exists but can't install an app
+            let methods: Vec<crate::profiles::InstallMethod> = profile.install.iter().filter(|m| m.method != "brew-cask" || ctx.os() == "macos").cloned().collect();
+            let source = lock.harness.source.as_deref().filter(|s| !s.starts_with("brew-cask") || ctx.os() == "macos");
+            let mut s = install_step("harness".into(), "harness", &profile.name, None, source, &methods, opts, verify, ctx);
+            s.reason = s.reason.replace("; Homebrew installs the current version, which may differ from the pin", "").replace(&format!("{} is installed by hand", profile.name), "a download, installed by hand");
+            if let Some(w) = want {
+                s.title = format!("Install {}", profile.name);
+                s.reason = format!("{}{}installs the current version; the lock pins {w}", s.reason, if s.reason.is_empty() { "" } else { "; " });
+            }
+            steps.push(s);
         } else {
             let mut s = install_step("harness".into(), "harness", &profile.name, want, lock.harness.source.as_deref(), &profile.install, opts, verify, ctx);
             if probe.installed {
@@ -1005,10 +1054,23 @@ pub fn plan(lock: &Lockfile, lock_path: &Path, reg: &Registry, ctx: &Ctx, opts: 
             }
             continue;
         };
-        let (ot, _, _) = target_ctx(op, ctx, opts);
+        if op.is_app() && (docker || explicit_prefix) {
+            notes.push(format!("{}: a desktop app reads only its own config, so it's left out of {}", op.name, if docker { "a container" } else { "a prefix" }));
+            continue;
+        }
+        // an app is written where it reads, whatever the main harness's mode (§3.4 of specs/gui-apps.md)
+        let (ot, _, _) = if op.is_app() { target_ctx(op, ctx, &SyncOptions::default()) } else { target_ctx(op, ctx, opts) };
         let tag = format!("{}: ", op.name);
+        // an app has no project config: a project dependency goes into its user config
+        let app_scope = |scope: &str, project_ok: bool| if op.is_app() && scope == "project" && !project_ok { "user".to_string() } else { scope.to_string() };
+        let mut nowhere: BTreeSet<&str> = BTreeSet::new();
         for s in lock.skill.iter().filter(|s| s.dep.declared && s.enabled) {
             let scope = s.scope.as_deref().unwrap_or("project");
+            let scope = &app_scope(scope, crate::deps::skill_dest(op, scope, &s.name, &ot).is_ok());
+            if op.is_app() && crate::deps::skill_dest(op, scope, &s.name, &ot).is_err() {
+                nowhere.insert("skills");
+                continue;
+            }
             match crate::deps::skill_dest(op, scope, &s.name, &ot) {
                 Ok((dest, _)) => {
                     let ok = dest.join("SKILL.md").is_file() && Some(tree_digest(&dest)) == s.digest;
@@ -1037,7 +1099,12 @@ pub fn plan(lock: &Lockfile, lock_path: &Path, reg: &Registry, ctx: &Ctx, opts: 
         }
         for i in lock.instructions.iter().filter(|i| i.dep.declared) {
             let name = crate::deps::decl_name_of(i);
-            match crate::deps::instructions_dest(op, &i.scope, &name, &ot) {
+            let scope = &app_scope(&i.scope, crate::deps::instructions_dest(op, &i.scope, &name, &ot).is_ok());
+            if op.is_app() && crate::deps::instructions_dest(op, scope, &name, &ot).is_err() {
+                nowhere.insert("instruction files");
+                continue;
+            }
+            match crate::deps::instructions_dest(op, scope, &name, &ot) {
                 Ok((dest, _)) => {
                     let ok = std::fs::read(&dest).map(|b| Some(crate::hash::sha256_bytes(&b)) == i.digest).unwrap_or(false);
                     let mut step = Step { id: format!("also:{}:instructions:{name}", op.id), kind: "instructions".into(), title: format!("{tag}{}", pretty(&dest, ctx)), ..Default::default() };
@@ -1058,7 +1125,12 @@ pub fn plan(lock: &Lockfile, lock_path: &Path, reg: &Registry, ctx: &Ctx, opts: 
         for tool in lock.tool.iter().filter(|x| x.kind == "mcp" && x.dep.declared && x.enabled != Some(false)) {
             let mut step = mcp_dep_step(tool, op, &ot, ctx, &tag);
             step.id = format!("also:{}:{}", op.id, step.id);
+            // a server an app's config can't hold is the user's to add there; it doesn't hold up the main harness
+            step.optional = op.is_app() && transport_problem(tool, op).is_some();
             steps.push(step);
+        }
+        if !nowhere.is_empty() {
+            notes.push(format!("{tag}reads no {}, so those stay with {}", nowhere.into_iter().collect::<Vec<_>>().join(" or "), profile.name));
         }
         if lock.native.iter().any(|n| n.dep.declared) || lock.config.iter().any(|c| c.restore != "record") {
             notes.push(format!("{}: plugins, settings and hooks stay with {}; only skills, MCP servers and instruction files are installed here", op.name, profile.name));
@@ -1132,6 +1204,13 @@ pub fn plan(lock: &Lockfile, lock_path: &Path, reg: &Registry, ctx: &Ctx, opts: 
         st.reason = if denied { format!("you denied {} on this machine (hlock trust to change that)", what.join(", ")) } else { format!("⚑ runs {}, not yet trusted: approve with hlock trust, or sync --trust", what.join(", ")) };
     }
 
+    // ---- desktop apps: their own config is written only with --apps, and not while they run ----
+    let (apps, reload) = gate_apps(&mut steps, profile, mode == "home", reg, ctx, opts);
+    if profile.is_app() && !profile.unmanaged.is_empty() {
+        let n = profile.unmanaged.len();
+        notes.push(format!("not restored: {n} part{} of {} that live{} outside files hlock restores (hlock harness show {})", if n == 1 { "" } else { "s" }, profile.name, if n == 1 { "s" } else { "" }, profile.id));
+    }
+
     Ok(Plan {
         harness: profile.id.clone(),
         harness_name: profile.name.clone(),
@@ -1145,7 +1224,74 @@ pub fn plan(lock: &Lockfile, lock_path: &Path, reg: &Registry, ctx: &Ctx, opts: 
         steps,
         notes,
         executables,
+        app: profile.is_app(),
+        apps,
+        reload,
     })
+}
+
+/// Where an action writes.
+fn action_target(a: &Action) -> Option<&Path> {
+    match a {
+        Action::WriteConfig { path, .. } | Action::Remove { path } | Action::WriteHooks { path, .. } | Action::WriteFile { path, .. } => Some(path),
+        Action::CopyDir { to, .. } | Action::CopyFile { to, .. } | Action::GitSkill { to, .. } | Action::FetchDep { to, .. } => Some(to),
+        Action::WriteMcp { dest, .. } => Some(&dest.path),
+        Action::Run { .. } => None,
+    }
+}
+
+/// Whether a desktop app is running: `HLOCK_APPS_RUNNING` (profile ids, comma-separated)
+/// when set, else `pgrep -x <process>`. Where that can't be asked, it isn't.
+pub fn app_running(p: &HarnessProfile, ctx: &Ctx) -> bool {
+    if let Some(list) = ctx.env.get("HLOCK_APPS_RUNNING") {
+        return list.split(',').any(|id| id.trim() == p.id);
+    }
+    let Some(process) = p.app.as_ref().and_then(|a| a.process.as_deref()).filter(|n| fsutil::plain_token(n)) else { return false };
+    let pgrep = Path::new("/usr/bin/pgrep");
+    pgrep.is_file() && crate::profiles::run_capture(pgrep, &["-x".to_string(), process.to_string()], ctx, std::time::Duration::from_secs(5)).is_some()
+}
+
+/// Gate the steps that write a desktop app's own config, outside the project: without
+/// `--apps` (or `--in-place`) they're manual, and while a `quit-to-write` app runs they're
+/// manual whatever the flags. The main harness is gated only in `home` mode (a prefix is a
+/// copy the app never reads); `[target] also` apps always are, and their gated steps are
+/// optional so they don't hold up the main harness's sync. Returns the apps that need
+/// `--apps`, and how each app that will be written picks up the change.
+fn gate_apps(steps: &mut [Step], profile: &HarnessProfile, home: bool, reg: &Registry, ctx: &Ctx, opts: &SyncOptions) -> (Vec<String>, BTreeMap<String, String>) {
+    let allowed = opts.apps || opts.in_place;
+    let mut need: Vec<String> = Vec::new();
+    let mut reload = BTreeMap::new();
+    let mut running: BTreeMap<String, bool> = BTreeMap::new();
+    for st in steps.iter_mut().filter(|st| st.status == "auto") {
+        let also = st.id.strip_prefix("also:").and_then(|r| r.split_once(':')).map(|(id, _)| id);
+        let app = match also {
+            Some(id) => reg.harness(id).filter(|p| p.is_app()),
+            None => Some(profile).filter(|p| p.is_app() && home),
+        };
+        let (Some(app), Some(target)) = (app, st.action.as_ref().and_then(action_target)) else { continue };
+        if crate::capture::is_project_path(target, &app.config_root(ctx), ctx) {
+            continue;
+        }
+        let is_running = *running.entry(app.id.clone()).or_insert_with(|| app.app.as_ref().is_some_and(|a| a.quit_to_write) && app_running(app, ctx));
+        if is_running {
+            st.reason = format!("{} is running and may overwrite the file; quit it, then run hlock sync --apps", app.name);
+        } else if !allowed {
+            st.reason = format!("{} reads only your own config; hlock sync --apps writes it", app.name);
+            st.needs = Some("apps".into());
+            if !need.contains(&app.name) {
+                need.push(app.name.clone());
+            }
+        } else {
+            if let Some(r) = app.app.as_ref().and_then(|a| a.reload.clone()) {
+                reload.insert(app.name.clone(), r);
+            }
+            continue;
+        }
+        st.status = "manual".into();
+        st.action = None;
+        st.optional = also.is_some();
+    }
+    (need, reload)
 }
 
 /// A step that fetches a declared dependency at its commit into `dest`. A lock pulled
@@ -1209,6 +1355,17 @@ fn fetch_dep_step(mut step: Step, entry: crate::deps::Entry, dest: PathBuf, lock
 }
 
 /// A step that configures a declared MCP server in `profile`'s config for `t`.
+/// Why `profile`'s MCP config can't hold `tool` (Claude Desktop's file takes only stdio
+/// servers), naming where it goes instead when the profile says.
+pub(crate) fn transport_problem(tool: &crate::lockfile::Tool, profile: &HarnessProfile) -> Option<String> {
+    let transport = tool.transport.as_deref().unwrap_or(if tool.url.is_some() { "http" } else { "stdio" });
+    if profile.holds_transport(transport) {
+        return None;
+    }
+    let elsewhere = profile.unmanaged.iter().find(|u| u.what.contains("MCP")).map(|u| format!("; add it in {}{}", u.where_, u.url.as_deref().map(|l| format!(": {l}")).unwrap_or_default())).unwrap_or_default();
+    Some(format!("{}'s MCP config can't hold a {transport} server{elsewhere}", profile.name))
+}
+
 fn mcp_dep_step(tool: &crate::lockfile::Tool, profile: &HarnessProfile, t: &Ctx, ctx: &Ctx, tag: &str) -> Step {
     let id = format!("mcp-dep:{}", tool.name);
     let scope = tool.scope.as_deref().unwrap_or("project");
@@ -1219,6 +1376,17 @@ fn mcp_dep_step(tool: &crate::lockfile::Tool, profile: &HarnessProfile, t: &Ctx,
         step.reason = format!("{} names a server hlock can't configure by itself; add it by hand", tool.source.as_deref().unwrap_or("its source"));
         return step;
     }
+    if let Some(why) = transport_problem(tool, profile) {
+        step.status = "manual".into();
+        step.reason = why;
+        return step;
+    }
+    // an app has no project MCP config: a project server goes into its user config
+    let scope = if profile.is_app() && scope == "project" && crate::deps::mcp_dest(profile, scope, t).is_err() {
+        "user"
+    } else {
+        scope
+    };
     match crate::deps::mcp_dest(profile, scope, t) {
         Ok(dest) => {
             let entry = crate::deps::mcp_entry(tool, &dest.shape);
@@ -1402,8 +1570,15 @@ fn decider_steps(lock: &Lockfile, lock_path: &Path, profile: &HarnessProfile, re
 
 /// Isolated by default: without `in_place` or `docker`, a plan writes under the
 /// lock's `.hlock/env` prefix.
-fn isolated(opts: &SyncOptions, lock_path: &Path, ctx: &Ctx) -> SyncOptions {
+fn isolated(profile: &HarnessProfile, opts: &SyncOptions, lock_path: &Path, ctx: &Ctx) -> SyncOptions {
     let mut o = opts.clone();
+    if profile.is_app() {
+        // an app reads only its own config: plan against it, unless the user named a prefix
+        if o.default_prefix {
+            o.prefix = None;
+        }
+        return o;
+    }
     if o.prefix.is_none() && o.docker.is_none() && !o.in_place {
         o.prefix = Some(crate::launch::env_prefix(lock_path, ctx));
     }
@@ -1421,7 +1596,7 @@ pub fn secret_env(lock: &Lockfile, lock_path: &Path, reg: &Registry, ctx: &Ctx, 
         return Ok((values, missing));
     }
     let profile = reg.require_harness(&lock.harness.name)?;
-    let (t, _, _) = target_ctx(profile, ctx, &isolated(opts, lock_path, ctx));
+    let (t, _, _) = target_ctx(profile, ctx, &isolated(profile, opts, lock_path, ctx));
     let lock_dir = lock_dir_of(lock_path, ctx);
     let resolve = resolver(ctx);
     for c in lock.config.iter().filter(|c| c.restore != "record") {
@@ -1859,6 +2034,9 @@ pub fn rehydrate_skill(plan: &Plan, lock_name: &str) -> String {
     s.push_str(&format!("## Rules\n\n- Ask the user before installing system software or downloading large model weights, and say how big the download is.\n- Never print, log, or commit secret values. Ask the user to set secrets in their shell; don't type them yourself.\n- Run each step's check before moving on. If a step fails, stop and report the error.\n- Finish by running `{sync_cmd}`, which performs the remaining automatic steps, then `{check_cmd}`.\n\n"));
     if let (true, Some(p)) = (plan.mode == "prefix", &plan.prefix) {
         s.push_str(&format!("The setup is restored into an isolated config root under `{p}`, not the user's own config. Don't change the user's own config unless they ask.\n\n"));
+    }
+    if plan.app {
+        s.push_str(&format!("{} is a desktop app, which reads only its own config. Install it with the step below (into ~/Applications when /Applications would need `sudo`; ask before anything that needs admin rights). It doesn't need to be opened first: `{sync_cmd}` creates its config.\n\n", plan.harness_name));
     }
     let pending: Vec<&Step> = plan.steps.iter().filter(|st| st.status != "satisfied" && !st.optional).collect();
     if pending.is_empty() {
@@ -2303,5 +2481,149 @@ mod tests {
         let (d, entry) = dockerfile(&Plan { harness_name: "Claude Code".into(), version: lock.harness.version.clone(), ..Default::default() }, &lock, profile);
         assert!(!d.lines().any(|l| l.starts_with("RUN curl evil") || l.starts_with("RUN evil")), "{d}");
         assert!(entry.contains("os.O_EXCL, 0o600") && !entry.contains("chmod"));
+    }
+
+    /// A Claude Desktop lock: its `/mcpServers`, vendored next to the lock.
+    fn desktop_lock(ctx: &Ctx) -> Lockfile {
+        vendor(ctx, ".hlock/vendor/claude-desktop/claude_desktop_config.json", r#"{"mcpServers": {"fs": {"command": "npx", "args": ["fs-mcp"]}}}"#);
+        let config = crate::lockfile::ConfigFile {
+            id: "config".into(),
+            path: "{root}/claude_desktop_config.json".into(),
+            format: "json".into(),
+            restore: "pointers".into(),
+            pointers: vec!["/mcpServers".into()],
+            vendored: Some(".hlock/vendor/claude-desktop/claude_desktop_config.json".into()),
+            ..Default::default()
+        };
+        Lockfile { harness: Harness { name: "claude-desktop".into(), version: Some("1.0.3".into()), source: Some("app@1.0.3".into()), ..Default::default() }, config: vec![config], ..Default::default() }
+    }
+
+    /// macOS, no desktop app running, and app bundles looked for under the sandbox.
+    fn app_ctx(dir: &Path, mut ctx: Ctx) -> Ctx {
+        ctx.env.insert("HLOCK_OS".into(), "macos".into());
+        ctx.env.insert("HLOCK_APPS_RUNNING".into(), String::new());
+        ctx.env.insert("HLOCK_APP_DIRS".into(), dir.join("Applications").to_string_lossy().into_owned());
+        ctx
+    }
+
+    fn bundle(dir: &Path, name: &str, version: &str) {
+        let c = dir.join("Applications").join(name).join("Contents");
+        std::fs::create_dir_all(&c).unwrap();
+        std::fs::write(c.join("Info.plist"), format!("<?xml version=\"1.0\"?>\n<plist version=\"1.0\"><dict>\n<key>CFBundleName</key><string>x</string>\n<key>CFBundleShortVersionString</key>\n<string>{version}</string>\n</dict></plist>\n")).unwrap();
+    }
+
+    #[test]
+    fn an_app_lock_writes_its_real_config_only_with_apps() {
+        let (dir, ctx) = sandbox("app-lock");
+        let ctx = app_ctx(&dir, ctx);
+        bundle(&dir, "Claude.app", "1.0.4");
+        let lock = desktop_lock(&ctx);
+        let reg = Registry::builtin();
+        let path = ctx.cwd.join("harness.lock");
+        let real = ctx.home.join("Library/Application Support/Claude/claude_desktop_config.json");
+        let opts = SyncOptions { trust: true, ..Default::default() };
+        let p = plan(&lock, &path, &reg, &ctx, &opts).unwrap();
+        // no isolated root: an app reads only its own config
+        assert_eq!((p.mode.as_str(), p.app, p.apps.clone()), ("home", true, vec!["Claude Desktop".to_string()]));
+        let cfg = p.steps.iter().find(|s| s.kind == "config").unwrap();
+        assert!(cfg.status == "manual" && cfg.action.is_none() && cfg.needs.as_deref() == Some("apps") && !cfg.optional, "{cfg:?}");
+        assert!(cfg.reason.contains("hlock sync --apps"), "{cfg:?}");
+        assert_eq!(p.commands().0, "hlock sync --apps");
+        // a newer app is fine: it updates itself
+        let h = step(&p, "harness");
+        assert!(h.status == "satisfied" && h.reason.contains("updates itself"), "{h:?}");
+        assert!(p.notes.iter().any(|n| n.starts_with("not restored: 3 parts of Claude Desktop")), "{:?}", p.notes);
+        // --apps (or --in-place) writes the real file, and says the app needs a restart
+        for o in [SyncOptions { apps: true, ..opts.clone() }, SyncOptions { in_place: true, ..opts.clone() }] {
+            let p = plan(&lock, &path, &reg, &ctx, &o).unwrap();
+            let cfg = p.steps.iter().find(|s| s.kind == "config").unwrap();
+            assert!(matches!(&cfg.action, Some(Action::WriteConfig { path, .. }) if path == &real), "{cfg:?}");
+            assert!(p.apps.is_empty() && p.reload.get("Claude Desktop").map(String::as_str) == Some("restart"));
+        }
+        // ... but not while it runs: it may overwrite the file
+        let mut running = ctx.clone();
+        running.env.insert("HLOCK_APPS_RUNNING".into(), "claude-desktop".into());
+        let p = plan(&lock, &path, &reg, &running, &SyncOptions { apps: true, ..opts.clone() }).unwrap();
+        let cfg = p.steps.iter().find(|s| s.kind == "config").unwrap();
+        assert!(cfg.status == "manual" && cfg.reason.contains("is running"), "{cfg:?}");
+        // a pulled lock's default prefix is dropped; a prefix the user names is a copy, not gated
+        let p = plan(&lock, &path, &reg, &ctx, &SyncOptions { prefix: Some(dir.join("env")), default_prefix: true, ..opts.clone() }).unwrap();
+        assert_eq!(p.mode, "home");
+        let p = plan(&lock, &path, &reg, &ctx, &SyncOptions { prefix: Some(dir.join("env")), ..opts.clone() }).unwrap();
+        let cfg = p.steps.iter().find(|s| s.kind == "config").unwrap();
+        assert_eq!(p.mode, "prefix");
+        assert!(matches!(&cfg.action, Some(Action::WriteConfig { path, .. }) if path.starts_with(dir.join("env"))), "{cfg:?}");
+        // and an app can't go in a container
+        let err = plan(&lock, &path, &reg, &ctx, &SyncOptions { docker: Some(dir.join("docker")), ..opts }).unwrap_err();
+        assert!(err.to_string().contains("can't run in a container"), "{err}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_missing_app_installs_the_current_version() {
+        let (dir, ctx) = sandbox("app-install");
+        let mut ctx = app_ctx(&dir, ctx);
+        let lock = desktop_lock(&ctx);
+        let reg = Registry::builtin();
+        let p = plan(&lock, &ctx.cwd.join("harness.lock"), &reg, &ctx, &SyncOptions::default()).unwrap();
+        let h = step(&p, "harness");
+        assert!(h.status == "manual" && h.reason.contains("installs the current version; the lock pins 1.0.3"), "{h:?}");
+        assert_eq!(h.verify.as_deref(), Some("hlock harness show claude-desktop"));
+        assert!(h.command.as_deref().is_some_and(|c| c.contains("claude.ai/download")), "{h:?}");
+        // a cask lock on Linux falls back to the download: Linux has brew, but no casks
+        ctx.env.insert("HLOCK_OS".into(), "linux".into());
+        let cask = Lockfile { harness: Harness { source: Some("brew-cask:claude@1.0.3".into()), ..lock.harness.clone() }, ..lock.clone() };
+        let h = plan(&cask, &ctx.cwd.join("harness.lock"), &reg, &ctx, &SyncOptions::default()).unwrap().steps.into_iter().find(|s| s.id == "harness").unwrap();
+        assert!(!h.command.as_deref().unwrap_or_default().contains("--cask"), "{h:?}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn also_apps_get_declared_servers_in_their_real_config() {
+        let (dir, ctx) = sandbox("also-app");
+        let ctx = app_ctx(&dir, ctx);
+        let declared = crate::lockfile::Declared { declared: true, ..Default::default() };
+        use crate::lockfile::Tool;
+        let stdio = Tool { name: "fs".into(), kind: "mcp".into(), transport: Some("stdio".into()), command: Some("npx".into()), args: vec!["fs-mcp".into()], dep: declared.clone(), ..Default::default() };
+        let remote = Tool { name: "web".into(), kind: "mcp".into(), transport: Some("http".into()), url: Some("https://x.dev/mcp".into()), dep: declared, ..Default::default() };
+        let lock = Lockfile { harness: Harness { name: "claude-code".into(), ..Default::default() }, tool: vec![stdio, remote], ..Default::default() };
+        let reg = Registry::builtin();
+        let path = ctx.cwd.join("harness.lock");
+        let opts = SyncOptions { also: vec!["claude-desktop".into()], trust: true, ..Default::default() };
+        let p = plan(&lock, &path, &reg, &ctx, &opts).unwrap();
+        // Claude Code stays isolated; Claude Desktop is planned where it reads, in its user config
+        assert_eq!(p.mode, "prefix");
+        let fs = step(&p, "also:claude-desktop:mcp-dep:fs");
+        assert!(fs.status == "manual" && fs.optional && fs.needs.as_deref() == Some("apps"), "{fs:?}");
+        // optional: it doesn't hold up Claude Code's sync
+        assert_eq!(p.count("manual"), p.steps.iter().filter(|s| s.status == "manual" && !s.id.starts_with("also:")).count());
+        // a remote server can't go in Claude Desktop's file: it's a connector
+        let web = step(&p, "also:claude-desktop:mcp-dep:web");
+        assert!(web.status == "manual" && web.reason.contains("can't hold a http server") && web.reason.contains("claude.ai/settings/connectors"), "{web:?}");
+        let p = plan(&lock, &path, &reg, &ctx, &SyncOptions { apps: true, ..opts.clone() }).unwrap();
+        let fs = step(&p, "also:claude-desktop:mcp-dep:fs");
+        assert!(matches!(&fs.action, Some(Action::WriteMcp { dest, .. }) if dest.path == ctx.home.join("Library/Application Support/Claude/claude_desktop_config.json")), "{fs:?}");
+        // under a prefix the user named, or in a container, an app is left out
+        let p = plan(&lock, &path, &reg, &ctx, &SyncOptions { prefix: Some(dir.join("env")), ..opts.clone() }).unwrap();
+        assert!(!p.steps.iter().any(|s| s.id.starts_with("also:claude-desktop")) && p.notes.iter().any(|n| n.contains("left out of a prefix")), "{:?}", p.notes);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_relocated_home_takes_the_app_config_dir_with_it() {
+        let (dir, mut ctx) = sandbox("app-config-iso");
+        ctx.env.insert("HLOCK_OS".into(), "linux".into());
+        ctx.env.insert("XDG_CONFIG_HOME".into(), "/real/config".into());
+        let reg = Registry::builtin();
+        let vscode = reg.harness("vscode").unwrap();
+        assert_eq!(vscode.config_root(&ctx), PathBuf::from("/real/config/Code/User"));
+        let (t, mode, _) = target_ctx(vscode, &ctx, &SyncOptions { prefix: Some(dir.join("env")), ..Default::default() });
+        assert_eq!(mode, "prefix");
+        assert!(vscode.config_root(&t).starts_with(dir.join("env")), "{}", vscode.config_root(&t).display());
+        // a profile whose own root variable is XDG_CONFIG_HOME keeps it pointed at the prefix
+        let opencode = reg.harness("opencode").unwrap();
+        let (t, _, iso) = target_ctx(opencode, &ctx, &SyncOptions { prefix: Some(dir.join("env")), ..Default::default() });
+        assert_eq!(t.var("XDG_CONFIG_HOME"), iso.get("XDG_CONFIG_HOME").map(String::as_str));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

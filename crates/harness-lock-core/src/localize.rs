@@ -299,6 +299,9 @@ pub fn localize(source: &Lockfile, source_path: &Path, reg: &Registry, ctx: &Ctx
     let src_profile = reg.harness(&source.harness.name);
     let (target, why) = if let Some(h) = &opts.harness {
         let p = reg.require_harness(h)?;
+        if let Some(e) = p.app_refusal() {
+            return Err(e);
+        }
         if !(p.kind == "custom" || p.local_models == Some(true)) {
             return Err(Error::Profile(format!("{} can't use a local model endpoint", p.name)));
         }

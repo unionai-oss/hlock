@@ -55,8 +55,9 @@ hlock migrate [LOCK] --to <harness> [-o OUT] [--model provider:model] [--local [
   defaults to `harness.local.lock`, as `localize`'s does.
 
 Refused: an unknown harness, the lock's own harness without `--local` ("already on …"), and
-a target that isn't an agent CLI (`kind = "framework"` or `"custom"`: those run code, and
-have no config hlock writes skills and MCP servers into).
+a target that isn't an agent CLI or a desktop app (`kind = "framework"` or `"custom"`: those
+run code, and have no config hlock writes skills and MCP servers into). Desktop apps
+(`kind = "app"`) are allowed; see [gui-apps](gui-apps.md) §3.10.
 
 The result is an ordinary lock: `kind = "migrated"`, `base-lock` naming the source, and a
 `[migrate]` table with the report (what moved, what was replaced, what didn't carry over).

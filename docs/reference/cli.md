@@ -463,6 +463,7 @@ hlock sync [LOCK] [OPTIONS]
 | `--all-models` | Include models no locked role uses |
 | `--prefix DIR` | Where isolated config roots live (default `.hlock/env`) |
 | `--in-place` | Write into your own config (`~/.claude`, …) instead of an isolated root |
+| `--apps` | Write [desktop apps'](../guides/sync.md#desktop-apps) own config (Claude Desktop, VS Code), which they read instead of an isolated root. `--in-place` implies it |
 | `--docker` | Write a Docker build context to `.hlock/docker/<harness>/` |
 | `--build` | With `--docker`, also run `docker build` |
 | `--base IMAGE` | With `--docker`, build on IMAGE (Debian-based) instead of `node:22-bookworm` |
@@ -911,7 +912,7 @@ project's lock.
 | `hlock meta launch [ARGS...]` | Start an interactive session in an installed meta harness |
 | `hlock meta jobs` | List built-in and custom jobs (`--json`) |
 | `hlock meta run JOB [INSTRUCTIONS...]` | Run a job in the meta harness, then verify it |
-| `hlock meta verify JOB` | Run only a job's verification (`--out`, `--count`, `--json`) |
+| `hlock meta verify JOB` | Run only a job's verification (`--out`, `--count`, `--apps`, `--json`) |
 
 ### `meta init`
 
@@ -944,6 +945,7 @@ hlock meta run JOB [INSTRUCTIONS...] [OPTIONS]
 | `--count N` | `10` | `bootstrap-evals`: how many tasks to aim for |
 | `-t`, `--template` | `coding` | `bootstrap-evals`: the template to scaffold when there's no pack yet (`hlock evals templates`) |
 | `--pin` | | `update`: re-pin the project's lock when something changed |
+| `--apps` | | `install`: let the agent write [desktop apps'](../guides/meta.md#desktop-apps) own config, with `hlock sync --apps` |
 | `--allow-version-mismatch` | | Run even if the installed meta harness differs from its lock |
 | `--dry-run` | | Print the command and the prompt, and run nothing |
 | `--json` | | With `--dry-run`: print the run plan as JSON |

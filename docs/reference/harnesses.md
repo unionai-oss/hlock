@@ -1,11 +1,11 @@
 ---
-description: The agent harnesses, agent frameworks, and local inference runtimes hlock supports, what it captures from each, and how to add one.
+description: The agent harnesses, desktop apps, agent frameworks, and local inference runtimes hlock supports, what it captures from each, and how to add one.
 ---
 
 # Supported harnesses
 
-hlock supports agent CLIs, autonomous agents, agent frameworks, and local inference
-runtimes. Each one is
+hlock supports agent CLIs, autonomous agents, desktop apps, agent frameworks, and local
+inference runtimes. Each one is
 described by a [profile](../guides/harness-profiles.md), a TOML file that tells hlock where
 the harness keeps its config, model, MCP servers, skills and plugins, and how it was
 installed. These tables are generated from the built-in profiles, so they match the
@@ -161,6 +161,36 @@ Hermes Agent is listed here because it also runs as a gateway. It's as fully sup
 the agent CLIs above. NanoClaw isn't supported: it's a git checkout that you customize by editing its
 code, and its settings live in a SQLite database rather than in a config file a profile can
 describe.
+
+## Desktop apps
+
+Desktop apps keep their MCP servers, skills and instruction files in plain files too, so
+`pin`, `check`, `sync` and `migrate` work with them. hlock never starts an app: `launch`,
+`run`, `resolve` and `tune` refuse one. An app reads only its own config, so `sync` writes it
+only with `--apps` (see [Desktop apps](../guides/harnesses.md#desktop-apps)).
+
+<!-- generated:apps -->
+| Harness | Vendor | Name in hlock | Support | Open source | Installs from |
+|---|---|---|---|---|---|
+| [Claude Desktop](https://claude.ai/download) | Anthropic | `claude-desktop` (`claude-app`) | basic | — | `brew-cask`, `app` |
+| [VS Code](https://code.visualstudio.com) | Microsoft | `vscode` (`code`, `vs-code`, `visual-studio-code`) | basic | — | `brew-cask`, `app` |
+<!-- /generated:apps -->
+
+<!-- generated:apps-capture -->
+| App | MCP servers | Skills | Instructions | Not restored |
+|---|---|---|---|---|
+| Claude Desktop | ✓ | — | — | Connectors (remote MCP servers), Desktop Extensions, Projects, chat skills and the default model |
+| VS Code | ✓ | ✓ | `AGENTS.md`, `.github/copilot-instructions.md` | Settings (settings.json) and other VS Code profiles |
+<!-- /generated:apps-capture -->
+
+- **Claude Desktop**: hlock pins the chat app's MCP servers (`/mcpServers` in
+  `claude_desktop_config.json`), which must be local (stdio) servers. Remote servers are
+  connectors in your claude.ai account. The app's Code tab reads `~/.claude`, which the
+  `claude-code` profile covers.
+- **VS Code**: hlock pins the default VS Code profile's `mcp.json`, and Copilot's skills and
+  instruction files. Other VS Code profiles and `settings.json` aren't pinned.
+- Windows paths are unverified on a real install, and app versions are read on macOS (from
+  the app bundle) or from the app's CLI shim (`code --version`).
 
 ## Agent frameworks
 

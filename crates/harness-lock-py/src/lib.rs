@@ -1042,6 +1042,8 @@ fn sync_options(prefix: Option<String>, in_place: bool, docker: Option<String>, 
         also: Vec::new(),
         allow_hidden: Vec::new(),
         trust: false,
+        apps: false,
+        default_prefix: false,
     }
 }
 
@@ -1326,9 +1328,9 @@ fn export_apm_lock(py: Python<'_>, lock: String, out: Option<String>, force: boo
 /// Build the `hlock sync` plan for a lock as JSON. Nothing is changed. The plan writes
 /// into an isolated root (`prefix`, default `.hlock/env`) unless `in_place` or `docker`.
 #[pyfunction]
-#[pyo3(signature = (path="harness.lock".to_string(), prefix=None, in_place=false, docker=None, install=false, pull=false, all_models=false, exact=false, manifest=None, refresh=false, allow_hidden=None, trust=false))]
+#[pyo3(signature = (path="harness.lock".to_string(), prefix=None, in_place=false, docker=None, install=false, pull=false, all_models=false, exact=false, manifest=None, refresh=false, allow_hidden=None, trust=false, apps=false, default_prefix=None))]
 #[allow(clippy::too_many_arguments)]
-fn sync_plan(py: Python<'_>, path: String, prefix: Option<String>, in_place: bool, docker: Option<String>, install: bool, pull: bool, all_models: bool, exact: bool, manifest: Option<String>, refresh: bool, allow_hidden: Option<Vec<String>>, trust: bool) -> PyResult<String> {
+fn sync_plan(py: Python<'_>, path: String, prefix: Option<String>, in_place: bool, docker: Option<String>, install: bool, pull: bool, all_models: bool, exact: bool, manifest: Option<String>, refresh: bool, allow_hidden: Option<Vec<String>>, trust: bool, apps: bool, default_prefix: Option<String>) -> PyResult<String> {
     // no GIL while it waits on the network (deciders), so other Python threads keep running
     interruptible(py, move || {
         let (reg, ctx, _) = registry(manifest.as_deref(), Some(&lock_dir(&path)))?;
@@ -1338,10 +1340,14 @@ fn sync_plan(py: Python<'_>, path: String, prefix: Option<String>, in_place: boo
             let m = manifest.as_deref().map(project_manifest).transpose()?.flatten();
             core::deps::refresh(m.as_ref(), &mut lock, &reg, &ctx, false).map_err(py_err)?;
         }
-        let mut opts = sync_options(prefix, in_place, docker, install, pull, all_models, exact);
+        // a default prefix (a pulled lock's environment) is dropped for a desktop app
+        let defaulted = prefix.is_none() && default_prefix.is_some();
+        let mut opts = sync_options(prefix.or(default_prefix), in_place, docker, install, pull, all_models, exact);
+        opts.default_prefix = defaulted;
         opts.also = also_harnesses(manifest.as_deref(), &path);
         opts.allow_hidden = allow_hidden.unwrap_or_default();
         opts.trust = trust;
+        opts.apps = apps;
         let plan = core::sync::plan(&lock, Path::new(&path), &reg, &ctx, &opts).map_err(py_err)?;
         Ok(json_str(serde_json::json!(plan)))
     })
@@ -1905,6 +1911,7 @@ fn meta_input(
     count: usize,
     instructions: String,
     guide: Option<String>,
+    apps: bool,
 ) -> PyResult<(core::meta::JobInput, core::Registry, core::profiles::Ctx)> {
     let project = lock_dir(lock);
     let (reg, ctx, m) = registry(manifest, Some(&project))?;
@@ -1919,6 +1926,7 @@ fn meta_input(
         count,
         guide: guide.map(|g| abs(&g)),
         instructions,
+        apps,
     };
     Ok((input, reg, ctx))
 }
@@ -1995,7 +2003,7 @@ fn meta_check(py: Python<'_>, path: String, meta_manifest: Option<String>, manif
 /// Prepare a meta job: render its prompt and build the command that runs it in the
 /// meta harness pinned in `meta_lock`. Returns JSON (see `meta::Prepared`).
 #[pyfunction]
-#[pyo3(signature = (job, lock="harness.lock".to_string(), meta_lock="harness.meta.lock".to_string(), meta_manifest=None, manifest=None, out=None, count=10, instructions=String::new(), guide=None, headless=None, allow_version_mismatch=false, dry_run=false))]
+#[pyo3(signature = (job, lock="harness.lock".to_string(), meta_lock="harness.meta.lock".to_string(), meta_manifest=None, manifest=None, out=None, count=10, instructions=String::new(), guide=None, headless=None, allow_version_mismatch=false, dry_run=false, apps=false))]
 #[allow(clippy::too_many_arguments)]
 fn meta_prepare(
     py: Python<'_>,
@@ -2011,13 +2019,14 @@ fn meta_prepare(
     headless: Option<bool>,
     allow_version_mismatch: bool,
     dry_run: bool,
+    apps: bool,
 ) -> PyResult<String> {
     let meta = self::meta_manifest(meta_manifest.as_deref())?;
     if !Path::new(&meta_lock).is_file() {
         return Err(LockfileError::new_err(format!("no meta harness pinned: {meta_lock} doesn't exist; pin one with `hlock meta pin`")));
     }
     interruptible(py, move || {
-        let (input, reg, ctx) = meta_input(&lock, &meta_lock, manifest.as_deref(), out, count, instructions, guide)?;
+        let (input, reg, ctx) = meta_input(&lock, &meta_lock, manifest.as_deref(), out, count, instructions, guide, apps)?;
         let ml = core::Lockfile::load(&input.meta_lock_path).map_err(py_err)?;
         let opts = core::meta::RunOptions { headless, allow_version_mismatch, dry_run };
         let prep = core::meta::prepare(&job, &input, meta.as_ref(), &ml, &reg, &ctx, &opts).map_err(py_err)?;
@@ -2027,12 +2036,13 @@ fn meta_prepare(
 
 /// hlock's own check of a meta job's result. Returns JSON (see `meta::Verdict`).
 #[pyfunction]
-#[pyo3(signature = (job, lock="harness.lock".to_string(), meta_lock="harness.meta.lock".to_string(), meta_manifest=None, manifest=None, out=None, count=0))]
-fn meta_verify(py: Python<'_>, job: String, lock: String, meta_lock: String, meta_manifest: Option<String>, manifest: Option<String>, out: Option<String>, count: usize) -> PyResult<String> {
+#[pyo3(signature = (job, lock="harness.lock".to_string(), meta_lock="harness.meta.lock".to_string(), meta_manifest=None, manifest=None, out=None, count=0, apps=false))]
+#[allow(clippy::too_many_arguments)]
+fn meta_verify(py: Python<'_>, job: String, lock: String, meta_lock: String, meta_manifest: Option<String>, manifest: Option<String>, out: Option<String>, count: usize, apps: bool) -> PyResult<String> {
     // no GIL while it waits on the network (deciders), so other Python threads keep running
     interruptible(py, move || {
         let meta = self::meta_manifest(meta_manifest.as_deref())?;
-        let (input, reg, ctx) = meta_input(&lock, &meta_lock, manifest.as_deref(), out, count, String::new(), None)?;
+        let (input, reg, ctx) = meta_input(&lock, &meta_lock, manifest.as_deref(), out, count, String::new(), None, apps)?;
         let v = core::meta::verify(&job, &input, meta.as_ref(), &reg, &ctx).map_err(py_err)?;
         Ok(json_str(serde_json::json!(v)))
     })
