@@ -277,6 +277,20 @@ A digest of each control file in `project` (`harness.toml`, the locks, the polic
 `.envrc`, git hooks and config), or null where there's none, as JSON. Compare one taken
 before a sandboxed session with one after to see what the session created or changed.
 
+### `sandbox_session_begin` and `sandbox_session_end`
+
+```python
+sandbox_session_begin(session, env) -> str
+sandbox_session_end(session, env) -> str
+```
+
+Run an [OpenShell](../guides/sandbox.md#run-the-lock-on-openshell) session around a
+prepared launch: `session` is the JSON of `launch_prepare`'s `sandbox.session`, `env` its
+`sandbox.env`. `begin` creates the sandbox, uploads what the run sees and attaches providers,
+and returns JSON `{argv, session}`: run `argv`, then pass that `session` to `end`, which copies
+back what the run changed, deletes the sandbox and its providers, and returns JSON `{notes}`.
+`hlock.sandbox.run` does both.
+
 ### `prepare_eval_workspace`
 
 ```python

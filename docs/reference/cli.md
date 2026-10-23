@@ -711,7 +711,8 @@ hlock run PROMPT [--trust] [--no-sandbox] [--json]
 
 ## `sandbox`
 
-Show the lock's [sandbox](../guides/sandbox.md): its runner and whether it's installed and
+Show the lock's [sandbox](../guides/sandbox.md) (`docker`, `openshell`, or a runner you
+define): its runner and whether it's installed and
 trusted, the image, network, secrets, what runs inside, the profile, and whether
 `harness.toml`'s `[sandbox]` or the evidence differ. Takes `--json`.
 

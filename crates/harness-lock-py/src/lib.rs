@@ -1492,7 +1492,7 @@ fn sandbox_info(path: String, manifest: Option<String>, no_sandbox: bool) -> PyR
     let table = core::sandbox::project_table(&ldir);
     let runners = core::sandbox::runners(&ctx, table.as_ref()).map_err(py_err)?;
     let runner = spec.as_ref().and_then(|s| runners.get(&s.runner)).map(|r| {
-        let program = if r.name == "docker" { "docker".to_string() } else { r.command[0].clone() };
+        let program = if r.builtin() { r.name.clone() } else { r.command[0].clone() };
         serde_json::json!({"name": r.name, "origin": r.origin, "program": program, "installed": ctx.which(&program).is_some(), "command": r.command})
     });
     let trusted = core::trust::sandbox_executable(&lock, &ldir, &ctx).map(|e| {
@@ -1526,6 +1526,31 @@ fn sandbox_info(path: String, manifest: Option<String>, no_sandbox: bool) -> PyR
 #[pyfunction]
 fn sandbox_control_snapshot(project: String) -> String {
     json_str(serde_json::json!(core::sandbox::control_snapshot(Path::new(&project))))
+}
+
+/// Begin an OpenShell session (`sandbox.session` from a prepared launch): create the
+/// sandbox, upload its places, attach providers. `env` is the runner's environment
+/// (`sandbox.env`), `command_env` the command's (`sandbox.session_env`); `timeout`, in seconds,
+/// is when the caller gives up on the command. Returns JSON `{argv, env, deadline, session}`:
+/// run `argv` in `env`, then pass `session` to [`sandbox_session_end`]. Not interruptible:
+/// what it creates is removed if it fails.
+#[pyfunction]
+#[pyo3(signature = (session, env, command_env, timeout=None))]
+fn sandbox_session_begin(py: Python<'_>, session: String, env: std::collections::BTreeMap<String, String>, command_env: std::collections::BTreeMap<String, String>, timeout: Option<u64>) -> PyResult<String> {
+    let s: core::openshell::Session = serde_json::from_str(&session).map_err(|e| PyValueError::new_err(e.to_string()))?;
+    let started = py.allow_threads(move || core::openshell::begin(s, &env, &command_env, timeout)).map_err(py_err)?;
+    Ok(json_str(serde_json::json!(started)))
+}
+
+/// End an OpenShell session: copy back what the command changed, delete the sandbox and its
+/// providers. `stopped`: how the caller stopped the command early (`"timeout"`,
+/// `"interrupt"`), when it did. Returns JSON `{notes}`: what the run should say.
+#[pyfunction]
+#[pyo3(signature = (session, env, stopped=None))]
+fn sandbox_session_end(py: Python<'_>, session: String, env: std::collections::BTreeMap<String, String>, stopped: Option<String>) -> PyResult<String> {
+    let s: core::openshell::Session = serde_json::from_str(&session).map_err(|e| PyValueError::new_err(e.to_string()))?;
+    let notes = py.allow_threads(move || core::openshell::end(&s, &env, stopped.as_deref())).map_err(py_err)?;
+    Ok(json_str(serde_json::json!({"notes": notes})))
 }
 
 /// Run a locked code harness (`[harnesses.<id>]`) on a prompt through the
@@ -2173,6 +2198,8 @@ fn _hlock(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(grade_eval_task, m)?)?;
     m.add_function(wrap_pyfunction!(sandbox_info, m)?)?;
     m.add_function(wrap_pyfunction!(sandbox_control_snapshot, m)?)?;
+    m.add_function(wrap_pyfunction!(sandbox_session_begin, m)?)?;
+    m.add_function(wrap_pyfunction!(sandbox_session_end, m)?)?;
     m.add_function(wrap_pyfunction!(calibrate_eval_pack, m)?)?;
     m.add_function(wrap_pyfunction!(decide, m)?)?;
     m.add_function(wrap_pyfunction!(decide_hook, m)?)?;

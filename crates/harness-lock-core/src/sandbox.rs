@@ -87,11 +87,13 @@ impl Spec {
             None => None,
             Some(p) => Some(ProfileRef { digest: profile_digest(root, &p)?, path: p }),
         };
+        // OpenShell denies by default and holds keys itself: its defaults say so
+        let openshell = runner == "openshell";
         let spec = Spec {
-            runner,
             image: s("image")?,
-            network: s("network")?.unwrap_or_else(|| "open".into()),
-            secrets: s("secrets")?.unwrap_or_else(|| "env".into()),
+            network: s("network")?.unwrap_or_else(|| if openshell { "none" } else { "open" }.into()),
+            secrets: s("secrets")?.unwrap_or_else(|| if openshell { "proxy" } else { "env" }.into()),
+            runner,
             applies_to,
             profile,
             grader_image: s("grader-image")?,
@@ -142,13 +144,16 @@ impl Spec {
         for img in self.image.iter().chain(&self.grader_image) {
             check_image(img)?;
         }
-        if self.runner == "docker" && self.image.is_none() {
-            return Err(err("[sandbox] runner = \"docker\" needs an image (hlock sync --docker --build makes one)"));
+        if matches!(self.runner.as_str(), "docker" | "openshell") && self.image.is_none() {
+            return Err(err(format!("[sandbox] runner = \"{}\" needs an image (hlock sync --docker --build makes one)", self.runner)));
         }
-        if self.secrets == "proxy" && self.runner != "docker" {
-            return Err(err("[sandbox] secrets = \"proxy\" works with runner = \"docker\" only; use secrets = \"env\""));
+        if self.runner == "openshell" && self.network == "open" {
+            return Err(err("[sandbox] OpenShell has no allow-all network rule: use network = \"none\" (the providers' hosts, plus what an OpenShell policy in profile allows)"));
         }
-        if self.secrets == "proxy" && self.network == "none" {
+        if self.secrets == "proxy" && !matches!(self.runner.as_str(), "docker" | "openshell") {
+            return Err(err("[sandbox] secrets = \"proxy\" works with runner = \"docker\" or \"openshell\" only; use secrets = \"env\""));
+        }
+        if self.secrets == "proxy" && self.network == "none" && self.runner == "docker" {
             return Err(err("[sandbox] secrets = \"proxy\" needs network = \"open\": with none, the agent can't reach the proxy"));
         }
         Ok(())
@@ -256,6 +261,16 @@ impl Runner {
         Runner { name: "docker".into(), origin: "builtin".into(), networks: vec!["open".into(), "none".into()], ..Default::default() }
     }
 
+    /// NVIDIA OpenShell (`crate::openshell`): network is its policy's, deny by default.
+    fn openshell() -> Runner {
+        Runner { name: "openshell".into(), origin: "builtin".into(), networks: vec!["none".into()], ..Default::default() }
+    }
+
+    /// One of hlock's own runners (`docker`, `openshell`), not an argv template.
+    pub fn builtin(&self) -> bool {
+        self.origin == "builtin"
+    }
+
     /// The network modes it claims to enforce.
     pub fn supports(&self, network: &str) -> bool {
         let listed = if !self.networks.is_empty() {
@@ -297,10 +312,14 @@ pub fn user_file(ctx: &Ctx) -> PathBuf {
     }
 }
 
-/// Every runner defined here: `docker`, the user's, then the project's (`harness.toml`'s
-/// `[sandbox.runners]`, which can't shadow `docker`, `none`, or a user runner).
+/// Names a runners file can't define: hlock's own runners and `none`.
+const RESERVED: &[&str] = &["docker", "openshell", "none"];
+
+/// Every runner defined here: `docker` and `openshell`, the user's, then the project's
+/// (`harness.toml`'s `[sandbox.runners]`, which can't shadow a built-in, `none`, or a user
+/// runner).
 pub fn runners(ctx: &Ctx, project: Option<&Value>) -> Result<BTreeMap<String, Runner>> {
-    let mut out = BTreeMap::from([("docker".to_string(), Runner::docker())]);
+    let mut out = BTreeMap::from([("docker".to_string(), Runner::docker()), ("openshell".to_string(), Runner::openshell())]);
     let file = user_file(ctx);
     if file.is_file() {
         let text = std::fs::read_to_string(&file)?;
@@ -308,14 +327,14 @@ pub fn runners(ctx: &Ctx, project: Option<&Value>) -> Result<BTreeMap<String, Ru
             .map_err(|e| err(format!("{}: {e}", file.display())))
             .and_then(|v| serde_json::to_value(v).map_err(|e| err(e.to_string())))?;
         for (name, def) in doc.get("runners").and_then(Value::as_object).into_iter().flatten() {
-            if !valid_name(name) || matches!(name.as_str(), "docker" | "none") {
+            if !valid_name(name) || RESERVED.contains(&name.as_str()) {
                 return Err(err(format!("{}: {name:?} can't be a runner name", file.display())));
             }
             out.insert(name.clone(), Runner::parse(name, "user", def)?);
         }
     }
     for (name, def) in project.and_then(|v| v.get("runners")).and_then(Value::as_object).into_iter().flatten() {
-        if !valid_name(name) || matches!(name.as_str(), "docker" | "none") {
+        if !valid_name(name) || RESERVED.contains(&name.as_str()) {
             return Err(err(format!("[sandbox.runners] can't define {name:?}")));
         }
         if out.contains_key(name) {
@@ -428,11 +447,19 @@ pub struct Wrapped {
     pub mounts: Vec<Mount>,
     /// What the runner can't do as asked (a read-only path it mounts read-write).
     pub notes: Vec<String>,
+    /// For `openshell`: the session to begin before `argv` runs and end after it
+    /// ([`crate::openshell::begin`]); `argv` is then only what it will look like.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session: Option<crate::openshell::Session>,
+    /// For `openshell`: the command's variables, for the file [`crate::openshell::begin`]
+    /// writes inside. They hold secret values, so they're never printed.
+    #[serde(skip)]
+    pub session_env: BTreeMap<String, String>,
 }
 
 /// The host variables a runner process keeps for itself.
-fn runner_keeps(k: &str) -> bool {
-    matches!(k, "PATH" | "USER" | "LOGNAME" | "TMPDIR" | "XDG_RUNTIME_DIR" | "SYSTEMROOT") || k.starts_with("DOCKER_")
+pub fn runner_keeps(k: &str) -> bool {
+    matches!(k, "PATH" | "USER" | "LOGNAME" | "TMPDIR" | "XDG_RUNTIME_DIR" | "SYSTEMROOT") || k.starts_with("DOCKER_") || k.starts_with("OPENSHELL_")
 }
 
 /// Variables that change how the runner process itself behaves: never set from the lock.
@@ -453,9 +480,12 @@ impl Sandbox {
         let runner = all.get(&spec.runner).cloned().ok_or_else(|| {
             err(format!("the lock's sandbox runner {:?} isn't defined on this machine; define it in {} (or harness.toml [sandbox.runners]), or run with --no-sandbox", spec.runner, user_file(ctx).display()))
         })?;
-        let program = if runner.name == "docker" { "docker".to_string() } else { runner.command[0].clone() };
+        let program = if runner.builtin() { runner.name.clone() } else { runner.command[0].clone() };
         if ctx.which(&program).is_none() {
             return Err(err(format!("{program} isn't installed (the {} sandbox runs it); install it, or run with --no-sandbox", spec.runner)));
+        }
+        if runner.name == "openshell" && spec.network != "none" {
+            return Err(err("OpenShell has no allow-all network rule: use network = \"none\" (the providers' hosts, plus what an OpenShell policy in profile allows)"));
         }
         if !runner.supports(&spec.network) {
             return Err(err(format!("the {} runner can't enforce network = {:?}", runner.name, spec.network)));
@@ -515,6 +545,36 @@ impl Sandbox {
         if !steering.is_empty() {
             notes.push(format!("left out of the sandbox's environment, since they'd steer the runner: {}", steering.join(", ")));
         }
+        if self.runner.name == "openshell" {
+            if self.spec.secrets == "proxy" {
+                // a provider sends the key to the provider's own host: a key meant for
+                // another endpoint would go to the wrong place
+                for (_, key, host, _) in crate::openshell::KEY_ROUTES {
+                    let base = key.replace("_API_KEY", "_BASE_URL");
+                    if let Some(url) = ctx.var(&base).filter(|u| !u.trim_end_matches('/').starts_with(&format!("https://{host}"))) {
+                        return Err(err(format!("{base} is {url}, but an OpenShell provider sends {key} to {host} only; unset {base}, or use secrets = \"env\" with an OpenShell policy in profile that allows its host")));
+                    }
+                }
+            }
+            let session = crate::openshell::plan(self, run, &mounts, &id, names.clone())?;
+            // the openshell CLI finds its gateway under the real HOME (and XDG_CONFIG_HOME); a
+            // provider reads the keys from its environment. The command's values go in a
+            // file inside (begin), never in the CLI's environment.
+            let mut env = runner_env;
+            for k in ["HOME", "XDG_CONFIG_HOME"] {
+                if let Some(v) = ctx.var(k) {
+                    env.insert(k.into(), v.to_string());
+                }
+            }
+            if self.spec.secrets == "proxy" {
+                env.extend(crate::openshell::KEY_ROUTES.iter().filter_map(|(_, k, _, _)| ctx.var(k).map(|v| (k.to_string(), v.to_string()))));
+            } else if run.kind != "graders" {
+                notes.push("secrets = \"env\": the keys are in the sandbox's environment, and OpenShell's policy (profile) has to allow their hosts".into());
+            }
+            let session_env: BTreeMap<String, String> = inside.into_iter().filter(|(k, _)| k != "HOME" && k != IN_SANDBOX).collect();
+            let argv = crate::openshell::preview(&session);
+            return Ok(Wrapped { argv, env, env_names: names, id, kill: vec![], mounts, notes, session: Some(session), session_env });
+        }
         let (argv, env, kill) = if self.runner.name == "docker" {
             let image = if run.kind == "graders" { self.spec.grader_image.as_ref().or(self.spec.image.as_ref()) } else { self.spec.image.as_ref() };
             let image = image.ok_or_else(|| err("the docker sandbox has no image"))?;
@@ -547,7 +607,7 @@ impl Sandbox {
             env.extend(inside.clone());
             (a, env, vec![])
         };
-        Ok(Wrapped { argv, env, env_names: names, id, kill, mounts, notes })
+        Ok(Wrapped { argv, env, env_names: names, id, kill, mounts, notes, session: None, session_env: BTreeMap::new() })
     }
 
     /// Run a command sandboxed to completion, within `limits`: `trials` and `graders`.
@@ -568,12 +628,42 @@ impl Sandbox {
             ..Default::default()
         };
         let w = self.wrap(&run, ctx)?;
-        let (prog, args) = w.argv.split_first().ok_or_else(|| err("nothing to run"))?;
+        let started = match &w.session {
+            Some(s) => Some(crate::openshell::begin(s.clone(), &w.env, &w.session_env, limits.timeout.map(|t| t.as_secs()))?),
+            None => None,
+        };
+        let (argv, run_env) = match &started {
+            Some(st) => (st.argv.clone(), st.env.clone()),
+            None => (w.argv.clone(), w.env.clone()),
+        };
+        let (prog, args) = argv.split_first().ok_or_else(|| err("nothing to run"))?;
         let mut cmd = std::process::Command::new(prog);
-        cmd.args(args).current_dir(cwd).env_clear().envs(&w.env).stdin(std::process::Stdio::null());
-        let out = crate::process::run(cmd, limits).map_err(|e| err(format!("cannot run {prog}: {e}")))?;
-        if out.timed_out {
+        cmd.args(args).current_dir(cwd).env_clear().envs(&run_env).stdin(std::process::Stdio::null());
+        let t0 = std::time::Instant::now();
+        let mut ran = crate::process::run(cmd, limits).map_err(|e| err(format!("cannot run {prog}: {e}")));
+        // the deadline inside the sandbox stops it just before ours: that's a timeout too
+        if let (Ok(o), Some(st)) = (ran.as_mut(), &started) {
+            if st.stopped_inside(o.code, t0.elapsed()) {
+                o.timed_out = true;
+                o.success = false;
+            }
+        }
+        let timed_out = ran.as_ref().is_ok_and(|o| o.timed_out);
+        if timed_out {
             self.kill(&w);
+        }
+        // killed without a timeout: a Ctrl-C (stop_all), and the command may still run inside
+        let stopped = match &ran {
+            Ok(o) if o.timed_out => Some("timeout"),
+            Ok(o) if o.code.is_none() => Some("interrupt"),
+            Err(_) => Some("interrupt"),
+            Ok(_) => None,
+        };
+        // copied back (and the sandbox gone) before anyone reads the command's files
+        let ended = started.as_ref().map(|st| crate::openshell::end(&st.session, &w.env, stopped)).transpose();
+        let mut out = ran?;
+        for n in ended?.unwrap_or_default() {
+            out.stderr.extend(format!("\n[hlock] {n}").into_bytes());
         }
         Ok(out)
     }
@@ -739,6 +829,12 @@ const CONTROL_FILES: &[&str] = &["harness.toml", "hlock-policy.toml", ".envrc"];
 /// Directories skipped when looking for `.env` files.
 const SKIP_DIRS: &[&str] = &[".git", "node_modules", "target", ".venv", "venv", ".hlock", "__pycache__"];
 const MAX_WALK: usize = 100_000;
+
+/// Whether a file at the project's top is a control file (or a harness lock), existing or
+/// not: what a sandbox that copies files back never brings back.
+pub fn is_control_name(name: &str) -> bool {
+    CONTROL_FILES.contains(&name) || name.starts_with("harness") && (name.ends_with(".lock") || name.ends_with(".lock.prev"))
+}
 
 /// The control paths that exist: mounted read-only over the read-write project.
 pub fn control_paths(project: &Path) -> Vec<PathBuf> {
@@ -949,7 +1045,7 @@ mod tests {
     fn ctx(home: &Path) -> Ctx {
         let bin = home.join("bin");
         std::fs::create_dir_all(&bin).unwrap();
-        for b in ["docker", "jail"] {
+        for b in ["docker", "jail", "openshell"] {
             std::fs::write(bin.join(b), "#!/bin/sh\n").unwrap();
         }
         Ctx {
@@ -975,11 +1071,16 @@ mod tests {
         assert_eq!((s.network.as_str(), s.secrets.as_str()), ("open", "env"));
         assert_eq!(s.applies_to, vec!["agent", "trials", "graders"]);
         assert!(Spec::from_manifest(Some(&table("runner = \"none\"")), &d).unwrap().is_none());
+        // OpenShell denies by default and holds the keys: its defaults
+        let o = Spec::from_manifest(Some(&table("runner = \"openshell\"\nimage = \"hlock-pi:1\"")), &d).unwrap().unwrap();
+        assert_eq!((o.network.as_str(), o.secrets.as_str()), ("none", "proxy"));
         for (bad, why) in [
             ("runner = \"docker\"", "needs an image"),
             ("runner = \"docker\"\nimage = \"--privileged\"", "isn't an image reference"),
             ("runner = \"docker\"\nimage = \"x\"\nnetwork = \"allowlist\"", "isn't open or none"),
-            ("runner = \"jail\"\nsecrets = \"proxy\"", "docker\" only"),
+            ("runner = \"jail\"\nsecrets = \"proxy\"", "\"openshell\" only"),
+            ("runner = \"openshell\"", "needs an image"),
+            ("runner = \"openshell\"\nimage = \"x\"\nnetwork = \"open\"", "no allow-all network rule"),
             ("runner = \"docker\"\nimage = \"x\"\nsecrets = \"proxy\"\nnetwork = \"none\"", "needs network"),
             ("runner = \"docker\"\nimage = \"x\"\napplies-to = [\"everything\"]", "applies-to has"),
             ("runner = \"docker\"\nimage = \"x\"\nprofile = \"../etc/passwd\"", "inside the project"),
@@ -1023,6 +1124,9 @@ mod tests {
         assert_eq!((r["jail"].origin.as_str(), r["other"].origin.as_str(), r["docker"].origin.as_str()), ("user", "project", "builtin"));
         let e = runners(&c, Some(&table("[runners.docker]\ncommand = [\"evil\"]\n"))).unwrap_err().to_string();
         assert!(e.contains("can't define"), "{e}");
+        let e = runners(&c, Some(&table("[runners.openshell]\ncommand = [\"evil\"]\n"))).unwrap_err().to_string();
+        assert!(e.contains("can't define"), "{e}");
+        assert_eq!(r["openshell"].origin, "builtin");
     }
 
     #[test]
@@ -1075,6 +1179,45 @@ mod tests {
         // parents before what's inside them
         let order: Vec<&Mount> = w.mounts.iter().collect();
         assert!(order.iter().position(|m| m.dst == project).unwrap() < order.iter().position(|m| m.dst == project.join(".hlock")).unwrap());
+    }
+
+    #[test]
+    fn openshell_wrap_plans_a_session() {
+        let d = tmp("openshell");
+        let c = ctx(&d);
+        let project = d.join("proj");
+        std::fs::create_dir_all(project.join("app")).unwrap();
+        std::fs::write(project.join("harness.toml"), "").unwrap();
+        std::fs::write(project.join("app/.env"), "SECRET=1").unwrap();
+        let spec = Spec::from_manifest(Some(&table("runner = \"openshell\"\nimage = \"hlock-claude-code:1\"")), &project).unwrap().unwrap();
+        let sb = Sandbox::new(&spec, &project, None, &c).unwrap();
+        let home = project.join(SANDBOX_ENV_DIR).join("claude-code/home");
+        let run = Run {
+            kind: "agent".into(),
+            argv: vec!["claude".into()],
+            cwd: project.clone(),
+            home: home.clone(),
+            mounts: project_mounts(&project).unwrap(),
+            env: [("CLAUDE_CONFIG_DIR", "/x"), ("XDG_CONFIG_HOME", "/root-of-its-own")].into_iter().map(|(k, v)| (k.to_string(), v.to_string())).collect(),
+            ..Default::default()
+        };
+        let w = sb.wrap(&run, &c).unwrap();
+        let s = w.session.as_ref().unwrap();
+        // the command's variables are kept apart from the CLI's (one of them would move the
+        // CLI's gateway config)
+        assert!(!w.env.contains_key("XDG_CONFIG_HOME") && !w.env.contains_key("CLAUDE_CONFIG_DIR"));
+        assert_eq!(w.session_env["XDG_CONFIG_HOME"], "/root-of-its-own");
+        assert_eq!(w.argv[..3], ["openshell".to_string(), "sandbox".into(), "exec".into()]);
+        assert!(w.kill.is_empty() && s.name.starts_with("hlock-") && s.image == "hlock-claude-code:1");
+        // the project comes back; its control files and .env don't; HOME is a place of its own
+        let p = &s.places[0];
+        assert!(p.host == project && p.copy_back);
+        assert!(p.keep.contains(&project.join("harness.toml")) && p.skip.contains(&project.join("app/.env")));
+        assert!(s.places.iter().any(|x| x.host == home && x.rewrite && !x.copy_back));
+        // the provider reads the real key from the runner's environment; the command doesn't get it
+        assert_eq!(w.env["ANTHROPIC_API_KEY"], "sk-real");
+        assert!(!s.env_names.contains(&"ANTHROPIC_API_KEY".to_string()) && s.env_names.contains(&"CLAUDE_CONFIG_DIR".to_string()));
+        assert_eq!(w.env["HOME"], d.to_string_lossy());
     }
 
     #[test]
