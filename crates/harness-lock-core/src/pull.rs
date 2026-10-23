@@ -273,7 +273,7 @@ pub(crate) fn redact_urls(text: &str) -> String {
 }
 
 /// A scratch checkout, removed on drop.
-struct Checkout(PathBuf);
+pub(crate) struct Checkout(pub(crate) PathBuf);
 
 impl Drop for Checkout {
     fn drop(&mut self) {
@@ -281,7 +281,7 @@ impl Drop for Checkout {
     }
 }
 
-fn scratch_dir() -> Result<Checkout> {
+pub(crate) fn scratch_dir() -> Result<Checkout> {
     let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
     let dir = std::env::temp_dir().join(format!("hlock-pull-{}-{nanos}", std::process::id()));
     std::fs::create_dir(&dir).map_err(|e| crate::error::io_at(&dir, e))?;
@@ -315,10 +315,13 @@ fn fetch(src: &Source, dir: &Path) -> Result<String> {
         return Err(Error::Pull(format!("can't fetch {}: {e}\n{hint}", src.spec)));
     }
     // A lock path selects one file; a directory (or the root) looks for harness locks in it.
-    let patterns: Vec<String> = match src.path.as_deref() {
+    let mut patterns: Vec<String> = match src.path.as_deref() {
         Some(p) if p.ends_with(".lock") => vec![format!("/{p}")],
         p => vec![in_repo(p, "harness.lock"), in_repo(p, "harness.*.lock")],
     };
+    // the rest of the setup next to the lock, for `pull --into`
+    let setup_dir = src.path.as_deref().map(|p| if p.ends_with(".lock") { p.rsplit_once('/').map(|(d, _)| d).unwrap_or("") } else { p }).filter(|d| !d.is_empty());
+    patterns.extend(SETUP_FILES.iter().chain(["apm.yaml"].iter()).filter(|f| **f != crate::LOCKFILE_PATH).map(|f| in_repo(setup_dir, f)));
     let mut args = vec!["sparse-checkout", "set", "--no-cone"];
     args.extend(patterns.iter().map(String::as_str));
     git(dir, &args)?;
@@ -388,6 +391,30 @@ pub struct OtherLock {
     pub source: String,
 }
 
+/// The files a setup is made of, besides the files its lock vendors: what `push` uploads
+/// and `pull --into` writes.
+pub const SETUP_FILES: [&str; 4] = ["harness.toml", "harness.lock", "apm.yml", "apm.lock.yaml"];
+
+/// What was fetched into a scratch directory (a git checkout, or an unpacked registry
+/// archive), ready to be placed.
+pub(crate) struct Fetched<'a> {
+    pub src: Source,
+    /// The scratch directory.
+    pub root: &'a Path,
+    /// The git commit, or the registry version.
+    pub commit: String,
+    /// The lock to place; `None` for a setup without one (`pull --into` only).
+    pub remote_lock: Option<PathBuf>,
+    /// Other harness locks next to it.
+    pub others: Vec<String>,
+    /// A git checkout is sparse: vendored paths are checked out before they're copied.
+    pub git: bool,
+    /// The lock's `[pulled]` table (`at` is added when it's written).
+    pub pulled: Value,
+    /// A registry version's archive digest.
+    pub digest: Option<String>,
+}
+
 /// What [`pull`] did.
 #[derive(Debug, Clone, Serialize)]
 pub struct PullOutcome {
@@ -398,8 +425,12 @@ pub struct PullOutcome {
     /// True when written to the store (not a project file).
     pub stored: bool,
     pub source: Source,
+    /// The git commit, or the registry version.
     pub commit: String,
-    /// The commit of the lock this pull replaced (a refresh), if any.
+    /// The registry version and its archive digest (`None` for a git pull).
+    pub version: Option<String>,
+    pub digest: Option<String>,
+    /// The commit (or registry version) of the lock this pull replaced (a refresh), if any.
     pub previous_commit: Option<String>,
     /// Changes from the replaced lock (empty for a first pull).
     pub diff: Vec<String>,
@@ -596,8 +627,30 @@ pub fn pull_allowing(spec: &str, target: &Target, force: bool, allow_hidden: &[S
     let scratch = scratch_dir()?;
     let commit = fetch(&src, &scratch.0)?;
     let (remote_lock, others) = choose_lock(&src, &scratch.0)?;
+    let pulled = git_pulled(&src, &scratch.0, &remote_lock, &commit);
+    place(Fetched { src, root: &scratch.0, commit, remote_lock: Some(remote_lock), others, git: true, pulled, digest: None }, target, force, allow_hidden)
+}
+
+/// The `[pulled]` table of a lock pulled from git.
+fn git_pulled(src: &Source, root: &Path, remote_lock: &Path, commit: &str) -> Value {
+    let repo_path = remote_lock.strip_prefix(root).map(|p| p.to_string_lossy().into_owned()).unwrap_or_else(|_| crate::LOCKFILE_PATH.into());
+    let mut pulled = json!({ "from": src.spec, "url": src.url, "path": repo_path, "commit": commit });
+    if let Some(r) = &src.reference {
+        pulled["ref"] = json!(r);
+    }
+    pulled
+}
+
+/// Place what [`Fetched`] holds into `target`: the shared second half of a git pull and a
+/// registry pull.
+pub(crate) fn place(f: Fetched<'_>, target: &Target, force: bool, allow_hidden: &[String]) -> Result<PullOutcome> {
+    let Fetched { src, root, commit, remote_lock, others, git: is_git, pulled, digest } = f;
+    if let Target::Store(Some(n)) = target {
+        check_name(n)?;
+    }
+    let remote_lock = remote_lock.ok_or_else(|| Error::Lockfile(format!("{} has no harness.lock; write its files into a project with --into DIR", src.spec)))?;
     // a lock that's a symlink (or under one) could point anywhere on this machine
-    if !std::fs::symlink_metadata(&remote_lock).is_ok_and(|m| m.is_file()) || !crate::fsutil::within(&scratch.0, &remote_lock) {
+    if !std::fs::symlink_metadata(&remote_lock).is_ok_and(|m| m.is_file()) || !crate::fsutil::within(root, &remote_lock) {
         return Err(Error::Pull(format!("{}'s lock is a symlink or outside the repository; refusing to pull it", src.spec)));
     }
     // load() validates the lock: names that become paths, values that become commands
@@ -640,7 +693,7 @@ pub fn pull_allowing(spec: &str, target: &Target, force: bool, allow_hidden: &[S
 
     // Fetch the vendored paths too, then copy them into the target's vendor directory.
     let others = others.into_iter().map(|p| OtherLock { source: with_path(&src, &p), path: p }).collect();
-    let lock_dir_rel = remote_lock.parent().and_then(|p| p.strip_prefix(&scratch.0).ok()).map(Path::to_path_buf).unwrap_or_default();
+    let lock_dir_rel = remote_lock.parent().and_then(|p| p.strip_prefix(root).ok()).map(Path::to_path_buf).unwrap_or_default();
     let harness = lock.harness.name.clone();
     // both name the vendor directory that's replaced below
     crate::fsutil::check_plain_name("the pulled lock's harness name", &harness)?;
@@ -654,12 +707,8 @@ pub fn pull_allowing(spec: &str, target: &Target, force: bool, allow_hidden: &[S
     if let Some(p) = paths.iter().find(|p| !safe_rel(p)) {
         return Err(Error::Lockfile(format!("{} vendors {p:?}, which isn't a path inside the repository; refusing to pull it", src.spec)));
     }
-    if !paths.is_empty() {
-        let rel = |p: &str| format!("/{}", lock_dir_rel.join(p).to_string_lossy().trim_start_matches('/'));
-        let patterns: Vec<String> = paths.iter().map(|p| rel(p)).collect();
-        let mut args = vec!["sparse-checkout", "add"];
-        args.extend(patterns.iter().map(String::as_str));
-        git(&scratch.0, &args)?;
+    if is_git {
+        checkout_paths(root, &lock_dir_rel, &paths)?;
     }
     let dir = out.parent().filter(|p| !p.as_os_str().is_empty()).map(Path::to_path_buf).unwrap_or_else(|| PathBuf::from("."));
     let vdir = match (&ns, target) {
@@ -673,7 +722,7 @@ pub fn pull_allowing(spec: &str, target: &Target, force: bool, allow_hidden: &[S
     let _ = std::fs::remove_dir_all(&staged);
     let mut warnings = policy_warnings;
     let mut vendored = Vec::new();
-    let lock_root = scratch.0.join(&lock_dir_rel);
+    let lock_root = root.join(&lock_dir_rel);
     let mut move_one = |slot: &mut Option<String>, what: String| -> Result<()> {
         let Some(old) = slot.clone() else { return Ok(()) };
         let from = lock_root.join(&old);
@@ -683,7 +732,7 @@ pub fn pull_allowing(spec: &str, target: &Target, force: bool, allow_hidden: &[S
             return Ok(());
         };
         // a symlink in the repository (or a symlinked parent) could point anywhere here
-        if meta.file_type().is_symlink() || !crate::fsutil::within(&scratch.0, &from) {
+        if meta.file_type().is_symlink() || !crate::fsutil::within(root, &from) {
             warnings.push(format!("{what}: {old} is a symlink in the repository; skipped (sync will treat it as manual)"));
             *slot = None;
             return Ok(());
@@ -754,13 +803,10 @@ pub fn pull_allowing(spec: &str, target: &Target, force: bool, allow_hidden: &[S
         return Err(e);
     }
 
-    let repo_path = lock_dir_rel.join(&remote_file).to_string_lossy().into_owned();
-    let mut pulled = json!({ "from": src.spec, "url": src.url, "path": repo_path, "commit": commit, "at": now_rfc3339() });
-    if let Some(r) = &src.reference {
-        pulled["ref"] = json!(r);
-    }
+    let mut pulled = pulled;
+    pulled["at"] = json!(now_rfc3339());
     lock.pulled = Some(pulled);
-    let previous_commit = previous.as_ref().and_then(pulled_from).and_then(|p| p.get("commit")).and_then(Value::as_str).map(str::to_string);
+    let previous_commit = previous.as_ref().and_then(pulled_from).and_then(|p| p.get("commit").or_else(|| p.get("version"))).and_then(Value::as_str).map(str::to_string);
     let diff = previous.as_ref().map(|p| diff_locks(p, &lock)).unwrap_or_default();
     lock.save(&out)?;
     // `--allow-hidden` let these through after this pull scanned them: the exception is
@@ -778,7 +824,177 @@ pub fn pull_allowing(spec: &str, target: &Target, force: bool, allow_hidden: &[S
             store.save(&ctx)?;
         }
     }
-    Ok(PullOutcome { lock, path: out, name, stored: matches!(target, Target::Store(_)), source: src, commit, previous_commit, diff, vendored, others, warnings })
+    let version = digest.is_some().then(|| commit.clone());
+    Ok(PullOutcome { lock, path: out, name, stored: matches!(target, Target::Store(_)), source: src, commit, version, digest, previous_commit, diff, vendored, others, warnings })
+}
+
+/// Check out `paths` (relative to the lock's directory `lock_dir_rel`) in a sparse checkout.
+fn checkout_paths(root: &Path, lock_dir_rel: &Path, paths: &[String]) -> Result<()> {
+    if paths.is_empty() {
+        return Ok(());
+    }
+    let rel = |p: &str| format!("/{}", lock_dir_rel.join(p).to_string_lossy().trim_start_matches('/'));
+    let patterns: Vec<String> = paths.iter().map(|p| rel(p)).collect();
+    let mut args = vec!["sparse-checkout", "add"];
+    args.extend(patterns.iter().map(String::as_str));
+    git(root, &args).map(|_| ())
+}
+
+/// What [`pull_into`] wrote.
+#[derive(Debug, Clone, Serialize)]
+pub struct IntoOutcome {
+    /// The directory written into.
+    pub dir: PathBuf,
+    /// The files written, relative to `dir`.
+    pub files: Vec<String>,
+    /// The lock written, with its `[pulled]` table (`None` for a setup without one).
+    pub lock: Option<Lockfile>,
+    pub source: Source,
+    pub commit: String,
+    pub version: Option<String>,
+    pub digest: Option<String>,
+    pub warnings: Vec<String>,
+}
+
+/// Pull the setup at a git `spec` and write its files (the lock, the files it vendors,
+/// `harness.toml`, `apm.yml`, `apm.lock.yaml`) into the directory `into`.
+pub fn pull_into(spec: &str, into: &Path, force: bool, allow_hidden: &[String]) -> Result<IntoOutcome> {
+    let src = parse(spec)?;
+    let scratch = scratch_dir()?;
+    let commit = fetch(&src, &scratch.0)?;
+    let lock = match choose_lock(&src, &scratch.0) {
+        Ok((l, _)) => Some(l),
+        // a setup of APM files only has no lock
+        Err(e) => {
+            let base = src.path.as_deref().map(|p| scratch.0.join(p)).unwrap_or_else(|| scratch.0.clone());
+            if SETUP_FILES.iter().chain(["apm.yaml"].iter()).any(|f| base.join(f).is_file()) {
+                None
+            } else {
+                return Err(e);
+            }
+        }
+    };
+    let pulled = match &lock {
+        Some(l) => git_pulled(&src, &scratch.0, l, &commit),
+        None => json!({ "from": src.spec, "url": src.url, "commit": commit }),
+    };
+    let base = match (&lock, src.path.as_deref()) {
+        (Some(l), _) => l.parent().map(Path::to_path_buf).unwrap_or_else(|| scratch.0.clone()),
+        (None, Some(p)) => scratch.0.join(p),
+        (None, None) => scratch.0.clone(),
+    };
+    place_into(Fetched { src, root: &scratch.0, commit, remote_lock: lock, others: Vec::new(), git: true, pulled, digest: None }, &base, into, force, allow_hidden)
+}
+
+/// Write a fetched setup's files from `base` (the directory holding them in the scratch
+/// directory) into `into`, checked like a pull: hidden characters and the project policy
+/// first, then nothing is overwritten without `force`.
+pub(crate) fn place_into(f: Fetched<'_>, base: &Path, into: &Path, force: bool, allow_hidden: &[String]) -> Result<IntoOutcome> {
+    let Fetched { src, root, commit, remote_lock, git: is_git, pulled, digest, .. } = f;
+    if !crate::fsutil::within(root, base) {
+        return Err(Error::Pull(format!("{}: the setup isn't inside the repository; refusing to pull it", src.spec)));
+    }
+    let mut warnings = Vec::new();
+    // (path under `base`, path under `into`)
+    let mut files: Vec<(String, String)> = Vec::new();
+    let mut lock = None;
+    if let Some(l) = &remote_lock {
+        if !std::fs::symlink_metadata(l).is_ok_and(|m| m.is_file()) || !crate::fsutil::within(root, l) {
+            return Err(Error::Pull(format!("{}'s lock is a symlink or outside the repository; refusing to pull it", src.spec)));
+        }
+        let parsed = Lockfile::load(l)?;
+        let policy = crate::policy::Policy::for_dir(into)?;
+        warnings.extend(policy.enforce(policy.check_lock(&parsed), &src.spec)?);
+        let mut paths: Vec<String> = Vec::new();
+        paths.extend(parsed.skill.iter().filter_map(|s| s.vendored.clone()));
+        paths.extend(parsed.instructions.iter().filter_map(|i| i.vendored.clone()));
+        paths.extend(parsed.config.iter().filter_map(|c| c.vendored.clone()));
+        for fc in parsed.subagent.iter().chain(&parsed.script).chain(&parsed.middleware) {
+            paths.extend(fc.vendored.clone());
+        }
+        if let Some(p) = paths.iter().find(|p| !safe_rel(p)) {
+            return Err(Error::Lockfile(format!("{} vendors {p:?}, which isn't a path inside the repository; refusing to pull it", src.spec)));
+        }
+        if is_git {
+            let rel = base.strip_prefix(root).map(Path::to_path_buf).unwrap_or_default();
+            checkout_paths(root, &rel, &paths)?;
+        }
+        let name = l.file_name().and_then(|n| n.to_str()).unwrap_or(crate::LOCKFILE_PATH).to_string();
+        files.push((name, String::new()));
+        for p in &paths {
+            let from = base.join(p);
+            match std::fs::symlink_metadata(&from) {
+                Ok(m) if m.file_type().is_symlink() || !crate::fsutil::within(root, &from) => warnings.push(format!("{p} is a symlink in the source; skipped")),
+                Ok(m) if m.is_dir() => {
+                    for f in crate::scan::text_files(&from) {
+                        if let Ok(r) = f.strip_prefix(base) {
+                            let r = r.to_string_lossy().replace('\\', "/");
+                            files.push((r.clone(), r));
+                        }
+                    }
+                }
+                Ok(_) => files.push((p.clone(), p.clone())),
+                Err(_) => warnings.push(format!("{p} isn't in the source; sync will treat it as manual")),
+            }
+        }
+        lock = Some(parsed);
+    }
+    for f in SETUP_FILES.iter().filter(|f| **f != crate::LOCKFILE_PATH) {
+        let from = base.join(f);
+        // APM accepts apm.yaml too; it's written as apm.yml
+        let from = if *f == "apm.yml" && !from.exists() { base.join("apm.yaml") } else { from };
+        match std::fs::symlink_metadata(&from) {
+            Ok(m) if m.is_file() => files.push((from.strip_prefix(base).map(|r| r.to_string_lossy().into_owned()).unwrap_or_default(), f.to_string())),
+            Ok(_) => warnings.push(format!("{f} isn't a regular file in the source; skipped")),
+            Err(_) => {}
+        }
+    }
+    // the lock's own entry: its destination is its file name
+    for (from, to) in files.iter_mut() {
+        if to.is_empty() {
+            *to = from.clone();
+        }
+    }
+    files.sort_by(|a, b| a.1.cmp(&b.1));
+    files.dedup_by(|a, b| a.1 == b.1);
+    if files.is_empty() {
+        return Err(Error::Lockfile(format!("{} has none of {}", src.spec, SETUP_FILES.join(", "))));
+    }
+    let mut found = Vec::new();
+    for (from, to) in &files {
+        found.extend(crate::scan::scan_path(&base.join(from), to));
+    }
+    crate::audit::blocking(&found, allow_hidden, &src.spec)?;
+    let existing: Vec<&str> = files.iter().filter(|(_, to)| std::fs::symlink_metadata(into.join(to)).is_ok()).map(|(_, to)| to.as_str()).collect();
+    if !existing.is_empty() && !force {
+        return Err(Error::Lockfile(format!(
+            "{} already has {}; nothing was written. Pass --force to replace {}",
+            into.display(),
+            existing.join(", "),
+            if existing.len() == 1 { "it" } else { "them" }
+        )));
+    }
+    let lock_name = remote_lock.as_ref().and_then(|l| l.file_name()).map(|n| n.to_string_lossy().into_owned());
+    for (from, to) in &files {
+        let dest = into.join(to);
+        crate::fsutil::check_within(to, into, &dest)?;
+        if let Some(parent) = dest.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| crate::error::io_at(parent, e))?;
+        }
+        if Some(to) == lock_name.as_ref() {
+            continue;
+        }
+        let _ = std::fs::remove_file(&dest);
+        std::fs::copy(base.join(from), &dest).map_err(|e| crate::error::io_at(&dest, e))?;
+    }
+    if let (Some(l), Some(name)) = (lock.as_mut(), lock_name) {
+        let mut pulled = pulled;
+        pulled["at"] = json!(now_rfc3339());
+        l.pulled = Some(pulled);
+        l.save(&into.join(name))?;
+    }
+    let version = digest.is_some().then(|| commit.clone());
+    Ok(IntoOutcome { dir: into.to_path_buf(), files: files.into_iter().map(|(_, to)| to).collect(), lock, source: src, commit, version, digest, warnings })
 }
 
 #[cfg(test)]

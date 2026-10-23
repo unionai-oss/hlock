@@ -35,6 +35,10 @@ pub enum Error {
     /// trusted, a policy violation.
     #[error("{0}")]
     Audit(String),
+    /// A registry (`hlock login`, `push`, `search`, `pull NS/NAME`): not configured, not
+    /// reachable, or it refused the request.
+    #[error("{0}")]
+    Registry(String),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;

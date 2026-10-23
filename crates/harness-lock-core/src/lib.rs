@@ -36,6 +36,7 @@ pub mod process;
 pub mod profiles;
 pub mod providers;
 pub mod pull;
+pub mod registry;
 pub mod resolver;
 pub mod sbom;
 pub mod scan;

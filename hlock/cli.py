@@ -19,7 +19,7 @@ import subprocess
 import sys
 import tempfile
 import time
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -49,6 +49,7 @@ from hlock import (
     harness_profile,
     harnesses,
     is_pull_source,
+    is_registry_ref,
     launch_prepare,
     load,
     meta_check,
@@ -100,9 +101,20 @@ from hlock import prepare_eval_workspace as _prepare_eval_workspace
 from hlock import pull as _pull
 from hlock import pull_env as _pull_env
 from hlock import pull_find as _pull_find
+from hlock import pull_into as _pull_into
 from hlock import pull_list as _pull_list
 from hlock import pull_parse as _pull_parse
 from hlock import pull_remove as _pull_remove
+from hlock import registry_device_poll as _registry_device_poll
+from hlock import registry_device_start as _registry_device_start
+from hlock import registry_login_token as _registry_login_token
+from hlock import registry_logout as _registry_logout
+from hlock import registry_pull as _registry_pull
+from hlock import registry_push as _registry_push
+from hlock import registry_search as _registry_search
+from hlock import registry_token_source as _registry_token_source
+from hlock import registry_url as _registry_url
+from hlock import registry_whoami as _registry_whoami
 from hlock import resolve as _resolve
 from hlock import resolve_plan as _resolve_plan
 from hlock import scan_lock as _scan_lock
@@ -212,6 +224,7 @@ click.rich_click.COMMAND_GROUPS = {
         {"name": "Switch", "commands": ["migrate", "localize"]},
         {"name": "Harness", "commands": ["harness", "runtime"]},
         {"name": "Inspect", "commands": ["show", "diff", "tree", "backend"]},
+        {"name": "Share", "commands": ["pull", "list", "rm", "push", "search", "login", "logout", "whoami"]},
         {"name": "Meta", "commands": ["meta"]},
     ],
     "hlock meta": [
@@ -1258,17 +1271,22 @@ def _pull_label(result: dict) -> str:
     return result["name"] if result.get("stored") else _show(result["path"])
 
 
+def _rev(result: dict, rev: str | None) -> str:
+    """A pull's commit, short; a registry version, whole."""
+    return escape(rev or "") if result.get("version") else _short(rev)
+
+
 def _print_pull(result: dict) -> None:
     lock, label = result["lock"], _pull_label(result)
     src = result["source"]["spec"]
     prev = result.get("previous_commit")
     if prev and prev == result["commit"] and not result["diff"]:
-        _ok(f"[path]{label}[/] is up to date with {escape(src)} [muted]@ {_short(prev)}[/]", soft_wrap=True)
+        _ok(f"[path]{label}[/] is up to date with {escape(src)} [muted]@ {_rev(result, prev)}[/]", soft_wrap=True)
         return
     if prev:
-        _ok(f"updated [path]{label}[/] from {escape(src)}  [muted]{_short(prev)} → {_short(result['commit'])}[/]", soft_wrap=True)
+        _ok(f"updated [path]{label}[/] from {escape(src)}  [muted]{_rev(result, prev)} → {_rev(result, result['commit'])}[/]", soft_wrap=True)
     else:
-        _ok(f"pulled {escape(src)} [muted]@ {_short(result['commit'])}[/] → [path]{label}[/]", soft_wrap=True)
+        _ok(f"pulled {escape(src)} [muted]@ {_rev(result, result['commit'])}[/] → [path]{label}[/]", soft_wrap=True)
     for w in result["warnings"]:
         console.print(f"[warn]![/] {w}")
     if lock.get("kind") == "pin":
@@ -1320,40 +1338,59 @@ def _lock_ref(arg: str, as_json: bool = False) -> tuple[str, str | None]:
               help="Name to store the lock under.  [dim]\\[default: the repo owner][/]")
 @click.option("-o", "--out", default=None, metavar="FILE",
               help="Write the lock into the project as FILE (e.g. harness.alice.lock) instead of the store.")
-@click.option("--force", is_flag=True, help="Replace an existing lock of that name that came from somewhere else.")
+@click.option("--into", "into", default=None, metavar="DIR",
+              help="Write the whole setup (harness.toml, harness.lock and what it vendors, apm.yml, "
+                   "apm.lock.yaml) into DIR. Refuses to overwrite files without --force.")
+@click.option("--force", is_flag=True, help="Replace an existing lock of that name that came from somewhere else "
+                                            "(with --into: files that already exist).")
 @click.option("--allow-hidden", "allow_hidden", multiple=True, metavar="FILE",
               help="Let through hidden characters in FILE (a file or directory the lock vendors). Repeatable.")
+@click.option("--registry", default=None, metavar="URL",
+              help="The registry a NAMESPACE/NAME source is in.  [dim]\\[default: $HLOCK_REGISTRY, else the one you logged in to][/]")
 @click.option("--json", "as_json", is_flag=True, help="Print the result as JSON.")
-def pull(sources: tuple[str, ...], name: str | None, out: str | None, force: bool, allow_hidden: tuple[str, ...],
-         as_json: bool) -> None:
-    """Pull someone else's [path]harness.lock[/] from a git repository.
+def pull(sources: tuple[str, ...], name: str | None, out: str | None, into: str | None, force: bool,
+         allow_hidden: tuple[str, ...], registry: str | None, as_json: bool) -> None:
+    """Pull someone else's [path]harness.lock[/] from a git repository or a registry.
 
     SOURCE is [cmd]github:OWNER/REPO\\[/PATH]\\[@REF][/], [cmd]gitlab:GROUP/REPO\\[//PATH]\\[@REF][/],
-    [cmd]git:URL\\[//PATH]\\[@REF][/], or a repository or file URL copied from the browser. The lock
-    and the files it vendors are stored under [path]~/.hlock/pulls/NAME/[/], so you can use it
-    from any project by name: [cmd]hlock launch --lock NAME[/], [cmd]hlock sync NAME[/]. Nothing from
-    the lock runs until you do.
+    [cmd]git:URL\\[//PATH]\\[@REF][/], a repository or file URL copied from the browser, or a registry
+    package, [cmd]NAMESPACE/NAME\\[@VERSION][/] (see [cmd]hlock login[/]). The lock and the files it
+    vendors are stored under [path]~/.hlock/pulls/NAME/[/], so you can use it from any project by
+    name: [cmd]hlock launch --lock NAME[/], [cmd]hlock sync NAME[/]. Nothing from the lock runs until you do.
 
     With no SOURCE, refreshes every pulled lock; with NAMEs or LOCK files, refreshes those.
     """
-    remote = [s for s in sources if is_pull_source(s)]
+    remote = [s for s in sources if is_pull_source(s) or is_registry_ref(s)]
     if remote and len(sources) > 1:
         _fail("pull one source at a time", "run [cmd]hlock pull[/] once per source")
     if name and out:
         _fail("--as and -o both name the lock", "use [cmd]--as NAME[/] for the store, or [cmd]-o FILE[/] for the project")
+    if into and (name or out):
+        _fail("--into writes the whole setup into a directory; it doesn't take --as or -o",
+              "use one of [cmd]--into DIR[/], [cmd]--as NAME[/], [cmd]-o FILE[/]")
     if remote:
-        with _working(f"Pulling {remote[0]}…"):
-            result = json.loads(_pull(remote[0], out=out, name=name, force=force, allow_hidden=list(allow_hidden)))
+        src = remote[0]
+        with _working(f"Pulling {src}…"):
+            if is_registry_ref(src):
+                result = json.loads(_registry_pull(src, registry=registry, out=out, name=name, into=into, force=force,
+                                                   allow_hidden=list(allow_hidden)))
+            elif into:
+                result = json.loads(_pull_into(src, into, force=force, allow_hidden=list(allow_hidden)))
+            else:
+                result = json.loads(_pull(src, out=out, name=name, force=force, allow_hidden=list(allow_hidden)))
         if as_json:
             console.print_json(data=result)
+            return
+        if into:
+            _print_into(result)
             return
         _print_pull(result)
         label = _pull_label(result)
         _next(f"hlock launch --lock {label}", f"hlock sync {label} --in-place --plan")
         return
 
-    if name or out:
-        _fail("--as and -o need a SOURCE", "e.g. [cmd]hlock pull github:alice/agent-setup --as alice[/]")
+    if name or out or into:
+        _fail("--as, -o and --into need a SOURCE", "e.g. [cmd]hlock pull github:alice/agent-setup --as alice[/]")
     # (lock path, store name or None for a project file)
     targets: list[tuple[str, str | None]] = []
     if sources:
@@ -1372,7 +1409,8 @@ def pull(sources: tuple[str, ...], name: str | None, out: str | None, force: boo
         if pulled.get("from"):
             # a lock's [pulled] source is checked like a typed one before anything is fetched
             try:
-                _pull_parse(pulled["from"])
+                if not pulled["from"].startswith("registry:"):
+                    _pull_parse(pulled["from"])
             except PullError as e:
                 _fail(f"{_show(path)} has a [pulled] source hlock won't fetch: {escape(str(e))}",
                       "pull it again from a source you trust with [cmd]hlock pull SOURCE --force[/]")
@@ -1385,8 +1423,9 @@ def pull(sources: tuple[str, ...], name: str | None, out: str | None, force: boo
     results = []
     for path, stored, spec in jobs:
         with _working(f"Refreshing {stored or _show(path)} from {spec}…"):
-            results.append(json.loads(_pull(spec, out=None if stored else path, name=stored, force=force,
-                                            allow_hidden=list(allow_hidden))))
+            fetch = _registry_pull if spec.startswith("registry:") else _pull
+            results.append(json.loads(fetch(spec, out=None if stored else path, name=stored, force=force,
+                                             allow_hidden=list(allow_hidden))))
     if as_json:
         console.print_json(data=results)
         return
@@ -1415,7 +1454,7 @@ def list_(as_json: bool) -> None:
             continue
         p = e.get("pulled") or {}
         t.add_row(f"[key]{e['name']}[/]", f"{e['harness']} {e.get('version') or ''}".strip(),
-                  escape(p.get("from", "—")), _short(p.get("commit")) or "—", _ago((p.get("at") or "").replace("Z", "+00:00") or None))
+                  escape(p.get("from", "—")), _short(p.get("commit")) or escape(p.get("version") or "—"), _ago((p.get("at") or "").replace("Z", "+00:00") or None))
     console.print(t)
     _next(f"hlock launch --lock {entries[0]['name']}", "hlock pull [muted](refresh all)[/]")
 
@@ -1428,6 +1467,227 @@ def rm(names: tuple[str, ...]) -> None:
         with _friendly_errors():
             _pull_remove(n)
         _ok(f"removed [path]{n}[/]")
+
+
+def _print_into(result: dict) -> None:
+    """What [cmd]pull --into[/] wrote."""
+    rev = result.get("version") or _short(result.get("commit"))
+    files = result["files"]
+    _ok(f"pulled {escape(result['source']['spec'])} [muted]@ {escape(rev or '')}[/] → [path]{_show(result['dir'])}[/]  "
+        f"[muted]({len(files)} {'file' if len(files) == 1 else 'files'})[/]", soft_wrap=True)
+    vendored = [f for f in files if f.startswith(".hlock/vendor/")]
+    for f in files:
+        if not f.startswith(".hlock/vendor/"):
+            console.print(f"  [path]{escape(f)}[/]")
+    if vendored:
+        console.print(f"  [path].hlock/vendor/[/] [muted]{len(vendored)} vendored {'file' if len(vendored) == 1 else 'files'}[/]")
+    for w in result["warnings"]:
+        console.print(f"[warn]![/] {w}")
+    if result.get("lock"):
+        cmds = _mcp_commands(result["lock"])
+        if cmds:
+            console.print(f"[warn]![/] starts MCP servers with: [cmd]{', '.join(cmds)}[/]  "
+                          "[muted]· review before syncing[/]")
+    steps = []
+    if "harness.lock" in files:
+        steps.append("hlock sync --plan")
+    if "apm.lock.yaml" in files:
+        steps.append("apm install --frozen")
+    if steps:
+        _next(*steps)
+
+
+def _registry(flag: str | None) -> str:
+    """The registry URL to use, or a clean error saying how to set one."""
+    try:
+        return _registry_url(flag)
+    except ValueError as e:
+        _fail(escape(str(e)), "log in with [cmd]hlock login https://registry.example.com[/]")
+
+
+def _size(n: int | None) -> str:
+    if n is None:
+        return "—"
+    for unit in ("B", "kB", "MB"):
+        if n < 1000 or unit == "MB":
+            return f"{n:.0f} {unit}" if unit == "B" else f"{n:.1f} {unit}"
+        n /= 1000
+    return ""
+
+
+@main.command()
+@click.argument("url", required=False, metavar="[URL]")
+@click.option("--token", default=None, metavar="TOKEN",
+              help="Log in with a token made in the registry's settings instead of the browser ([cmd]-[/] reads it from stdin).")
+@click.option("--no-browser", is_flag=True, help="Print the login link instead of opening it.")
+def login(url: str | None, token: str | None, no_browser: bool) -> None:
+    """Log in to a registry, for [cmd]push[/], [cmd]search[/] and [cmd]pull NAMESPACE/NAME[/].
+
+    Opens the registry's login page and waits while you confirm the code shown here. The
+    token goes in your OS keychain (else [path]~/.hlock/credentials.toml[/], readable only by you),
+    and URL becomes your default registry. In CI, set [cmd]HLOCK_REGISTRY[/] and
+    [cmd]HLOCK_REGISTRY_TOKEN[/] instead.
+    """
+    url = _registry(url)
+    if token is not None:
+        if token == "-":
+            token = sys.stdin.readline().strip()
+        with _working(f"Checking the token with {url}…"):
+            r = json.loads(_registry_login_token(url, token))
+    else:
+        with _working(f"Contacting {url}…"):
+            start = json.loads(_registry_device_start(url))
+        link = start.get("verification_uri_complete") or start["verification_uri"]
+        console.print(f"Your code: [bold]{escape(start['user_code'])}[/]")
+        console.print(f"Confirm it at [path]{escape(link)}[/]", soft_wrap=True)
+        if not no_browser:
+            import webbrowser
+
+            with suppress(webbrowser.Error):
+                webbrowser.open(link)
+        interval = float(start.get("interval", 5))
+        deadline = time.time() + float(start.get("expires_in", 900))
+        r = None
+        with _friendly_errors(), console.status("[brand]Waiting for you to confirm in the browser…[/]", spinner="dots"):
+            while time.time() < deadline:
+                time.sleep(interval)
+                polled = json.loads(_registry_device_poll(url, start["device_code"]))
+                if polled["status"] == "ok":
+                    r = polled
+                    break
+                if polled["status"] == "slow_down":
+                    interval += 5
+        if r is None:
+            _fail("the login code expired before it was confirmed", "run [cmd]hlock login[/] again")
+    user = (r.get("whoami") or {}).get("user") or {}
+    _ok(f"logged in to [path]{escape(r['url'])}[/] as [key]{escape(user.get('handle') or '?')}[/]  "
+        f"[muted](token in the {r['stored']})[/]", soft_wrap=True)
+    _next("hlock push", "hlock search QUERY")
+
+
+@main.command()
+@click.option("--registry", default=None, metavar="URL", help="The registry to log out of.  [dim]\\[default: your default registry][/]")
+def logout(registry: str | None) -> None:
+    """Forget the token for a registry."""
+    url = _registry(registry)
+    with _friendly_errors():
+        removed = _registry_logout(url)
+    if removed:
+        _ok(f"logged out of [path]{escape(url)}[/]")
+    else:
+        console.print(f"[muted]no saved token for {escape(url)}[/]")
+    if os.environ.get("HLOCK_REGISTRY_TOKEN"):
+        console.print("[warn]![/] HLOCK_REGISTRY_TOKEN is still set in your environment")
+
+
+@main.command()
+@click.option("--registry", default=None, metavar="URL", help="The registry to ask.  [dim]\\[default: your default registry][/]")
+@click.option("--json", "as_json", is_flag=True, help="Print the registry's answer as JSON.")
+def whoami(registry: str | None, as_json: bool) -> None:
+    """Show who you're logged in to a registry as, and what your token may do."""
+    url = _registry(registry)
+    with _working(f"Asking {url}…"):
+        who = json.loads(_registry_whoami(url))
+    if as_json:
+        console.print_json(data={"registry": url, "token_source": _registry_token_source(url), **who})
+        return
+    user = who.get("user") or {}
+    name = f" [muted]({escape(user['name'])})[/]" if user.get("name") else ""
+    console.print(f"[key]{escape(user.get('handle') or '?')}[/]{name} on [path]{escape(url)}[/]", soft_wrap=True)
+    ns = [n if isinstance(n, str) else n.get("name", "") for n in who.get("namespaces") or []]
+    if ns:
+        console.print(f"  [muted]namespaces[/]  {escape(', '.join(ns))}")
+    if who.get("scopes"):
+        console.print(f"  [muted]scopes[/]      {escape(', '.join(who['scopes']))}")
+    console.print(f"  [muted]token[/]       from the {_registry_token_source(url) or '?'}")
+
+
+@main.command()
+@click.argument("name", required=False, metavar="[NAMESPACE/NAME]")
+@click.option("--version", "version", default=None, metavar="VERSION",
+              help="The version to publish.  [dim]\\[default: apm.yml's version, else sha-<digest>][/]")
+@click.option("-C", "--dir", "directory", default=".", metavar="DIR", help="The project to push.  [dim]\\[default: .][/]")
+@click.option("--dry-run", is_flag=True, help="Show what would be pushed, and push nothing.")
+@click.option("--registry", default=None, metavar="URL", help="The registry to push to.  [dim]\\[default: your default registry][/]")
+@click.option("--json", "as_json", is_flag=True, help="Print the result as JSON.")
+def push(name: str | None, version: str | None, directory: str, dry_run: bool, registry: str | None, as_json: bool) -> None:
+    """Publish this project's agent setup to a registry.
+
+    Packs what exists of [path]harness.toml[/], [path]harness.lock[/] (with the files it vendors),
+    [path]apm.yml[/], [path]apm.lock.yaml[/] and [path]README.md[/] into one archive, checked first
+    for credentials and hidden characters. NAMESPACE/NAME defaults to your namespace and the
+    project's name. The same files always pack to the same digest, so pushing twice is safe.
+    """
+    url = _registry(registry)
+    with _working(f"{'Packing' if dry_run else 'Pushing to ' + url}…"):
+        r = json.loads(_registry_push(url, directory, name=name, version=version, dry_run=dry_run))
+    if as_json:
+        console.print_json(data=r)
+        return
+    for w in r.get("warnings", []):
+        console.print(f"[warn]![/] {w}")
+    ref = f"{r['package']}@{r['version']}"
+    summary = f"[muted]({len(r['files'])} files, {_size(r.get('size_bytes'))}, {r['digest'][:19]}…)[/]"
+    if r.get("dry_run"):
+        console.print(f"would push [key]{escape(ref)}[/] to [path]{escape(url)}[/] {summary}", soft_wrap=True)
+        t = Table(box=None, header_style="bold", pad_edge=False)
+        for col in ("file", "size", "digest"):
+            t.add_column(col)
+        for f in r["files"]:
+            t.add_row(f"[path]{escape(f['path'])}[/]", _size(f["size"]), f"[muted]{f['digest'][:12]}[/]")
+        console.print(t)
+        _next(f"hlock push{' ' + name if name else ''}")
+        return
+    if r.get("already_published"):
+        _ok(f"[key]{escape(ref)}[/] is already published with these files {summary}", soft_wrap=True)
+    else:
+        _ok(f"pushed [key]{escape(ref)}[/] {summary}", soft_wrap=True)
+        if r.get("url"):
+            console.print(f"  [path]{escape(r['url'])}[/]", soft_wrap=True)
+    _next(f"hlock pull {r['package']}@{r['version']}")
+
+
+@main.command()
+@click.argument("query", nargs=-1, metavar="[QUERY]...")
+@click.option("--type", "type_", type=click.Choice(["setup", "apm-package"]), default=None, help="Only setups, or only APM packages.")
+@click.option("--kind", type=click.Choice(["harness", "apm"]), default=None,
+              help="Only setups with hlock files (harness.toml/harness.lock), or with APM files (apm.yml/apm.lock.yaml).")
+@click.option("--source", type=click.Choice(["hosted", "github", "gitlab"]), default=None,
+              help="Only packages pushed to the registry, or found in GitHub or GitLab repositories.")
+@click.option("--limit", "per_page", type=int, default=20, show_default=True, help="How many results to show.")
+@click.option("--registry", default=None, metavar="URL", help="The registry to search.  [dim]\\[default: your default registry][/]")
+@click.option("--json", "as_json", is_flag=True, help="Print the registry's answer as JSON.")
+def search(query: tuple[str, ...], type_: str | None, kind: str | None, source: str | None, per_page: int,
+           registry: str | None, as_json: bool) -> None:
+    """Search a registry for agent setups and APM packages."""
+    url = _registry(registry)
+    q = " ".join(query)
+    with _working(f"Searching {url}…"):
+        r = json.loads(_registry_search(url, q, type=type_, kind=kind, source=source, per_page=per_page))
+    if as_json:
+        console.print_json(data=r)
+        return
+    results = r.get("results") or []
+    if not results:
+        console.print(f"[muted]nothing matches {escape(q)!r}[/]" if q else "[muted]nothing found[/]")
+        return
+    t = Table(box=None, header_style="bold", pad_edge=False)
+    for col in ("package", "source", "files", "harness", "description"):
+        t.add_column(col, overflow="fold")
+    for x in results:
+        kinds = ", ".join(x.get("kinds") or [])
+        ty = " [muted](apm package)[/]" if x.get("type") == "apm-package" else ""
+        t.add_row(f"[key]{escape(x.get('ref', '?'))}[/]{ty}", escape(x.get("source") or ""), escape(kinds),
+                  escape(x.get("harness") or ""), escape((x.get("description") or "")[:80]))
+    console.print(t)
+    total = r.get("total")
+    if total and total > len(results):
+        console.print(f"[muted]{len(results)} of {total} · --limit N for more[/]")
+    first = results[0]
+    if first.get("type") == "apm-package":
+        _next(f"apm install {first.get('ref')}")
+    elif first.get("pull"):
+        _next(f"hlock pull {first['pull']}")
 
 
 # --------------------------------------------------------------------------- #

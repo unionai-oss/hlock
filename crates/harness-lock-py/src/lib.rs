@@ -31,6 +31,7 @@ create_exception!(hlock, WorkerError, HarnessLockError, "The Python worker faile
 create_exception!(hlock, PullError, HarnessLockError, "`hlock pull`: a source can't be read, or git failed.");
 create_exception!(hlock, DependencyError, HarnessLockError, "A declared dependency can't be read, resolved, fetched or installed.");
 create_exception!(hlock, AuditError, HarnessLockError, "Hidden characters, an executable not yet trusted, or a policy violation stopped a step.");
+create_exception!(hlock, RegistryError, HarnessLockError, "A registry isn't configured or reachable, or it refused the request.");
 
 fn py_err(e: core::Error) -> PyErr {
     use core::Error as E;
@@ -47,6 +48,7 @@ fn py_err(e: core::Error) -> PyErr {
         E::Pull(_) => PullError::new_err(msg),
         E::Dependency(_) => DependencyError::new_err(msg),
         E::Audit(_) => AuditError::new_err(msg),
+        E::Registry(_) => RegistryError::new_err(msg),
         E::Toml(_) | E::Json(_) => HarnessLockError::new_err(msg),
     }
 }
@@ -999,6 +1001,137 @@ fn pull_remove(name: &str) -> PyResult<String> {
 #[pyfunction]
 fn pull_env(name: &str) -> String {
     core::pull::env_dir(name).to_string_lossy().into_owned()
+}
+
+// --------------------------------------------------------------------------- //
+// The registry client (`hlock login`, `push`, `search`, `pull NS/NAME`)
+// --------------------------------------------------------------------------- //
+
+/// The registry to use (`registry`, else `HLOCK_REGISTRY`, else the one `login` saved),
+/// normalized. Raises `RegistryError` when none is configured.
+#[pyfunction]
+#[pyo3(signature = (registry=None))]
+fn registry_url(registry: Option<String>) -> PyResult<String> {
+    core::registry::resolve_url(registry.as_deref()).map_err(py_err)
+}
+
+/// Where the registry's token comes from (`environment`, `keychain`, `credentials file`), or None.
+#[pyfunction]
+fn registry_token_source(url: &str) -> Option<String> {
+    core::registry::token_for(url).map(|(_, s)| s.to_string())
+}
+
+/// `hlock login URL --token T`: check the token with the registry, then keep it and the URL.
+#[pyfunction]
+fn registry_login_token(py: Python<'_>, url: String, token: String) -> PyResult<String> {
+    interruptible(py, move || to_json(&core::registry::login_with_token(&url, &token).map_err(py_err)?))
+}
+
+/// Start a device login; returns the registry's response as JSON.
+#[pyfunction]
+fn registry_device_start(py: Python<'_>, url: String) -> PyResult<String> {
+    interruptible(py, move || {
+        let url = core::registry::normalize_url(&url).map_err(py_err)?;
+        to_json(&core::registry::Client::new(&url, None).device_start().map_err(py_err)?)
+    })
+}
+
+/// Poll a device login once: `{"status": "pending" | "slow_down"}`, or, when it's done,
+/// `{"status": "ok", "stored", "whoami"}` with the token kept and the URL saved.
+#[pyfunction]
+fn registry_device_poll(py: Python<'_>, url: String, device_code: String) -> PyResult<String> {
+    interruptible(py, move || {
+        let url = core::registry::normalize_url(&url).map_err(py_err)?;
+        match core::registry::Client::new(&url, None).device_poll(&device_code).map_err(py_err)? {
+            core::registry::Poll::Pending => to_json(&serde_json::json!({"status": "pending"})),
+            core::registry::Poll::SlowDown => to_json(&serde_json::json!({"status": "slow_down"})),
+            core::registry::Poll::Token(v) => {
+                let token = v["access_token"].as_str().unwrap_or_default().to_string();
+                let mut out = core::registry::login_with_token(&url, &token).map_err(py_err)?;
+                out["status"] = serde_json::json!("ok");
+                to_json(&out)
+            }
+        }
+    })
+}
+
+/// Forget the registry's token. True if one was removed.
+#[pyfunction]
+fn registry_logout(url: &str) -> PyResult<bool> {
+    core::registry::forget(url).map_err(py_err)
+}
+
+/// The registry's `whoami` for the saved token, as JSON.
+#[pyfunction]
+fn registry_whoami(py: Python<'_>, url: String) -> PyResult<String> {
+    interruptible(py, move || to_json(&core::registry::Client::for_url(&url).whoami().map_err(py_err)?))
+}
+
+/// Search the registry; returns its JSON response.
+#[pyfunction]
+#[pyo3(signature = (url, query, r#type=None, kind=None, source=None, page=None, per_page=None))]
+fn registry_search(py: Python<'_>, url: String, query: String, r#type: Option<String>, kind: Option<String>, source: Option<String>, page: Option<u32>, per_page: Option<u32>) -> PyResult<String> {
+    interruptible(py, move || {
+        let filters = [
+            ("type", r#type.unwrap_or_default()),
+            ("kind", kind.unwrap_or_default()),
+            ("source", source.unwrap_or_default()),
+            ("page", page.map(|p| p.to_string()).unwrap_or_default()),
+            ("per_page", per_page.map(|p| p.to_string()).unwrap_or_default()),
+        ];
+        to_json(&core::registry::Client::for_url(&url).search(&query, &filters).map_err(py_err)?)
+    })
+}
+
+/// `hlock push`: pack the setup in `dir` and publish it (or, with `dry_run`, say what
+/// would be published). Returns JSON.
+#[pyfunction]
+#[pyo3(signature = (url, dir=".".to_string(), name=None, version=None, dry_run=false))]
+fn registry_push(py: Python<'_>, url: String, dir: String, name: Option<String>, version: Option<String>, dry_run: bool) -> PyResult<String> {
+    interruptible(py, move || to_json(&core::registry::push(&url, Path::new(&dir), name.as_deref(), version.as_deref(), dry_run).map_err(py_err)?))
+}
+
+/// `hlock pull NS/NAME[@VERSION]` (or a `registry:` spec): into the store as `name`, into
+/// the project lock file `out`, or every file of the setup into the directory `into`.
+#[pyfunction]
+#[pyo3(signature = (spec, registry=None, out=None, name=None, into=None, force=false, allow_hidden=None))]
+fn registry_pull(py: Python<'_>, spec: String, registry: Option<String>, out: Option<String>, name: Option<String>, into: Option<String>, force: bool, allow_hidden: Option<Vec<String>>) -> PyResult<String> {
+    let cwd = std::env::current_dir().unwrap_or_default();
+    interruptible(py, move || {
+        let allow = allow_hidden.unwrap_or_default();
+        let v = match into {
+            Some(d) => {
+                let d = cwd.join(d);
+                core::registry::pull(registry.as_deref(), &spec, core::registry::Dest::Into(&d), force, &allow)
+            }
+            None => {
+                let target = match out {
+                    Some(o) => core::pull::Target::File(cwd.join(o)),
+                    None => core::pull::Target::Store(name),
+                };
+                core::registry::pull(registry.as_deref(), &spec, core::registry::Dest::Target(&target), force, &allow)
+            }
+        }
+        .map_err(py_err)?;
+        to_json(&v)
+    })
+}
+
+/// Pull the setup at a git source and write its files into the directory `into`.
+#[pyfunction]
+#[pyo3(signature = (source, into, force=false, allow_hidden=None))]
+fn pull_into(py: Python<'_>, source: String, into: String, force: bool, allow_hidden: Option<Vec<String>>) -> PyResult<String> {
+    let into = std::env::current_dir().unwrap_or_default().join(into);
+    interruptible(py, move || {
+        let o = core::pull::pull_into(&source, &into, force, &allow_hidden.unwrap_or_default()).map_err(py_err)?;
+        Ok(json_str(serde_json::to_value(&o).map_err(|e| py_err(e.into()))?))
+    })
+}
+
+/// True if `arg` is a registry reference (`NAMESPACE/NAME[@VERSION]`) and not a file.
+#[pyfunction]
+fn is_registry_ref(arg: &str) -> bool {
+    core::registry::is_ref(arg)
 }
 
 /// True if `arg` names a remote source (`github:`, `gitlab:`, `git:`, a URL) rather than a lock path.
@@ -2031,6 +2164,18 @@ fn _hlock(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(pull_remove, m)?)?;
     m.add_function(wrap_pyfunction!(pull_env, m)?)?;
     m.add_function(wrap_pyfunction!(is_pull_source, m)?)?;
+    m.add_function(wrap_pyfunction!(is_registry_ref, m)?)?;
+    m.add_function(wrap_pyfunction!(pull_into, m)?)?;
+    m.add_function(wrap_pyfunction!(registry_url, m)?)?;
+    m.add_function(wrap_pyfunction!(registry_token_source, m)?)?;
+    m.add_function(wrap_pyfunction!(registry_login_token, m)?)?;
+    m.add_function(wrap_pyfunction!(registry_device_start, m)?)?;
+    m.add_function(wrap_pyfunction!(registry_device_poll, m)?)?;
+    m.add_function(wrap_pyfunction!(registry_logout, m)?)?;
+    m.add_function(wrap_pyfunction!(registry_whoami, m)?)?;
+    m.add_function(wrap_pyfunction!(registry_search, m)?)?;
+    m.add_function(wrap_pyfunction!(registry_push, m)?)?;
+    m.add_function(wrap_pyfunction!(registry_pull, m)?)?;
     m.add_function(wrap_pyfunction!(check_pin, m)?)?;
     m.add_function(wrap_pyfunction!(deps_prepare, m)?)?;
     m.add_function(wrap_pyfunction!(deps_commit, m)?)?;
@@ -2089,6 +2234,7 @@ fn _hlock(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("ProfileError", py.get_type::<ProfileError>())?;
     m.add("WorkerError", py.get_type::<WorkerError>())?;
     m.add("PullError", py.get_type::<PullError>())?;
+    m.add("RegistryError", py.get_type::<RegistryError>())?;
     m.add("DependencyError", py.get_type::<DependencyError>())?;
     m.add("AuditError", py.get_type::<AuditError>())?;
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;

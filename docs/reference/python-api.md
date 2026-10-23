@@ -477,6 +477,7 @@ kind:
 | `ProfileError` | A harness or runtime profile, harness selection, or a sync or launch step that failed |
 | `WorkerError` | The Python worker failed |
 | `PullError` | A [`pull`](../guides/pull.md) source hlock can't read or won't fetch, or `git` failed |
+| `RegistryError` | A [registry](../guides/registry.md) isn't configured or reachable, or it refused the request |
 | `DependencyError` | A [declared dependency](../guides/dependencies.md) hlock can't read, resolve, fetch or install |
 | `AuditError` | [Hidden characters](../guides/audit.md#hidden-characters), a [policy](../guides/audit.md#policy) violation, or a bad trust store stopped a step |
 

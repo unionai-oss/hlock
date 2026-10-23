@@ -526,17 +526,19 @@ any project by name. Nothing from the lock runs. With no source, refresh every p
 See [Pulling someone else's lock](../guides/pull.md).
 
 ```bash
-hlock pull SOURCE [--as NAME | -o FILE] [--force] [--allow-hidden FILE ...] [--json]
+hlock pull SOURCE [--as NAME | -o FILE | --into DIR] [--force] [--allow-hidden FILE ...] [--registry URL] [--json]
 hlock pull [NAME | LOCK ...] [--json]
 ```
 
 | Option | Default | Description |
 |---|---|---|
-| `SOURCE` | | `github:OWNER/REPO[/PATH][@REF]`, `gitlab:GROUP/REPO[//PATH][@REF]`, `git:URL[//PATH][@REF]`, or a GitHub or GitLab URL |
+| `SOURCE` | | `github:OWNER/REPO[/PATH][@REF]`, `gitlab:GROUP/REPO[//PATH][@REF]`, `git:URL[//PATH][@REF]`, a GitHub or GitLab URL, or a registry package `NAMESPACE/NAME[@VERSION]` (see [Sharing through a registry](../guides/registry.md)) |
 | `NAME`, `LOCK` | every pulled lock | Pulled locks to refresh from their recorded source: names in the store, or lock files pulled with `-o` |
-| `--as NAME` | the repository owner | Store the lock as `NAME` |
+| `--as NAME` | the repository owner (the package name, from a registry) | Store the lock as `NAME` |
 | `-o`, `--out FILE` | | Write the lock into the project as `FILE` (its vendored files go in `.hlock/vendor/<name>/`) instead of the store |
-| `--force` | | Replace a lock of that name that wasn't pulled from the same repository |
+| `--into DIR` | | Write the whole setup into `DIR`: `harness.toml`, `harness.lock` and the files it vendors, `apm.yml`, `apm.lock.yaml` |
+| `--force` | | Replace a lock of that name that wasn't pulled from the same repository (with `--into`, files that already exist) |
+| `--registry URL` | `HLOCK_REGISTRY`, else the one you logged in to | The registry a `NAMESPACE/NAME` source is in |
 | `--allow-hidden FILE` | | Let through [hidden characters](../guides/audit.md#hidden-characters) in FILE (a file or directory the lock vendors); the lock records the exception. Repeatable |
 | `--json` | | Print the lock, its path, the source, the commit, the diff from the lock it replaced, vendored files, other locks in the repository, and warnings as JSON |
 
@@ -558,6 +560,75 @@ Remove pulled locks from the store, along with the isolated roots `launch` made 
 
 ```bash
 hlock rm NAME...
+```
+
+## `push`
+
+Publish the project's setup to a registry: what exists of `harness.toml`, `harness.lock` (with
+the files it vendors), `apm.yml` (or `apm.yaml`), `apm.lock.yaml` and `README.md`, packed into
+a deterministic `tar.gz`. Refuses values that look like credentials and hidden characters.
+See [Sharing through a registry](../guides/registry.md#publish).
+
+```bash
+hlock push [NAMESPACE/NAME] [--version V] [-C DIR] [--dry-run] [--registry URL] [--json]
+```
+
+| Option | Default | Description |
+|---|---|---|
+| `NAMESPACE/NAME` | your handle / the project's name | The package to publish |
+| `--version V` | `apm.yml`'s `version`, else `sha-<digest>` | The version; a published version can't change |
+| `-C`, `--dir DIR` | `.` | The project to push |
+| `--dry-run` | | List the files, size and digest; push nothing |
+| `--registry URL` | `HLOCK_REGISTRY`, else the one you logged in to | The registry to push to |
+| `--json` | | Print the package, version, digest, size, files and warnings as JSON |
+
+## `search`
+
+Search a registry for setups and APM packages.
+
+```bash
+hlock search [QUERY...] [--type setup|apm-package] [--kind harness|apm] [--source hosted|github|gitlab] [--limit N] [--registry URL] [--json]
+```
+
+| Option | Default | Description |
+|---|---|---|
+| `--type` | | Only setups, or only APM packages |
+| `--kind` | | Only setups with hlock's files (`harness`) or APM's (`apm`) |
+| `--source` | | Only packages pushed to the registry (`hosted`), or found in GitHub or GitLab repositories |
+| `--limit N` | 20 | How many results |
+| `--json` | | Print the registry's answer |
+
+## `login`
+
+Log in to a registry with its device login: open its page, confirm the code, and keep the
+token in the OS keychain (else `~/.hlock/credentials.toml`, mode `0600`). The URL becomes your
+default registry (`~/.hlock/config.toml`).
+
+```bash
+hlock login [URL] [--token TOKEN | --no-browser]
+```
+
+| Option | Default | Description |
+|---|---|---|
+| `URL` | `HLOCK_REGISTRY`, else the saved one | The registry |
+| `--token TOKEN` | | Use a token made in the registry's settings instead; `-` reads it from stdin |
+| `--no-browser` | | Print the link instead of opening it |
+
+## `logout`
+
+Forget a registry's token (keychain and credentials file).
+
+```bash
+hlock logout [--registry URL]
+```
+
+## `whoami`
+
+Show the user, namespaces and token scopes the registry knows you by, and where the token
+came from.
+
+```bash
+hlock whoami [--registry URL] [--json]
 ```
 
 ## `show`
