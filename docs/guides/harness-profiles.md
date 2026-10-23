@@ -212,7 +212,7 @@ harness expands references everywhere hlock writes secrets in that file. See
 | `files.<id>` | `path`, `isolated`, `format`, `restore`, `pointers`, `env-ref` |
 | `model` | `default`, `small`, `provider`, `base-url` sources; `format`; `default-provider` |
 | `providers` | `source`, plus pointers into each provider for `base-url` and `models` |
-| `mcp` | `sources`, `write`, `shape` (`standard`, `opencode`, `codex`, `goose`, `openclaw`, `nanobot`, `vscode`, `zed`): how servers are written; `transports`: the ones its config can hold (`stdio`, `http`, `sse`; default all) |
+| `mcp` | `sources`, `write`, `shape` (`standard`, `opencode`, `codex`, `goose`, `openclaw`, `nanobot`, `vscode`, `zed`, `devin`, `antigravity`): how servers are written; `transports`: the ones its config can hold (`stdio`, `http`, `sse`; default all) |
 | `skills` | `dirs`, `write`, `builtin-dirs`, `builtin-manifest` |
 | `bundles` | Plugins/packages: `kind`, `extractor` (`claude-plugins`, `pi-packages`, `npm-list`), `source`, `lockfile` |
 | `instructions` | Instruction files the harness reads |

@@ -1,4 +1,4 @@
-"""Desktop apps (`kind = "app"`): Claude Desktop and VS Code, pinned and restored, never started."""
+"""Desktop apps (`kind = "app"`): Claude Desktop, VS Code and the rest, pinned and restored, never started."""
 
 import json
 import os
@@ -122,3 +122,35 @@ def test_apps_are_listed_and_never_started(machine):
     for args in (["run", "hi"], ["launch"], ["init", "--force", "--harness", "claude-desktop"]):
         r = invoke(*args)
         assert r.exit_code != 0 and "desktop app" in r.output, (args, r.output)
+
+
+@pytest.mark.parametrize("app, bundle_name, path, text", [
+    ("cursor-ide", "Cursor.app", ".cursor/mcp.json", '{"mcpServers": {"fs": {"command": "npx", "args": ["-y", "fs-mcp"]}}}'),
+    ("chatgpt", "ChatGPT.app", ".codex/config.toml", '[mcp_servers.fs]\ncommand = "npx"\nargs = ["-y", "fs-mcp"]\n'),
+    ("devin-desktop", "Devin.app", ".config/devin/mcp_config.json", '{"mcpServers": {"fs": {"command": "npx", "args": ["-y", "fs-mcp"]}}}'),
+    ("kiro", "Kiro.app", ".kiro/settings/mcp.json", '{"mcpServers": {"fs": {"command": "npx", "args": ["-y", "fs-mcp"]}}}'),
+    ("antigravity", "Antigravity.app", ".gemini/config/mcp_config.json", '{"mcpServers": {"fs": {"command": "npx", "args": ["-y", "fs-mcp"]}}}'),
+    ("trae", "Trae.app", "Library/Application Support/Trae/User/mcp.json", '{"mcpServers": {"fs": {"command": "npx", "args": ["-y", "fs-mcp"]}}}'),
+])
+def test_more_apps_pin_and_restore_their_mcp_servers(machine, tmp_path, app, bundle_name, path, text):
+    bundle(tmp_path / "Applications", bundle_name, "2.0.1")
+    config = tmp_path / "home" / path
+    config.parent.mkdir(parents=True, exist_ok=True)
+    config.write_text(text)
+    r = invoke("pin", "--harness", app)
+    assert r.exit_code == 0, r.output
+    lock = json.loads(Lockfile.load("harness.lock").to_json())
+    assert lock["harness"]["name"] == app and lock["harness"]["source"] == "app@2.0.1"
+    assert [(t["name"], t["command"]) for t in lock["tool"]] == [("fs", "npx")]
+    assert invoke("check").exit_code == 0
+    assert invoke("trust", "--yes").exit_code == 0
+    config.unlink()
+    r = invoke("sync", "--yes")
+    assert r.exit_code == 3 and "hlock sync --apps" in r.output and not config.exists(), r.output
+    r = invoke("sync", "--apps", "--yes")
+    assert r.exit_code == 0, r.output
+    if path.endswith(".toml"):
+        assert '[mcp_servers.fs]' in config.read_text() and 'command = "npx"' in config.read_text()
+    else:
+        assert json.loads(config.read_text()) == json.loads(text)
+    assert invoke("check").exit_code == 0

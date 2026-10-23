@@ -1,0 +1,53 @@
+# Harness profile: Google Antigravity, the agent app and the Antigravity IDE (split in two in
+# May 2026). A desktop app: hlock pins and restores their MCP servers, rules and skills but
+# never starts them. Both read ~/.gemini/config; the Antigravity CLI (`agy`) keeps its own
+# settings. Windows and Linux paths aren't documented, so only macOS bundles are found.
+id = "antigravity"
+name = "Antigravity"
+kind = "app"
+aliases = ["google-antigravity", "antigravity-ide"]
+vendor = "Google"
+homepage = "https://antigravity.google"
+support = "basic"
+open-source = false
+local-models = false
+config-root = { default = "~/.gemini/config" }
+instructions = ["AGENTS.md", "GEMINI.md", ".agents/AGENTS.md", "~/.gemini/AGENTS.md", "~/.gemini/GEMINI.md"]
+rules = { dir = ".agents/rules", ext = ".md" }
+
+[app]
+bundles = ["Antigravity.app", "Antigravity IDE.app"]
+# MCP servers reload with Refresh (or a server's Restart) in the app
+reload = "restart"
+
+[[install]]
+method = "brew-cask"
+package = "antigravity"
+[[install]]
+method = "app"
+path-hints = ["/Antigravity.app", "/Antigravity IDE.app"]
+command = "Download Antigravity from https://antigravity.google/download"
+
+[files.mcp]
+path = "{root}/mcp_config.json"
+format = "json"
+restore = "whole"
+[files.project-mcp]
+path = ".agents/mcp_config.json"
+format = "json"
+restore = "record"
+
+[mcp]
+sources = ["mcp#/mcpServers", "project-mcp#/mcpServers"]
+write = "mcp#/mcpServers"
+# remote servers are `serverUrl`; stdio and streamable HTTP, no SSE
+shape = "antigravity"
+transports = ["stdio", "http"]
+
+[skills]
+dirs = ["{root}/skills", ".agents/skills"]
+write = "{root}/skills"
+
+[[unmanaged]]
+what = "The model and the agent's permissions"
+where = "the app (Settings)"

@@ -41,6 +41,12 @@ const BUILTIN_HARNESSES: &[(&str, &str)] = &[
     // desktop apps: hlock pins and restores their config but never starts them (`kind = "app"`)
     ("claude-desktop", include_str!("../profiles/harnesses/claude-desktop.toml")),
     ("vscode", include_str!("../profiles/harnesses/vscode.toml")),
+    ("cursor-ide", include_str!("../profiles/harnesses/cursor-ide.toml")),
+    ("chatgpt", include_str!("../profiles/harnesses/chatgpt.toml")),
+    ("devin-desktop", include_str!("../profiles/harnesses/devin-desktop.toml")),
+    ("kiro", include_str!("../profiles/harnesses/kiro.toml")),
+    ("antigravity", include_str!("../profiles/harnesses/antigravity.toml")),
+    ("trae", include_str!("../profiles/harnesses/trae.toml")),
     // frameworks: code harnesses a project builds on (`[harnesses.<id>] framework = …`)
     ("pydantic-ai", include_str!("../profiles/harnesses/pydantic-ai.toml")),
     ("deepagents", include_str!("../profiles/harnesses/deepagents.toml")),
@@ -1538,6 +1544,35 @@ packages = ["pypi:httpx"]
         assert!(!probe_harness(claude, &linux).installed);
         assert_eq!(plist_string("<key>A</key><string>1</string><key>B</key><string>2</string>", "B").as_deref(), Some("2"));
         assert_eq!(plist_string("<key>A</key><integer>1</integer><string>2</string>", "A"), None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn renamed_apps_are_found_by_their_old_names_too() {
+        let dir = std::env::temp_dir().join(format!("hlock-prof-renamed-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let apps = dir.join("Applications");
+        let env: BTreeMap<String, String> = [("HLOCK_OS", "macos"), ("HLOCK_APP_DIRS", apps.to_str().unwrap()), ("HOMEBREW_PREFIX", dir.join("brew").to_str().unwrap())]
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+        let ctx = Ctx { home: dir.join("home"), cwd: dir.clone(), env, path: vec![] };
+        let r = Registry::builtin();
+        for (alias, id) in [("codex-app", "chatgpt"), ("windsurf", "devin-desktop"), ("cursor-app", "cursor-ide"), ("antigravity-ide", "antigravity")] {
+            assert_eq!(r.harness(alias).map(|h| h.id.as_str()), Some(id), "{alias}");
+        }
+        // `cursor` stays the Cursor Agent CLI
+        assert_eq!(r.harness("cursor").unwrap().id, "cursor-agent");
+        for (id, bundle) in [("chatgpt", "Codex.app"), ("devin-desktop", "Windsurf.app"), ("kiro", "Kiro.app"), ("antigravity", "Antigravity IDE.app"), ("cursor-ide", "Cursor.app"), ("trae", "Trae.app")] {
+            let h = r.harness(id).unwrap();
+            assert!(h.is_app() && !probe_harness(h, &ctx).installed, "{id}");
+            let c = apps.join(bundle).join("Contents");
+            std::fs::create_dir_all(&c).unwrap();
+            std::fs::write(c.join("Info.plist"), "<plist><dict><key>CFBundleShortVersionString</key><string>2.0.1</string></dict></plist>").unwrap();
+            let p = probe_harness(h, &ctx);
+            assert!(p.installed && p.binary.as_deref().is_some_and(|b| b.ends_with(bundle)), "{id}: {p:?}");
+            assert_eq!(p.source.as_deref(), Some("app@2.0.1"), "{id}");
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 

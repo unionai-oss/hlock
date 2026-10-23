@@ -115,7 +115,7 @@ local model.
 
 ## To a desktop app
 
-`--to` can name a desktop app (`claude-desktop`, `vscode`), and a lock pinned from one can
+`--to` can name a desktop app (`claude-desktop`, `vscode`, `cursor-ide`, …), and a lock pinned from one can
 move to an agent CLI. MCP servers are rewritten into the app's shape (VS Code's `servers`,
 with `type`), and skills and instruction files go where it reads them (`CLAUDE.md` becomes
 `AGENTS.md` for VS Code). An app picks its model in the app or your account, so the lock's

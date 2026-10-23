@@ -147,10 +147,27 @@ A harness that isn't installed (on a CI runner, say) skips the version check.
 
 ## Desktop apps
 
-Claude Desktop and VS Code (with Copilot) keep their MCP servers, skills and instruction
-files in plain files, so hlock pins, checks, syncs and migrates them like an agent CLI. Their
-profiles have `kind = "app"`. hlock never starts an app, so `launch`, `run`, `resolve` and
-`tune` refuse one: you open the app yourself.
+Desktop apps keep their MCP servers, skills and instruction files in plain files, so hlock
+pins, checks, syncs and migrates them like an agent CLI. Their profiles have `kind = "app"`:
+
+| App | Profile | Shares its files with |
+|---|---|---|
+| Claude Desktop | `claude-desktop` | (its Code tab: `claude-code`) |
+| VS Code with Copilot | `vscode` | |
+| Cursor | `cursor-ide` | `cursor-agent`: `~/.cursor/mcp.json`, rules, skills |
+| ChatGPT (formerly the Codex app) | `chatgpt` (alias `codex-app`) | `codex`: `~/.codex/config.toml`, `AGENTS.md`, skills |
+| Devin Desktop (formerly Windsurf) | `devin-desktop` (alias `windsurf`) | the Devin CLI: `~/.config/devin` |
+| Kiro | `kiro` | |
+| Antigravity (the app and the IDE) | `antigravity` | |
+| TRAE | `trae` | |
+
+hlock never starts an app, so `launch`, `run`, `resolve` and `tune` refuse one: you open
+the app yourself. An app that shares its files with a CLI is restored by either profile's
+lock; pin with the app's profile to record the app's version.
+
+Devin Desktop's older Cascade agent keeps its setup under `~/.codeium/windsurf`, and the
+profile restores only Devin Local's. Zed isn't here yet: its MCP servers live in a
+`settings.json` full of comments, which a write would drop.
 
 An app's setup is in your user config, so `pin` takes the user scope by default:
 

@@ -47,7 +47,7 @@ skill when they disagree.
 | Add a skill, MCP server, plugin, or instruction file | `hlock add KIND SOURCE` (`--dry-run` first) | [dependencies](https://docs.hlock.ai/guides/dependencies/) |
 | Remove or update one | `hlock remove NAME`, `hlock outdated`, `hlock upgrade dep:NAME` | [dependencies](https://docs.hlock.ai/guides/dependencies/) |
 | Reproduce a lock on this machine | `hlock sync --plan`, then `hlock sync` | [sync](https://docs.hlock.ai/guides/sync/) |
-| Lock or restore a desktop app (Claude Desktop, VS Code) | `hlock pin --harness claude-desktop`, then `hlock sync --apps` (hlock never starts an app) | [desktop apps](https://docs.hlock.ai/guides/harnesses/#desktop-apps) |
+| Lock or restore a desktop app (Claude Desktop, VS Code, Cursor, ChatGPT, Kiro, …) | `hlock pin --harness claude-desktop`, then `hlock sync --apps` (hlock never starts an app) | [desktop apps](https://docs.hlock.ai/guides/harnesses/#desktop-apps) |
 | Start a session on the locked setup | `hlock launch` (`--dry-run` to see the command) | [launch](https://docs.hlock.ai/guides/launch/) |
 | Try someone else's setup | `hlock pull github:OWNER/REPO`, then `hlock launch --lock …` | [pull](https://docs.hlock.ai/guides/pull/) |
 | Keep per-person locks in a repo | `hlock pin --harness H -o .hlock/locks/harness.HANDLE.lock` | [teams](https://docs.hlock.ai/guides/teams/) |

@@ -1,6 +1,6 @@
 # Desktop apps: pin, check, sync and migrate GUI agent harnesses
 
-Status: phase 1 implemented · Owner: Niels Bantilan · Last updated: 2026-10-22 · Builds on [v0](v0.md) §7.8, [migrate](migrate.md), [meta harness](meta-harness.md), [dependencies](dependencies.md)
+Status: phase 1 implemented, more apps added (§10) · Owner: Niels Bantilan · Last updated: 2026-10-23 · Builds on [v0](v0.md) §7.8, [migrate](migrate.md), [meta harness](meta-harness.md), [dependencies](dependencies.md)
 
 > More and more agent setup lives in desktop apps: Claude Desktop, VS Code with Copilot,
 > Cursor, Zed. Their MCP servers, instructions and skills are plain files, often the same
@@ -524,9 +524,8 @@ CLI" target rule now includes apps.
    - **Zed**, once pointer writes into JSONC keep comments (its `settings.json` is
      usually heavily commented, and a write would drop every comment), with
      `instructions-first-match` (Zed reads only the first instruction file it finds).
-   - **The Cursor IDE** as `cursor-ide` (app detection and install on top of the files
-     `cursor-agent` already restores), Devin Desktop (formerly Windsurf), LM Studio's chat
-     MCP, and the ChatGPT desktop app once it ships Codex.
+   - **More apps** (done, §10): `cursor-ide`, `chatgpt`, `devin-desktop`, `kiro`,
+     `antigravity`, `trae`. Still open: LM Studio's chat MCP and Bionic, JetBrains.
    - **Windows**: `winget`, the Claude Desktop MSIX path, running-app detection with
      `tasklist`, and versions from the registry (`DisplayVersion` under the app's
      `Uninstall` key).
@@ -572,3 +571,24 @@ Phase 1 is §3 and §4 as written, with these details settled in the code:
 2. **Claude Desktop rewriting its file.** The running-app check covers the reported bug
    for writes. If the app later drops `mcpServers` on its own, `check` reports it as drift;
    should the hint name the likely cause?
+
+## 10. More apps (phase 2, profiles only)
+
+Six more profiles, researched from vendor docs, changelogs and Homebrew casks in October
+2026. None needed new sync rules; two needed MCP shapes.
+
+| id | App | Config | MCP | Notes |
+|---|---|---|---|---|
+| `cursor-ide` | Cursor | `~/.cursor` | `mcp.json` `/mcpServers`, `.cursor/mcp.json`; `standard` | Shares files with `cursor-agent`; shim `cursor`; `reload = "restart"` (staff say only a full restart reloads every server) |
+| `chatgpt` | ChatGPT (the Codex app until July 2026) | `~/.codex` (`CODEX_HOME`) | `config.toml` `/mcp_servers`; `codex`; stdio and HTTP | Shares files with `codex`; bundles `ChatGPT.app`, `Codex.app`; ChatGPT Classic has no file config |
+| `devin-desktop` | Devin Desktop (Windsurf until June 2026) | `~/.config/devin` | `mcp_config.json` `/mcpServers`, `.devin/mcp_config.json`; new shape `devin` (`url` + `transport`) | Devin Local's files; Cascade's `~/.codeium/windsurf` is unmanaged; bundles `Devin.app`, `Windsurf.app` |
+| `kiro` | Kiro | `~/.kiro` | `settings/mcp.json` `/mcpServers`, `.kiro/settings/mcp.json`; `standard` | Steering is the rules dir (`.kiro/steering`, `.md`); shim `kiro`; reloads live |
+| `antigravity` | Antigravity app and IDE | `~/.gemini/config` | `mcp_config.json` `/mcpServers`, `.agents/mcp_config.json`; new shape `antigravity` (`serverUrl`); no SSE | One profile for both bundles, which read the same files |
+| `trae` | TRAE | `{app-config}/Trae/User` | `mcp.json` `/mcpServers`, `.trae/mcp.json`; `standard` | The user MCP path is from MCP installers, not Trae's docs |
+
+Not added: **Zed** (a write to its commented `settings.json` drops the comments, and Zed
+reads only the first instruction file it finds), **LM Studio** (a runtime profile already;
+its home moves with `~/.lmstudio-home-pointer`), **Goose Desktop** (shares
+`~/.config/goose/config.yaml` with `goose`), and **JetBrains** AI Assistant (MCP set in the
+IDE, not a documented file). Process names aren't documented for any of the six, so none
+sets `quit-to-write`; Windows and Linux paths are listed only where a vendor documents them.

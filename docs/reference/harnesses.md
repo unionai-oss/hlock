@@ -174,6 +174,12 @@ only with `--apps` (see [Desktop apps](../guides/harnesses.md#desktop-apps)).
 |---|---|---|---|---|---|
 | [Claude Desktop](https://claude.ai/download) | Anthropic | `claude-desktop` (`claude-app`) | basic | — | `brew-cask`, `app` |
 | [VS Code](https://code.visualstudio.com) | Microsoft | `vscode` (`code`, `vs-code`, `visual-studio-code`) | basic | — | `brew-cask`, `app` |
+| [Cursor](https://cursor.com) | Anysphere | `cursor-ide` (`cursor-app`, `cursor-editor`) | basic | — | `brew-cask`, `app` |
+| [ChatGPT](https://learn.chatgpt.com/docs/app) | OpenAI | `chatgpt` (`chatgpt-desktop`, `codex-app`, `codex-desktop`) | basic | — | `brew-cask`, `app` |
+| [Devin Desktop](https://devin.ai/desktop) | Cognition | `devin-desktop` (`windsurf`, `devin-app`) | basic | — | `brew-cask`, `app` |
+| [Kiro](https://kiro.dev) | AWS | `kiro` (`kiro-ide`) | basic | — | `brew-cask`, `app` |
+| [Antigravity](https://antigravity.google) | Google | `antigravity` (`google-antigravity`, `antigravity-ide`) | basic | — | `brew-cask`, `app` |
+| [TRAE](https://www.trae.ai) | ByteDance | `trae` (`trae-ide`) | basic | — | `brew-cask`, `app` |
 <!-- /generated:apps -->
 
 <!-- generated:apps-capture -->
@@ -181,6 +187,12 @@ only with `--apps` (see [Desktop apps](../guides/harnesses.md#desktop-apps)).
 |---|---|---|---|---|
 | Claude Desktop | ✓ | — | — | Connectors (remote MCP servers), Desktop Extensions, Projects, chat skills and the default model |
 | VS Code | ✓ | ✓ | `AGENTS.md`, `.github/copilot-instructions.md` | Settings (settings.json) and other VS Code profiles |
+| Cursor | ✓ | ✓ | `AGENTS.md` | User Rules and the model, Team Rules, Which MCP servers are turned on, and tool approvals |
+| ChatGPT | ✓ | ✓ | `AGENTS.md`, `AGENTS.override.md` | Plugins and connectors, Chats, projects, memory and custom instructions |
+| Devin Desktop | ✓ | ✓ | `AGENTS.md`, `CLAUDE.md` | The Cascade agent's MCP servers, memories and global rules, Your team's MCP allowlist, and whether Devin Local is on |
+| Kiro | ✓ | ✓ | `AGENTS.md` | The model, Cloud steering and skills, and your organization's MCP registry |
+| Antigravity | ✓ | ✓ | `AGENTS.md`, `GEMINI.md`, `.agents/AGENTS.md` | The model and the agent's permissions |
+| TRAE | ✓ | ✓ | `AGENTS.md` | User rules (~/.trae/user_rules) and the model, Cloud MCP servers |
 <!-- /generated:apps-capture -->
 
 - **Claude Desktop**: hlock pins the chat app's MCP servers (`/mcpServers` in
