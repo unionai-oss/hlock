@@ -1,5 +1,8 @@
 """Backends: where hlock's work runs (see ``specs/backends.md``).
 
+A backend says only *where*. What searches for harness edits in ``tune`` is an optimizer
+(``hlock.optimizers``); a backend that lists ``harness.optimize`` hosts that search.
+
 The Rust core sends a backend one *work item* at a time (a trial, a tune stage) and
 gets one result back. hlock's worker (``python -m hlock.tasks.worker``) is the process
 for Python backends: it finds the backend the request names and calls it.

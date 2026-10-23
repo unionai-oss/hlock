@@ -114,6 +114,22 @@ or `error`. `offline` has neither, since it runs in process.
 '{"describe":{"about":"hlock\'s stock handlers, in process on this machine","kinds":["llm.run_trial","data.load","data.synthetic","grade","prompt.search","harness.optimize","ft.lora"],"model_endpoint":true,"name":"local"},"name":"local","options":{},"renamed_from":null,"source":"built in, Python worker"}'
 ```
 
+### `optimizer_describe`
+
+```python
+optimizer_describe(manifest=None, optimizer=None) -> str
+```
+
+The optimizer `optimizer` names (else the manifest's `[tune] optimizer`, else `hlock`), like
+[`hlock optimizer status`](cli.md#optimizer-status). Returns JSON with `name`, `source` (how
+it was found), `options`, and the `object` or `command` that runs it (`null` for a built-in
+or an entry point).
+
+```python
+>>> hlock.optimizer_describe(hlock.Manifest.from_str("[optimizers.harness2]\noptions = { k = 2 }\n"), optimizer="harness2")
+'{"command":null,"name":"harness2","object":null,"options":{"k":2},"source":"built in"}'
+```
+
 ### `tune`
 
 ```python
@@ -143,7 +159,7 @@ tune_eval(session, candidate, split="train", tasks=None, trials=None) -> str
 Run a tune candidate's trials, like [`hlock tune eval`](cli.md#tune-eval). Returns JSON with
 `candidate` (its digest), `split`, `results` (each with `task`, `trial`, `success`, `score`,
 `feedback`, `workspace`, `cost_usd`, `latency_s`, `cached`), and `budget`. An optimizer
-written in Python uses [`hlock.optimize.Session`](../guides/backends.md#write-an-optimizer),
+written in Python uses [`hlock.optimize.Session`](../guides/optimizers.md#write-an-optimizer),
 which wraps it and raises `BudgetExhausted` when the budget is spent.
 
 ### `lock_diff`
@@ -221,13 +237,15 @@ JSON with `name`, `version`, `domain`, `path`, `hash` (a digest of every file in
 ### `grade_eval_task`
 
 ```python
-grade_eval_task(path, task, workspace=None, manifest=None) -> str
+grade_eval_task(path, task, workspace=None, manifest=None, lock=None, no_sandbox=False, trust=False) -> str
 ```
 
 Grade a copy of `workspace` as the output of `task` in the pack at `path`, like
 [`hlock evals grade`](cli.md#evals-grade); with no `workspace`, the task's solution.
-`manifest` is a `harness.toml` whose judge settings apply. Returns JSON with `task`,
-`workspace`, `judge`, `success`, `score` (the mean), and `grades`, each with `grader`,
+`manifest` is a `harness.toml` whose judge settings apply. With `lock`, `tests` graders run
+in its [sandbox](../guides/sandbox.md) when it covers `graders` (unless `no_sandbox`;
+`trust` approves it). Returns JSON with `task`, `workspace`, `judge`, `success`, `score`
+(the mean), `sandbox` (its summary, or null), `notes`, and `grades`, each with `grader`,
 `success`, `score`, and `detail`, and for judges `parts` (each criterion's `label` and
 `value`), `uncertain`, and `judged_by` (the model that answered).
 
@@ -236,6 +254,42 @@ Grade a copy of `workspace` as the output of `task` in the pack at `path`, like
 >>> r["success"], round(r["score"], 2), [(g["grader"], g["success"]) for g in r["grades"]]
 (False, 0.67, [('artifact:greetings.md', True), ('tests:greet_people/check.py', False)])
 ```
+
+### `sandbox_info`
+
+```python
+sandbox_info(path="harness.lock", manifest=None, no_sandbox=False) -> str
+```
+
+The lock's [sandbox](../guides/sandbox.md) and how it stands on this machine, like
+[`hlock sandbox`](cli.md#sandbox). Returns JSON with `spec` (the lock's `[policy.sandbox]`,
+or null), `summary`, `declared` (`harness.toml`'s), `drift`, `weakened`, `off`, `runner`
+(its `name`, `origin`, `program`, and whether it's `installed`), `trusted`, `error` (why it
+can't run here, or null), `policy` (violations), `evidence` and `evidence_note`.
+
+### `sandbox_control_snapshot`
+
+```python
+sandbox_control_snapshot(project) -> str
+```
+
+A digest of each control file in `project` (`harness.toml`, the locks, the policy,
+`.envrc`, git hooks and config), or null where there's none, as JSON. Compare one taken
+before a sandboxed session with one after to see what the session created or changed.
+
+### `sandbox_session_begin` and `sandbox_session_end`
+
+```python
+sandbox_session_begin(session, env) -> str
+sandbox_session_end(session, env) -> str
+```
+
+Run an [OpenShell](../guides/sandbox.md#run-the-lock-on-openshell) session around a
+prepared launch: `session` is the JSON of `launch_prepare`'s `sandbox.session`, `env` its
+`sandbox.env`. `begin` creates the sandbox, uploads what the run sees and attaches providers,
+and returns JSON `{argv, session}`: run `argv`, then pass that `session` to `end`, which copies
+back what the run changed, deletes the sandbox and its providers, and returns JSON `{notes}`.
+`hlock.sandbox.run` does both.
 
 ### `prepare_eval_workspace`
 

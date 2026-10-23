@@ -2,7 +2,8 @@
 //! evaluation session it calls back into (`hlock tune eval`), and the checks the core makes
 //! before an edit reaches the tune lock.
 //!
-//! An optimizer (a backend that runs `harness.optimize`) gets a **bundle**: the base lock's
+//! An optimizer ([`Optimizer`], `specs/optimizers.md`) is what searches; the backend is
+//! where it and its trials run. It gets a **bundle**: the base lock's
 //! instruction files and skills as files, and `bundle.json`, which says which it may edit.
 //! It evaluates candidates through a **session**, which runs and grades trials of a
 //! candidate on the train or dev split, inside a budget, and never on the test split. When
@@ -44,6 +45,81 @@ pub fn file_dest(profile: Option<&crate::profiles::HarnessProfile>, kind: &str, 
         _ => None,
     }
 }
+/// The built-in optimizers. Both run in hlock's Python worker.
+pub const BUILTIN_OPTIMIZERS: &[&str] = &["hlock", "harness2"];
+
+/// How an optimizer runs, in whichever process hosts the search.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OptimizerRunner {
+    /// A Python optimizer: built in or found by its `hlock.optimizers` entry point
+    /// (`object: None`), or a `module:attr` object.
+    Python { object: Option<String> },
+    /// An executable that speaks the backend contract for `harness.optimize`.
+    Command(Vec<String>),
+}
+
+/// The optimizer `tune` searches with (`[tune] optimizer`), resolved from its name. Where
+/// it runs is the backend's business ([`crate::worker::Backend`]).
+#[derive(Debug, Clone, PartialEq)]
+pub struct Optimizer {
+    pub name: String,
+    pub runner: OptimizerRunner,
+    /// `[optimizers.<name>] options`, sent with the request.
+    pub options: Value,
+}
+
+impl Optimizer {
+    /// The optimizer `name` names: a built-in, an `[optimizers.<name>]` table, an
+    /// `hlock-optimizer-<name>` executable on `PATH`, or else a Python optimizer the
+    /// worker looks up by entry point (and reports missing when it runs).
+    pub fn resolve(manifest: &crate::manifest::Manifest, name: &str) -> Result<Optimizer> {
+        let name = name.trim();
+        if name.is_empty() || !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') {
+            return Err(Error::Manifest(format!("optimizer {name:?} isn't a valid name: use letters, digits, '-' and '_'")));
+        }
+        let def = manifest.optimizers.get(name);
+        if def.is_none() && manifest.backends.contains_key(name) && !BUILTIN_OPTIMIZERS.contains(&name) {
+            return Err(Error::Manifest(format!("[tune] optimizer = {name:?} names a backend: optimizers are declared under [optimizers.{name}], backends only say where the work runs")));
+        }
+        let bad = |why: String| Error::Manifest(format!("[optimizers.{name}] {why}"));
+        let (command, object, options) = crate::worker::parse_def(def, &bad)?;
+        let runner = match (command, object) {
+            (Some(_), _) | (_, Some(_)) if BUILTIN_OPTIMIZERS.contains(&name) => return Err(bad(format!("can only set options: {name} is built in"))),
+            (Some(_), Some(_)) => return Err(bad("sets both command and python: keep one".into())),
+            (Some(c), None) => OptimizerRunner::Command(c),
+            (None, Some(o)) => OptimizerRunner::Python { object: Some(o) },
+            (None, None) if BUILTIN_OPTIMIZERS.contains(&name) => OptimizerRunner::Python { object: None },
+            (None, None) => match crate::profiles::Ctx::from_process().which(&format!("hlock-optimizer-{name}")) {
+                Some(p) => OptimizerRunner::Command(vec![p.to_string_lossy().into_owned()]),
+                None => OptimizerRunner::Python { object: None },
+            },
+        };
+        Ok(Optimizer { name: name.to_string(), runner, options })
+    }
+
+    /// How the optimizer was found, for `hlock optimizer status`.
+    pub fn source(&self) -> String {
+        match &self.runner {
+            OptimizerRunner::Python { object: None } if BUILTIN_OPTIMIZERS.contains(&self.name.as_str()) => "built in".into(),
+            OptimizerRunner::Python { object: None } => format!("looked up as '{}' in the hlock.optimizers entry points", self.name),
+            OptimizerRunner::Python { object: Some(o) } => format!("Python object {o}"),
+            OptimizerRunner::Command(argv) if argv.len() == 1 && Path::new(&argv[0]).file_name().is_some_and(|f| f.to_string_lossy() == format!("hlock-optimizer-{}", self.name)) => {
+                format!("hlock-optimizer-{} on PATH", self.name)
+            }
+            OptimizerRunner::Command(argv) => format!("command {}", argv.join(" ")),
+        }
+    }
+
+    /// The request's `optimizer` field (contract 5).
+    pub fn to_value(&self) -> Value {
+        let (object, command) = match &self.runner {
+            OptimizerRunner::Python { object } => (json!(object), Value::Null),
+            OptimizerRunner::Command(argv) => (Value::Null, json!(argv)),
+        };
+        json!({"name": self.name, "options": self.options, "object": object, "command": command})
+    }
+}
+
 const MAX_COMPONENT_BYTES: usize = 15 * 1024;
 const MAX_CHANGED_LINES: usize = 120;
 
@@ -786,6 +862,31 @@ fn apply_file(lf: &mut Lockfile, profile: Option<&crate::profiles::HarnessProfil
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn optimizers_are_resolved_apart_from_backends() {
+        let m = |toml: &str| crate::manifest::Manifest::from_str(toml).unwrap();
+        let none = m("");
+        assert_eq!(Optimizer::resolve(&none, "hlock").unwrap().runner, OptimizerRunner::Python { object: None });
+        assert_eq!(Optimizer::resolve(&none, "harness2").unwrap().source(), "built in");
+        let m2 = m("[optimizers.harness2]\noptions = { k = 2 }\n[optimizers.ace]\ncommand = [\"ace\", \"-v\"]\n[optimizers.gepa]\npython = \"hlock_gepa:Gepa\"\n[backends.ray]\ncommand = \"ray\"\n");
+        let h2 = Optimizer::resolve(&m2, "harness2").unwrap();
+        assert_eq!(h2.to_value(), json!({"name": "harness2", "options": {"k": 2}, "object": null, "command": null}));
+        assert_eq!(Optimizer::resolve(&m2, "ace").unwrap().runner, OptimizerRunner::Command(vec!["ace".into(), "-v".into()]));
+        assert_eq!(Optimizer::resolve(&m2, "gepa").unwrap().to_value()["object"], json!("hlock_gepa:Gepa"));
+        let e = Optimizer::resolve(&m2, "ray").unwrap_err().to_string();
+        assert!(e.contains("names a backend") && e.contains("[optimizers.ray]"), "{e}");
+        for (toml, name, why) in [
+            ("[optimizers.hlock]\ncommand = \"x\"\n", "hlock", "can only set options"),
+            ("[optimizers.x]\ncommand = \"x\"\npython = \"a:b\"\n", "x", "keep one"),
+            ("[optimizers.x]\noptions = 3\n", "x", "options must be a table"),
+            ("", "../x", "isn't a valid name"),
+        ] {
+            let e = Optimizer::resolve(&m(toml), name).unwrap_err().to_string();
+            assert!(e.contains(why), "{toml}: {e}");
+        }
+        assert!(m("[optimizers.x]\npyhton = \"a:b\"\n").problems().iter().any(|p| p.contains("unknown key `pyhton` in [optimizers.x]")));
+    }
 
     fn tmp(tag: &str) -> PathBuf {
         let d = std::env::temp_dir().join(format!("hlock-optimize-{tag}-{}", std::process::id()));

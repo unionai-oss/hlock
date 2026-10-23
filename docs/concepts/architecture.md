@@ -68,13 +68,13 @@ $HL_PYTHON -m hlock.tasks.worker request.json response.json
 
 A command backend (`[backends.<name>] command`, or `hlock-backend-<name>` on `PATH`) is
 run the same way, as `<command…> request.json response.json`. Requests and responses
-follow a versioned JSON contract (`CONTRACT_VERSION = 4`). The core only ever sees the
+follow a versioned JSON contract (`CONTRACT_VERSION = 5`). The core only ever sees the
 response, so it doesn't depend on where the work ran: in process, on this machine, or
 as a Flyte task on a GPU node.
 
 | Request field | Meaning |
 |---|---|
-| `version` | The contract version (4). A backend refuses one it doesn't know |
+| `version` | The contract version (5). A backend refuses one it doesn't know |
 | `kind` | `backend.describe`, `llm.run_trial`, `data.load`, `data.synthetic`, `grade`, `harness.optimize`, `prompt.search` (the old prompt stage), or `ft.lora` |
 | `backend` | The backend's name |
 | `backend_options` | `[backends.<name>] options`, or `{}` |
@@ -82,13 +82,14 @@ as a Flyte task on a GPU node.
 | `stack`, `task`, `seed` | The trial's configuration, task, and seed (empty for stages) |
 | `workdir` | A directory the item works in. A trial's holds the task's fixtures, and hlock grades what's left there |
 | `plan` | The tune plan: depth, data source, axes |
-| `optimize` | `harness.optimize` only: the bundle, the session, the splits, the budget (see [Write an optimizer](../guides/backends.md#write-an-optimizer)) |
+| `optimizer` | `harness.optimize` only: the [optimizer](../guides/optimizers.md) that searches, apart from the backend that hosts it: `name`, `options` (`[optimizers.<name>] options`), and the `object` or `command` that runs it |
+| `optimize` | `harness.optimize` only: the bundle, the session, the splits, the budget (see [Write an optimizer](../guides/optimizers.md#write-an-optimizer)) |
 
 A trial's `stack` has `system_prompt` when tune runs it with a candidate's (or the lock's)
 instruction files: a single-completion trial sends it as the system message.
 
-The response is `{"version": 4, "ok": true, "result": {...}}`, or
-`{"version": 4, "ok": false, "error": "..."}` with a non-zero exit. A result has
+The response is `{"version": 5, "ok": true, "result": {...}}`, or
+`{"version": 5, "ok": false, "error": "..."}` with a non-zero exit. A result has
 `success`, `score`, `cost_usd` (`null` when unknown), `simulated`, `gpu_h`,
 `latency_s`, `steps`, `trace`, `artifact_digests`, and `model_digests` (stage metadata;
 a `run` key there is recorded as the run in the tune lock); `harness.optimize`'s also has
@@ -96,7 +97,7 @@ a `run` key there is recorded as the run in the tune lock); `harness.optimize`'s
 
 `backend.describe` comes first, and its result says what the backend runs: `name`,
 `kinds`, `model_endpoint` (its trials call `HL_LLM_BASE_URL`), and `about`. A stage the
-backend doesn't list is skipped. See [Write your own backend](../guides/backends.md#write-your-own-backend).
+backend doesn't list is skipped, except `harness.optimize`: the search then runs in hlock's local worker, and its trials on the backend. See [Write your own backend](../guides/backends.md#write-your-own-backend).
 
 Each stock handler owns one stage of [`hlock tune`](../guides/tune.md):
 LLM trials, trace loading, synthetic data, grading, the built-in optimizer, and LoRA

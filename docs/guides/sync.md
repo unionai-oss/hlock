@@ -94,6 +94,7 @@ steps need you to opt in:
 | Flag | Lets hlock… | Otherwise the step is manual, with |
 |---|---|---|
 | `--in-place` | write into your own config root (`~/.claude`, …) instead of `.hlock/env/` | (no manual step: the setup goes into `.hlock/env/`) |
+| `--apps` | write a [desktop app's](#desktop-apps) own config (Claude Desktop, VS Code) | the step that writes it, with "hlock sync --apps writes it" |
 | `--install` | run package managers: `npm install -g`, `brew install`, `uv tool install`, install scripts | the exact command, e.g. `npm install -g @earendil-works/pi-coding-agent@1.0.0` |
 | `--pull` | download model weights through an installed runtime (`ollama pull`, `lms get`, `hf download`) | the pull command and the download size |
 
@@ -211,6 +212,29 @@ Each file it replaces is kept as `<file>.hlock-bak`. Only the parts the lock res
 written: for `~/.claude.json`, only `/mcpServers`, so your sign-in and other state stay.
 `--in-place` doesn't combine with `--prefix` or `--docker`.
 
+## Desktop apps
+
+A [desktop app](harnesses.md#desktop-apps) (Claude Desktop, VS Code) reads only its own
+config, so an isolated root is no use to it. For an app's lock, `sync` plans against the
+app's real config, and writes it only with `--apps` (`--in-place` implies it):
+
+| | Without `--apps` | With `--apps` |
+|---|---|---|
+| The lock's harness is an app | Steps that write the app's config are manual (`○`, "hlock sync --apps writes it"); `sync` exits `3` | Written, then "quit and reopen Claude Desktop" when the app needs a restart |
+| An app in [`[target] also`](dependencies.md#mixed-harness-teams) | Its steps are optional: listed, but `sync` still exits `0` | Written |
+| Files in the project (`.vscode/mcp.json`, `.github/skills/`) | Written, as for any harness | Written |
+
+Interactively, `sync` asks before it leaves them out. While Claude Desktop runs, its config
+isn't written whatever the flags, because the app can overwrite the file: quit it, then run
+`sync` again. `--prefix DIR` writes a copy for you to inspect, which the app doesn't read,
+and `--docker` refuses an app. `--apps` doesn't combine with `--prefix` or `--docker`.
+
+A missing app is installed by `--install` through Homebrew (`brew install --cask claude`)
+on macOS. Otherwise it's a manual step with the download link, which
+[`hlock meta run install`](meta.md#install) can hand to an agent. An installed app at a
+different version than the lock pins is fine: apps update themselves, and installers only
+offer the current version.
+
 ## Into a Docker image
 
 ```console
@@ -218,8 +242,13 @@ $ hlock sync --docker
 …
 ✓ wrote .hlock/docker/pi/Dockerfile
 next →
-  docker build -t hlock-pi .hlock/docker/pi
-  docker run -it --rm -e HLOCK_SECRET_… -v "$PWD:/workspace" hlock-pi
+  docker build -t hlock-pi:8f489e60629b .hlock/docker/pi
+  docker run -it --rm -e HLOCK_SECRET_… -v "$PWD:/workspace" hlock-pi:8f489e60629b
+  or run the lock in it as a sandbox: add to harness.toml, then re-pin
+    [sandbox]
+    runner = "docker"
+    image = "hlock-pi:8f489e60629b"  # push it, and pin @sha256:, to share it
+    (runner = "openshell" runs it on an OpenShell gateway instead)
 ```
 
 `--docker` writes a build context to `.hlock/docker/<harness>/`. The restored config, skills
@@ -230,13 +259,17 @@ entrypoint fills `${HLOCK_SECRET_*}` placeholders when the container starts, fro
 variables or from secret files mounted at `/run/secrets` (Docker and Compose secrets; see
 [Secrets](secrets.md#in-docker)). Model weights stay on the host. A local runtime is reached at
 `http://host.docker.internal:<port>`, which the Dockerfile notes. `--build` also runs
-`docker build`.
+`docker build`. The image is tagged with the lock's hash and labeled with the harness and
+its version, so it can be the lock's [sandbox](sandbox.md), on Docker or
+[OpenShell](sandbox.md#run-the-lock-on-openshell) (its `/workspace` is writable by uid 1000,
+which OpenShell runs as). `--base IMAGE` builds on your own Debian-based image instead of
+`node:22-bookworm`.
 
 ## Reference
 
 ```bash
 hlock sync [LOCK] [--plan | --json | --skill] [--yes] [--install] [--pull] [--all-models]
-           [--prefix DIR | --in-place | --docker [--build]] [--exact] [--verbose]
+           [--prefix DIR | --in-place | --docker [--build] [--base IMAGE]] [--apps] [--exact] [--verbose]
 ```
 
 See the [CLI reference](../reference/cli.md#sync) for every option.

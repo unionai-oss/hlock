@@ -10,6 +10,9 @@
 | `HLOCK_LOCKFILE` | `harness.lock` next to the manifest | Same as `--lock` |
 | `HLOCK_HARNESS` | unset | Target harness, between `--harness` and `[target] harness` in precedence. See [Harnesses](../guides/harnesses.md#target-a-harness). |
 | `HLOCK_PROFILE_PATH` | unset | Extra profile directories (`:`-separated). See [Harness profiles](../guides/harness-profiles.md). |
+| `HLOCK_APP_DIRS` | `/Applications`, `~/Applications` | Where hlock looks for [desktop app](../guides/harnesses.md#desktop-apps) bundles on macOS (`:`-separated) |
+| `HLOCK_OS` | this machine's | The OS profiles are read for (`macos`, `linux`, `windows`): where `{app-config}` points, and which install methods and app paths apply. For tests |
+| `HLOCK_APPS_RUNNING` | unset (hlock asks `pgrep`) | The desktop apps to treat as running, by id (`claude-desktop,vscode`); empty for none. For tests |
 | `HLOCK_SECRET_*` | unset | Values for secret placeholders in a pinned lock. They take precedence over the secrets file and the keychain. See [Secrets](../guides/secrets.md). |
 | `HLOCK_SECRETS_FILE` | `~/.config/hlock/secrets.toml` | Where secret references live. See [Secrets](../guides/secrets.md#reference-a-password-manager). |
 | `HLOCK_KEYCHAIN` | on | `0` stops hlock from reading or writing the OS keychain |
@@ -28,6 +31,9 @@
 | `HLOCK_DECIDE_LOCK` | set for code harnesses | The lock whose deciders `ctx.decide` and `hlock decide hook --format plugin` ask |
 | `TYPESAFE_API_KEY`, `TYPESAFE_BASE_URL` | unset | TypeSafe's key and endpoint, for `typesafe:` deciders |
 | `OLLAYA_HOST`, `OLLAYA_API_KEY` | `127.0.0.1:11435` | Where Ollaya serves `ollaya:` deciders, and its key if it has one |
+| `HLOCK_NO_SANDBOX` | unset | `1` runs without the lock's [sandbox](../guides/sandbox.md), like `--no-sandbox`. Ignored inside an hlock sandbox |
+| `HLOCK_IN_SANDBOX` | set inside a sandbox | Marks a sandboxed run, so a nested hlock ignores `HLOCK_NO_SANDBOX`. Don't set it yourself |
+| `HLOCK_SANDBOX_FILE` | `~/.config/hlock/sandbox.toml` | Where your [sandbox runners](../guides/sandbox.md#define-your-own-runner) are defined |
 | `HLOCK_META_RESTORE` | set by `hlock meta run` | Inside a meta harness session: the config variables isolation changed, with their original values. `hlock` commands put them back. Don't set it yourself. |
 
 The variables below are used by hlock's Python worker (the `local` and `flyte`

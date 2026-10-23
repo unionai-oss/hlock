@@ -36,7 +36,9 @@ config root in your home directory (`~/.claude`, `~/.pi/agent`, `~/.codex`, …)
 your personal skills, MCP servers, plugins, instructions and settings.
 
 By default, `pin` records only the project's. Your personal setup stays out of the
-repository, and the summary says what was left out. To pin your user-level setup too, for
+repository, and the summary says what was left out. A [desktop app's](harnesses.md#desktop-apps)
+setup is almost all user-level (Claude Desktop's MCP servers, VS Code's `mcp.json`), so for
+an app `pin` records the user scope by default, as `--user` does. To pin your user-level setup too, for
 example to carry it to a new laptop or to share it, pass `--user`:
 
 ```console

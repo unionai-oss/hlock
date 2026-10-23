@@ -1,0 +1,58 @@
+# Harness profile: Claude Desktop (the chat app). A desktop app: hlock pins and restores
+# its MCP servers but never starts it. The app's Code tab reads ~/.claude, which the
+# claude-code profile covers. Windows paths are from vendor docs and issue reports, not
+# yet tried on a real install.
+id = "claude-desktop"
+name = "Claude Desktop"
+kind = "app"
+aliases = ["claude-app"]
+vendor = "Anthropic"
+homepage = "https://claude.ai/download"
+support = "basic"
+open-source = false
+local-models = false
+# On Windows, the Microsoft Store and winget (MSIX) install reads a virtualized copy of
+# this directory instead, which this profile doesn't handle yet.
+config-root = { default = "{app-config}/Claude" }
+instructions = []
+
+[app]
+bundles = ["Claude.app"]
+paths.windows = ["~/AppData/Local/AnthropicClaude/claude.exe"]
+process = "Claude"
+# it rewrites claude_desktop_config.json while it runs, and loads MCP servers at start
+quit-to-write = true
+reload = "restart"
+
+[[install]]
+method = "brew-cask"
+package = "claude"
+[[install]]
+method = "app"
+path-hints = ["/Claude.app"]
+command = "Download Claude Desktop from https://claude.ai/download"
+
+# Only /mcpServers: the rest of the file (/preferences, …) is state the app writes.
+[files.config]
+path = "{root}/claude_desktop_config.json"
+format = "json"
+restore = "pointers"
+pointers = ["/mcpServers"]
+
+[mcp]
+sources = ["config#/mcpServers"]
+write = "config#/mcpServers"
+# remote servers are connectors in the claude.ai account, not entries in this file
+transports = ["stdio"]
+
+[[unmanaged]]
+what = "Connectors (remote MCP servers)"
+where = "your claude.ai account"
+url = "https://claude.ai/settings/connectors"
+[[unmanaged]]
+what = "Desktop Extensions"
+where = "the app (Settings → Extensions)"
+[[unmanaged]]
+what = "Projects, chat skills and the default model"
+where = "your claude.ai account"
+url = "https://claude.ai/settings"

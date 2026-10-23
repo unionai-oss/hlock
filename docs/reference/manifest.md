@@ -174,6 +174,32 @@ options = { project = "agents", domain = "development" }
 A table has at most one of `command` and `python`. `local` and `flyte` take only
 `options`, and `offline` can't be configured.
 
+## `[optimizers.<name>]`
+
+Defines an [optimizer](../guides/optimizers.md), or configures a built-in one (`hlock`,
+`harness2`). An optimizer is what `tune` searches with; the backend is where it runs. hlock
+finds an optimizer that has no table here as an `hlock-optimizer-<name>` executable on
+`PATH`, or as an installed `hlock.optimizers` entry point.
+
+```toml title="harness.toml"
+[optimizers.harness2]
+options = { k = 2, mode = "sequential" }
+
+[optimizers.mine]
+python = "mine_opt:Mine"
+
+[optimizers.ace]
+command = ["ace-optimizer", "--fast"]
+```
+
+| Key | Description |
+|---|---|
+| `command` | An executable that answers `harness.optimize` in the [backend contract](../concepts/architecture.md#the-backend-contract)'s envelope. hlock appends the request and response paths |
+| `python` | A Python optimizer as `"module:attribute"`, a `hlock.optimizers.Optimizer` class or instance |
+| `options` | A table sent with the request, as `optimizer.options` |
+
+A table has at most one of `command` and `python`. The built-ins take only `options`.
+
 ## `[tune]`
 
 How [`hlock tune`](../guides/tune.md#tune-the-harness-text) edits the harness's text.
@@ -192,13 +218,42 @@ budget = { rollouts = 100, usd = 20 }
 | Key | Default | Description |
 |---|---|---|
 | `edit` | `["instructions"]` from `--depth prompt` on, else none | What the optimizer may change: `instructions` (with their roles: guardrails, memory, tool guidance), `skill`, `subagent`, `script`, `middleware`. Empty means no optimize stage |
-| `optimizer` | `"hlock"` | The built-in optimizer, [`"harness2"`](../guides/tune.md#harness2), or a backend that runs `harness.optimize` ([Write an optimizer](../guides/backends.md#write-an-optimizer)) |
+| `optimizer` | `"hlock"` | What searches for edits: the built-in optimizer, [`"harness2"`](../guides/tune.md#harness2), or [your own](../guides/optimizers.md#write-an-optimizer). Where it runs is `[backend] target` |
 | `proposer` | | The model that drafts edits. The built-in optimizer tries fixed guidance without one |
 | `trials` | `2` | Trials per task in each evaluation and in the acceptance runs |
 | `alpha` | `0.05` | The sign test's significance level an accepted candidate must reach |
 | `max-cost-increase` | `0.25` | How much more per trial an accepted candidate may cost |
 | `budget.rollouts` | `100` | The most trials the optimizer may run |
 | `budget.usd` | | The most it may spend on trials |
+
+## `[sandbox]`
+
+The [sandbox](../guides/sandbox.md) the lock runs in. `pin`, `resolve` and `tune` copy it
+into the lock's `[policy.sandbox]`; `resolve` and `tune` also run code-harness trials and
+`tests` graders in it.
+
+```toml title="harness.toml"
+[sandbox]
+runner = "docker"
+image = "ghcr.io/acme/agent@sha256:4f1c9e0b7d2a"
+network = "open"
+secrets = "proxy"
+applies-to = ["agent", "trials", "graders"]
+grader-image = "ghcr.io/acme/ci@sha256:9d03…"
+```
+
+| Key | Default | Description |
+|---|---|---|
+| `runner` | `"none"` | `docker`, [`openshell`](../guides/sandbox.md#run-the-lock-on-openshell), or a runner defined in `~/.config/hlock/sandbox.toml` or `[sandbox.runners.<name>]` |
+| `image` | | The image `docker` or `openshell` runs (required for them). Pin it `@sha256:` |
+| `network` | `"open"` (`"none"` for `openshell`) | `open` or `none`; `openshell` takes `none` only |
+| `secrets` | `"env"` (`"proxy"` for `openshell`) | `env` (provider keys as environment variables) or `proxy` (a [key proxy](../guides/sandbox.md#keep-provider-keys-out-of-the-agents-reach) on `docker`, OpenShell providers on `openshell`) |
+| `applies-to` | all three | What runs inside: `agent`, `trials`, `graders` |
+| `profile` | | A runtime policy file in the project (a seatbelt profile, an OpenShell policy), pinned by digest and passed as `{profile}` (to `openshell`, as `--policy`) |
+| `grader-image` | `image` | The image `tests` graders run in |
+
+`[sandbox.runners.<name>]` defines a [command runner](../guides/sandbox.md#define-your-own-runner)
+for the project: `command`, `mount-args`, `mount-ro-args`, `network-args` and `networks`.
 
 ## Dependencies
 

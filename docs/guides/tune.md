@@ -71,7 +71,7 @@ keeps the edits only if they beat the lock on tasks the optimizer never saw:
 ```toml title="harness.toml"
 [tune]
 edit = ["instructions"]          # what it may change: instructions, skill, subagent, script, middleware
-optimizer = "hlock"              # the built-in one, or a backend that runs harness.optimize
+optimizer = "hlock"              # what searches: the built-in one, harness2, or your own
 proposer = "anthropic:opus"      # the model that drafts edits (optional for the built-in one)
 trials = 1                       # trials per task, in each evaluation
 alpha = 0.2                      # the significance level edits must reach
@@ -89,7 +89,7 @@ $ hlock tune --backend local
 │  data       synthetic                                                                    │
 │  grid       6 configurations                                                             │
 │  stages     data ✓  ·  optimize ✓  ·  hpo ✓                                              │
-│  optimizer  hlock  1 edit accepted  holdout: 0% → 100% on 4 tasks, p = 0.0625            │
+│  optimizer  hlock on local  1 edit accepted  holdout: 0% → 100% on 4 tasks, p = 0.0625   │
 │                                                                                          │
 │  Best configuration                                                                      │
 │  model                 reference:qwen-7b                                                 │
@@ -182,13 +182,14 @@ Commit `.hlock/tuned/` with the lock.
 
 ### The built-in optimizer
 
-`optimizer = "hlock"` runs on the trial backend's worker (`local`, or `flyte`, where the search
-runs on your machine and its trials on the cluster). It runs the lock's text on the train
+`optimizer = "hlock"` runs on any backend: on `local` the search and its trials run on your
+machine; on `flyte` the search runs on your machine and its trials on Flyte (see
+[Where the search runs](optimizers.md#where-the-search-runs)). It runs the lock's text on the train
 split, picks an editable component in turn, and asks the `proposer` model for a few lines of
 guidance from the failures and the graders' feedback. It reruns the same tasks, and keeps the
 edit when it does better there and no worse on dev. The lines it may add per step decay from
 3 to 1. Without a `proposer` (or without `HL_LLM_BASE_URL`), it tries a fixed list of general
-guidance instead. It's small on purpose: a better optimizer is a [backend](backends.md#write-an-optimizer).
+guidance instead. It's small on purpose: a better optimizer is [one of your own](optimizers.md#write-an-optimizer).
 
 ### Harness²
 
@@ -203,17 +204,20 @@ library, and OpenCode or Codex executor:
 optimizer = "harness2"
 edit = ["instructions", "skill", "subagent", "script", "middleware"]
 
-[backends.harness2]
+[optimizers.harness2]
 options = { python = "~/src/harness2/.venv/bin/python", k = 1, mode = "parallel" }
 ```
 
 ```console
-$ hlock backend status --backend harness2
-backend    harness2  (from --backend)
-found      looked up as 'harness2' in the hlock.backends entry points
-runs       harness.optimize
+$ hlock optimizer status harness2
+optimizer  harness2  (named)
+found      built in
+options    k=1, mode=parallel, python=~/src/harness2/.venv/bin/python
 about      Harness² (google-research/harness2), run as a black box in its own environment
 ```
+
+Harness² is the optimizer; the trials hlock runs to check its edits run on `[backend] target`
+as usual.
 
 Install Harness² and its executor as its README says (`uv pip install -e .`, then
 `harness2-setup`), and set its models the way it reads them (`HARNESS2_SOLVER_MODEL`,

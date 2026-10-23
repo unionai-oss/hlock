@@ -364,7 +364,7 @@ sys.exit(0 if got == want else 1)
 !!! warning "Test commands run on your machine"
     A `tests` grader runs with your permissions, the same as the agent being measured, and
     it often runs code the agent wrote. Read the graders in a pack you didn't write before
-    you resolve against it.
+    you resolve against it, or run graders in a [sandbox](sandbox.md).
 
 ### Judges
 

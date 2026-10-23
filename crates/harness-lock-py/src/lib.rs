@@ -129,6 +129,10 @@ impl PyManifest {
         serde_json::to_string(&self.inner.backends).map_err(|e| py_err(e.into()))
     }
 
+    fn optimizers(&self) -> PyResult<String> {
+        serde_json::to_string(&self.inner.optimizers).map_err(|e| py_err(e.into()))
+    }
+
     fn manifest_hash(&self) -> String {
         self.inner.manifest_hash()
     }
@@ -973,6 +977,24 @@ fn backend_describe(py: Python<'_>, manifest: Option<PyObject>, backend: Option<
     to_json(&out)
 }
 
+/// The optimizer `optimizer` names (else the manifest's `[tune] optimizer`, else `hlock`)
+/// and how it was found, as JSON (`hlock optimizer status`): `name`, `source`, `options`,
+/// and the `object` or `command` that runs it.
+#[pyfunction]
+#[pyo3(signature = (manifest=None, optimizer=None))]
+fn optimizer_describe(py: Python<'_>, manifest: Option<PyObject>, optimizer: Option<String>) -> PyResult<String> {
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let m = match manifest {
+        None if core::find_manifest(&cwd).is_none() => core::Manifest::from_str("").map_err(py_err)?,
+        manifest => resolve_manifest(py, manifest, None)?,
+    };
+    let name = optimizer.or_else(|| m.tune.get("optimizer").and_then(|v| v.as_str()).map(str::to_string)).unwrap_or_else(|| "hlock".into());
+    let o = core::optimize::Optimizer::resolve(&m, &name).map_err(py_err)?;
+    let mut out = o.to_value();
+    out["source"] = serde_json::json!(o.source());
+    to_json(&out)
+}
+
 #[pyfunction]
 fn pull_parse(source: &str) -> PyResult<String> {
     let s = core::pull::parse(source).map_err(py_err)?;
@@ -1153,6 +1175,8 @@ fn sync_options(prefix: Option<String>, in_place: bool, docker: Option<String>, 
         also: Vec::new(),
         allow_hidden: Vec::new(),
         trust: false,
+        apps: false,
+        default_prefix: false,
     }
 }
 
@@ -1437,9 +1461,9 @@ fn export_apm_lock(py: Python<'_>, lock: String, out: Option<String>, force: boo
 /// Build the `hlock sync` plan for a lock as JSON. Nothing is changed. The plan writes
 /// into an isolated root (`prefix`, default `.hlock/env`) unless `in_place` or `docker`.
 #[pyfunction]
-#[pyo3(signature = (path="harness.lock".to_string(), prefix=None, in_place=false, docker=None, install=false, pull=false, all_models=false, exact=false, manifest=None, refresh=false, allow_hidden=None, trust=false))]
+#[pyo3(signature = (path="harness.lock".to_string(), prefix=None, in_place=false, docker=None, install=false, pull=false, all_models=false, exact=false, manifest=None, refresh=false, allow_hidden=None, trust=false, apps=false, default_prefix=None))]
 #[allow(clippy::too_many_arguments)]
-fn sync_plan(py: Python<'_>, path: String, prefix: Option<String>, in_place: bool, docker: Option<String>, install: bool, pull: bool, all_models: bool, exact: bool, manifest: Option<String>, refresh: bool, allow_hidden: Option<Vec<String>>, trust: bool) -> PyResult<String> {
+fn sync_plan(py: Python<'_>, path: String, prefix: Option<String>, in_place: bool, docker: Option<String>, install: bool, pull: bool, all_models: bool, exact: bool, manifest: Option<String>, refresh: bool, allow_hidden: Option<Vec<String>>, trust: bool, apps: bool, default_prefix: Option<String>) -> PyResult<String> {
     // no GIL while it waits on the network (deciders), so other Python threads keep running
     interruptible(py, move || {
         let (reg, ctx, _) = registry(manifest.as_deref(), Some(&lock_dir(&path)))?;
@@ -1449,10 +1473,14 @@ fn sync_plan(py: Python<'_>, path: String, prefix: Option<String>, in_place: boo
             let m = manifest.as_deref().map(project_manifest).transpose()?.flatten();
             core::deps::refresh(m.as_ref(), &mut lock, &reg, &ctx, false).map_err(py_err)?;
         }
-        let mut opts = sync_options(prefix, in_place, docker, install, pull, all_models, exact);
+        // a default prefix (a pulled lock's environment) is dropped for a desktop app
+        let defaulted = prefix.is_none() && default_prefix.is_some();
+        let mut opts = sync_options(prefix.or(default_prefix), in_place, docker, install, pull, all_models, exact);
+        opts.default_prefix = defaulted;
         opts.also = also_harnesses(manifest.as_deref(), &path);
         opts.allow_hidden = allow_hidden.unwrap_or_default();
         opts.trust = trust;
+        opts.apps = apps;
         let plan = core::sync::plan(&lock, Path::new(&path), &reg, &ctx, &opts).map_err(py_err)?;
         Ok(json_str(serde_json::json!(plan)))
     })
@@ -1527,20 +1555,20 @@ fn sync_skill(plan: &str, lock_name: String) -> PyResult<String> {
 
 /// The Dockerfile and entrypoint for a docker-mode plan, as JSON.
 #[pyfunction]
-#[pyo3(signature = (plan, path="harness.lock".to_string(), manifest=None))]
-fn sync_dockerfile(plan: &str, path: String, manifest: Option<String>) -> PyResult<String> {
+#[pyo3(signature = (plan, path="harness.lock".to_string(), manifest=None, base=None))]
+fn sync_dockerfile(plan: &str, path: String, manifest: Option<String>, base: Option<String>) -> PyResult<String> {
     let plan: core::sync::Plan = serde_json::from_str(plan).map_err(|e| json_arg_err("plan", e))?;
     let (reg, _, _) = registry(manifest.as_deref(), Some(&lock_dir(&path)))?;
     let lock = core::Lockfile::load(Path::new(&path)).map_err(py_err)?;
     let profile = reg.require_harness(&plan.harness).map_err(py_err)?;
-    let (dockerfile, entrypoint) = core::sync::dockerfile(&plan, &lock, profile);
+    let (dockerfile, entrypoint) = core::sync::dockerfile_on(&plan, &lock, profile, base.as_deref());
     Ok(json_str(serde_json::json!({"dockerfile": dockerfile, "entrypoint": entrypoint})))
 }
 
 /// Prepare `hlock launch`: verify, materialize the isolated root, and return
 /// JSON with the argv and environment to exec, plus what was done and notes.
 #[pyfunction]
-#[pyo3(signature = (path="harness.lock".to_string(), harness=None, prefix=None, allow_version_mismatch=false, in_place=false, args=Vec::new(), manifest=None, prompt=None, trust=false, allow_hidden=None, project=None))]
+#[pyo3(signature = (path="harness.lock".to_string(), harness=None, prefix=None, allow_version_mismatch=false, in_place=false, args=Vec::new(), manifest=None, prompt=None, trust=false, allow_hidden=None, project=None, no_sandbox=false, proxy_env=None, tty=false))]
 #[allow(clippy::too_many_arguments)]
 fn launch_prepare(
     py: Python<'_>,
@@ -1555,6 +1583,9 @@ fn launch_prepare(
     trust: bool,
     allow_hidden: Option<Vec<String>>,
     project: Option<String>,
+    no_sandbox: bool,
+    proxy_env: Option<std::collections::BTreeMap<String, String>>,
+    tty: bool,
 ) -> PyResult<String> {
     interruptible(py, move || {
         let (reg, ctx, _) = registry(manifest.as_deref(), Some(&lock_dir(&path)))?;
@@ -1571,6 +1602,9 @@ fn launch_prepare(
             workspace: std::env::current_dir().ok(),
             trust,
             allow_hidden: allow_hidden.unwrap_or_default(),
+            no_sandbox,
+            proxy_env: proxy_env.unwrap_or_default(),
+            tty,
             ..Default::default()
         };
         let prep = core::launch::prepare(&lock, Path::new(&path), &reg, &ctx, &opts, &args).map_err(py_err)?;
@@ -1578,11 +1612,92 @@ fn launch_prepare(
     })
 }
 
+/// The lock's sandbox and how it stands on this machine: the spec, `harness.toml`'s (and
+/// whether they differ), whether it's turned off, its runner and whether that's
+/// installed, whether it's trusted, and notes. Returns JSON; never raises for a sandbox
+/// that can't run (it's reported in `error`).
+#[pyfunction]
+#[pyo3(signature = (path="harness.lock".to_string(), manifest=None, no_sandbox=false))]
+fn sandbox_info(path: String, manifest: Option<String>, no_sandbox: bool) -> PyResult<String> {
+    let (_, ctx, m) = registry(manifest.as_deref(), Some(&lock_dir(&path)))?;
+    let lock = core::Lockfile::load(Path::new(&path)).map_err(py_err)?;
+    let spec = core::sandbox::Spec::from_lock(&lock).map_err(py_err)?;
+    let declared = match &m {
+        Some(m) => m.sandbox_spec().map_err(py_err)?,
+        None => None,
+    };
+    let (off, note) = core::sandbox::disabled(no_sandbox, &ctx);
+    let ldir = lock_dir(&path);
+    let table = core::sandbox::project_table(&ldir);
+    let runners = core::sandbox::runners(&ctx, table.as_ref()).map_err(py_err)?;
+    let runner = spec.as_ref().and_then(|s| runners.get(&s.runner)).map(|r| {
+        let program = if r.builtin() { r.name.clone() } else { r.command[0].clone() };
+        serde_json::json!({"name": r.name, "origin": r.origin, "program": program, "installed": ctx.which(&program).is_some(), "command": r.command})
+    });
+    let trusted = core::trust::sandbox_executable(&lock, &ldir, &ctx).map(|e| {
+        let store = core::trust::TrustStore::load(&ctx).ok();
+        store.and_then(|s| s.status(&e.digest).map(str::to_string)).unwrap_or_else(|| "untrusted".into())
+    });
+    let error = spec.as_ref().filter(|_| !off).and_then(|s| core::sandbox::Sandbox::new(s, &ctx.cwd, table.as_ref(), &ctx).err()).map(|e| e.to_string());
+    let policy = core::policy::Policy::for_lock(Path::new(&path), &ctx).map_err(py_err)?;
+    let violations: Vec<String> = policy.check_sandbox(spec.is_some(), off).into_iter().map(|v| v.message).collect();
+    Ok(json_str(serde_json::json!({
+        "spec": spec,
+        "summary": spec.as_ref().map(|s| s.summary()),
+        "declared": declared,
+        "drift": m.is_some() && declared != spec,
+        "off": off,
+        "note": note,
+        "runner": runner,
+        "runners": runners.keys().collect::<Vec<_>>(),
+        "trusted": trusted,
+        "error": error,
+        "policy": violations,
+        "evidence": lock.evidence.sandbox,
+        "evidence_note": core::sandbox::evidence_note(&lock),
+        "weakened": core::sandbox::weakened(declared.as_ref(), spec.as_ref()),
+    })))
+}
+
+/// A digest of each control file in `project` (harness.toml, the locks, the policy,
+/// `.envrc`, git hooks), or null where there's none: compared before and after a
+/// sandboxed session, to report what it created or changed. Returns JSON.
+#[pyfunction]
+fn sandbox_control_snapshot(project: String) -> String {
+    json_str(serde_json::json!(core::sandbox::control_snapshot(Path::new(&project))))
+}
+
+/// Begin an OpenShell session (`sandbox.session` from a prepared launch): create the
+/// sandbox, upload its places, attach providers. `env` is the runner's environment
+/// (`sandbox.env`), `command_env` the command's (`sandbox.session_env`); `timeout`, in seconds,
+/// is when the caller gives up on the command. Returns JSON `{argv, env, deadline, session}`:
+/// run `argv` in `env`, then pass `session` to [`sandbox_session_end`]. Not interruptible:
+/// what it creates is removed if it fails.
+#[pyfunction]
+#[pyo3(signature = (session, env, command_env, timeout=None))]
+fn sandbox_session_begin(py: Python<'_>, session: String, env: std::collections::BTreeMap<String, String>, command_env: std::collections::BTreeMap<String, String>, timeout: Option<u64>) -> PyResult<String> {
+    let s: core::openshell::Session = serde_json::from_str(&session).map_err(|e| PyValueError::new_err(e.to_string()))?;
+    let started = py.allow_threads(move || core::openshell::begin(s, &env, &command_env, timeout)).map_err(py_err)?;
+    Ok(json_str(serde_json::json!(started)))
+}
+
+/// End an OpenShell session: copy back what the command changed, delete the sandbox and its
+/// providers. `stopped`: how the caller stopped the command early (`"timeout"`,
+/// `"interrupt"`), when it did. Returns JSON `{notes}`: what the run should say.
+#[pyfunction]
+#[pyo3(signature = (session, env, stopped=None))]
+fn sandbox_session_end(py: Python<'_>, session: String, env: std::collections::BTreeMap<String, String>, stopped: Option<String>) -> PyResult<String> {
+    let s: core::openshell::Session = serde_json::from_str(&session).map_err(|e| PyValueError::new_err(e.to_string()))?;
+    let notes = py.allow_threads(move || core::openshell::end(&s, &env, stopped.as_deref())).map_err(py_err)?;
+    Ok(json_str(serde_json::json!({"notes": notes})))
+}
+
 /// Run a locked code harness (`[harnesses.<id>]`) on a prompt through the
 /// execution contract. Returns JSON with success, output, cost, latency and log.
 #[pyfunction]
-#[pyo3(signature = (prompt, path="harness.lock".to_string(), workspace=None, timeout=600, manifest=None, trust=false))]
-fn run_code_harness(py: Python<'_>, prompt: String, path: String, workspace: Option<String>, timeout: u64, manifest: Option<String>, trust: bool) -> PyResult<String> {
+#[pyo3(signature = (prompt, path="harness.lock".to_string(), workspace=None, timeout=600, manifest=None, trust=false, no_sandbox=false))]
+#[allow(clippy::too_many_arguments)]
+fn run_code_harness(py: Python<'_>, prompt: String, path: String, workspace: Option<String>, timeout: u64, manifest: Option<String>, trust: bool, no_sandbox: bool) -> PyResult<String> {
     interruptible(py, move || {
         let (reg, ctx, _) = registry(manifest.as_deref(), Some(&lock_dir(&path)))?;
         let lock = core::Lockfile::load(Path::new(&path)).map_err(py_err)?;
@@ -1594,8 +1709,17 @@ fn run_code_harness(py: Python<'_>, prompt: String, path: String, workspace: Opt
         // the agent works where the user is; the project root stays on PYTHONPATH
         let ws = workspace.map(PathBuf::from).or_else(|| std::env::current_dir().ok()).unwrap_or_else(|| ctx.cwd.clone());
         let inv = core::contract::invocation(profile, Some(&lock), Some(Path::new(&path)), None, &prompt, &ws, 0, &ctx).map_err(py_err)?;
-        let r = core::contract::run(&inv, &ctx, std::time::Duration::from_secs(timeout)).map_err(py_err)?;
-        Ok(json_str(serde_json::json!(r)))
+        let mut notes = Vec::new();
+        let sandbox = core::sandbox::for_lock(&lock, Path::new(&path), &ctx.cwd, &ctx, no_sandbox, trust, &mut notes).map_err(py_err)?;
+        if sandbox.as_ref().is_some_and(|s| !s.spec.applies("trials")) {
+            notes.push("the lock's sandbox doesn't cover trials (applies-to), so the code harness runs on this machine".to_string());
+        }
+        let sandbox = sandbox.filter(|s| s.spec.applies("trials"));
+        let r = core::contract::run_in(&inv, &ctx, std::time::Duration::from_secs(timeout), sandbox.as_ref()).map_err(py_err)?;
+        let mut v = serde_json::json!(r);
+        v["notes"] = serde_json::json!(notes);
+        v["sandbox"] = serde_json::json!(sandbox.map(|s| s.spec.summary()));
+        Ok(json_str(v))
     })
 }
 
@@ -1754,12 +1878,20 @@ fn eval_packs_digest(manifest: String) -> PyResult<String> {
 /// `harness.toml` whose judge settings apply. Returns JSON with the grades and the
 /// overall `success` and `score`.
 #[pyfunction]
-#[pyo3(signature = (path, task, workspace=None, manifest=None))]
-fn grade_eval_task(py: Python<'_>, path: String, task: String, workspace: Option<String>, manifest: Option<String>) -> PyResult<String> {
+#[pyo3(signature = (path, task, workspace=None, manifest=None, lock=None, no_sandbox=false, trust=false))]
+#[allow(clippy::too_many_arguments)]
+fn grade_eval_task(py: Python<'_>, path: String, task: String, workspace: Option<String>, manifest: Option<String>, lock: Option<String>, no_sandbox: bool, trust: bool) -> PyResult<String> {
     // no GIL while it waits on the network, so other Python threads keep running
     interruptible(py, move || {
         let pack = core::tasks::EvalPack::load(&path, None).map_err(py_err)?;
-        let opts = grade_options(manifest.as_deref(), true)?;
+        let mut opts = grade_options(manifest.as_deref(), true)?;
+        // `tests` graders run in the lock's sandbox, when it covers them
+        let mut notes = Vec::new();
+        if let Some(lp) = lock.filter(|l| Path::new(l).is_file()) {
+            let (_, ctx, _) = registry(manifest.as_deref(), Some(&lock_dir(&lp)))?;
+            let lf = core::Lockfile::load(Path::new(&lp)).map_err(py_err)?;
+            opts.sandbox = core::sandbox::for_lock(&lf, Path::new(&lp), &ctx.cwd, &ctx, no_sandbox, trust, &mut notes).map_err(py_err)?.filter(|s| s.spec.applies("graders"));
+        }
         let grades = pack.grade_dir(&task, workspace.as_deref().map(Path::new), &opts).map_err(py_err)?;
         let score = grades.iter().map(|g| g.score).sum::<f64>() / grades.len().max(1) as f64;
         Ok(json_str(serde_json::json!({
@@ -1769,6 +1901,8 @@ fn grade_eval_task(py: Python<'_>, path: String, task: String, workspace: Option
             "success": grades.iter().all(|g| g.success),
             "score": score,
             "grades": grades,
+            "sandbox": opts.sandbox.as_ref().map(|s| s.spec.summary()),
+            "notes": notes,
         })))
     })
 }
@@ -1910,6 +2044,7 @@ fn meta_input(
     count: usize,
     instructions: String,
     guide: Option<String>,
+    apps: bool,
 ) -> PyResult<(core::meta::JobInput, core::Registry, core::profiles::Ctx)> {
     let project = lock_dir(lock);
     let (reg, ctx, m) = registry(manifest, Some(&project))?;
@@ -1924,6 +2059,7 @@ fn meta_input(
         count,
         guide: guide.map(|g| abs(&g)),
         instructions,
+        apps,
     };
     Ok((input, reg, ctx))
 }
@@ -2000,7 +2136,7 @@ fn meta_check(py: Python<'_>, path: String, meta_manifest: Option<String>, manif
 /// Prepare a meta job: render its prompt and build the command that runs it in the
 /// meta harness pinned in `meta_lock`. Returns JSON (see `meta::Prepared`).
 #[pyfunction]
-#[pyo3(signature = (job, lock="harness.lock".to_string(), meta_lock="harness.meta.lock".to_string(), meta_manifest=None, manifest=None, out=None, count=10, instructions=String::new(), guide=None, headless=None, allow_version_mismatch=false, dry_run=false))]
+#[pyo3(signature = (job, lock="harness.lock".to_string(), meta_lock="harness.meta.lock".to_string(), meta_manifest=None, manifest=None, out=None, count=10, instructions=String::new(), guide=None, headless=None, allow_version_mismatch=false, dry_run=false, apps=false))]
 #[allow(clippy::too_many_arguments)]
 fn meta_prepare(
     py: Python<'_>,
@@ -2016,13 +2152,14 @@ fn meta_prepare(
     headless: Option<bool>,
     allow_version_mismatch: bool,
     dry_run: bool,
+    apps: bool,
 ) -> PyResult<String> {
     let meta = self::meta_manifest(meta_manifest.as_deref())?;
     if !Path::new(&meta_lock).is_file() {
         return Err(LockfileError::new_err(format!("no meta harness pinned: {meta_lock} doesn't exist; pin one with `hlock meta pin`")));
     }
     interruptible(py, move || {
-        let (input, reg, ctx) = meta_input(&lock, &meta_lock, manifest.as_deref(), out, count, instructions, guide)?;
+        let (input, reg, ctx) = meta_input(&lock, &meta_lock, manifest.as_deref(), out, count, instructions, guide, apps)?;
         let ml = core::Lockfile::load(&input.meta_lock_path).map_err(py_err)?;
         let opts = core::meta::RunOptions { headless, allow_version_mismatch, dry_run };
         let prep = core::meta::prepare(&job, &input, meta.as_ref(), &ml, &reg, &ctx, &opts).map_err(py_err)?;
@@ -2032,12 +2169,13 @@ fn meta_prepare(
 
 /// hlock's own check of a meta job's result. Returns JSON (see `meta::Verdict`).
 #[pyfunction]
-#[pyo3(signature = (job, lock="harness.lock".to_string(), meta_lock="harness.meta.lock".to_string(), meta_manifest=None, manifest=None, out=None, count=0))]
-fn meta_verify(py: Python<'_>, job: String, lock: String, meta_lock: String, meta_manifest: Option<String>, manifest: Option<String>, out: Option<String>, count: usize) -> PyResult<String> {
+#[pyo3(signature = (job, lock="harness.lock".to_string(), meta_lock="harness.meta.lock".to_string(), meta_manifest=None, manifest=None, out=None, count=0, apps=false))]
+#[allow(clippy::too_many_arguments)]
+fn meta_verify(py: Python<'_>, job: String, lock: String, meta_lock: String, meta_manifest: Option<String>, manifest: Option<String>, out: Option<String>, count: usize, apps: bool) -> PyResult<String> {
     // no GIL while it waits on the network (deciders), so other Python threads keep running
     interruptible(py, move || {
         let meta = self::meta_manifest(meta_manifest.as_deref())?;
-        let (input, reg, ctx) = meta_input(&lock, &meta_lock, manifest.as_deref(), out, count, String::new(), None)?;
+        let (input, reg, ctx) = meta_input(&lock, &meta_lock, manifest.as_deref(), out, count, String::new(), None, apps)?;
         let v = core::meta::verify(&job, &input, meta.as_ref(), &reg, &ctx).map_err(py_err)?;
         Ok(json_str(serde_json::json!(v)))
     })
@@ -2160,6 +2298,7 @@ fn _hlock(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(pull_find, m)?)?;
     m.add_function(wrap_pyfunction!(pull_parse, m)?)?;
     m.add_function(wrap_pyfunction!(backend_describe, m)?)?;
+    m.add_function(wrap_pyfunction!(optimizer_describe, m)?)?;
     m.add_function(wrap_pyfunction!(pull_list, m)?)?;
     m.add_function(wrap_pyfunction!(pull_remove, m)?)?;
     m.add_function(wrap_pyfunction!(pull_env, m)?)?;
@@ -2212,6 +2351,10 @@ fn _hlock(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(prepare_eval_workspace, m)?)?;
     m.add_function(wrap_pyfunction!(eval_packs_digest, m)?)?;
     m.add_function(wrap_pyfunction!(grade_eval_task, m)?)?;
+    m.add_function(wrap_pyfunction!(sandbox_info, m)?)?;
+    m.add_function(wrap_pyfunction!(sandbox_control_snapshot, m)?)?;
+    m.add_function(wrap_pyfunction!(sandbox_session_begin, m)?)?;
+    m.add_function(wrap_pyfunction!(sandbox_session_end, m)?)?;
     m.add_function(wrap_pyfunction!(calibrate_eval_pack, m)?)?;
     m.add_function(wrap_pyfunction!(decide, m)?)?;
     m.add_function(wrap_pyfunction!(decide_hook, m)?)?;

@@ -5,6 +5,10 @@ tokens and other credentials with placeholders like `${HLOCK_SECRET_GITHUB_GITHU
 and lists each one as a `[[secret]]` entry. This page covers where hlock finds the values
 when it restores a setup, and where it puts them.
 
+A secret that reaches a harness is readable by the agent and anything it runs. To keep
+provider keys out of its reach, run the lock in a [sandbox](sandbox.md#keep-provider-keys-out-of-the-agents-reach)
+with `secrets = "proxy"`.
+
 ## Where values come from
 
 For each placeholder, hlock uses the first of these that has a value:

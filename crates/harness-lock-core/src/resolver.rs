@@ -49,6 +49,9 @@ pub struct Resolver {
     /// What the last [`Resolver::resolve_lock`] compared: each stack's scores, the
     /// holdout check, and how many trials ran or came from the cache.
     pub report: Option<serde_json::Value>,
+    /// The sandbox code-harness trials and `tests` graders run in (`[sandbox]`), unless
+    /// it's turned off (`HLOCK_NO_SANDBOX`).
+    pub sandbox: Option<crate::sandbox::Sandbox>,
 }
 
 /// What a search measures: the stacks, the search-split tasks, and the stacks the
@@ -105,6 +108,7 @@ impl Resolver {
             on_event: std::sync::Mutex::new(None),
             use_cache: true,
             report: None,
+            sandbox: None,
         }
     }
 
@@ -285,6 +289,7 @@ impl Resolver {
             Some(p) => crate::contract::CommandAdapter::new(p.clone(), Ctx::from_process())
                 .with_deciders(self.trial_deciders()?)
                 .with_lock(self.trial_locks.get(&hash).cloned())
+                .with_sandbox(self.sandbox_for("trials"))
                 .run(stack, task, &ws, seed),
             None => self.adapter.run(stack, task, &ws, seed),
         });
@@ -301,6 +306,7 @@ impl Resolver {
             default_judge: self.manifest.default_judge(),
             auto: true,
             trace: Some(json!({"events": outcome.trace})),
+            sandbox: self.sandbox_for("graders"),
             ..Default::default()
         };
         // a run that didn't happen has nothing to grade
@@ -412,7 +418,61 @@ impl Resolver {
             .map(|h| (h.id.clone(), h.clone()))
             .collect();
         self.profiles = self.manifest.candidates.harness.iter().filter_map(|h| registry.harness(&h.name).map(|p| (h.name.clone(), p.clone()))).collect();
+        // trials start the harness, and a desktop app can't be started
+        if let Some(e) = self.profiles.values().find_map(|p| p.app_refusal()) {
+            return Err(e);
+        }
+        self.prepare_sandbox()
+    }
+
+    /// The manifest's sandbox, checked against this machine and the project's policy.
+    fn prepare_sandbox(&mut self) -> Result<()> {
+        let ctx = Ctx::from_process();
+        let (off, note) = crate::sandbox::disabled(false, &ctx);
+        if let Some(n) = note {
+            self.note(n);
+        }
+        let spec = self.manifest.sandbox_spec()?;
+        let root = self.manifest.root();
+        let policy = crate::policy::Policy::for_dir(&root)?;
+        for w in policy.enforce(policy.check_sandbox(spec.is_some(), off), "this run")? {
+            self.note(w);
+        }
+        self.sandbox = match spec {
+            Some(s) if off => {
+                self.note(format!("sandbox off ({}); trials and graders run on this machine", crate::sandbox::NO_SANDBOX));
+                let _ = s;
+                None
+            }
+            Some(s) => {
+                if !s.applies("graders") {
+                    self.note("[sandbox] applies-to leaves out graders: graders run code the agent wrote, on this machine");
+                }
+                Some(crate::sandbox::Sandbox::new(&s, &root, self.manifest.sandbox_table().as_ref(), &ctx)?)
+            }
+            None => None,
+        };
         Ok(())
+    }
+
+    /// The sandbox a kind runs in, when the manifest's covers it.
+    fn sandbox_for(&self, kind: &str) -> Option<crate::sandbox::Sandbox> {
+        self.sandbox.as_ref().filter(|s| s.spec.applies(kind)).cloned()
+    }
+
+    /// What `harness`'s trials and grading ran under, for the lock's evidence.
+    pub fn evidence_sandbox(&self, harness: &str) -> crate::lockfile::EvidenceSandbox {
+        let code = self.code_harnesses.contains_key(harness);
+        let note = if code { String::new() } else if self.profiles.get(harness).is_some_and(|p| p.kind == "cli") { "agent-CLI trials are simulated".into() } else { String::new() };
+        match &self.sandbox {
+            None => crate::lockfile::EvidenceSandbox { runner: "none".into(), network: "open".into(), applies_to: vec![], note },
+            Some(sb) => crate::lockfile::EvidenceSandbox {
+                runner: sb.spec.runner.clone(),
+                network: sb.spec.network.clone(),
+                applies_to: ["trials", "graders"].iter().filter(|k| sb.spec.applies(k) && (**k != "trials" || code)).map(|k| k.to_string()).collect(),
+                note,
+            },
+        }
     }
 
     /// Everything a search needs, checked before any trial runs: the manifest, the
@@ -625,7 +685,21 @@ impl Resolver {
         done["kind"] = json!("done");
         self.emit(done);
         self.report = Some(report);
+        self.approve_sandbox(&lock)?;
         Ok(lock)
+    }
+
+    /// The lock's sandbox came from this project's own harness.toml: approve it on this
+    /// machine, as `pin` approves what it captures, so running the lock here doesn't ask.
+    pub fn approve_sandbox(&self, lock: &Lockfile) -> Result<()> {
+        let ctx = Ctx::from_process();
+        if let Some(e) = crate::trust::sandbox_executable(lock, &self.manifest.root(), &ctx) {
+            let mut store = crate::trust::TrustStore::load(&ctx)?;
+            if store.approve([&e]) > 0 {
+                store.save(&ctx)?;
+            }
+        }
+        Ok(())
     }
 
     /// The evidence comes from the holdout check when there is one (the winner's search
@@ -693,6 +767,7 @@ impl Resolver {
                 retries: 1,
                 max_steps: 40,
                 human_approval: "never".into(),
+                sandbox: self.manifest.sandbox_spec()?.map(|s| s.to_map()).unwrap_or_default(),
                 ..Default::default()
             },
             context: Context { isolation: self.manifest.context.get("isolation").and_then(serde_json::Value::as_str).unwrap_or("locked-only").into(), ..Default::default() },
@@ -708,7 +783,7 @@ impl Resolver {
                 judge: self.judge_model(measured),
                 // an agent CLI's trials ran on a stand-in, not the agent itself
                 simulated: self.profiles.get(&s.harness).is_some_and(|p| p.kind == "cli"),
-                ..Default::default()
+                sandbox: Some(self.evidence_sandbox(&s.harness)),
             },
             verify: Verify::default(),
             provenance: Provenance {
@@ -838,6 +913,9 @@ pub fn apply_target(manifest: &mut Manifest, explicit: Option<&str>, registry: &
         return Ok(Some(name));
     }
     let profile = registry.require_harness(&name)?;
+    if let Some(e) = profile.app_refusal() {
+        return Err(e);
+    }
     let cands = &mut manifest.candidates.harness;
     let only_default = cands.iter().all(|h| h.name == "reference");
     if only_default {

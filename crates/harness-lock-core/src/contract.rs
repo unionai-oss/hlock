@@ -234,13 +234,28 @@ pub fn invocation(
 
 /// Run an invocation to completion, capturing output, with a timeout.
 pub fn run(inv: &Invocation, ctx: &Ctx, timeout: Duration) -> Result<RunResult> {
+    run_in(inv, ctx, timeout, None)
+}
+
+/// [`run`], inside `sandbox` when there is one: the harness sees its workspace, the
+/// project read-only, its own variables and the model credentials, and nothing else.
+pub fn run_in(inv: &Invocation, ctx: &Ctx, timeout: Duration, sandbox: Option<&crate::sandbox::Sandbox>) -> Result<RunResult> {
     let start = Instant::now();
     let Some((prog, args)) = inv.argv.split_first() else {
         return Err(Error::Profile("the harness invocation has no command".into()));
     };
-    let mut cmd = Command::new(prog);
-    cmd.args(args).current_dir(&inv.cwd).env_clear().envs(&ctx.env).envs(&inv.env).stdin(Stdio::null());
-    let out = process::run(cmd, &Limits::timeout(timeout)).map_err(|e| Error::Profile(format!("cannot run {prog}: {e}")))?;
+    let out = match sandbox {
+        Some(sb) => {
+            let mut env = crate::sandbox::provider_env(ctx, &[]);
+            env.extend(inv.env.clone());
+            sb.run_command("trials", &inv.argv, &inv.cwd, env, vec![], ctx, &Limits::timeout(timeout))?
+        }
+        None => {
+            let mut cmd = Command::new(prog);
+            cmd.args(args).current_dir(&inv.cwd).env_clear().envs(&ctx.env).envs(&inv.env).stdin(Stdio::null());
+            process::run(cmd, &Limits::timeout(timeout)).map_err(|e| Error::Profile(format!("cannot run {prog}: {e}")))?
+        }
+    };
     let timed_out = out.timed_out;
     let mut log = out.text();
     // the harness wrote it into its workspace: read it as a plain file, never through a symlink
@@ -272,11 +287,19 @@ pub struct CommandAdapter {
     deciders: BTreeMap<String, crate::decide::DeciderSpec>,
     /// A lock whose skills and MCP servers each trial gets (`hlock add --eval`).
     lock: Option<(crate::lockfile::Lockfile, PathBuf)>,
+    /// The sandbox trials run in, when the lock's covers `trials`.
+    sandbox: Option<crate::sandbox::Sandbox>,
 }
 
 impl CommandAdapter {
     pub fn new(profile: HarnessProfile, ctx: Ctx) -> Self {
-        CommandAdapter { profile, ctx, deciders: BTreeMap::new(), lock: None }
+        CommandAdapter { profile, ctx, deciders: BTreeMap::new(), lock: None, sandbox: None }
+    }
+
+    /// Run each trial inside `sandbox`.
+    pub fn with_sandbox(mut self, sandbox: Option<crate::sandbox::Sandbox>) -> Self {
+        self.sandbox = sandbox;
+        self
     }
 
     /// Give each trial a lock's skills and MCP servers, as `hlock launch` would.
@@ -337,7 +360,7 @@ impl HarnessAdapter for CommandAdapter {
             inv.env.insert("HLOCK_DECIDE_LOCK".into(), path.to_string_lossy().into_owned());
             inv.env.insert("HLOCK_BIN".into(), self.ctx.var("HLOCK_BIN").unwrap_or("hlock").to_string());
         }
-        let r = run(&inv, &self.ctx, Duration::from_secs(task.timeout_seconds.max(1)))?;
+        let r = run_in(&inv, &self.ctx, Duration::from_secs(task.timeout_seconds.max(1)), self.sandbox.as_ref())?;
         let mut trace = r.trace.clone();
         if let Value::Array(a) = &mut trace {
             let tail: Vec<&str> = r.log.lines().rev().take(20).collect::<Vec<_>>().into_iter().rev().collect();

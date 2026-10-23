@@ -194,6 +194,9 @@ pub fn ineligible(p: &HarnessProfile) -> Option<String> {
     if p.kind == "custom" || p.kind == "builtin" {
         return None;
     }
+    if p.is_app() {
+        return Some(format!("{} is a desktop app; the meta harness must be an agent hlock can start: one of {}", p.name, META_HARNESSES.join(", ")));
+    }
     if p.kind != "cli" {
         return Some(format!("{} is a framework; declare a project harness built on it under [harnesses.<id>] in harness.toml", p.name));
     }
@@ -645,6 +648,8 @@ pub struct JobInput {
     pub guide: Option<PathBuf>,
     /// The user's extra instructions.
     pub instructions: String,
+    /// `install`: the user asked for desktop apps' own config to be written (`--apps`).
+    pub apps: bool,
 }
 
 impl JobInput {
@@ -746,7 +751,7 @@ const MAX_SOLUTION_READ: usize = 64 * 1024;
 
 fn install_goal(input: &JobInput, reg: &Registry, ctx: &Ctx) -> Result<(String, Option<String>)> {
     let lock = input.load_lock()?;
-    let plan = sync::plan(&lock, &input.lock_path, reg, ctx, &SyncOptions::default())?;
+    let plan = sync::plan(&lock, &input.lock_path, reg, ctx, &SyncOptions { apps: input.apps, ..Default::default() })?;
     let lock_name = input.show(&input.lock_path);
     let mut s = format!(
         "Make this machine match `{lock_name}` for {} {}: install what's missing, so `hlock sync` has nothing left that needs a person.\n\n",
@@ -754,9 +759,17 @@ fn install_goal(input: &JobInput, reg: &Registry, ctx: &Ctx) -> Result<(String, 
         plan.version.as_deref().unwrap_or("")
     );
     if let Some(p) = &plan.prefix {
-        s.push_str(&format!("`hlock sync` restores the config into an isolated root under `{p}`, not the user's own config. Don't change the user's own config unless they ask.\n\n"));
+        s.push_str(&format!("`hlock sync` restores the config into an isolated root under `{p}`, not the user's own config. "));
+        s.push_str(if input.apps { "The user asked for desktop apps' own config to be written too (`--apps`), so that part is expected.\n\n" } else { "Don't change the user's own config unless they ask.\n\n" });
+    } else if input.apps && reg.harness(&plan.harness).is_some_and(|p| p.is_app()) {
+        s.push_str(&format!("The user asked for {}'s own config to be written (`--apps`).\n\n", plan.harness_name));
     }
-    let pending: Vec<&sync::Step> = plan.steps.iter().filter(|st| st.status != "satisfied" && !st.optional).collect();
+    if let Some(app) = reg.harness(&plan.harness).filter(|p| p.is_app()) {
+        if plan.steps.iter().any(|st| st.kind == "harness" && st.status != "satisfied") {
+            s.push_str(&app_install_guidance(app, ctx));
+        }
+    }
+    let pending: Vec<&sync::Step> = plan.steps.iter().filter(|st| st.status != "satisfied" && !st.optional && st.needs.is_none()).collect();
     let (secrets, steps): (Vec<&sync::Step>, Vec<&sync::Step>) = pending.into_iter().partition(|st| st.kind == "secret");
     if steps.is_empty() {
         s.push_str("Nothing is missing that you can install. ");
@@ -765,7 +778,7 @@ fn install_goal(input: &JobInput, reg: &Registry, ctx: &Ctx) -> Result<(String, 
         for (i, st) in steps.iter().enumerate() {
             s.push_str(&format!("{}. **{}**", i + 1, st.title));
             if st.status == "auto" {
-                s.push_str(" (`hlock sync --yes` does this)");
+                s.push_str(if input.apps { " (`hlock sync --apps --yes` does this)" } else { " (`hlock sync --yes` does this)" });
             }
             s.push('\n');
             if !st.reason.is_empty() {
@@ -787,8 +800,43 @@ fn install_goal(input: &JobInput, reg: &Registry, ctx: &Ctx) -> Result<(String, 
             names.join(", ")
         ));
     }
-    s.push_str("Finish by running `hlock sync --yes`, which performs the remaining automatic steps.");
-    Ok((s, Some("hlock meta verify install".into())))
+    if !plan.apps.is_empty() {
+        s.push_str(&format!("Writing {}'s own config is the user's call: don't run `hlock sync --apps` yourself; tell them it's what's left.\n\n", app_names(&plan)));
+    }
+    let apps_flag = if input.apps { " --apps" } else { "" };
+    s.push_str(&format!("Finish by running `hlock sync{apps_flag} --yes`, which performs the remaining automatic steps."));
+    Ok((s, Some(format!("hlock meta verify install{apps_flag}"))))
+}
+
+/// The names of the desktop apps a plan needs `--apps` for.
+fn app_names(plan: &sync::Plan) -> String {
+    plan.apps.join(", ")
+}
+
+/// What an agent needs to install a desktop app: where hlock looks for it, how it's
+/// installed here, and how to check. hlock writes the app's config itself, so the app
+/// needn't be opened first.
+pub fn app_install_guidance(app: &HarnessProfile, ctx: &Ctx) -> String {
+    let mut s = format!("{} is a desktop app, which reads only its own config. To install it:\n\n", app.name);
+    let os = ctx.os();
+    for m in &app.install {
+        match (m.method.as_str(), m.package.as_deref()) {
+            ("brew-cask", Some(p)) if os == "macos" => s.push_str(&format!("- With Homebrew: `brew install --cask {p}`\n")),
+            ("app", _) => {
+                if let Some(c) = &m.command {
+                    s.push_str(&format!("- Otherwise: {c}\n"));
+                }
+            }
+            _ => {}
+        }
+    }
+    if let Some(a) = &app.app {
+        if os == "macos" && !a.bundles.is_empty() {
+            s.push_str(&format!("- hlock looks for {} in /Applications and ~/Applications. Install into ~/Applications when /Applications would need `sudo`, and ask the user before anything that needs admin rights.\n", a.bundles.join(" or ")));
+        }
+    }
+    s.push_str(&format!("- You don't need to open the app: hlock creates its config when it writes it.\n- Check: `hlock harness show {}` reports it installed.\n\n", app.id));
+    s
 }
 
 fn pack_goal(input: &JobInput) -> (String, Option<String>) {
@@ -1013,8 +1061,10 @@ pub fn verify(job: &str, input: &JobInput, meta: Option<&MetaManifest>, reg: &Re
     match job {
         "install" => {
             let lock = input.load_lock()?;
-            let plan = sync::plan(&lock, &input.lock_path, reg, ctx, &SyncOptions::default())?;
+            let plan = sync::plan(&lock, &input.lock_path, reg, ctx, &SyncOptions { apps: input.apps, ..Default::default() })?;
             let pending: Vec<&sync::Step> = plan.steps.iter().filter(|st| st.status != "satisfied" && !st.optional).collect();
+            // steps that write a desktop app's own config wait for the user's --apps, like secrets
+            let (apps, pending): (Vec<&sync::Step>, Vec<&sync::Step>) = pending.into_iter().partition(|st| st.needs.is_some());
             let (secrets, steps): (Vec<&sync::Step>, Vec<&sync::Step>) = pending.into_iter().partition(|st| st.kind == "secret");
             let secret_names: Vec<String> = secrets.iter().map(|st| st.id.trim_start_matches("secret:").to_string()).collect();
             let mut v = if !steps.is_empty() {
@@ -1028,8 +1078,17 @@ pub fn verify(job: &str, input: &JobInput, meta: Option<&MetaManifest>, reg: &Re
                     }
                 }
                 v
-            } else if !secrets.is_empty() {
+            } else if apps.is_empty() && !secrets.is_empty() {
                 Verdict::new(job, "needs-you", format!("installed; {} secret{} left for you to set", secrets.len(), if secrets.len() == 1 { "" } else { "s" }))
+            } else if !apps.is_empty() {
+                let mut left = Vec::new();
+                if !apps.is_empty() {
+                    left.push(format!("{}'s own config to write with hlock sync --apps", app_names(&plan)));
+                }
+                if !secrets.is_empty() {
+                    left.push(format!("{} secret{} for you to set", secrets.len(), if secrets.len() == 1 { "" } else { "s" }));
+                }
+                Verdict::new(job, "needs-you", format!("installed; left: {}", left.join(", ")))
             } else {
                 Verdict::new(job, "verified", format!("this machine matches {}", input.show(&input.lock_path)))
             };
@@ -1344,6 +1403,52 @@ mod tests {
         assert!(MetaManifest::from_str("[jobs.notes]\nverify = \"true\"\n").is_err());
         assert!(MetaManifest::from_str("[run]\nmode = \"yolo\"\n").is_err());
         assert!(job_spec("nope", Some(&m)).is_err());
+    }
+
+    #[test]
+    fn install_hands_a_desktop_app_to_the_agent_and_leaves_its_config_to_you() {
+        let dir = std::env::temp_dir().join(format!("hlock-meta-app-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let project = dir.join("proj");
+        let vend = project.join(".hlock/vendor/claude-desktop/claude_desktop_config.json");
+        std::fs::create_dir_all(vend.parent().unwrap()).unwrap();
+        std::fs::write(&vend, r#"{"mcpServers": {}}"#).unwrap();
+        let lock = Lockfile {
+            harness: crate::lockfile::Harness { name: "claude-desktop".into(), version: Some("1.0.3".into()), ..Default::default() },
+            config: vec![crate::lockfile::ConfigFile { id: "config".into(), path: "{root}/claude_desktop_config.json".into(), format: "json".into(), restore: "pointers".into(), pointers: vec!["/mcpServers".into()], vendored: Some(".hlock/vendor/claude-desktop/claude_desktop_config.json".into()), ..Default::default() }],
+            ..Default::default()
+        };
+        lock.save(&project.join("harness.lock")).unwrap();
+        let apps = dir.join("Applications");
+        let env: BTreeMap<String, String> = [("HLOCK_OS", "macos"), ("HLOCK_APPS_RUNNING", ""), ("HLOCK_APP_DIRS", apps.to_str().unwrap())].iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
+        let ctx = Ctx { home: dir.join("home"), cwd: project.clone(), env, path: vec![] };
+        let reg = Registry::builtin();
+        let input = JobInput { project: project.clone(), lock_path: project.join("harness.lock"), ..Default::default() };
+        // not installed: the agent gets what it needs to install it, and no first launch
+        let prompt = render("install", &input, None, &reg, &ctx, "").unwrap();
+        assert!(prompt.contains("Claude Desktop is a desktop app") && prompt.contains("brew install --cask claude") && prompt.contains("claude.ai/download"), "{prompt}");
+        assert!(prompt.contains("hlock harness show claude-desktop") && prompt.contains("don't need to open the app"), "{prompt}");
+        assert!(prompt.contains("don't run `hlock sync --apps` yourself"), "{prompt}");
+        assert_eq!(verify("install", &input, None, &reg, &ctx).unwrap().status, "failed");
+        // installed: what's left is writing its config, which is the user's call
+        let c = apps.join("Claude.app/Contents");
+        std::fs::create_dir_all(&c).unwrap();
+        std::fs::write(c.join("Info.plist"), "<plist><dict><key>CFBundleShortVersionString</key><string>1.0.3</string></dict></plist>").unwrap();
+        let v = verify("install", &input, None, &reg, &ctx).unwrap();
+        assert!(v.status == "needs-you" && v.summary.contains("hlock sync --apps"), "{v:?}");
+        // with --apps, the agent finishes with it, and then it's done
+        let with = JobInput { apps: true, ..input.clone() };
+        let prompt = render("install", &with, None, &reg, &ctx, "").unwrap();
+        assert!(prompt.contains("hlock sync --apps --yes") && prompt.contains("hlock meta verify install --apps"), "{prompt}");
+        assert_eq!(verify("install", &with, None, &reg, &ctx).unwrap().status, "failed");
+        let plan = sync::plan(&lock, &input.lock_path, &reg, &ctx, &SyncOptions { apps: true, ..Default::default() }).unwrap();
+        for st in plan.steps.iter().filter(|s| s.status == "auto") {
+            sync::run_step(st, &ctx).unwrap();
+        }
+        assert_eq!(verify("install", &with, None, &reg, &ctx).unwrap().status, "verified");
+        // and an app can't be the meta harness
+        assert!(ineligible(reg.harness("claude-desktop").unwrap()).unwrap().contains("desktop app"));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[cfg(unix)]

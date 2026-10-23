@@ -110,3 +110,16 @@ writes `harness.local.lock`; `--runtime` picks the runtime. For the model search
 `migrate` refuses an unknown harness, the lock's own harness (use `localize` to keep the
 harness and go local), a framework harness like `pydantic-ai` (it runs your code; there's no
 config to move skills into), and a `--model` whose provider the new harness doesn't support.
+`--local` refuses a [desktop app](harnesses.md#desktop-apps), which hlock can't run on a
+local model.
+
+## To a desktop app
+
+`--to` can name a desktop app (`claude-desktop`, `vscode`), and a lock pinned from one can
+move to an agent CLI. MCP servers are rewritten into the app's shape (VS Code's `servers`,
+with `type`), and skills and instruction files go where it reads them (`CLAUDE.md` becomes
+`AGENTS.md` for VS Code). An app picks its model in the app or your account, so the lock's
+models are kept but not configured, and the report says so. A server the app can't hold
+(a remote one, for Claude Desktop, where remote servers are connectors) stays in the lock and
+is left out of its config, with a note. `hlock sync --apps harness.vscode.lock` then puts the
+rest in place.

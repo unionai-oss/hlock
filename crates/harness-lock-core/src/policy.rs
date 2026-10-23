@@ -75,6 +75,14 @@ pub struct PolicyFile {
     pub models: Models,
     pub harness: HarnessRules,
     pub evidence: EvidenceRules,
+    pub sandbox: SandboxRules,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(default, deny_unknown_fields, rename_all = "kebab-case")]
+pub struct SandboxRules {
+    /// A lock must name a sandbox, and runs can't turn it off.
+    pub require: bool,
 }
 
 /// The policy in force: each level from the project's file up its `extends` chain.
@@ -454,8 +462,24 @@ impl Policy {
             out.extend(self.check_harness(&lock.harness.name, lock.harness.version.as_deref()));
         }
         out.extend(self.check_evidence(lock, today()));
+        out.extend(self.check_sandbox(crate::sandbox::Spec::from_lock(lock).ok().flatten().is_some(), false));
         out.dedup();
         out
+    }
+
+    /// `[sandbox] require`: a run with no sandbox (`has` false), or one turned off.
+    pub fn check_sandbox(&self, has: bool, turned_off: bool) -> Vec<Violation> {
+        let why = match (has, turned_off) {
+            (false, _) => "there's no sandbox (set [sandbox] in harness.toml and re-pin)",
+            (true, true) => "the sandbox is turned off (--no-sandbox or HLOCK_NO_SANDBOX)",
+            _ => return Vec::new(),
+        };
+        self.levels
+            .iter()
+            .zip(&self.files)
+            .filter(|(l, _)| l.sandbox.require)
+            .map(|(_, f)| Violation { section: "sandbox".into(), subject: "sandbox".into(), message: format!("the policy requires a sandbox, and {why}"), file: f.clone() })
+            .collect()
     }
 
     /// Stop with the violations when the policy blocks; otherwise return them as warnings.

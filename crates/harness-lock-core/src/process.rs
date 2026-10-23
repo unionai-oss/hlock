@@ -28,11 +28,14 @@ pub struct Limits {
     /// Also stop what the child left running when it exits normally (a test command's
     /// `server &`). Off for installers, which may start a daemon on purpose.
     pub kill_leftovers: bool,
+    /// Left out of [`stop_all`]: cleanup that has to finish even after a Ctrl-C (deleting a
+    /// sandbox, and the providers that hold keys).
+    pub untracked: bool,
 }
 
 impl Default for Limits {
     fn default() -> Self {
-        Limits { timeout: None, max_bytes: MAX_OUTPUT, kill_leftovers: true }
+        Limits { timeout: None, max_bytes: MAX_OUTPUT, kill_leftovers: true, untracked: false }
     }
 }
 
@@ -74,7 +77,7 @@ pub fn run(mut cmd: Command, limits: &Limits) -> std::io::Result<Output> {
     #[cfg(unix)]
     std::os::unix::process::CommandExt::process_group(&mut cmd, 0);
     let mut child = cmd.spawn()?;
-    let _live = Live::register(&child);
+    let _live = (!limits.untracked).then(|| Live::register(&child));
     let max = limits.max_bytes;
     let (tx_out, rx_out) = mpsc::channel();
     let (tx_err, rx_err) = mpsc::channel();

@@ -38,6 +38,7 @@ nav = [
       "guides/registry.md",
       "guides/teams.md",
       "guides/secrets.md",
+      "guides/sandbox.md",
       "guides/audit.md",
       "guides/diff.md",
     ] },
@@ -48,6 +49,7 @@ nav = [
       "guides/tune.md",
       "guides/upgrade.md",
       "guides/backends.md",
+      "guides/optimizers.md",
       "guides/ci.md",
     ] },
     { "Switch harnesses" = [

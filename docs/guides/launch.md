@@ -47,6 +47,10 @@ The same goes when it translates a lock into another harness: MCP servers, skill
 instruction files that aren't trusted, or hide text, aren't carried over, and the notes say
 which.
 
+A lock with a [sandbox](sandbox.md) launches through it: the harness runs inside Docker or
+your own runner, restored into `.hlock/sandbox-env/` instead of `.hlock/env/`, and sees only
+the project and its own config. `--no-sandbox` runs it here instead.
+
 ## Launch a different harness
 
 Name another harness to run the lock's **portable** parts in it:

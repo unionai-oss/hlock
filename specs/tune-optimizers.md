@@ -91,6 +91,9 @@ splits and the lock. The optimizer should own only the search.
 
 ### 3.1 Optimizers are backends that run `harness.optimize`
 
+> Superseded by [optimizers](optimizers.md): optimizers now have their own protocol,
+> registry (`[optimizers.<name>]`, `hlock.optimizers`) and CLI, apart from backends.
+
 An optimizer is a backend, found the same way ([backends](backends.md) §5): built in,
 `[backends.<name>]`, `hlock-backend-<name>` on `PATH`, or an `hlock.backends` entry point.
 It lists `harness.optimize` in `backend.describe`. `tune` picks it separately from where

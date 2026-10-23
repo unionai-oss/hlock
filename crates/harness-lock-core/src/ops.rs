@@ -315,7 +315,8 @@ impl Default for TuneSpec {
 /// `[tune]` in `harness.toml`, with `tune`'s flags applied.
 #[derive(Debug, Clone, PartialEq)]
 pub struct TuneConfig {
-    /// The backend that searches: `hlock` (the trial backend's built-in) or another.
+    /// The optimizer that searches: `hlock` (built in), `harness2`, or another
+    /// (`specs/optimizers.md`). Where it runs is the backend's business.
     pub optimizer: String,
     /// The component kinds it may edit; empty means no optimize stage.
     pub edit: Vec<String>,
@@ -393,6 +394,7 @@ fn per_task(dir: &std::path::Path, resolver: &Resolver, stack: &Stack, tasks: &[
 #[allow(clippy::too_many_arguments)]
 fn optimize_stage(
     w: &crate::worker::Worker,
+    optimizer: &crate::optimize::Optimizer,
     cfg: &TuneConfig,
     manifest: &Manifest,
     spec: &TuneSpec,
@@ -487,7 +489,7 @@ fn optimize_stage(
         "models": {"task": base.llm.get(&tuned_role(base)), "proposer": cfg.proposer},
         "noise": {"dev_success_sd": noise},
     });
-    let r = w.optimize(&dir.join("opt"), &serde_json::json!({"edit": cfg.edit}), payload).map_err(|e| match e {
+    let r = w.optimize(optimizer, &dir.join("opt"), &serde_json::json!({"edit": cfg.edit}), payload).map_err(|e| match e {
         Error::Worker(m) => Error::Tuning(format!("the {} optimizer failed: {m}", cfg.optimizer)),
         e => e,
     })?;
@@ -524,6 +526,7 @@ fn optimize_stage(
     let used = opt::Session::load(&dir).map(|s| s.used).unwrap_or_default();
     let mut optimizer = serde_json::json!({
         "name": cfg.optimizer,
+        "backend": w.backend.name,
         "evaluator": if used.rollouts > 0 { "hlock" } else { "optimizer" },
         "edit": cfg.edit,
         "budget": {"rollouts": cfg.budget.rollouts, "usd": cfg.budget.usd},
@@ -778,23 +781,29 @@ pub fn tune(manifest: Manifest, spec: &TuneSpec) -> Result<TuneOutcome> {
     let mut optimized: Option<Optimized> = None;
     let mut legacy_prompt = false;
     if !tcfg.edit.is_empty() {
-        // the optimizer: the trial backend's built-in one, or a backend of its own
-        let named: Option<crate::worker::Worker>;
-        let found = if tcfg.optimizer == "hlock" {
-            runs("harness.optimize")?
-        } else {
-            let b = crate::worker::Backend::resolve(&manifest, Some(&tcfg.optimizer))?;
-            named = crate::worker::Worker::for_backend(&b, spec.workdir.join("backend").join(&tcfg.optimizer));
-            match &named {
-                None => Err(format!("{} runs in hlock's core and has no optimizer; name a backend that runs harness.optimize", tcfg.optimizer)),
-                Some(w) => match w.unsupported("harness.optimize")? {
-                    Some(why) => Err(why),
-                    None => Ok(w),
-                },
+        // what searches (the optimizer) and where (the backend, when it hosts searches, else
+        // hlock's local worker; the trials run on the backend either way)
+        let optimizer = crate::optimize::Optimizer::resolve(&manifest, &tcfg.optimizer)?;
+        let host: Option<crate::worker::Worker>;
+        let found = match runs("harness.optimize")? {
+            Ok(w) => Ok(w),
+            Err(why) if worker.is_none() => Err(why),
+            Err(_) => {
+                let local = crate::worker::Backend::resolve(&manifest, Some("local"))?;
+                host = crate::worker::Worker::for_backend(&local, spec.workdir.join("backend").join("local"));
+                match &host {
+                    None => Err("hlock's local worker isn't available to run the search".to_string()),
+                    Some(w) => match w.unsupported("harness.optimize") {
+                        Ok(None) => Ok(w),
+                        Ok(Some(why)) => Err(why),
+                        Err(Error::Worker(e)) => Err(format!("the {} backend doesn't host the search, and hlock's local worker can't: {e}", backend.as_str())),
+                        Err(e) => return Err(e),
+                    },
+                }
             }
         };
         match found {
-            Ok(w) => match optimize_stage(w, &tcfg, &manifest, spec, &mut resolver, &base, base_lock.as_ref(), &lock_path, &search_tasks, &note) {
+            Ok(w) => match optimize_stage(w, &optimizer, &tcfg, &manifest, spec, &mut resolver, &base, base_lock.as_ref(), &lock_path, &search_tasks, &note) {
                 Ok(o) => {
                     let detail = if o.accepted { format!("{} edit{} accepted", o.changes.len(), if o.changes.len() == 1 { "" } else { "s" }) } else { "no edits accepted".to_string() };
                     stages.push(stage("optimize", true, detail));
@@ -962,7 +971,8 @@ pub fn tune(manifest: Manifest, spec: &TuneSpec) -> Result<TuneOutcome> {
         Some(p) => Some(write_tuned_instructions(base_lock.as_ref(), &manifest, &base.harness, &out_dir, lock_path.parent().filter(|d| !d.as_os_str().is_empty()).unwrap_or(std::path::Path::new(".")), p)?),
         None => None,
     };
-    let mut tune_lock = build_tuned_lock(&manifest, base_lock.as_ref(), &winner, &measured, &split, scored.len(), backend.as_str(), &prompt_meta, prompt_gain, tuned_file.as_ref(), &ft_meta, &data_meta, &spec.data, data_mode, simulated, &plan_value);
+    let mut tune_lock = build_tuned_lock(&manifest, base_lock.as_ref(), &winner, &measured, &split, scored.len(), backend.as_str(), &prompt_meta, prompt_gain, tuned_file.as_ref(), &ft_meta, &data_meta, &spec.data, data_mode, simulated, &plan_value, Some(resolver.evidence_sandbox(&winner.stack.harness)));
+    resolver.approve_sandbox(&tune_lock)?;
     let mut optimize_report = serde_json::Value::Null;
     if let Some(o) = &optimized {
         let mut t = tune_lock.tune.take().unwrap_or_else(|| serde_json::json!({}));
@@ -1061,6 +1071,7 @@ fn build_tuned_lock(
     data_mode: &str,
     simulated: bool,
     plan: &serde_json::Value,
+    evidence_sandbox: Option<crate::lockfile::EvidenceSandbox>,
 ) -> Lockfile {
     let stack = &winner.stack;
     let mut lf = base.cloned().unwrap_or_default();
@@ -1103,6 +1114,8 @@ fn build_tuned_lock(
         None => lf.llm.push(crate::lockfile::LLM { role, provider, model, resolved_from: Some(spec.clone()), params: params.into_iter().collect(), ..Default::default() }),
     }
     lf.policy.retries = stack.retries;
+    // the sandbox is harness.toml's, whatever the base lock had
+    lf.policy.sandbox = manifest.sandbox_spec().ok().flatten().map(|s| s.to_map()).unwrap_or_default();
     let r4 = |v: f64| (v * 1e4).round() / 1e4;
     let mut success = BTreeMap::from([("mean".to_string(), r4(measured.success_rate()))]);
     if split == "holdout" {
@@ -1118,6 +1131,7 @@ fn build_tuned_lock(
         cost_usd_per_task: BTreeMap::from([("mean".to_string(), round6(measured.mean_cost()))]),
         latency_s_per_task: BTreeMap::from([("p50".to_string(), r4(measured.mean_latency())), ("p95".to_string(), r4(measured.p95_latency()))]),
         simulated,
+        sandbox: evidence_sandbox,
         ..Default::default()
     };
     lf.provenance.backend = backend.to_string();

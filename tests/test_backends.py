@@ -10,6 +10,7 @@ import pytest
 from click.testing import CliRunner
 from test_worker import run_worker
 
+import hlock
 from hlock.backends import KINDS, Backend, BackendError, load, run_local
 from hlock.backends.local import LocalBackend
 from hlock.cli import main
@@ -102,7 +103,10 @@ def test_a_python_backend_from_the_manifest_runs_resolve_and_tune(project):
     assert r.exit_code == 0, r.output
     out = flat(r.output)
     assert "data ✗ the mine backend doesn't run data.load" in out
-    assert "optimize ✗ the mine backend doesn't run harness.optimize" in out
+    # mine doesn't host the search, so it runs on local; its trials still run on mine
+    assert "optimize ✓" in out and "optimizer hlock on local" in out
+    tuned = json.loads(hlock.Lockfile.load(str(project / "harness.tune.lock")).to_json())
+    assert tuned["tune"]["optimizer"]["backend"] == "local" and tuned["provenance"]["backend"] == "mine"
 
     r = invoke("backend", "status")
     assert r.exit_code == 0, r.output
