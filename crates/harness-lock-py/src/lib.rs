@@ -1531,7 +1531,7 @@ fn sync_ignore_env(plan: &str) -> PyResult<()> {
 }
 
 /// The secrets a lock's placeholders need, and where each would come from (no values):
-/// JSON `{"file": …, "keychain": …, "secrets": [{name, used_by, source}]}`.
+/// JSON `{"file": …, "keychain": …, "secrets": [{name, used_by, optional, description, source}]}`.
 #[pyfunction]
 #[pyo3(signature = (path="harness.lock".to_string(), manifest=None))]
 fn secret_status(py: Python<'_>, path: String, manifest: Option<String>) -> PyResult<String> {
@@ -1543,7 +1543,7 @@ fn secret_status(py: Python<'_>, path: String, manifest: Option<String>) -> PyRe
         let rows: Vec<_> = lock
             .secret
             .iter()
-            .map(|s| serde_json::json!({"name": s.name, "used_by": s.used_by, "source": core::secrets::locate(&s.name, &ctx)}))
+            .map(|s| serde_json::json!({"name": s.name, "used_by": s.used_by.join(", "), "optional": s.optional, "description": s.description, "source": core::secrets::locate(&s.name, &ctx)}))
             .collect();
         Ok(json_str(serde_json::json!({
             "file": core::secrets::secrets_file(&ctx),

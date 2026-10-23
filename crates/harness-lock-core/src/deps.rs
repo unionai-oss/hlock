@@ -2679,9 +2679,22 @@ fn undeclared(lock: &Lockfile, env: &Env) -> Vec<Issue> {
 /// network when nothing changed). Returns what changed, as diff lines. With `frozen`, a
 /// lock that would change is an error instead.
 pub fn refresh(manifest: Option<&crate::manifest::Manifest>, lock: &mut Lockfile, reg: &crate::profiles::Registry, ctx: &Ctx, frozen: bool) -> Result<Vec<String>> {
+    // `[environment]` and `[[secrets]]` are recorded as declared: nothing to resolve
+    let mut changes = match manifest {
+        Some(m) => {
+            m.check_declared()?;
+            let mut next = lock.clone();
+            let changes = next.declare(&m.environment, &m.secrets);
+            if !frozen {
+                *lock = next;
+            }
+            changes
+        }
+        None => Vec::new(),
+    };
     let (decls, _) = all_declared(manifest, &ctx.cwd)?;
     if decls.is_empty() && locked_declarations(lock).is_empty() {
-        return Ok(Vec::new());
+        return finish_refresh(manifest, lock, frozen, changes);
     }
     let profile = reg.require_harness(&lock.harness.name)?;
     let env = Env::new(ctx, profile);
@@ -2689,7 +2702,6 @@ pub fn refresh(manifest: Option<&crate::manifest::Manifest>, lock: &mut Lockfile
     if let Some(c) = conflicts.first() {
         return Err(err(format!("package {}: {}", c.name, c.detail)));
     }
-    let mut changes = Vec::new();
     let mut seen = BTreeSet::new();
     let pkgs: Vec<Decl> = decls.iter().filter(|d| d.kind == Kind::Package).cloned().collect();
     let pkg_names: BTreeSet<&str> = pkgs.iter().map(|d| d.name.as_str()).collect();
@@ -2736,6 +2748,10 @@ pub fn refresh(manifest: Option<&crate::manifest::Manifest>, lock: &mut Lockfile
             }
         }
     }
+    finish_refresh(manifest, lock, frozen, changes)
+}
+
+fn finish_refresh(manifest: Option<&crate::manifest::Manifest>, lock: &mut Lockfile, frozen: bool, changes: Vec<String>) -> Result<Vec<String>> {
     if frozen && !changes.is_empty() {
         return Err(err(format!("the lock is out of date with the declared dependencies (--frozen):\n  {}\nrun `hlock sync` without --frozen to update it", changes.join("\n  "))));
     }
@@ -3111,7 +3127,15 @@ pub(crate) fn carry_from(prev: &Lockfile, cap: &mut crate::capture::Capture) {
     if !lock.package.is_empty() {
         lock.provenance.openapm = prev.provenance.openapm.clone();
     }
-    if prev.skill.iter().any(|s| s.dep.declared) || prev.tool.iter().any(|t| t.dep.declared) || prev.instructions.iter().any(|i| i.dep.declared) || prev.native.iter().any(|n| n.dep.declared) || !prev.package.is_empty() {
+    // the declared environment and secrets, merged with the placeholders this pin found
+    let secrets: Vec<crate::manifest::DeclaredSecret> = prev
+        .secret
+        .iter()
+        .filter(|s| s.declared)
+        .map(|s| crate::manifest::DeclaredSecret { name: s.name.clone(), used_by: s.used_by.clone(), optional: s.optional, description: s.description.clone() })
+        .collect();
+    lock.declare(&prev.environment, &secrets);
+    if prev.skill.iter().any(|s| s.dep.declared) || prev.tool.iter().any(|t| t.dep.declared) || prev.instructions.iter().any(|i| i.dep.declared) || prev.native.iter().any(|n| n.dep.declared) || !prev.package.is_empty() || !secrets.is_empty() || !prev.environment.is_empty() {
         lock.manifest_hash = prev.manifest_hash.clone();
     }
     for v in unvendor {

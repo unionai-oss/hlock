@@ -1160,7 +1160,7 @@ pub fn plan(lock: &Lockfile, lock_path: &Path, reg: &Registry, ctx: &Ctx, opts: 
         steps.push(Step {
             id: format!("secret:{}", r.name),
             kind: "secret".into(),
-            title: format!("{} ({})", r.name, r.used_by),
+            title: if r.used_by.is_empty() { r.name.clone() } else { format!("{} ({})", r.name, r.used_by.join(", ")) },
             status: if missing && !docker { "manual" } else { "satisfied" }.into(),
             reason: if docker {
                 format!("supplied when the container starts (`docker run -e` or /run/secrets/{})", r.name)

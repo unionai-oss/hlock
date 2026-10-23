@@ -47,8 +47,9 @@ target = "local"
 ```
 
 `resolve` and `tune` refuse a manifest with a key they don't know in `[budget]`,
-`[objective]`, `[evals]`, `[evals.splits]`, `[candidates]`, `[backend]`, `[target]`, or at
-the top level, and name the closest known key: a mistyped key is otherwise ignored.
+`[objective]`, `[evals]`, `[evals.splits]`, `[candidates]`, `[backend]`, `[target]`,
+`[environment]`, `[[environment.binaries]]`, `[[secrets]]`, or at the top level, and name
+the closest known key: a mistyped key is otherwise ignored.
 
 ## `[project]`
 
@@ -255,6 +256,60 @@ grader-image = "ghcr.io/acme/ci@sha256:9d03…"
 `[sandbox.runners.<name>]` defines a [command runner](../guides/sandbox.md#define-your-own-runner)
 for the project: `command`, `mount-args`, `mount-ro-args`, `network-args` and `networks`.
 
+## `[environment]`
+
+What the agent needs installed: packages for each installer, and binaries pinned by URL
+and SHA-256. The lock records it as declared, in its own
+[`[environment]`](lockfile.md#declared-environment-and-secrets); hlock doesn't install any
+of it yet.
+
+```toml title="harness.toml"
+[environment]
+apt = ["protobuf-compiler", "ripgrep"]
+pip = ["ruff==0.6.9"]
+npm = ["pnpm@9"]
+cargo = ["cargo-nextest"]
+go = ["golang.org/x/tools/gopls@v0.16.2"]
+
+[[environment.binaries]]
+url = "https://example.com/tool-1.2.3-linux-x64"
+sha256 = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+path = "/usr/local/bin/tool"
+```
+
+| Key | Description |
+|---|---|
+| `apt`, `pip`, `npm`, `cargo`, `go` | Packages, as that installer names them (`ruff==0.6.9`, `pnpm@9`, `golang.org/x/tools/gopls@v0.16.2`). Each is one word, not starting with `-` |
+| `[[environment.binaries]]` | A file to download: `url` (`http://` or `https://`), `sha256` (64 lowercase hex digits) and `path`, the absolute path it's installed at, with no `..`. All three are required, and each `path` appears once |
+
+## `[[secrets]]`
+
+The secrets the agent needs, declared up front so a launcher can ask for them before it
+starts. Values never go in the manifest or the lock: each secret is supplied as
+`HLOCK_SECRET_<name>`, from the environment, the secrets file or the keychain
+([`hlock secret`](cli.md)).
+
+```toml title="harness.toml"
+[[secrets]]
+name = "GITHUB_TOKEN"
+used-by = ["mcp:github", "skill:release"]
+optional = false
+description = "Opens PRs on the user's behalf."
+```
+
+| Key | Default | Description |
+|---|---|---|
+| `name` | | Letters, digits and `_`. `GITHUB_TOKEN` and `HLOCK_SECRET_GITHUB_TOKEN` are the same secret, and each is declared once |
+| `used-by` | `[]` | What needs it, e.g. `mcp:github`, `skill:release` |
+| `optional` | `false` | `true` when the agent runs without it |
+| `description` | | What it's for |
+
+The lock merges each into its [`[[secret]]`](lockfile.md#declared-environment-and-secrets)
+entries.
+
+hlock checks `[environment]` and `[[secrets]]` when it reads `harness.toml`: a bad digest,
+path, package or secret name is an error rather than ignored.
+
 ## Dependencies
 
 `[skills]`, `[mcp]`, `[instructions]`, `[plugins]` and `[packages]` declare dependencies:
@@ -310,8 +365,9 @@ and whitespace included: the text the run read, even if the file changes during 
 `harness.toml` needs a fresh `hlock resolve`.
 
 A pinned lock with declared dependencies records a hash of the dependency sections only
-(`[skills]`, `[mcp]`, `[instructions]`, `[plugins]`, `[packages]` and `[tools]`), so editing
-`[candidates]` or `[evals]` in the same file doesn't invalidate the pin.
+(`[skills]`, `[mcp]`, `[instructions]`, `[plugins]`, `[packages]` and `[tools]`, and
+`[environment]` and `[[secrets]]` when there are any), so editing `[candidates]` or
+`[evals]` in the same file doesn't invalidate the pin.
 
 ## `[deciders.<use>]`
 

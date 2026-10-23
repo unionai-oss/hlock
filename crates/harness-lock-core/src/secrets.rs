@@ -237,7 +237,7 @@ pub fn keychain_set(name: &str, value: &str, ctx: &Ctx) -> Result<String> {
 
 /// A secret's full name must be a variable name (`HLOCK_SECRET_` and letters, digits,
 /// `_`): it goes into an environment, and into the command line `security -i` parses.
-fn check_name(name: &str) -> Result<()> {
+pub(crate) fn check_name(name: &str) -> Result<()> {
     let rest = name.strip_prefix(PREFIX).unwrap_or_default();
     if !rest.is_empty() && rest.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
         Ok(())

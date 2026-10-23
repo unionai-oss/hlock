@@ -50,7 +50,7 @@ pub const SELECTS: &[&str] = &["min-cost", "max-quality"];
 /// The keys of the manifest's fixed-shape tables; anything else is reported by
 /// [`Manifest::problems`]. Tables holding names (`[skills]`, `[harnesses]`, …) aren't
 /// checked, and neither are the reserved `[context]` and `[enforce]`.
-const TOP_KEYS: &[&str] = &["project", "evals", "tasks", "candidates", "tools", "skills", "instructions", "mcp", "plugins", "packages", "context", "objective", "budget", "enforce", "backend", "backends", "optimizers", "target", "harnesses", "deciders", "tune", "sandbox"];
+const TOP_KEYS: &[&str] = &["project", "evals", "tasks", "candidates", "tools", "skills", "instructions", "mcp", "plugins", "packages", "context", "objective", "budget", "enforce", "backend", "backends", "optimizers", "target", "harnesses", "deciders", "tune", "sandbox", "environment", "secrets"];
 const BUDGET_KEYS: &[&str] = &["max-spend-usd", "max-trials", "strategy", "random-seed", "max_spend_usd", "max_trials", "random_seed"];
 const OBJECTIVE_KEYS: &[&str] = &["primary", "constraints", "select"];
 const EVALS_KEYS: &[&str] = &["packs", "seeds", "splits", "judge"];
@@ -60,6 +60,117 @@ const BACKEND_KEYS: &[&str] = &["target"];
 const TARGET_KEYS: &[&str] = &["harness", "also"];
 const TUNE_KEYS: &[&str] = &["optimizer", "edit", "proposer", "budget", "trials", "alpha", "max-cost-increase"];
 const TUNE_BUDGET_KEYS: &[&str] = &["rollouts", "usd"];
+const ENVIRONMENT_KEYS: &[&str] = &["apt", "pip", "npm", "cargo", "go", "binaries"];
+const BINARY_KEYS: &[&str] = &["url", "sha256", "path"];
+const SECRET_KEYS: &[&str] = &["name", "used-by", "optional", "description"];
+
+/// `[environment]`: what the agent needs installed, as package lists for each installer
+/// and binaries pinned by URL and SHA-256. The lock records it as declared; nothing
+/// installs it yet.
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+#[serde(default)]
+pub struct Environment {
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub apt: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub pip: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub npm: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub cargo: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub go: Vec<String>,
+    /// `[[environment.binaries]]`.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub binaries: Vec<Binary>,
+}
+
+/// A file downloaded from `url`, checked against `sha256`, and placed at `path`.
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+#[serde(default)]
+pub struct Binary {
+    pub url: String,
+    /// 64 lowercase hex digits.
+    pub sha256: String,
+    /// Where it's installed: an absolute path (`/usr/local/bin/tool`).
+    pub path: String,
+}
+
+impl Environment {
+    pub fn is_empty(&self) -> bool {
+        *self == Environment::default()
+    }
+
+    /// The package lists, by installer.
+    pub fn lists(&self) -> [(&'static str, &Vec<String>); 5] {
+        [("apt", &self.apt), ("pip", &self.pip), ("npm", &self.npm), ("cargo", &self.cargo), ("go", &self.go)]
+    }
+
+    /// Values that would reach an installer as something other than what they say: a
+    /// package that's an option or several words, a binary without a URL, SHA-256 or
+    /// absolute path. The manifest and the lock both check it.
+    pub fn check(&self) -> std::result::Result<(), String> {
+        for (list, items) in self.lists() {
+            for p in items {
+                if p.is_empty() || p.starts_with('-') || p.chars().any(|c| c.is_whitespace() || c.is_control()) {
+                    return Err(format!("[environment] {list} entry {p:?} must be one package: no spaces, not starting with '-'"));
+                }
+            }
+        }
+        let mut paths = std::collections::BTreeSet::new();
+        for (i, b) in self.binaries.iter().enumerate() {
+            let what = if b.path.is_empty() { format!("[[environment.binaries]] #{}", i + 1) } else { format!("[[environment.binaries]] {}", b.path) };
+            for (k, v) in [("url", &b.url), ("sha256", &b.sha256), ("path", &b.path)] {
+                if v.is_empty() {
+                    return Err(format!("{what} needs `{k}` (each binary has `url`, `sha256` and `path`)"));
+                }
+            }
+            if !(b.url.starts_with("https://") || b.url.starts_with("http://")) || b.url.chars().any(|c| c.is_whitespace() || c.is_control()) {
+                return Err(format!("{what} url {:?} must be an http(s) URL", b.url));
+            }
+            if !is_sha256_hex(&b.sha256) {
+                return Err(format!("{what} sha256 {:?} must be 64 lowercase hex digits", b.sha256));
+            }
+            let p = Path::new(&b.path);
+            if !b.path.starts_with('/') || b.path.chars().any(char::is_control) || !p.components().all(|c| matches!(c, std::path::Component::RootDir | std::path::Component::Normal(_))) || p.file_name().is_none() {
+                return Err(format!("{what} path {:?} must be an absolute file path, with no '..'", b.path));
+            }
+            if !paths.insert(&b.path) {
+                return Err(format!("{what} is declared twice"));
+            }
+        }
+        Ok(())
+    }
+}
+
+/// `s` is a SHA-256 digest as 64 lowercase hex digits.
+pub fn is_sha256_hex(s: &str) -> bool {
+    s.len() == 64 && s.bytes().all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(&c))
+}
+
+/// A `[[secrets]]` entry: a secret the agent needs, declared up front. Values are never
+/// stored; the lock's `[[secret]]` records the name, what uses it, and whether it's
+/// optional.
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+#[serde(default, rename_all = "kebab-case")]
+pub struct DeclaredSecret {
+    /// `GITHUB_TOKEN`, supplied as `HLOCK_SECRET_GITHUB_TOKEN` (either spelling works).
+    pub name: String,
+    /// What needs it: `mcp:github`, `skill:release`.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub used_by: Vec<String>,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub optional: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+}
+
+impl DeclaredSecret {
+    /// The variable that supplies it, as the lock names it (`HLOCK_SECRET_…`).
+    pub fn full_name(&self) -> String {
+        crate::secrets::full_name(&self.name)
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(default)]
@@ -184,6 +295,12 @@ pub struct Manifest {
     /// The sandbox the lock runs in (`[sandbox]`), and project-defined runners.
     #[serde(default)]
     pub sandbox: BTreeMap<String, serde_json::Value>,
+    /// What the agent needs installed (`[environment]`).
+    #[serde(default, skip_serializing_if = "Environment::is_empty")]
+    pub environment: Environment,
+    /// Secrets the agent needs (`[[secrets]]`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub secrets: Vec<DeclaredSecret>,
     #[serde(skip)]
     pub source_path: Option<PathBuf>,
     /// The text this manifest was parsed from, which [`Manifest::manifest_hash`] hashes.
@@ -211,6 +328,7 @@ impl Manifest {
         let mut m = Manifest::from_str(&text)?;
         // a bad [deciders] table is an error here, not a silent fallback later
         m.deciders()?;
+        m.check_declared()?;
         m.source_path = Some(path.to_path_buf());
         Ok(m)
     }
@@ -263,6 +381,20 @@ impl Manifest {
             report(table(&["target"]), TARGET_KEYS, "[target]");
             report(table(&["tune"]), TUNE_KEYS, "[tune]");
             report(table(&["tune", "budget"]), TUNE_BUDGET_KEYS, "[tune.budget]");
+            report(table(&["environment"]), ENVIRONMENT_KEYS, "[environment]");
+            let items = |path: &[&str], last: &str| -> Vec<&toml::Table> {
+                let arr = match path {
+                    [] => doc.get(last),
+                    _ => table(path).and_then(|t| t.get(last)),
+                };
+                arr.and_then(toml::Value::as_array).into_iter().flatten().filter_map(toml::Value::as_table).collect()
+            };
+            for t in items(&["environment"], "binaries") {
+                report(Some(t), BINARY_KEYS, "[[environment.binaries]]");
+            }
+            for t in items(&[], "secrets") {
+                report(Some(t), SECRET_KEYS, "[[secrets]]");
+            }
         }
         let mut supported = |key: &str, value: &str, allowed: &[&str]| {
             if !value.is_empty() && !allowed.contains(&value) {
@@ -273,6 +405,13 @@ impl Manifest {
         supported("[objective] primary", &self.objective.primary, PRIMARIES);
         supported("[objective] select", &self.objective.select, SELECTS);
         out
+    }
+
+    /// The values in `[environment]` and `[[secrets]]` that can't be used: checked when the
+    /// manifest is loaded, so a bad digest or secret name is an error rather than ignored.
+    pub fn check_declared(&self) -> Result<()> {
+        self.environment.check().map_err(Error::Manifest)?;
+        check_secrets(&self.secrets, "[[secrets]]").map_err(Error::Manifest)
     }
 
     /// [`Manifest::problems`] as an error, for the commands that search.
@@ -406,17 +545,26 @@ impl Manifest {
     }
 
     /// Hash of the dependency sections only (`[skills]`, `[mcp]`, `[instructions]`,
-    /// `[plugins]`, `[packages]`, `[tools]`): what a pinned lock's `manifest-hash`
+    /// `[plugins]`, `[packages]`, `[tools]`, and `[environment]` and `[[secrets]]` when
+    /// present): what a pinned lock's `manifest-hash`
     /// records, so editing `[candidates]` in the same file doesn't invalidate a pin.
     pub fn deps_hash(&self) -> String {
-        crate::hash::content_hash(&serde_json::json!({
+        let mut sections = serde_json::json!({
             "skills": self.skills,
             "mcp": self.mcp,
             "instructions": self.instructions,
             "plugins": self.plugins,
             "packages": self.packages,
             "tools": self.tools,
-        }))
+        });
+        // only when present, so a manifest without them hashes as it did before they existed
+        if !self.environment.is_empty() {
+            sections["environment"] = serde_json::json!(self.environment);
+        }
+        if !self.secrets.is_empty() {
+            sections["secrets"] = serde_json::json!(self.secrets);
+        }
+        crate::hash::content_hash(&sections)
     }
 
     /// Hash of the manifest: of the text it was parsed from (so it matches what the run
@@ -430,6 +578,27 @@ impl Manifest {
             Err(_) => String::new(),
         }
     }
+}
+
+/// Secret names are variable names (letters, digits and `_`), declared once each, and
+/// what uses them is text on one line. `what` names the section in errors.
+pub(crate) fn check_secrets(secrets: &[DeclaredSecret], what: &str) -> std::result::Result<(), String> {
+    let mut seen = std::collections::BTreeSet::new();
+    for s in secrets {
+        if s.name.is_empty() {
+            return Err(format!("{what} entry needs a `name`"));
+        }
+        if !s.name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') || crate::secrets::check_name(&s.full_name()).is_err() {
+            return Err(format!("{what} name {:?} isn't a valid secret name (letters, digits and _ only)", s.name));
+        }
+        if !seen.insert(s.full_name()) {
+            return Err(format!("{what} {} is declared twice", s.name));
+        }
+        if let Some(u) = s.used_by.iter().find(|u| u.trim().is_empty() || u.chars().any(char::is_control)) {
+            return Err(format!("{what} {} used-by entry {u:?} must be non-empty text on one line", s.name));
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -447,6 +616,114 @@ mod tests {
         // a use with only any-of candidates falls back to [deciders.default]'s model
         let m = Manifest::from_str("[deciders.judge]\nany-of = [\"ollama:kev:4b\"]\n[deciders.default]\nmodel = \"typesafe:jev-1.13.0\"\n").unwrap();
         assert_eq!(m.default_judge_checked().unwrap().unwrap().model, "typesafe:jev-1.13.0");
+    }
+
+    const DECLARED: &str = r#"
+[environment]
+apt = ["protobuf-compiler", "ripgrep"]
+pip = ["ruff==0.6.9"]
+npm = ["pnpm@9"]
+cargo = ["cargo-nextest"]
+go = ["golang.org/x/tools/gopls@v0.16.2"]
+
+[[environment.binaries]]
+url = "https://example.com/tool-1.2.3-linux-x64"
+sha256 = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+path = "/usr/local/bin/tool"
+
+[[secrets]]
+name = "GITHUB_TOKEN"
+used-by = ["mcp:github", "skill:release"]
+optional = false
+description = "Opens PRs on the user's behalf."
+
+[[secrets]]
+name = "HLOCK_SECRET_SENTRY_DSN"
+optional = true
+"#;
+
+    #[test]
+    fn environment_and_secrets_parse_and_check() {
+        let m = Manifest::from_str(DECLARED).unwrap();
+        m.check_declared().unwrap();
+        assert!(m.problems().is_empty(), "{:?}", m.problems());
+        assert_eq!(m.environment.pip, ["ruff==0.6.9"]);
+        assert_eq!(m.environment.binaries[0].path, "/usr/local/bin/tool");
+        assert_eq!(m.secrets[0].used_by, ["mcp:github", "skill:release"]);
+        assert_eq!(m.secrets[0].description.as_deref(), Some("Opens PRs on the user's behalf."));
+        assert_eq!((m.secrets[0].full_name(), m.secrets[1].full_name()), ("HLOCK_SECRET_GITHUB_TOKEN".to_string(), "HLOCK_SECRET_SENTRY_DSN".to_string()));
+        assert!(m.secrets[1].optional && m.secrets[1].used_by.is_empty());
+        // an empty manifest has neither
+        let e = Manifest::from_str("").unwrap();
+        assert!(e.environment.is_empty() && e.secrets.is_empty());
+        e.check_declared().unwrap();
+    }
+
+    #[test]
+    fn unknown_environment_and_secret_keys_are_problems() {
+        let m = Manifest::from_str(
+            "[environment]\nbrew = [\"x\"]\n[[environment.binaries]]\nurl = \"https://x/t\"\nsha265 = \"\"\npath = \"/t\"\n[[secrets]]\nname = \"A\"\nused_by = [\"x\"]\n",
+        )
+        .unwrap();
+        let p = m.problems();
+        for want in [
+            "unknown key `brew` in [environment]",
+            "unknown key `sha265` in [[environment.binaries]] (did you mean `sha256`?)",
+            "unknown key `used_by` in [[secrets]] (did you mean `used-by`?)",
+        ] {
+            assert!(p.iter().any(|x| x == want), "{want:?} not in {p:?}");
+        }
+        // a value of the wrong type doesn't parse at all
+        assert!(Manifest::from_str("[[secrets]]\nname = \"A\"\nused-by = \"mcp:x\"\n").is_err());
+        assert!(Manifest::from_str("[environment]\napt = \"ripgrep\"\n").is_err());
+    }
+
+    #[test]
+    fn bad_environment_and_secret_values_are_errors() {
+        let bin = |url: &str, sha: &str, path: &str| format!("[[environment.binaries]]\nurl = {url:?}\nsha256 = {sha:?}\npath = {path:?}\n");
+        let sha = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        for (text, want) in [
+            (bin("https://x/t", &sha.to_uppercase(), "/t"), "must be 64 lowercase hex digits"),
+            (bin("https://x/t", &sha[..63], "/t"), "must be 64 lowercase hex digits"),
+            (bin("https://x/t", "", "/t"), "needs `sha256`"),
+            (bin("", sha, "/t"), "needs `url`"),
+            (bin("https://x/t", sha, ""), "[[environment.binaries]] #1 needs `path`"),
+            (bin("ftp://x/t", sha, "/t"), "must be an http(s) URL"),
+            (bin("https://x/t", sha, "bin/t"), "must be an absolute file path"),
+            (bin("https://x/t", sha, "/usr/../etc/passwd"), "must be an absolute file path"),
+            (format!("{}{}", bin("https://x/a", sha, "/t"), bin("https://x/b", sha, "/t")), "[[environment.binaries]] /t is declared twice"),
+            ("[environment]\npip = [\"-e git+https://x\"]\n".to_string(), "[environment] pip entry"),
+            ("[environment]\napt = [\"a b\"]\n".to_string(), "must be one package"),
+            ("[[secrets]]\nused-by = [\"x\"]\n".to_string(), "needs a `name`"),
+            ("[[secrets]]\nname = \"GITHUB-TOKEN\"\n".to_string(), "isn't a valid secret name"),
+            ("[[secrets]]\nname = \"${GH}\"\n".to_string(), "isn't a valid secret name"),
+            ("[[secrets]]\nname = \"HLOCK_SECRET_\"\n".to_string(), "isn't a valid secret name"),
+            ("[[secrets]]\nname = \"GH\"\n[[secrets]]\nname = \"HLOCK_SECRET_GH\"\n".to_string(), "declared twice"),
+            ("[[secrets]]\nname = \"GH\"\nused-by = [\"\"]\n".to_string(), "used-by entry"),
+        ] {
+            let e = Manifest::from_str(&text).unwrap().check_declared().unwrap_err().to_string();
+            assert!(e.contains(want), "{text}: {e}");
+        }
+        // and `load` refuses them
+        let d = std::env::temp_dir().join(format!("hlock-manifest-declared-{}", std::process::id()));
+        std::fs::create_dir_all(&d).unwrap();
+        let p = d.join("harness.toml");
+        std::fs::write(&p, bin("https://x/t", "abc", "/t")).unwrap();
+        assert!(Manifest::load(&p).unwrap_err().to_string().contains("sha256"));
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn deps_hash_counts_environment_and_secrets_only_when_present() {
+        let base = "[skills]\nsql = \"github:acme/skills/skills/sql\"\n";
+        let m = Manifest::from_str(base).unwrap();
+        // what it was before these sections existed
+        let before = crate::hash::content_hash(&serde_json::json!({"skills": m.skills, "mcp": {}, "instructions": {}, "plugins": {}, "packages": {}, "tools": {}}));
+        assert_eq!(m.deps_hash(), before);
+        let with_env = Manifest::from_str(&format!("{base}[environment]\napt = [\"ripgrep\"]\n")).unwrap();
+        let with_secret = Manifest::from_str(&format!("{base}[[secrets]]\nname = \"GH\"\n")).unwrap();
+        assert_ne!(with_env.deps_hash(), before);
+        assert_ne!(with_secret.deps_hash(), before);
     }
 
     #[test]

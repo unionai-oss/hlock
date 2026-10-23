@@ -673,6 +673,7 @@ fn stage(name: &str, ran: bool, detail: impl Into<String>) -> serde_json::Value 
 /// recorded.
 pub fn tune(manifest: Manifest, spec: &TuneSpec) -> Result<TuneOutcome> {
     manifest.check_search()?;
+    manifest.check_declared()?;
     let depth = spec.resolved_depth().to_string();
     let backend = crate::worker::Backend::resolve(&manifest, spec.backend.as_deref())?;
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
@@ -1116,6 +1117,8 @@ fn build_tuned_lock(
     lf.policy.retries = stack.retries;
     // the sandbox is harness.toml's, whatever the base lock had
     lf.policy.sandbox = manifest.sandbox_spec().ok().flatten().map(|s| s.to_map()).unwrap_or_default();
+    // so are the environment and the declared secrets
+    lf.declare(&manifest.environment, &manifest.secrets);
     let r4 = |v: f64| (v * 1e4).round() / 1e4;
     let mut success = BTreeMap::from([("mean".to_string(), r4(measured.success_rate()))]);
     if split == "holdout" {
