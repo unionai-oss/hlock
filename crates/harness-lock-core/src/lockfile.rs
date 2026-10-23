@@ -468,13 +468,47 @@ pub struct ConfigFile {
     pub scan: Option<String>,
 }
 
-/// A secret `pin` replaced with a placeholder; `sync`/`launch` fill it from the environment.
+/// A secret the stack needs: a placeholder `pin` replaced, or one `harness.toml`'s
+/// `[[secrets]]` declares (or both). `sync`/`launch` fill it from the environment.
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
 #[serde(default, rename_all = "kebab-case")]
 pub struct SecretRef {
     /// The environment variable that supplies it (`HLOCK_SECRET_…`).
     pub name: String,
-    pub used_by: String,
+    /// What uses it: where `pin` found the value (`mcp github GITHUB_TOKEN`), or the
+    /// declaration's `used-by`. Written as a string when there's one, as older locks have it.
+    #[serde(serialize_with = "ser_used_by", deserialize_with = "de_used_by", skip_serializing_if = "Vec::is_empty")]
+    pub used_by: Vec<String>,
+    /// Declared optional: the stack runs without it.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub optional: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// Declared in `[[secrets]]`, not only found by `pin`.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub declared: bool,
+}
+
+fn ser_used_by<S: serde::Serializer>(v: &[String], s: S) -> std::result::Result<S::Ok, S::Error> {
+    match v {
+        [one] => s.serialize_str(one),
+        many => many.serialize(s),
+    }
+}
+
+/// `used-by = "…"` (what locks before declared secrets wrote) or a list.
+fn de_used_by<'de, D: serde::Deserializer<'de>>(d: D) -> std::result::Result<Vec<String>, D::Error> {
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum E {
+        S(String),
+        L(Vec<String>),
+    }
+    Ok(match E::deserialize(d)? {
+        E::S(s) if s.is_empty() => Vec::new(),
+        E::S(s) => vec![s],
+        E::L(l) => l,
+    })
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -619,6 +653,9 @@ pub struct Lockfile {
     /// APM packages declared dependencies resolved to.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub package: Vec<Package>,
+    /// What `harness.toml`'s `[environment]` declares the agent needs installed.
+    #[serde(default, skip_serializing_if = "crate::manifest::Environment::is_empty")]
+    pub environment: crate::manifest::Environment,
     /// Tune-lock-only fields (see §5.9 / `harness.tune.lock`).
     #[serde(default, skip_serializing_if = "Option::is_none", rename = "base-lock")]
     pub base_lock: Option<String>,
@@ -665,6 +702,7 @@ impl Default for Lockfile {
             config: Vec::new(),
             secret: Vec::new(),
             package: Vec::new(),
+            environment: crate::manifest::Environment::default(),
             base_lock: None,
             kind: None,
             tune: None,
@@ -789,6 +827,12 @@ impl Lockfile {
                 token(&format!("[[llm]] {} runtime", l.role), rt)?;
             }
         }
+        for s in &self.secret {
+            if crate::secrets::check_name(&s.name).is_err() {
+                return Err(Error::Lockfile(format!("[[secret]] name {:?} isn't a valid secret name (HLOCK_SECRET_ and letters, digits and _ only)", s.name)));
+            }
+        }
+        self.environment.check().map_err(Error::Lockfile)?;
         for d in &self.decider {
             if !crate::decide::AGENT_USES.contains(&d.use_.as_str()) {
                 return Err(Error::Lockfile(format!("[[decider]] use {:?} isn't one of {}", d.use_, crate::decide::AGENT_USES.join(", "))));
@@ -805,6 +849,61 @@ impl Lockfile {
             }
         }
         Ok(())
+    }
+
+    /// Bring `[environment]` and the declared `[[secret]]` entries in line with a
+    /// manifest's `[environment]` and `[[secrets]]`; returns what changed (`+ secret X`,
+    /// `- secret X`, `~ environment`), empty when nothing did.
+    ///
+    /// A declared secret's entry takes `used-by`, `optional` and `description` from the
+    /// declaration, and keeps the `used-by` it has (what `pin` found under the same name)
+    /// when the declaration gives none. An entry no longer declared is dropped, except in a
+    /// pinned lock, where `pin` may have placed the placeholder: there it stays,
+    /// undeclared, until the next pin.
+    pub fn declare(&mut self, environment: &crate::manifest::Environment, secrets: &[crate::manifest::DeclaredSecret]) -> Vec<String> {
+        let mut changes = Vec::new();
+        if &self.environment != environment {
+            changes.push(match (self.environment.is_empty(), environment.is_empty()) {
+                (true, _) => "+ environment".to_string(),
+                (_, true) => "- environment".to_string(),
+                _ => "~ environment".to_string(),
+            });
+            self.environment = environment.clone();
+        }
+        let wanted: BTreeMap<String, &crate::manifest::DeclaredSecret> = secrets.iter().map(|d| (d.full_name(), d)).collect();
+        let pin = self.is_pin();
+        self.secret.retain_mut(|s| {
+            if !s.declared || wanted.contains_key(&s.name) {
+                return true;
+            }
+            changes.push(format!("- secret {}", s.name));
+            s.declared = false;
+            s.optional = false;
+            s.description = None;
+            pin
+        });
+        for (name, d) in wanted {
+            let i = match self.secret.iter().position(|s| s.name == name) {
+                Some(i) => i,
+                None => {
+                    self.secret.push(SecretRef { name: name.clone(), ..Default::default() });
+                    self.secret.len() - 1
+                }
+            };
+            let s = &mut self.secret[i];
+            let want = SecretRef {
+                name: name.clone(),
+                used_by: if d.used_by.is_empty() { s.used_by.clone() } else { d.used_by.clone() },
+                optional: d.optional,
+                description: d.description.clone(),
+                declared: true,
+            };
+            if *s != want {
+                changes.push(format!("{} secret {name}", if s.declared { "~" } else { "+" }));
+                *s = want;
+            }
+        }
+        changes
     }
 
     pub fn save(&self, path: &Path) -> Result<()> {
@@ -936,6 +1035,72 @@ mod tests {
         let _ = std::fs::remove_dir_all(&d);
     }
 
+    fn declared(name: &str, used_by: &[&str], optional: bool, description: Option<&str>) -> crate::manifest::DeclaredSecret {
+        crate::manifest::DeclaredSecret { name: name.into(), used_by: used_by.iter().map(|s| s.to_string()).collect(), optional, description: description.map(str::to_string) }
+    }
+
+    #[test]
+    fn secret_used_by_reads_a_string_or_a_list_and_writes_one_as_a_string() {
+        // what pin has always written
+        let old = format!("{HEAD}[[secret]]\nname = \"HLOCK_SECRET_GITHUB_GITHUB_TOKEN\"\nused-by = \"mcp github GITHUB_TOKEN\"\n");
+        let l = Lockfile::from_str(&old).unwrap();
+        assert_eq!(l.secret[0].used_by, ["mcp github GITHUB_TOKEN"]);
+        assert!(!l.secret[0].declared && !l.secret[0].optional && l.secret[0].description.is_none());
+        let text = toml::to_string(&l).unwrap();
+        assert!(text.contains("used-by = \"mcp github GITHUB_TOKEN\"\n") && !text.contains("declared") && !text.contains("optional"), "{text}");
+        let new = format!("{HEAD}[[secret]]\nname = \"HLOCK_SECRET_GH\"\nused-by = [\"mcp:github\", \"skill:release\"]\noptional = true\ndescription = \"d\"\ndeclared = true\n");
+        let l = Lockfile::from_str(&new).unwrap();
+        assert_eq!(l.secret[0].used_by, ["mcp:github", "skill:release"]);
+        let back = Lockfile::from_str(&toml::to_string(&l).unwrap()).unwrap();
+        assert_eq!(back.secret, l.secret);
+        // none: no key at all
+        let l = Lockfile::from_str(&format!("{HEAD}[[secret]]\nname = \"HLOCK_SECRET_GH\"\n")).unwrap();
+        assert!(l.secret[0].used_by.is_empty());
+        assert!(!toml::to_string(&l).unwrap().contains("used-by"));
+    }
+
+    #[test]
+    fn declare_merges_secrets_and_records_the_environment() {
+        let mut l = Lockfile { kind: Some("pin".into()), ..Default::default() };
+        l.secret.push(SecretRef { name: "HLOCK_SECRET_GH".into(), used_by: vec!["mcp github GITHUB_TOKEN".into()], ..Default::default() });
+        l.secret.push(SecretRef { name: "HLOCK_SECRET_OTHER".into(), used_by: vec!["settings env OTHER".into()], ..Default::default() });
+        let m = crate::manifest::Manifest::from_str(
+            "[environment]\napt = [\"ripgrep\"]\n[[environment.binaries]]\nurl = \"https://x/t\"\nsha256 = \"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\"\npath = \"/usr/local/bin/t\"\n",
+        )
+        .unwrap();
+        let secrets = [declared("GH", &[], false, Some("Opens PRs.")), declared("LINEAR", &["mcp:linear"], true, None)];
+        let changes = l.declare(&m.environment, &secrets);
+        assert_eq!(changes, ["+ environment", "+ secret HLOCK_SECRET_GH", "+ secret HLOCK_SECRET_LINEAR"]);
+        let gh = l.secret.iter().find(|s| s.name == "HLOCK_SECRET_GH").unwrap();
+        assert_eq!(gh.used_by, ["mcp github GITHUB_TOKEN"], "no used-by declared: pin's stays");
+        assert!(gh.declared && gh.description.as_deref() == Some("Opens PRs."));
+        let lin = l.secret.iter().find(|s| s.name == "HLOCK_SECRET_LINEAR").unwrap();
+        assert!(lin.declared && lin.optional && lin.used_by == ["mcp:linear"]);
+        assert!(!l.secret.iter().find(|s| s.name == "HLOCK_SECRET_OTHER").unwrap().declared, "pin's own entries are left alone");
+        assert!(l.declare(&m.environment, &secrets).is_empty(), "applying it again changes nothing");
+
+        // the environment round-trips through the lock file
+        let back = Lockfile::from_str(&toml::to_string(&l).unwrap()).unwrap();
+        assert_eq!(back.environment, m.environment);
+        assert_eq!(back.secret, l.secret);
+        let text = toml::to_string(&l).unwrap();
+        assert!(text.contains("[environment]\napt = [\"ripgrep\"]") && text.contains("[[environment.binaries]]"), "{text}");
+
+        // a declaration that changes, and one that goes: in a pin, its entry stays undeclared
+        let changes = l.declare(&Default::default(), &[declared("GH", &["mcp:github"], false, None)]);
+        assert_eq!(changes, ["- environment", "- secret HLOCK_SECRET_LINEAR", "~ secret HLOCK_SECRET_GH"]);
+        assert!(l.environment.is_empty());
+        let lin = l.secret.iter().find(|s| s.name == "HLOCK_SECRET_LINEAR").unwrap();
+        assert!(!lin.declared && !lin.optional);
+        assert_eq!(l.secret.iter().find(|s| s.name == "HLOCK_SECRET_GH").unwrap().used_by, ["mcp:github"]);
+
+        // in a resolved lock, an entry no longer declared is dropped
+        let mut r = Lockfile::default();
+        r.declare(&Default::default(), &[declared("GH", &[], false, None)]);
+        assert_eq!(r.declare(&Default::default(), &[]), ["- secret HLOCK_SECRET_GH"]);
+        assert!(r.secret.is_empty());
+    }
+
     #[test]
     fn names_that_become_paths_or_commands_are_refused() {
         for (body, field) in [
@@ -950,6 +1115,10 @@ mod tests {
             ("[[decider]]\nuse = \"stop\"\nmodel = \"kev $(id)\"\n", "[[decider]] stop model"),
             ("[[decider]]\nuse = \"stop\"\nmodel = \"kev\"\n[[decider.wiring]]\nfile = \"settings\"\nevent = \"Stop; rm\"\n", "wiring event"),
             ("[[decider]]\nuse = \"stop\"\nmodel = \"kev\"\n[decider.policy]\npath = \"/etc/passwd\"\ndigest = \"\"\n", "policy path"),
+            ("[[secret]]\nname = \"HLOCK_SECRET_X; rm -rf ~\"\n", "[[secret]] name"),
+            ("[[secret]]\nname = \"GITHUB_TOKEN\"\n", "[[secret]] name"),
+            ("[[environment.binaries]]\nurl = \"https://x/t\"\nsha256 = \"abc\"\npath = \"/t\"\n", "sha256"),
+            ("[environment]\napt = [\"--allow-unauthenticated\"]\n", "[environment] apt entry"),
         ] {
             let e = Lockfile::from_str(&format!("{HEAD}{body}")).unwrap_err().to_string();
             assert!(e.contains(field), "{body}: {e}");

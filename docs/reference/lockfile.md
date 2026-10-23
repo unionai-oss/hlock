@@ -198,6 +198,8 @@ the provider publishes a price. `[evidence.sandbox]` records what trials and gra
 | `[verify]` | Runtime verification thresholds: `canary-tasks`, `min-success-rate`, `fingerprint-tolerance` |
 | `[provenance]` | The backend that produced the lock, the search settings (`candidates`, the number of stacks; `trials` and `holdout-trials` run; `cached`, those reused), for a pinned lock the `scopes` it captured and any `user-include` patterns, and `openapm` (`"0.1"`) when APM packages were resolved |
 | `[[package]]` | [APM packages](../guides/dependencies.md#apm-packages) declared dependencies resolved to (see below) |
+| `[environment]` | What `harness.toml`'s [`[environment]`](manifest.md#environment) declares the agent needs installed (see [below](#declared-environment-and-secrets)) |
+| `[[secret]]` | The secrets the stack needs: placeholders a [pin](#pinned-locks) replaced, and those `harness.toml`'s [`[[secrets]]`](manifest.md#secrets) declares (see [below](#declared-environment-and-secrets)) |
 
 ## Pinned locks
 
@@ -216,7 +218,7 @@ MCP servers carry `transport`, `command`, `args`, `url`, `env`, `headers`, `scop
 | `[[native]]` | Plugins, packages, extensions and marketplaces: `kind` (e.g. `claude-code.plugin`, `pi.package`), `name`, `version`, `source`, `revision`, `integrity`, `enabled`, `config` |
 | `[[runtime]]` | Inference runtimes: `name`, `location` (`local` or `network`), `version`, `source`, `endpoint`, and `[[runtime.model]]` entries with `id`, `source`, `revision`, `digest`, `size-bytes`, `present` |
 | `[[config]]` | Harness config files: `id`, `path`, `format`, `restore` (`whole`, `pointers`, `record`), `pointers`, `digest`, `vendored` |
-| `[[secret]]` | Placeholders that replaced secrets: `name` (the environment variable that supplies it) and `used-by` |
+| `[[secret]]` | Placeholders that replaced secrets: `name` (the environment variable that supplies it) and `used-by`, where the value was |
 
 ## Scans
 
@@ -255,6 +257,46 @@ tree's hash, computed as APM computes `content_hash`), `depth` (1 for one the pr
 declares), its `apm.yml` `version` and `license`, what it held that hlock doesn't install
 (`skipped`: prompts, agents, hooks), and the same `declared`, `constraint`,
 `resolved-tag`, `resolved-ref`, `commit` and `required-by` keys.
+
+## Declared environment and secrets
+
+`resolve`, `tune` and `sync` record `harness.toml`'s [`[environment]`](manifest.md#environment)
+and [`[[secrets]]`](manifest.md#secrets) in the lock, and `pin` keeps what the previous
+pin recorded. `sync --frozen` fails when they differ from the manifest.
+
+```toml title="harness.lock"
+[environment]
+apt = ["protobuf-compiler", "ripgrep"]
+pip = ["ruff==0.6.9"]
+
+[[environment.binaries]]
+url = "https://example.com/tool-1.2.3-linux-x64"
+sha256 = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+path = "/usr/local/bin/tool"
+
+[[secret]]
+name = "HLOCK_SECRET_GITHUB_TOKEN"
+used-by = ["mcp:github", "skill:release"]
+description = "Opens PRs on the user's behalf."
+declared = true
+```
+
+`[environment]` has the manifest's keys: the package lists as declared, and each binary's
+`url`, `sha256` and `path`. Nothing installs them yet.
+
+A declared secret's `[[secret]]` entry has these keys besides `name`, which is the
+`HLOCK_SECRET_…` variable that supplies it:
+
+| Key | Description |
+|---|---|
+| `used-by` | The declaration's `used-by`. A string when there's one value (as every lock before declared secrets has it), else a list. When the declaration gives none, the entry keeps the `used-by` a pin found |
+| `optional` | `true` when the declaration says the stack runs without it |
+| `description` | The declaration's `description` |
+| `declared` | `true`: `harness.toml` declares it, not only a pin found it |
+
+When a pin found a placeholder of the same name, the two are one entry. A secret no
+longer declared leaves a resolved lock; a pinned one keeps the entry, undeclared, since the
+pin may have placed its placeholder, until the next `hlock pin`.
 
 ## Localized locks
 
@@ -330,6 +372,9 @@ command-line words:
 | `vendored` (skills, instructions, config), `[decider.policy] path` | A relative path inside the project: no leading `/`, no `..` |
 | `[harness] version`, `[[native]] version`, `[[runtime]]` `name`, `version`, and each model's `id`, `source` and `revision`, `[[llm]] runtime`, `[[decider]]` `model`, `runtime` and wiring `event` | Letters, digits and `._:/@+-`, not starting with `-` |
 | `[[decider]] use` | `approve`, `stop`, `route`, or `tool` |
+| `[[secret]] name` | `HLOCK_SECRET_` and letters, digits and `_` |
+| `[environment]` package lists | One word each, not starting with `-` |
+| `[[environment.binaries]]` | An `http(s)` `url`, a `sha256` of 64 lowercase hex digits, and an absolute `path` with no `..` |
 
 A lock that fails a check isn't read: the error names the field. hlock writes locks
 atomically (a temporary file, then a rename), and leaves out JSON `null`s, which TOML

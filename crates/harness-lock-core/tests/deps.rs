@@ -212,3 +212,33 @@ fn apm_packages_resolve_as_one_graph() {
     assert!(e.contains("no version satisfies") && e.contains("app -> lib -> base") && e.contains("other -> base"), "{e}");
     let _ = std::fs::remove_dir_all(&w.root);
 }
+
+#[test]
+fn refresh_records_the_environment_and_declared_secrets() {
+    let w = World::new("declared");
+    let (project, ctx) = w.project();
+    let reg = Registry::builtin();
+    let text = "[environment]\napt = [\"ripgrep\"]\n\n[[secrets]]\nname = \"GITHUB_TOKEN\"\nused-by = [\"mcp:github\"]\ndescription = \"Opens PRs.\"\n";
+    write(&project.join("harness.toml"), text);
+    let m = Manifest::load(&project.join("harness.toml")).unwrap();
+    let mut lock = Lockfile { kind: Some("pin".into()), ..Default::default() };
+    lock.harness.name = "claude-code".into();
+
+    let e = deps::refresh(Some(&m), &mut lock.clone(), &reg, &ctx, true).unwrap_err().to_string();
+    assert!(e.contains("+ environment") && e.contains("+ secret HLOCK_SECRET_GITHUB_TOKEN"), "--frozen names what's missing: {e}");
+    let changes = deps::refresh(Some(&m), &mut lock, &reg, &ctx, false).unwrap();
+    assert_eq!(changes, ["+ environment", "+ secret HLOCK_SECRET_GITHUB_TOKEN"]);
+    assert_eq!(lock.environment.apt, ["ripgrep"]);
+    let s = &lock.secret[0];
+    assert!(s.declared && s.used_by == ["mcp:github"] && s.description.as_deref() == Some("Opens PRs."));
+    assert_eq!(lock.manifest_hash, Some(m.deps_hash()));
+    lock.save(&project.join("harness.lock")).unwrap();
+    let mut back = Lockfile::load(&project.join("harness.lock")).unwrap();
+    assert!(deps::refresh(Some(&m), &mut back, &reg, &ctx, true).unwrap().is_empty(), "in line with the manifest");
+
+    // a bad declaration stops the refresh
+    write(&project.join("harness.toml"), "[[secrets]]\nname = \"GITHUB-TOKEN\"\n");
+    let bad = Manifest::from_str("[[secrets]]\nname = \"GITHUB-TOKEN\"\n").unwrap();
+    assert!(Manifest::load(&project.join("harness.toml")).is_err());
+    assert!(deps::refresh(Some(&bad), &mut back, &reg, &ctx, false).unwrap_err().to_string().contains("valid secret name"));
+}

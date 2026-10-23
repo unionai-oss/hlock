@@ -479,6 +479,7 @@ impl Resolver {
     /// target, the stacks (less those the policy denies), and the search tasks.
     fn prepare_search(&mut self) -> Result<Search> {
         self.manifest.check_search()?;
+        self.manifest.check_declared()?;
         self.prepare_trials()?;
         // problems in the objective or the deciders stop the resolve before any trial runs
         crate::search::parse_constraints(&self.manifest.objective.constraints)?;
@@ -749,7 +750,7 @@ impl Resolver {
             search_map.insert("holdout-trials".to_string(), serde_json::json!(h.n));
         }
 
-        Ok(Lockfile {
+        let mut lf = Lockfile {
             manifest_hash: Some(self.manifest.manifest_hash()),
             stack: stack_map,
             llm: llms,
@@ -792,7 +793,9 @@ impl Resolver {
                 ..Default::default()
             },
             ..Default::default()
-        })
+        };
+        lf.declare(&self.manifest.environment, &self.manifest.secrets);
+        Ok(lf)
     }
 
     /// The judge that scored the winner's `judge` and `trace` graders, if any ran.

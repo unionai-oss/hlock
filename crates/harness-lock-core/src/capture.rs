@@ -509,7 +509,7 @@ impl Secrets {
         }
         let name = self.placeholder_name(context);
         self.by_value.insert(id, name.clone());
-        self.refs.push(SecretRef { name: name.clone(), used_by: used_by.to_string() });
+        self.refs.push(SecretRef { name: name.clone(), used_by: vec![used_by.to_string()], ..Default::default() });
         format!("${{{name}}}")
     }
 
