@@ -1,0 +1,56 @@
+# Harness profile: VS Code with GitHub Copilot. A desktop app: hlock pins and restores
+# its MCP servers, skills and instructions but never starts it. Only the default VS Code
+# profile is read (User/mcp.json, not User/profiles/<id>/mcp.json).
+id = "vscode"
+name = "VS Code"
+kind = "app"
+aliases = ["code", "vs-code", "visual-studio-code"]
+vendor = "Microsoft"
+homepage = "https://code.visualstudio.com"
+support = "basic"
+open-source = false
+local-models = false
+# the `code` shim the app installs; the app's own executable is never run
+binaries = ["code"]
+version = { args = ["--version"] }
+active-env = ["VSCODE_PID"]
+config-root = { default = "{app-config}/Code/User" }
+instructions = ["AGENTS.md", ".github/copilot-instructions.md"]
+rules = { dir = ".github/instructions", ext = ".instructions.md" }
+
+[app]
+bundles = ["Visual Studio Code.app"]
+paths.windows = ["~/AppData/Local/Programs/Microsoft VS Code/Code.exe"]
+paths.linux = ["/usr/share/code/code", "/snap/bin/code"]
+# it reloads mcp.json while it runs
+reload = "auto"
+
+[[install]]
+method = "brew-cask"
+package = "visual-studio-code"
+[[install]]
+method = "app"
+path-hints = ["/Visual Studio Code.app"]
+command = "Download VS Code from https://code.visualstudio.com/download"
+
+[files.mcp]
+path = "{root}/mcp.json"
+format = "jsonc"
+restore = "whole"
+[files.project-mcp]
+path = ".vscode/mcp.json"
+format = "jsonc"
+restore = "record"
+
+[mcp]
+sources = ["mcp#/servers", "project-mcp#/servers"]
+write = "mcp#/servers"
+shape = "vscode"
+
+[skills]
+dirs = [".github/skills", ".agents/skills", "~/.copilot/skills", "~/.agents/skills"]
+write = "~/.copilot/skills"
+
+[[unmanaged]]
+what = "Settings (settings.json) and other VS Code profiles"
+where = "the app; Settings Sync keeps them in your Microsoft or GitHub account"

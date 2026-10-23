@@ -43,7 +43,7 @@ prints where the active profile came from.
 ```toml
 id = "my-agent"
 name = "My Agent"
-kind = "cli"                       # cli | framework | custom
+kind = "cli"                       # cli | app | framework | custom
 aliases = ["myagent"]
 binaries = ["my-agent"]
 version = { args = ["--version"] }
@@ -83,7 +83,8 @@ prompt = ["run", "{prompt}"]       # one prompt, non-interactively: `hlock run`
 
 ### Paths
 
-`~` is your home directory and `{root}` is the config root. A relative path is relative to
+`~` is your home directory, `{root}` is the config root, and `{app-config}` is the OS's
+application config directory (see [Desktop apps](#desktop-apps)). A relative path is relative to
 the project (the current directory). `config-root.env` is the variable that relocates the
 root; when it names a parent directory (like `XDG_CONFIG_HOME`), add
 `suffix = "<subdir>"`. A file that lives outside the root by default but inside it when the
@@ -127,6 +128,55 @@ List only the workspace files you author in `instructions`, such as `SOUL.md` an
 daily notes, `hlock check` reports drift after every conversation, and `hlock sync`
 overwrites the agent's memory.
 
+### Desktop apps
+
+Set `kind = "app"` for a desktop app a person starts, such as Claude Desktop or VS Code.
+hlock pins and restores its config but never runs it: `launch`, `run`, `resolve` and `tune`
+refuse it, and `sync` writes its config only with `--apps` (see
+[Desktop apps](harnesses.md#desktop-apps)). The `[app]` table says how to find it:
+
+```toml
+id = "claude-desktop"
+name = "Claude Desktop"
+kind = "app"
+config-root = { default = "{app-config}/Claude" }
+
+[app]
+bundles = ["Claude.app"]           # macOS: looked for in /Applications and ~/Applications
+paths.windows = ["~/AppData/Local/AnthropicClaude/claude.exe"]   # more places, per OS
+process = "Claude"                 # its process name, for quit-to-write
+quit-to-write = true               # don't write its config while it runs
+reload = "restart"                 # restart | auto: how it picks up a change
+
+[[install]]
+method = "brew-cask"
+package = "claude"
+[[install]]
+method = "app"                     # a download: always a manual step
+path-hints = ["/Claude.app"]
+command = "Download Claude Desktop from https://claude.ai/download"
+
+[mcp]
+sources = ["config#/mcpServers"]
+write = "config#/mcpServers"
+transports = ["stdio"]             # what its MCP config can hold (default: any)
+
+[[unmanaged]]                      # setup outside any file hlock restores
+what = "Connectors (remote MCP servers)"
+where = "your claude.ai account"
+url = "https://claude.ai/settings/connectors"
+```
+
+hlock reads the version from the bundle's `Info.plist` on macOS, else from `binaries` on
+`PATH` with `version.args`. List only CLI shims there (`code`), never the app's own
+executable: probing runs it, and a GUI app would open. `{app-config}` is the OS's
+application config directory: `~/Library/Application Support` on macOS, `%APPDATA%` on
+Windows, and `$XDG_CONFIG_HOME` or `~/.config` elsewhere. A bundle's path has no trailing
+slash, so an `app` method's `path-hints` entry is `"/Claude.app"`.
+
+A project profile (`.hlock/profiles/`) may declare `[app]`, but its `bundles` must be plain
+names ending in `.app`, `process` a plain name, and its `paths` are ignored.
+
 ### Restore policies
 
 `restore` says what a file contributes to a locked setup: `whole` (the whole file),
@@ -148,7 +198,9 @@ harness expands references everywhere hlock writes secrets in that file. See
 | Field | Meaning |
 |---|---|
 | `id`, `name`, `aliases` | Identity; any alias works wherever a harness name does |
-| `kind` | `cli`, `framework`, or `custom` (default: `cli`, or `custom` with `run`) |
+| `kind` | `cli`, `app`, `framework`, or `custom` (default: `cli`, or `custom` with `run`) |
+| `app` | Desktop apps: `bundles`, `paths.<os>`, `process`, `quit-to-write`, `reload`; see [Desktop apps](#desktop-apps) |
+| `unmanaged` | Setup kept outside any file hlock restores, which `sync` and `hlock harness show` name: a list of `{ what, where, url }` |
 | `autonomous` | `true` for a `cli` harness that runs as a long-lived gateway (OpenClaw, nanobot, …); see [Autonomous agents](#autonomous-agents) |
 | `support` | `full` or `basic` (default `basic`) |
 | `vendor`, `homepage` | Informational |
@@ -156,11 +208,11 @@ harness expands references everywhere hlock writes secrets in that file. See
 | `version.args` | Arguments that print the version; the first dotted number is used |
 | `active-env` | Variables whose presence means hlock runs inside this harness |
 | `config-root` | `env`, `suffix`, `default` |
-| `install` | Install methods, most preferred first: `method`, `package`, `command`, `path-hints` |
+| `install` | Install methods, most preferred first: `method`, `package`, `command`, `path-hints`. An `app` method is a download, with `command` as the hint |
 | `files.<id>` | `path`, `isolated`, `format`, `restore`, `pointers`, `env-ref` |
 | `model` | `default`, `small`, `provider`, `base-url` sources; `format`; `default-provider` |
 | `providers` | `source`, plus pointers into each provider for `base-url` and `models` |
-| `mcp` | `sources`, `write`, `shape` (`standard`, `opencode`, `codex`, `goose`, `openclaw`, `nanobot`): how `launch` writes servers |
+| `mcp` | `sources`, `write`, `shape` (`standard`, `opencode`, `codex`, `goose`, `openclaw`, `nanobot`, `vscode`, `zed`): how servers are written; `transports`: the ones its config can hold (`stdio`, `http`, `sse`; default all) |
 | `skills` | `dirs`, `write`, `builtin-dirs`, `builtin-manifest` |
 | `bundles` | Plugins/packages: `kind`, `extractor` (`claude-plugins`, `pi-packages`, `npm-list`), `source`, `lockfile` |
 | `instructions` | Instruction files the harness reads |

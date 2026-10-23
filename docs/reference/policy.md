@@ -62,6 +62,12 @@ For resolved locks (those with evidence); a pinned lock has none to check.
 | `max-cost-usd-per-task` | The highest mean cost per task allowed |
 | `max-age-days` | How old the lock's measurement may be, by its `generated-at` |
 
+## `[sandbox]`
+
+| Key | Description |
+|---|---|
+| `require` | `true`: a lock without a [sandbox](../guides/sandbox.md), or a run with `--no-sandbox` or `HLOCK_NO_SANDBOX`, violates the policy. Checked at `pin`, `launch`, `run`, `evals run`, `evals grade`, `resolve` and `tune` |
+
 ## Patterns
 
 Patterns are anchored at both ends. `*` matches any run of characters except `/`, and `**`

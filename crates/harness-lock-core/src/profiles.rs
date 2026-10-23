@@ -38,6 +38,9 @@ const BUILTIN_HARNESSES: &[(&str, &str)] = &[
     ("picoclaw", include_str!("../profiles/harnesses/picoclaw.toml")),
     ("zeroclaw", include_str!("../profiles/harnesses/zeroclaw.toml")),
     ("ironclaw", include_str!("../profiles/harnesses/ironclaw.toml")),
+    // desktop apps: hlock pins and restores their config but never starts them (`kind = "app"`)
+    ("claude-desktop", include_str!("../profiles/harnesses/claude-desktop.toml")),
+    ("vscode", include_str!("../profiles/harnesses/vscode.toml")),
     // frameworks: code harnesses a project builds on (`[harnesses.<id>] framework = …`)
     ("pydantic-ai", include_str!("../profiles/harnesses/pydantic-ai.toml")),
     ("deepagents", include_str!("../profiles/harnesses/deepagents.toml")),
@@ -104,11 +107,31 @@ impl Ctx {
         self.env.get(key).map(String::as_str).filter(|v| !v.is_empty())
     }
 
-    /// Expand `~`, `{root}`, `{home}` and relative (project) paths.
+    /// The operating system profiles are read for: `HLOCK_OS` when set (tests choose
+    /// one this way), else this build's (`macos`, `linux`, `windows`, …).
+    pub fn os(&self) -> String {
+        self.var("HLOCK_OS").map(str::to_ascii_lowercase).unwrap_or_else(|| std::env::consts::OS.to_string())
+    }
+
+    /// The per-user application config directory desktop apps keep their settings in
+    /// (`{app-config}` in a profile): `~/Library/Application Support` on macOS,
+    /// `%APPDATA%` on Windows, else `$XDG_CONFIG_HOME` or `~/.config`.
+    pub fn app_config_dir(&self) -> PathBuf {
+        match self.os().as_str() {
+            "macos" => self.home.join("Library/Application Support"),
+            "windows" => self.var("APPDATA").map(PathBuf::from).unwrap_or_else(|| self.home.join("AppData/Roaming")),
+            _ => self.var("XDG_CONFIG_HOME").map(PathBuf::from).unwrap_or_else(|| self.home.join(".config")),
+        }
+    }
+
+    /// Expand `~`, `{root}`, `{home}`, `{app-config}` and relative (project) paths.
     pub fn expand(&self, template: &str, root: Option<&Path>) -> PathBuf {
         let mut s = template.to_string();
         if let Some(r) = root {
             s = s.replace("{root}", &r.to_string_lossy());
+        }
+        if s.contains("{app-config}") {
+            s = s.replace("{app-config}", &self.app_config_dir().to_string_lossy());
         }
         s = s.replace("{home}", &self.home.to_string_lossy());
         if s == "~" {
@@ -220,8 +243,38 @@ pub struct McpSpec {
     pub sources: Vec<String>,
     pub write: Option<String>,
     /// How servers are written: `standard` (`command`/`args`/`env`, `url`/`headers`),
-    /// `opencode`, `goose`, or `codex`.
+    /// `opencode`, `goose`, `codex`, `vscode`, or `zed`.
     pub shape: Option<String>,
+    /// Transports the MCP config can hold (`stdio`, `http`, `sse`); empty means all.
+    /// Claude Desktop's file takes only `stdio`.
+    pub transports: Vec<String>,
+}
+
+/// A desktop app (`kind = "app"`): where it's installed and how it takes config changes.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default, rename_all = "kebab-case")]
+pub struct AppSpec {
+    /// macOS app bundles, looked for in `/Applications` and `~/Applications`
+    /// (or `HLOCK_APP_DIRS`).
+    pub bundles: Vec<String>,
+    /// More install locations per OS (`macos`, `linux`, `windows`).
+    pub paths: BTreeMap<String, Vec<String>>,
+    /// The running app's process name, for `quit-to-write`.
+    pub process: Option<String>,
+    /// The app may overwrite its config while it runs: write it only when it's quit.
+    pub quit_to_write: bool,
+    /// How the app picks up a config change: `restart` or `auto`.
+    pub reload: Option<String>,
+}
+
+/// Setup a harness keeps outside any file hlock restores (an account, an app database).
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default, rename_all = "kebab-case")]
+pub struct Unmanaged {
+    pub what: String,
+    #[serde(rename = "where")]
+    pub where_: String,
+    pub url: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -399,8 +452,9 @@ pub struct NativeDeciderSpec {
 pub struct HarnessProfile {
     pub id: String,
     pub name: String,
-    /// `cli` (an installed agent CLI), `framework` (a Python/JS agent library), or
-    /// `custom` (a project's own agent, declared under `[harnesses.<id>]`).
+    /// `cli` (an installed agent CLI), `framework` (a Python/JS agent library),
+    /// `custom` (a project's own agent, declared under `[harnesses.<id>]`), or `app` (a
+    /// desktop app a person starts; hlock pins and restores its config but never runs it).
     pub kind: String,
     /// A long-running, self-directed agent (a gateway with chat channels, schedules
     /// and memory) rather than a session a person drives. Docs and `hlock harness list`
@@ -434,6 +488,10 @@ pub struct HarnessProfile {
     pub active_env: Vec<String>,
     pub config_root: ConfigRoot,
     pub instructions: Vec<String>,
+    /// Desktop apps: where the app is installed and how it takes changes.
+    pub app: Option<AppSpec>,
+    /// Setup kept outside any file hlock restores, which `sync` and `harness show` name.
+    pub unmanaged: Vec<Unmanaged>,
     /// A project directory the harness reads every instruction file in, where
     /// `hlock add instructions` installs one. Without it, a declared instruction file
     /// becomes the project's own instruction file.
@@ -513,6 +571,21 @@ impl HarnessProfile {
             }
         }
         ctx.expand(&cr.default, None)
+    }
+
+    /// A desktop app (`kind = "app"`), which hlock never starts.
+    pub fn is_app(&self) -> bool {
+        self.kind == "app"
+    }
+
+    /// Why a command that starts the harness can't take this one: it's a desktop app.
+    pub fn app_refusal(&self) -> Option<Error> {
+        self.is_app().then(|| Error::Profile(format!("{} is a desktop app, and hlock can't start it. `hlock sync --apps` puts the setup in place; then open the app", self.name)))
+    }
+
+    /// Whether the harness's MCP config can hold a server with this transport.
+    pub fn holds_transport(&self, transport: &str) -> bool {
+        self.mcp.transports.is_empty() || self.mcp.transports.iter().any(|t| t == transport)
     }
 
     /// Whether `config_root` is currently relocated by its variable.
@@ -631,6 +704,25 @@ fn confine(notes: &mut Vec<String>, origin: &Path, binaries: &mut Vec<String>, v
     }
 }
 
+/// Keep a project profile's `[app]` to bundle names and a process name: no install paths
+/// (anything hlock looks at by path comes from a profile you put on this machine).
+fn confine_app(notes: &mut Vec<String>, origin: &Path, app: &mut Option<AppSpec>) {
+    let Some(app) = app else { return };
+    let plain_bundle = |b: &String| b.ends_with(".app") && !b.contains(['/', '\\']) && b != ".app";
+    for b in app.bundles.iter().filter(|b| !plain_bundle(b)) {
+        notes.push(format!("{}: ignored app bundle {b:?}; a project profile names a bundle like \"Name.app\"", origin.display()));
+    }
+    app.bundles.retain(plain_bundle);
+    if !app.paths.is_empty() {
+        notes.push(format!("{}: ignored [app] paths; a project profile can't name install locations", origin.display()));
+        app.paths.clear();
+    }
+    if app.process.as_deref().is_some_and(|p| !crate::fsutil::plain_token(p)) {
+        notes.push(format!("{}: ignored app process {:?}; it must be a plain name", origin.display(), app.process.as_deref().unwrap_or_default()));
+        app.process = None;
+    }
+}
+
 pub fn parse_harness(text: &str, origin: &str) -> Result<HarnessProfile> {
     let mut p: HarnessProfile =
         toml::from_str(text).map_err(|e| Error::Profile(format!("invalid harness profile {origin}: {e}")))?;
@@ -707,6 +799,7 @@ impl Registry {
                 continue;
             }
             confine(&mut self.notes, &path, &mut p.binaries, &mut p.version, Some(&mut p.run.python));
+            confine_app(&mut self.notes, &path, &mut p.app);
             self.harnesses.push(p);
         }
         for path in toml_files(&dir.join("runtimes")) {
@@ -906,6 +999,9 @@ pub struct Probe {
 const VERSION_TIMEOUT: Duration = Duration::from_secs(8);
 
 pub fn probe_harness(p: &HarnessProfile, ctx: &Ctx) -> Probe {
+    if p.is_app() {
+        return probe_app(p, ctx);
+    }
     if p.kind != "cli" {
         return probe_code_harness(p, ctx);
     }
@@ -913,6 +1009,93 @@ pub fn probe_harness(p: &HarnessProfile, ctx: &Ctx) -> Probe {
     out.config_root = Some(p.config_root(ctx).to_string_lossy().into_owned());
     out.active = p.is_active(ctx);
     out
+}
+
+/// Where macOS app bundles are looked for: `HLOCK_APP_DIRS` (`:`-separated), else
+/// `/Applications` and `~/Applications`.
+pub fn app_dirs(ctx: &Ctx) -> Vec<PathBuf> {
+    match ctx.var("HLOCK_APP_DIRS") {
+        Some(v) => std::env::split_paths(v).collect(),
+        None => vec![PathBuf::from("/Applications"), ctx.home.join("Applications")],
+    }
+}
+
+/// A desktop app: its bundle (macOS), an install path for this OS, or a CLI shim on
+/// `PATH`, in that order. The version is the bundle's `CFBundleShortVersionString`, else
+/// the shim's. The app's own executable is never run: a GUI app would open.
+fn probe_app(p: &HarnessProfile, ctx: &Ctx) -> Probe {
+    let mut out = Probe { id: p.id.clone(), config_root: Some(p.config_root(ctx).to_string_lossy().into_owned()), ..Default::default() };
+    let app = p.app.clone().unwrap_or_default();
+    let os = ctx.os();
+    let mut found: Option<PathBuf> = None;
+    if os == "macos" {
+        for dir in app_dirs(ctx) {
+            if let Some(b) = app.bundles.iter().map(|b| dir.join(b)).find(|b| b.is_dir()) {
+                out.version = bundle_version(&b, ctx);
+                found = Some(b);
+                break;
+            }
+        }
+    }
+    if found.is_none() {
+        found = app.paths.get(&os).into_iter().flatten().map(|x| ctx.expand(x, None)).find(|x| x.exists());
+    }
+    let shim = p.binaries.iter().find_map(|b| ctx.which(b));
+    if out.version.is_none() && !p.version.args.is_empty() {
+        if let Some(bin) = &shim {
+            out.version = run_capture(bin, &p.version.args, ctx, VERSION_TIMEOUT).and_then(|t| t.lines().find_map(extract_version));
+        }
+    }
+    let Some(at) = found.or(shim) else { return out };
+    out.installed = true;
+    out.binary = Some(at.to_string_lossy().into_owned());
+    let (mut method, mut package) = detect_install(&std::fs::canonicalize(&at).unwrap_or(at.clone()), &p.install);
+    if method.is_none() || method.as_deref() == Some("app") {
+        if let Some(cask) = find_method(&p.install, "brew-cask").and_then(|m| m.package.clone()).filter(|c| in_caskroom(c, ctx)) {
+            method = Some("brew-cask".into());
+            package = Some(cask);
+        }
+    }
+    let method = method.unwrap_or_else(|| "app".into());
+    out.source = Some(source_spec(&method, package.as_deref(), out.version.as_deref()));
+    out.method = Some(method);
+    out
+}
+
+/// Whether Homebrew installed the cask `name`: `<prefix>/Caskroom/<name>` exists.
+fn in_caskroom(name: &str, ctx: &Ctx) -> bool {
+    let mut prefixes: Vec<PathBuf> = ctx.var("HOMEBREW_PREFIX").map(PathBuf::from).into_iter().collect();
+    prefixes.extend([PathBuf::from("/opt/homebrew"), PathBuf::from("/usr/local")]);
+    prefixes.iter().any(|p| p.join("Caskroom").join(name).is_dir())
+}
+
+/// A macOS bundle's `CFBundleShortVersionString`. An XML `Info.plist` is read directly;
+/// a binary one is converted by `/usr/bin/plutil`.
+pub fn bundle_version(bundle: &Path, ctx: &Ctx) -> Option<String> {
+    let plist = bundle.join("Contents/Info.plist");
+    let bytes = std::fs::read(&plist).ok()?;
+    let text = if bytes.starts_with(b"bplist00") {
+        let plutil = Path::new("/usr/bin/plutil");
+        if !plutil.is_file() {
+            return None;
+        }
+        let args = ["-convert", "xml1", "-o", "-"].iter().map(|a| a.to_string()).chain([plist.to_string_lossy().into_owned()]).collect::<Vec<_>>();
+        run_capture(plutil, &args, ctx, VERSION_TIMEOUT)?
+    } else {
+        String::from_utf8_lossy(&bytes).into_owned()
+    };
+    plist_string(&text, "CFBundleShortVersionString").or_else(|| plist_string(&text, "CFBundleVersion"))
+}
+
+/// The `<string>` after `<key>{key}</key>` in an XML property list.
+fn plist_string(xml: &str, key: &str) -> Option<String> {
+    let at = xml.find(&format!("<key>{key}</key>"))?;
+    let rest = &xml[at..];
+    let start = rest.find("<string>")? + "<string>".len();
+    let end = rest[start..].find("</string>")?;
+    // nothing but whitespace between the key and its value
+    let between = &rest[format!("<key>{key}</key>").len()..start - "<string>".len()];
+    (between.trim().is_empty()).then(|| rest[start..start + end].trim().to_string()).filter(|v| !v.is_empty())
 }
 
 /// Frameworks and custom harnesses: "installed" means their packages import
@@ -1281,6 +1464,100 @@ packages = ["pypi:httpx"]
         assert_eq!(r.harness("my-agent").unwrap().support, "basic");
         assert_eq!(r.harness("pi").unwrap().name, "Pi (fork)");
         assert_eq!(r.harnesses.iter().filter(|h| h.id == "pi").count(), 1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn app_config_follows_the_os() {
+        let ctx = |os: &str, env: &[(&str, &str)]| {
+            let mut e: BTreeMap<String, String> = env.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
+            e.insert("HLOCK_OS".into(), os.into());
+            Ctx { home: "/h".into(), cwd: "/w".into(), env: e, path: vec![] }
+        };
+        assert_eq!(ctx("macos", &[]).expand("{app-config}/Claude", None), PathBuf::from("/h/Library/Application Support/Claude"));
+        assert_eq!(ctx("linux", &[]).expand("{app-config}/Code/User", None), PathBuf::from("/h/.config/Code/User"));
+        assert_eq!(ctx("linux", &[("XDG_CONFIG_HOME", "/x")]).expand("{app-config}/Code/User", None), PathBuf::from("/x/Code/User"));
+        assert_eq!(ctx("windows", &[("APPDATA", "/h/AppData/Roaming")]).expand("{app-config}/Claude", None), PathBuf::from("/h/AppData/Roaming/Claude"));
+        assert_eq!(ctx("windows", &[]).app_config_dir(), PathBuf::from("/h/AppData/Roaming"));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn binary_plists_are_read_through_plutil() {
+        let dir = std::env::temp_dir().join(format!("hlock-prof-bplist-{}", std::process::id()));
+        let c = dir.join("X.app/Contents");
+        std::fs::create_dir_all(&c).unwrap();
+        std::fs::write(c.join("Info.plist"), "<?xml version=\"1.0\"?><plist version=\"1.0\"><dict><key>CFBundleShortVersionString</key><string>2.5.0</string></dict></plist>").unwrap();
+        let ok = std::process::Command::new("/usr/bin/plutil").args(["-convert", "binary1"]).arg(c.join("Info.plist")).status().unwrap().success();
+        assert!(ok && std::fs::read(c.join("Info.plist")).unwrap().starts_with(b"bplist00"));
+        assert_eq!(bundle_version(&dir.join("X.app"), &Ctx::from_process()).as_deref(), Some("2.5.0"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn apps_are_found_by_bundle_or_shim_and_never_run() {
+        let dir = std::env::temp_dir().join(format!("hlock-prof-app-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let apps = dir.join("Applications");
+        let plist = |name: &str, body: &str| {
+            let c = apps.join(name).join("Contents");
+            std::fs::create_dir_all(&c).unwrap();
+            std::fs::write(c.join("Info.plist"), body).unwrap();
+        };
+        plist("Claude.app", "<plist><dict>\n  <key>CFBundleShortVersionString</key>\n  <string>3.1623.1</string>\n</dict></plist>");
+        let env: BTreeMap<String, String> = [("HLOCK_OS", "macos"), ("HLOCK_APP_DIRS", apps.to_str().unwrap()), ("HOMEBREW_PREFIX", dir.join("brew").to_str().unwrap())]
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+        let ctx = Ctx { home: dir.join("home"), cwd: dir.clone(), env, path: vec![dir.join("bin")] };
+        let r = Registry::builtin();
+        let claude = r.harness("claude-desktop").unwrap();
+        let p = probe_harness(claude, &ctx);
+        assert!(p.installed && p.binary.as_deref().is_some_and(|b| b.ends_with("Claude.app")), "{p:?}");
+        assert_eq!((p.version.as_deref(), p.source.as_deref()), (Some("3.1623.1"), Some("app@3.1623.1")));
+        // installed by Homebrew: the cask's directory says so
+        std::fs::create_dir_all(dir.join("brew/Caskroom/claude")).unwrap();
+        assert_eq!(probe_harness(claude, &ctx).source.as_deref(), Some("brew-cask:claude@3.1623.1"));
+        // no bundle: a CLI shim on PATH finds it, and its first version is the app's
+        let vscode = r.harness("vscode").unwrap();
+        assert!(!probe_harness(vscode, &ctx).installed);
+        std::fs::create_dir_all(dir.join("bin")).unwrap();
+        let shim = dir.join("bin/code");
+        std::fs::write(&shim, "#!/bin/sh\nprintf '1.141.0\\n6a3b2c1\\narm64\\n'\n").unwrap();
+        std::fs::set_permissions(&shim, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        let p = probe_harness(vscode, &ctx);
+        assert!(p.installed && p.version.as_deref() == Some("1.141.0"), "{p:?}");
+        // a bundle whose plist has no version still counts; it has no version to report
+        plist("Visual Studio Code.app", "<plist><dict></dict></plist>");
+        let p = probe_harness(vscode, &ctx);
+        assert!(p.installed && p.binary.as_deref().is_some_and(|b| b.ends_with("Visual Studio Code.app")) && p.version.as_deref() == Some("1.141.0"), "{p:?}");
+        // off macOS, bundles aren't looked at
+        let mut linux = ctx.clone();
+        linux.env.insert("HLOCK_OS".into(), "linux".into());
+        assert!(!probe_harness(claude, &linux).installed);
+        assert_eq!(plist_string("<key>A</key><string>1</string><key>B</key><string>2</string>", "B").as_deref(), Some("2"));
+        assert_eq!(plist_string("<key>A</key><integer>1</integer><string>2</string>", "A"), None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn project_app_profiles_name_bundles_not_paths() {
+        let dir = std::env::temp_dir().join(format!("hlock-prof-proj-app-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let pd = dir.join("proj/.hlock/profiles");
+        std::fs::create_dir_all(pd.join("harnesses")).unwrap();
+        std::fs::write(
+            pd.join("harnesses/myapp.toml"),
+            "id = \"myapp\"\nkind = \"app\"\n[app]\nbundles = [\"My.app\", \"../../x.app\", \"evil\"]\nprocess = \"x; rm -rf ~\"\npaths.macos = [\"/tmp/evil\"]\n",
+        )
+        .unwrap();
+        let ctx = Ctx { home: dir.join("home"), cwd: dir.join("proj"), env: BTreeMap::new(), path: vec![] };
+        let r = Registry::load(&ctx).unwrap();
+        let app = r.harness("myapp").unwrap().app.clone().unwrap();
+        assert_eq!(app.bundles, ["My.app"]);
+        assert!(app.paths.is_empty() && app.process.is_none());
+        assert_eq!(r.notes.len(), 4, "{:?}", r.notes);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

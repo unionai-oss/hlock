@@ -110,6 +110,7 @@ def render(harnesses: list[dict], runtimes: list[dict]) -> dict[str, str]:
     clis = [p for p in harnesses if p["kind"] == "cli" and not p.get("autonomous")]
     autonomous = [p for p in harnesses if p["kind"] == "cli" and p.get("autonomous")]
     frameworks = [p for p in harnesses if p["kind"] == "framework"]
+    apps = [p for p in harnesses if p["kind"] == "app"]
 
     def overview(group: list[dict]) -> str:
         return table(
@@ -135,6 +136,13 @@ def render(harnesses: list[dict], runtimes: list[dict]) -> dict[str, str]:
         "capture": capture(clis, lambda p: code(project_instructions(p))),
         "autonomous": overview(autonomous),
         "autonomous-capture": capture(autonomous, all_instructions),
+        "apps": overview(apps),
+        "apps-capture": table(
+            ["App", "MCP servers", "Skills", "Instructions", "Not restored"],
+            [[p["name"], mark(p["mcp"]["sources"]), mark(p["skills"]["dirs"]), code(project_instructions(p)),
+              ", ".join(u["what"] for u in p.get("unmanaged") or []) or NO]
+             for p in apps],
+        ),
         "frameworks": table(
             ["Framework", "Vendor", "Name in hlock", "Packages pinned", "Instructions", "Skills"],
             [[name_cell(p), p.get("vendor") or NO, id_cell(p),

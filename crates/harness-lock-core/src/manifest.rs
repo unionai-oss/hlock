@@ -50,7 +50,7 @@ pub const SELECTS: &[&str] = &["min-cost", "max-quality"];
 /// The keys of the manifest's fixed-shape tables; anything else is reported by
 /// [`Manifest::problems`]. Tables holding names (`[skills]`, `[harnesses]`, …) aren't
 /// checked, and neither are the reserved `[context]` and `[enforce]`.
-const TOP_KEYS: &[&str] = &["project", "evals", "tasks", "candidates", "tools", "skills", "instructions", "mcp", "plugins", "packages", "context", "objective", "budget", "enforce", "backend", "backends", "optimizers", "target", "harnesses", "deciders", "tune"];
+const TOP_KEYS: &[&str] = &["project", "evals", "tasks", "candidates", "tools", "skills", "instructions", "mcp", "plugins", "packages", "context", "objective", "budget", "enforce", "backend", "backends", "optimizers", "target", "harnesses", "deciders", "tune", "sandbox"];
 const BUDGET_KEYS: &[&str] = &["max-spend-usd", "max-trials", "strategy", "random-seed", "max_spend_usd", "max_trials", "random_seed"];
 const OBJECTIVE_KEYS: &[&str] = &["primary", "constraints", "select"];
 const EVALS_KEYS: &[&str] = &["packs", "seeds", "splits", "judge"];
@@ -181,6 +181,9 @@ pub struct Manifest {
     /// How `tune` edits the harness (`[tune]`): the optimizer, what it may edit, its budget.
     #[serde(default)]
     pub tune: BTreeMap<String, serde_json::Value>,
+    /// The sandbox the lock runs in (`[sandbox]`), and project-defined runners.
+    #[serde(default)]
+    pub sandbox: BTreeMap<String, serde_json::Value>,
     #[serde(skip)]
     pub source_path: Option<PathBuf>,
     /// The text this manifest was parsed from, which [`Manifest::manifest_hash`] hashes.
@@ -331,6 +334,19 @@ impl Manifest {
     }
 
     /// `[deciders.<use>]`, checked, with defaults filled in.
+    /// The `[sandbox]` table as a spec (`None` without one, or with `runner = "none"`).
+    pub fn sandbox_spec(&self) -> Result<Option<crate::sandbox::Spec>> {
+        if self.sandbox.is_empty() {
+            return Ok(None);
+        }
+        crate::sandbox::Spec::from_manifest(Some(&serde_json::json!(self.sandbox)), &self.root())
+    }
+
+    /// The `[sandbox]` table, for runner lookup.
+    pub fn sandbox_table(&self) -> Option<serde_json::Value> {
+        (!self.sandbox.is_empty()).then(|| serde_json::json!(self.sandbox))
+    }
+
     pub fn deciders(&self) -> Result<BTreeMap<String, crate::decide::DeciderSpec>> {
         self.deciders
             .iter()

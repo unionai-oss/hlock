@@ -134,6 +134,41 @@ variables. This automates the hand-off in
 Installing usually means running package managers, so run it interactively, or add the
 commands it needs to [`[agent] allow`](#the-built-in-agent) for headless runs.
 
+#### Desktop apps
+
+For a [desktop app's](harnesses.md#desktop-apps) lock, the job is how a missing app gets
+installed when Homebrew can't do it. The prompt says how to install the app on this
+machine (the cask, else the download page), where hlock looks for it, and how to check:
+`hlock harness show claude-desktop`. It asks the agent to install into `~/Applications`
+rather than use `sudo`. There's no need to open the app first: hlock creates its config.
+`sync` suggests the job when the app is what's missing:
+
+```console
+$ hlock sync
+…
+2 steps need you:
+  1. Install Claude Desktop  a download, installed by hand; installs the current version;
+the lock pins 3.1623.1
+     Download Claude Desktop from https://claude.ai/download
+  2. Write ~/Library/Application Support/Claude/claude_desktop_config.json /mcpServers
+Claude Desktop reads only your own config; hlock sync --apps writes it
+next → hlock sync --apps  ·  hlock meta run install --apps (let the meta harness do it)
+```
+
+An app reads only your own config, so writing it is your call: pass `--apps` to
+`hlock meta run install` (and `hlock meta verify install`) to let the agent finish with
+`hlock sync --apps --yes`. Without it, the job stops once the app is installed, and leaves
+the config to you:
+
+```console
+$ hlock meta verify install
+! needs you  installed; left: Claude Desktop's own config to write with hlock sync --apps
+```
+
+`hlock meta run install` works on the project's lock. For a lock you pulled, use
+[`hlock sync --skill`](sync.md#let-your-agent-do-the-manual-steps), whose skill carries the
+same app instructions.
+
 ### `bootstrap-evals`
 
 Gets the agent to fill in an [eval pack](eval-packs.md) with real tasks from this

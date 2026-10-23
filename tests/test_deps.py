@@ -123,6 +123,30 @@ def test_add_declares_pins_and_installs(world):
     assert r.exit_code == 1 and "changed" in r.output and "hlock sync" in r.output, r.output
 
 
+def test_target_also_puts_servers_in_a_desktop_apps_own_config(world, tmp_path, monkeypatch):
+    # Claude Desktop installed on a Mac, not running, with no config yet
+    apps = tmp_path / "Applications"
+    (apps / "Claude.app/Contents").mkdir(parents=True)
+    (apps / "Claude.app/Contents/Info.plist").write_text(
+        "<plist><dict><key>CFBundleShortVersionString</key><string>3.1623.1</string></dict></plist>")
+    for k, v in {"HLOCK_OS": "macos", "HLOCK_APP_DIRS": str(apps), "HLOCK_APPS_RUNNING": ""}.items():
+        monkeypatch.setenv(k, v)
+    npx = Path(os.environ["PATH"].split(os.pathsep)[0]) / "npx"
+    npx.write_text("#!/bin/sh\necho 10\n")
+    npx.chmod(0o755)
+    config = world["home"] / "Library/Application Support/Claude/claude_desktop_config.json"
+    Path("harness.toml").write_text('[project]\nname = "demo"\n\n[target]\nharness = "claude-code"\nalso = ["claude-desktop"]\n')
+    assert invoke("add", "mcp", "npm:@modelcontextprotocol/server-github@^1").exit_code == 0
+    assert invoke("trust", "--yes").exit_code == 0
+    r = invoke("sync", "--yes")
+    # Claude Code is in sync; Claude Desktop waits for --apps, without failing the sync
+    assert r.exit_code == 0, r.output
+    assert "for hlock sync --apps" in r.output and not config.exists(), r.output
+    r = invoke("sync", "--apps", "--yes")
+    assert r.exit_code == 0, r.output
+    assert json.loads(config.read_text())["mcpServers"]["github"]["command"] == "npx"
+
+
 def test_dry_run_changes_nothing(world):
     r = invoke("add", "skill", "github:acme/skills/skills/sql@v1.2.0", "--dry-run")
     assert r.exit_code == 0, r.output

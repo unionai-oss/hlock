@@ -106,6 +106,9 @@ from hlock import pull_parse as _pull_parse
 from hlock import pull_remove as _pull_remove
 from hlock import resolve as _resolve
 from hlock import resolve_plan as _resolve_plan
+from hlock import sandbox as _sbx
+from hlock import sandbox_control_snapshot as _control_snapshot
+from hlock import sandbox_info as _sandbox_info
 from hlock import scan_lock as _scan_lock
 from hlock import select_harness as _select_harness
 from hlock import traces as _traces
@@ -118,6 +121,7 @@ from hlock import upgrade as al_upgrade
 
 MANIFEST = "harness.toml"
 LOCK = "harness.lock"
+_NO_SANDBOX_HELP = "Run without the lock's sandbox (or set HLOCK_NO_SANDBOX=1)."
 
 
 class _Project:
@@ -525,6 +529,8 @@ def init(name: str, pack: str, harness: str | None, force: bool) -> None:
     if harness:
         with _friendly_errors():
             target = json.loads(_select_harness(harness, manifest=_m()))
+        if _harness_kind(target["id"]) == "app":
+            _app_refusal(target["id"], "resolve runs the harness on an eval pack")
         if _harness_kind(target["id"]) == "cli":
             models = _locked_models(target["id"])
     p.write_text(_default_manifest(name, pack, target["id"] if target else None, models))
@@ -727,19 +733,25 @@ def evals_check(directory: str | None, run: bool, judges: bool, as_json: bool) -
 @click.argument("workspace", required=False)
 @click.option("--pack", "pack", default=None, help="The eval pack directory.  [dim]\\[default: this directory if it has a pack.toml, else the first of \\[evals] packs, else ./evals][/]")
 @click.option("--json", "as_json", is_flag=True, help="Print the result as JSON.")
-def evals_grade(task: str, workspace: str | None, pack: str | None, as_json: bool) -> None:
+@click.option("--trust", "trust", is_flag=True, help="Approve the lock's sandbox without asking.")
+@click.option("--no-sandbox", "no_sandbox", is_flag=True, help=_NO_SANDBOX_HELP)
+def evals_grade(task: str, workspace: str | None, pack: str | None, as_json: bool, trust: bool, no_sandbox: bool) -> None:
     """Grade a directory as if a run of TASK left it, with every grader the task has,
     judges included. With no WORKSPACE, grades the task's solution. Exits 1 if a grader
     fails."""
     pack = pack or _default_pack()
     manifest = _m() if Path(_m()).exists() else None
-    with _working(f"Grading {task}…"):
-        result = json.loads(_grade_eval_task(pack, task, workspace, manifest=manifest))
+    with _working(f"Grading {task}…"), _friendly_errors():
+        result = json.loads(_grade_eval_task(pack, task, workspace, manifest=manifest, lock=_l(), no_sandbox=no_sandbox,
+                                             trust=trust))
     if as_json:
         console.print_json(data=result)
         sys.exit(0 if result["success"] else 1)
     what = _show(workspace) if workspace else "its solution"
-    console.print(f"[bold]{escape(task)}[/]  [muted]{escape(what)} · score {result['score']:.2f}[/]")
+    for line in result.get("notes") or []:
+        console.print(f"[warn]![/] {escape(line)}", soft_wrap=True)
+    where = f" · in {result['sandbox']}" if result.get("sandbox") else ""
+    console.print(f"[bold]{escape(task)}[/]  [muted]{escape(what)} · score {result['score']:.2f}{escape(where)}[/]")
     for g in result["grades"]:
         mark = "[ok]✓[/]" if g["success"] else "[fail]✗[/]"
         unsure = "  [warn]uncertain[/]" if g.get("uncertain") else ""
@@ -763,8 +775,9 @@ def evals_grade(task: str, workspace: str | None, pack: str | None, as_json: boo
 @click.option("--workdir", default=None, help="Where the runs' workspaces go.  [dim]\\[default: a new temporary directory][/]")
 @click.option("--trust", "trust", is_flag=True, help="Approve every executable the lock would run.")
 @click.option("--json", "as_json", is_flag=True, help="Print the runs as JSON.")
+@click.option("--no-sandbox", "no_sandbox", is_flag=True, help=_NO_SANDBOX_HELP)
 def evals_run(tasks: tuple[str, ...], pack: str | None, seeds: int, workdir: str | None, trust: bool,
-              as_json: bool) -> None:
+              as_json: bool, no_sandbox: bool) -> None:
     """Run the locked agent on the pack's tasks (or just TASK), each in a fresh workspace,
     and grade each run with the task's graders. Exits 1 if a run fails.
 
@@ -781,6 +794,8 @@ def evals_run(tasks: tuple[str, ...], pack: str | None, seeds: int, workdir: str
         lf = Lockfile.load(_l())
         ids = json.loads(_check_eval_pack(pack, manifest=manifest))["tasks"]
     kind = _harness_kind(lf.harness)
+    if kind == "app":
+        _app_refusal(lf.harness)
     if kind is None:
         _fail(f"{_ld()} is for the simulated {lf.harness} harness, so there's no agent to run",
               "pin your own setup with [cmd]hlock pin[/]; [cmd]hlock resolve[/] measures the reference harness")
@@ -790,6 +805,7 @@ def evals_run(tasks: tuple[str, ...], pack: str | None, seeds: int, workdir: str
     root = Path(workdir).resolve() if workdir else Path(tempfile.mkdtemp(prefix="hlock-evals-"))
     root.mkdir(parents=True, exist_ok=True)
     runs, notes = [], []
+    proxy = _sandbox_proxy(_l(), no_sandbox) if kind == "cli" else None
     for tid in tasks or ids:
         for seed in range(seeds):
             ws = root / f"{tid}-{seed}"
@@ -799,14 +815,20 @@ def evals_run(tasks: tuple[str, ...], pack: str | None, seeds: int, workdir: str
                 task = json.loads(_prepare_eval_workspace(pack, tid, str(ws)))
             label = f"Running {tid}" + (f" (seed {seed})" if seeds > 1 else "") + "…"
             with _working(label) if not as_json else _friendly_errors():
-                r = _run_task(kind, task, ws, root / f"{tid}-{seed}.log", trust, notes)
-                g = json.loads(_grade_eval_task(pack, tid, str(ws), manifest=manifest)) if r["started"] else None
+                r = _run_task(kind, task, ws, root / f"{tid}-{seed}.log", trust, notes, no_sandbox, proxy)
+                g = json.loads(_grade_eval_task(pack, tid, str(ws), manifest=manifest, lock=_l(), no_sandbox=no_sandbox,
+                                                trust=trust)) if r["started"] else None
+                for line in (g or {}).get("notes") or []:
+                    if line not in notes:
+                        notes.append(line)
             r.update(task=tid, seed=seed, workspace=str(ws), grade=g,
                      success=r["error"] is None and bool(g and g["success"]),
                      score=g["score"] if g and r["error"] is None else 0.0)
             runs.append(r)
             if not as_json:
                 _print_run(r)
+    if proxy:
+        proxy.stop()
     failed = sum(not r["success"] for r in runs)
     if as_json:
         console.print_json(data={"harness": lf.harness, "lock": _l(), "workdir": str(root), "notes": notes,
@@ -825,14 +847,18 @@ def evals_run(tasks: tuple[str, ...], pack: str | None, seeds: int, workdir: str
     sys.exit(1 if failed else 0)
 
 
-def _run_task(kind: str, task: dict, ws: Path, log: Path, trust: bool, notes: list[str]) -> dict:
+def _run_task(kind: str, task: dict, ws: Path, log: Path, trust: bool, notes: list[str], no_sandbox: bool = False,
+              proxy=None) -> dict:
     """Run the locked agent on `task` in workspace `ws`, its output going to `log`: a CLI
     harness through its non-interactive mode, a code harness through the contract."""
     timeout = task["timeout-seconds"]
     start = time.monotonic()
     if kind == "custom":
         r = json.loads(run_code_harness(task["prompt"], _l(), workspace=str(ws), timeout=timeout, manifest=_m(),
-                                        trust=trust))
+                                        trust=trust, no_sandbox=no_sandbox))
+        for line in r.get("notes") or []:
+            if line not in notes:
+                notes.append(line)
         log.write_text(r.get("log") or "")
         if r["success"]:
             error = None
@@ -844,12 +870,31 @@ def _run_task(kind: str, task: dict, ws: Path, log: Path, trust: bool, notes: li
             error = "the harness reported a failure"
         return {"started": True, "error": error, "latency_s": r.get("latency_s"), "cost_usd": r.get("cost_usd"),
                 "log": str(log)}
-    prep = json.loads(launch_prepare(_l(), prompt=task["prompt"], manifest=_m(), trust=trust, project=str(ws)))
+    prep = json.loads(launch_prepare(_l(), prompt=task["prompt"], manifest=_m(), trust=trust, project=str(ws),
+                                     no_sandbox=no_sandbox, proxy_env=proxy.env() if proxy else None))
     secret_env = prep.pop("secret_env", {})  # values for the config's references; never shown
+    sb = _sandbox_start(prep, proxy)
     for line in prep["notes"] + [f"secret {s} isn't set" for s in prep["missing_secrets"]]:
         if line not in notes:
             notes.append(line)
     env = {**os.environ, **prep["env"], **secret_env}
+    if sb:
+        with log.open("w") as out:
+            try:
+                code, timed_out = _sbx.run(sb, cwd=ws, stdout=out, timeout=timeout)
+            except (OSError, ValueError) as e:
+                if not sb.get("began"):
+                    return {"started": False, "error": f"cannot start {sb['argv'][0]}: {e}", "latency_s": 0.0,
+                            "cost_usd": None, "log": str(log)}
+                # it ran; the session's end failed
+                return {"started": True, "error": f"the sandbox session failed: {e}",
+                        "latency_s": round(time.monotonic() - start, 3), "cost_usd": None, "log": str(log)}
+            finally:
+                _session_report(sb, notes)
+        error = (f"stopped after the task's {timeout}s timeout" if timed_out
+                 else None if code == 0 else f"{prep['harness_name']} exited {code}")
+        return {"started": True, "error": error, "latency_s": round(time.monotonic() - start, 3), "cost_usd": None,
+                "log": str(log)}
     with log.open("w") as out:
         try:
             # its own process group, so a timeout stops everything it started
@@ -1023,14 +1068,17 @@ def decide_hook(use_: str, fmt: str, event: str | None, input_: str | None, verb
 @click.option("--dry-run", is_flag=True, help="List the stacks and count the trials, and run nothing.")
 @click.option("--no-cache", is_flag=True, help="Run every trial again, even ones an earlier resolve ran.")
 @click.option("--json", "as_json", is_flag=True, help="Print the lock and every stack's scores as JSON.")
+@click.option("--no-sandbox", "no_sandbox", is_flag=True, help="Run trials and graders without [sandbox] (or set HLOCK_NO_SANDBOX=1).")
 def resolve(backend: str | None, harness: str | None, workdir: str | None, dry_run: bool, no_cache: bool,
-            as_json: bool) -> None:
+            as_json: bool, no_sandbox: bool) -> None:
     """Search the space and pin the winner in [path]harness.lock[/].
 
     Every stack runs on the search split; the winner then runs on the holdout split, and
     the lock's evidence comes from that. Trials an earlier resolve ran with the same
     stack, tasks and judge come from the cache, except a code harness's.
     """
+    if no_sandbox:
+        os.environ["HLOCK_NO_SANDBOX"] = "1"  # the core reads it, as from CI
     if dry_run:
         with _friendly_errors():
             plan = json.loads(_resolve_plan(_m(), backend=backend, workdir=workdir, harness=harness))
@@ -1836,6 +1884,68 @@ def _print_untrusted(untrusted: list[dict], label: str = "") -> None:
                   "   [muted](or re-run with --trust)[/]")
 
 
+@main.command("sandbox")
+@click.option("--json", "as_json", is_flag=True, help="Print the sandbox and its status as JSON.")
+def sandbox_cmd(as_json: bool) -> None:
+    """Show the sandbox the lock runs in, and whether it can run here.
+
+    A lock names its sandbox in [key]\\[policy.sandbox][/], from [path]harness.toml[/]'s
+    [key]\\[sandbox][/]: a runner (docker, openshell, or one you define), a network mode, how
+    secrets reach it, and what runs inside. [cmd]hlock launch --dry-run[/] shows the
+    command a launch would run.
+    """
+    if not Path(_l()).exists():
+        _fail(f"no {LOCK} here", "pin your setup with [cmd]hlock pin[/]")
+    manifest = _m() if Path(_m()).exists() else None
+    with _friendly_errors():
+        info = json.loads(_sandbox_info(_l(), manifest=manifest))
+    if as_json:
+        console.print_json(data=info)
+        return
+    spec = info["spec"]
+    if not spec:
+        console.print(f"[muted]{_ld()} runs without a sandbox[/]")
+        if info["declared"]:
+            console.print(f"[warn]![/] {MANIFEST} has a \\[sandbox] the lock doesn't: re-pin to lock it")
+        for v in info["policy"]:
+            console.print(f"[fail]✗[/] {escape(v)}")
+        if not info["declared"]:
+            _next("add a [sandbox] table to harness.toml, then hlock pin")
+        return
+    t = Table.grid(padding=(0, 2))
+    t.add_column(style="muted")
+    t.add_column()
+    runner = info["runner"]
+    state = ("[ok]installed[/]" if runner["installed"] else f"[fail]{escape(runner['program'])} isn't installed[/]") if runner \
+        else "[fail]not defined on this machine[/]"
+    origin = f"  [muted]{runner['origin']}[/]" if runner and runner["origin"] != "builtin" else ""
+    t.add_row("runner", f"[key]{escape(spec['runner'])}[/]{origin}  {state}")
+    if spec.get("image"):
+        t.add_row("image", escape(spec["image"]))
+    if spec.get("grader-image"):
+        t.add_row("grader image", escape(spec["grader-image"]))
+    t.add_row("network", spec["network"])
+    t.add_row("secrets", spec["secrets"])
+    t.add_row("applies to", ", ".join(spec["applies-to"]))
+    if spec.get("profile"):
+        t.add_row("profile", f"{escape(spec['profile']['path'])}  [muted]{spec['profile']['digest'][:15]}…[/]")
+    trusted = info["trusted"]
+    t.add_row("trust", "[ok]trusted[/]" if trusted == "trusted" else f"[warn]{trusted}[/]  [muted](hlock trust)[/]")
+    console.print(t)
+    if info["off"]:
+        console.print("[warn]![/] turned off here (HLOCK_NO_SANDBOX)")
+    for line in [info.get("note"), info.get("evidence_note"), info.get("error")]:
+        if line:
+            console.print(f"[warn]![/] {escape(line)}", soft_wrap=True)
+    if info["drift"]:
+        console.print(f"[warn]![/] {MANIFEST}'s \\[sandbox] differs from the lock's: re-pin to lock it")
+        for w in info["weakened"]:
+            console.print(f"    [warn]weakened[/] {escape(w)}")
+    for v in info["policy"]:
+        console.print(f"[fail]✗[/] {escape(v)}")
+    _next("hlock launch --dry-run" if trusted == "trusted" else "hlock trust")
+
+
 @main.command()
 @click.argument("lock", default=None, required=False)
 @click.option("-y", "--yes", is_flag=True, help="Approve every executable not yet trusted, without asking.")
@@ -2068,6 +2178,15 @@ def _tilde(path: str) -> str:
         return path
 
 
+def _print_reload(plan: dict, ran: list[dict]) -> None:
+    """After writing a desktop app's config: how the app picks it up."""
+    if not any(st["kind"] in ("config", "mcp", "skill", "instructions") for st in ran):
+        return
+    for name, how in (plan.get("reload") or {}).items():
+        if how == "restart":
+            console.print(f"[warn]quit and reopen {name}[/] [muted]to load the changes[/]")
+
+
 def _manual_steps(plan: dict) -> list[dict]:
     return [st for st in plan["steps"] if st["status"] == "manual" and not st.get("optional")]
 
@@ -2082,8 +2201,12 @@ def _manual_steps(plan: dict) -> list[dict]:
 @click.option("--all-models", is_flag=True, help="Include models a provider lists but no locked role uses.")
 @click.option("--prefix", default=None, help="Where isolated config roots live.  [dim]\\[default: .hlock/env][/]")
 @click.option("--in-place", is_flag=True, help="Write into your own config (~/.claude, …) instead of an isolated root.")
+@click.option("--apps", is_flag=True,
+              help="Write desktop apps' own config (Claude Desktop, VS Code): they don't read an isolated root.")
 @click.option("--docker", "docker", is_flag=True, help="Write a Docker build context and Dockerfile to .hlock/docker/<harness>.")
 @click.option("--build", is_flag=True, help="With --docker: also run docker build.")
+@click.option("--base", "base", default=None, metavar="IMAGE",
+              help="With --docker: build on IMAGE (Debian-based, like your dev image) instead of node:22-bookworm.")
 @click.option("--skill", "skill", is_flag=True, help="Write an Agent Skill that guides an agent through the remaining steps.")
 @click.option("--skill-dir", default=".agents/skills/hlock-rehydrate", show_default=True, help="Where --skill writes SKILL.md.")
 @click.option("--exact", is_flag=True, help="Also remove skills that aren't in the lock (moved aside, not deleted).")
@@ -2094,8 +2217,8 @@ def _manual_steps(plan: dict) -> list[dict]:
               help="Let through hidden characters in FILE. Repeatable.")
 @click.option("-v", "--verbose", is_flag=True, help="List every step, including optional ones.")
 def sync(lock: str, plan_only: bool, as_json: bool, yes: bool, install: bool, pull: bool, all_models: bool,
-         prefix: str | None, in_place: bool, docker: bool, build: bool, skill: bool, skill_dir: str, exact: bool,
-         frozen: bool, trust: bool, allow_hidden: tuple[str, ...], verbose: bool) -> None:
+         prefix: str | None, in_place: bool, apps: bool, docker: bool, build: bool, base: str | None, skill: bool,
+         skill_dir: str, exact: bool, frozen: bool, trust: bool, allow_hidden: tuple[str, ...], verbose: bool) -> None:
     """Rehydrate the setup in [path]harness.lock[/] on this machine.
 
     Builds a plan in which each step is [ok]✓ satisfied[/], [brand]● automatic[/] (hlock does it), or
@@ -2106,12 +2229,19 @@ def sync(lock: str, plan_only: bool, as_json: bool, yes: bool, install: bool, pu
 
     The setup goes into an isolated config root in [path].hlock/env/[/] (the one [cmd]hlock launch[/]
     uses), so your own config isn't touched. Pass [cmd]--in-place[/] to write into it instead.
+    A desktop app reads only its own config, so hlock writes it only with [cmd]--apps[/].
     """
+    if base and not docker:
+        _fail("--base goes with --docker", "hlock sync --docker --base IMAGE")
     if in_place and (prefix or docker):
         _fail("--in-place doesn't work with --prefix or --docker", "pick one place to write the setup")
+    if apps and (prefix or docker):
+        _fail("--apps writes your own config; it doesn't work with --prefix or --docker", "pick one place to write the setup")
     lock, stored = _lock_ref(lock, as_json) if lock else (_l(), None)
+    default_prefix = None
     if stored and prefix is None and not in_place and not docker:
-        prefix = _pull_env(stored)  # the same isolated root `hlock launch --lock NAME` uses
+        # the same isolated root `hlock launch --lock NAME` uses (a desktop app's lock ignores it)
+        default_prefix = _pull_env(stored)
     if stored is None and Path(lock).resolve() == _Project.lock.resolve():
         # the project's own lock: declared dependencies that are new or changed are locked first
         _refresh_deps(plan_only or as_json or skill, frozen)
@@ -2129,7 +2259,8 @@ def sync(lock: str, plan_only: bool, as_json: bool, yes: bool, install: bool, pu
                                         refresh=own and (plan_only or as_json or skill) and not frozen,
                                         allow_hidden=list(allow_hidden),
                                         # a plan isn't a sync: --trust shows what it would do, recording nothing
-                                        trust=trust and (plan_only or as_json)))
+                                        trust=trust and (plan_only or as_json),
+                                        apps=apps, default_prefix=default_prefix))
 
     plan = make_plan()
     untrusted = [e for e in plan.get("executables") or [] if e["status"] == "untrusted"]
@@ -2144,6 +2275,8 @@ def sync(lock: str, plan_only: bool, as_json: bool, yes: bool, install: bool, pu
         return
     where = {"home": f"your config [path]{_tilde(plan['root'])}[/]", "prefix": f"[path]{_tilde(_rel(plan['root']))}[/]",
              "docker": f"[path]{docker_dir}[/]"}[plan["mode"]]
+    if plan["harness_name"] in (plan.get("apps") or []):
+        where += "  [warn](needs --apps)[/]"
     console.print(f"[bold]Sync plan[/] for {plan['harness_name']} {plan.get('version') or ''} → {where}")
     console.print(_plan_table(plan, verbose))
     for note in plan.get("notes") or []:
@@ -2155,6 +2288,15 @@ def sync(lock: str, plan_only: bool, as_json: bool, yes: bool, install: bool, pu
             with _friendly_errors():
                 # exactly what was shown, not whatever is untrusted by now
                 _trust_approve(lock=lock, only=[e["digest"] for e in untrusted], manifest=_m())
+            plan = make_plan()
+            console.print(_plan_table(plan, verbose))
+
+    if plan.get("apps") and not (apps or in_place or plan_only or as_json or skill or yes) and sys.stdin.isatty():
+        # a desktop app reads only its own config: offer to write it
+        names = ", ".join(plan["apps"])
+        if click.confirm(f"{names} read{'s' if len(plan['apps']) == 1 else ''} only {'its' if len(plan['apps']) == 1 else 'their'} own config. "
+                         f"Write it?", default=False):
+            apps = True
             plan = make_plan()
             console.print(_plan_table(plan, verbose))
 
@@ -2213,7 +2355,7 @@ def sync(lock: str, plan_only: bool, as_json: bool, yes: bool, install: bool, pu
         with _friendly_errors():
             _deps_record_configs(sorted(wrote_mcp), lock=_l(), manifest=_m())
     if docker:
-        files = json.loads(sync_dockerfile(json.dumps(plan), lock, manifest=_m()))
+        files = json.loads(sync_dockerfile(json.dumps(plan), lock, manifest=_m(), base=base))
         ctx = Path(docker_dir)
         (ctx / "home").mkdir(parents=True, exist_ok=True)
         (ctx / "Dockerfile").write_text(files["dockerfile"])
@@ -2221,7 +2363,10 @@ def sync(lock: str, plan_only: bool, as_json: bool, yes: bool, install: bool, pu
         entry.write_text(files["entrypoint"])
         entry.chmod(0o755)
         _ok(f"wrote [path]{ctx / 'Dockerfile'}[/]")
-        tag = f"hlock-{plan['harness']}"
+        # tagged by the lock it was built from: a re-pin builds a new tag
+        import hashlib
+
+        tag = f"hlock-{plan['harness']}:{hashlib.sha256(Path(lock).read_bytes()).hexdigest()[:12]}"
         secrets = " ".join(f"-e {st['id'].split(':', 1)[1]}" for st in plan["steps"] if st["kind"] == "secret")
         if build:
             import subprocess
@@ -2235,10 +2380,18 @@ def sync(lock: str, plan_only: bool, as_json: bool, yes: bool, install: bool, pu
             console.print(f"  [cmd]docker build -t {tag} {ctx}[/]", soft_wrap=True)
         run_cmd = f"docker run -it --rm {secrets + ' ' if secrets else ''}-v \"$PWD:/workspace\" {tag}"
         console.print(f"  [cmd]{run_cmd}[/]", soft_wrap=True)
+        console.print(f"  [muted]or run the lock in it as a sandbox: add to {MANIFEST}, then re-pin[/]")
+        console.print(f"    [cmd]\\[sandbox][/]\n    [cmd]runner = \"docker\"[/]\n    [cmd]image = \"{tag}\"[/]  "
+                      "[muted]# push it, and pin @sha256:, to share it[/]", soft_wrap=True)
+        console.print("    [muted](runner = \"openshell\" runs it on an OpenShell gateway instead)[/]", soft_wrap=True)
         sys.exit(1 if failed else 0)
 
     remaining = _manual_steps(plan)
-    again = "hlock sync --in-place" if in_place else "hlock sync"
+    again = "hlock sync --in-place" if in_place else "hlock sync --apps" if apps or plan.get("app") else "hlock sync"
+    later = [st for st in plan["steps"] if st.get("needs") == "apps" and st.get("optional")]
+    if later:
+        console.print(f"\n[muted]{len(later)} step{'s' if len(later) != 1 else ''} for "
+                      f"{', '.join(plan.get('apps') or [])} wait{'s' if len(later) == 1 else ''} for[/] [cmd]hlock sync --apps[/]")
     if remaining:
         secrets = [st for st in remaining if st["kind"] == "secret"]
         others = [st for st in remaining if st["kind"] != "secret"]
@@ -2257,17 +2410,29 @@ def sync(lock: str, plan_only: bool, as_json: bool, yes: bool, install: bool, pu
                 console.print(f"     [cmd]hlock secret set {short}[/]  [muted]# {used.rstrip(')')}[/]")
             console.print("     [muted]or export each variable, or reference it in ~/.config/hlock/secrets.toml[/]")
         hints = []
+        needs_apps = any(st.get("needs") == "apps" for st in remaining)
+        if needs_apps:
+            hints.append("hlock sync --apps")
         if any("--install" in (st.get("reason") or "") for st in remaining):
             hints.append(f"{again} --install")
         if any("--pull" in (st.get("reason") or "") for st in remaining):
             hints.append(f"{again} --pull")
-        hints.append(f"{again} --skill [muted](let your agent do it)[/]")
+        # what --apps can't do: an agent can (the meta harness, for the project's own lock)
+        if any(st.get("needs") != "apps" for st in remaining):
+            flag = " --apps" if needs_apps or apps else ""
+            if plan.get("app") and own and Path(_ml()).is_file():
+                hints.append(f"hlock meta run install{flag} [muted](let the meta harness do it)[/]")
+            else:
+                hints.append(f"{again} --skill [muted](let your agent do it)[/]")
         _next(*hints)
     if failed:
         sys.exit(1)
     if remaining:
         sys.exit(MANUAL_EXIT)
-    if plan["mode"] == "prefix":
+    if plan["mode"] == "prefix" and plan.get("app"):
+        _ok(f"in sync at [path]{_rel(plan['root'])}[/]  [muted]a copy: {plan['harness_name']} reads only your own config[/]")
+        console.print("[muted]to write it there:[/] [cmd]hlock sync --apps[/]")
+    elif plan["mode"] == "prefix":
         env = " ".join(f"{k}={_rel(v)}" for k, v in plan["isolation"].items())
         _ok(f"in sync at [path]{_rel(plan['root'])}[/]  [muted]your own config wasn't touched[/]")
         console.print(f"[muted]use it:[/] [cmd]{env} {plan.get('binary') or plan['harness']}[/]", soft_wrap=True)
@@ -2275,6 +2440,7 @@ def sync(lock: str, plan_only: bool, as_json: bool, yes: bool, install: bool, pu
             console.print("[muted]to restore into your own config instead:[/] [cmd]hlock sync --in-place[/]")
     else:
         _ok(f"in sync with [path]{_show(lock)}[/]")
+    _print_reload(plan, auto)
 
 
 @main.command()
@@ -2317,7 +2483,8 @@ def check(prefix: str | None) -> None:
             err_console.print(f"[fail]✗ drift:[/] {which} changed since {_ld()} was pinned")
             for line in drift:
                 err_console.print(f"  {line}")
-            restore = f"hlock sync --prefix {prefix}" if prefix else "hlock sync --in-place"
+            restore = (f"hlock sync --prefix {prefix}" if prefix
+                       else "hlock sync --apps" if _harness_kind(lf.harness) == "app" else "hlock sync --in-place")
             err_console.print(f"  [muted]hint:[/] re-pin with [cmd]{escape(_pin_cmd(lf))}[/], or restore it with [cmd]{restore}[/]")
             sys.exit(1)
         if failed:
@@ -2353,8 +2520,9 @@ def check(prefix: str | None) -> None:
         sys.exit(1)
     with _friendly_errors():
         decider_drift = _decider_drift(_l())
+    decider_drift += _sandbox_drift()
     if decider_drift:
-        err_console.print(f"[fail]✗ drift:[/] {_ld()}'s deciders changed")
+        err_console.print(f"[fail]✗ drift:[/] {_ld()}'s deciders or sandbox changed")
         for line in decider_drift:
             err_console.print(f"  {line}")
         err_console.print("  [muted]hint:[/] re-lock with [cmd]hlock resolve[/]")
@@ -2364,7 +2532,24 @@ def check(prefix: str | None) -> None:
         err_console.print("  [muted]hint:[/] re-measure with [cmd]hlock resolve[/]")
     if json.loads(lf.evidence).get("simulated"):
         err_console.print(f"[warn]![/] {_ld()}'s evidence is a stand-in: {lf.harness} itself didn't run its trials")
+    note = json.loads(_sandbox_info(_l(), manifest=_m())).get("evidence_note")
+    if note:
+        err_console.print(f"[warn]![/] {escape(note)}")
     _ok(f"[path]{_ld()}[/] matches [path]{_md()}[/]  [muted]{live.split(':', 1)[-1][:12]}[/]")
+
+
+def _sandbox_drift() -> list[str]:
+    """How harness.toml's [sandbox] (and its profile file) differ from the lock's."""
+    manifest = _m() if Path(_m()).exists() else None
+    with _friendly_errors():
+        info = json.loads(_sandbox_info(_l(), manifest=manifest))
+    out = []
+    if info["drift"]:
+        out.append(f"~ sandbox: {MANIFEST}'s \\[sandbox] differs from the lock's")
+        out.extend(f"    weakened: {w}" for w in info["weakened"])
+    if info.get("error") and "changed since the lock" in info["error"]:
+        out.append(f"~ {info['error']}")
+    return out
 
 
 def _packs_changed(lf) -> bool:
@@ -2594,7 +2779,8 @@ def _pin_tree(lock: dict) -> Tree:
 @click.argument("prompt")
 @click.option("--trust", "trust", is_flag=True, help="Approve every executable the lock would run.")
 @click.option("--json", "as_json", is_flag=True, help="Print the raw outcome as JSON.")
-def run(prompt: str, trust: bool, as_json: bool) -> None:
+@click.option("--no-sandbox", "no_sandbox", is_flag=True, help=_NO_SANDBOX_HELP)
+def run(prompt: str, trust: bool, as_json: bool, no_sandbox: bool) -> None:
     """Run the locked agent on PROMPT.
 
     An agent CLI runs for real, in the locked environment [cmd]hlock launch[/] uses, through
@@ -2604,11 +2790,13 @@ def run(prompt: str, trust: bool, as_json: bool) -> None:
         lf = Lockfile.load(_l())
         agent = load(_l())
     kind = _harness_kind(lf.harness)
+    if kind == "app":
+        _app_refusal(lf.harness)
     if kind == "custom":
-        _run_code_harness(prompt, as_json, trust)
+        _run_code_harness(prompt, as_json, trust, no_sandbox)
         return
     if kind == "cli":
-        _run_cli_harness(prompt, as_json, trust)
+        _run_cli_harness(prompt, as_json, trust, no_sandbox)
         return
     with _working("Running the locked agent…"):
         raw = agent.run(prompt)
@@ -2625,27 +2813,51 @@ def run(prompt: str, trust: bool, as_json: bool) -> None:
     sys.exit(0 if ok else 1)
 
 
+def _app_refusal(harness_id: str, why: str = "") -> None:
+    """Stop: a desktop app can't be started by hlock."""
+    name = json.loads(harness_profile(harness_id, manifest=_m()))["profile"]["name"]
+    _fail(f"{name} is a desktop app, and hlock can't start it" + (f"; {why}" if why else ""),
+          "[cmd]hlock sync --apps[/] puts the setup in place; then open the app")
+
+
 def _harness_kind(name: str) -> str | None:
-    """`cli`, `custom` (a code harness), or None for the reference harness."""
+    """`cli`, `app` (a desktop app), `custom` (a code harness), or None for the reference harness."""
     try:
         return json.loads(harness_profile(name, manifest=_m()))["profile"]["kind"]
     except (ValueError, OSError):
         return None
 
 
-def _run_cli_harness(prompt: str, as_json: bool, trust: bool = False) -> None:
+def _run_cli_harness(prompt: str, as_json: bool, trust: bool = False, no_sandbox: bool = False) -> None:
+    proxy = _sandbox_proxy(_l(), no_sandbox)
     with _working("Preparing the locked environment…"):
-        prep = json.loads(launch_prepare(_l(), prompt=prompt, manifest=_m(), trust=trust))
+        prep = json.loads(launch_prepare(_l(), prompt=prompt, manifest=_m(), trust=trust, no_sandbox=no_sandbox,
+                                         proxy_env=proxy.env() if proxy else None))
     secret_env = prep.pop("secret_env", {})  # values for the config's references; never shown
     env = {**os.environ, **prep["env"], **secret_env}
+    sb = _sandbox_start(prep, proxy)
     if not as_json:
         _print_prep(prep)
         sys.stdout.flush()
     start = time.monotonic()
     try:
-        r = subprocess.run(prep["argv"], env=env, capture_output=as_json, text=True, check=False)
+        if sb:
+            before = json.loads(_control_snapshot(sb["project"]))
+            with tempfile.TemporaryFile("w+") as out, _friendly_errors():
+                try:
+                    code, _ = _sbx.run(sb, stdout=out if as_json else None)
+                finally:
+                    _session_report(sb, prep["notes"] if as_json else None)
+                out.seek(0)
+                r = subprocess.CompletedProcess(sb["argv"], code if code is not None else 1, out.read() if as_json else None, "")
+            _control_report(sb["project"], before)
+        else:
+            r = subprocess.run(prep["argv"], env=env, capture_output=as_json, text=True, check=False)
     except OSError as e:
         _fail(f"cannot start {prep['argv'][0]}: {e}")
+    finally:
+        if proxy:
+            proxy.stop()
     latency = time.monotonic() - start
     ok = r.returncode == 0
     if as_json:
@@ -2660,9 +2872,11 @@ def _run_cli_harness(prompt: str, as_json: bool, trust: bool = False) -> None:
     sys.exit(0 if ok else 1)
 
 
-def _run_code_harness(prompt: str, as_json: bool, trust: bool = False) -> None:
+def _run_code_harness(prompt: str, as_json: bool, trust: bool = False, no_sandbox: bool = False) -> None:
     with _working("Running the locked harness…"):
-        r = json.loads(run_code_harness(prompt, _l(), manifest=_m(), trust=trust))
+        r = json.loads(run_code_harness(prompt, _l(), manifest=_m(), trust=trust, no_sandbox=no_sandbox))
+    for line in r.get("notes") or []:
+        err_console.print(f"[warn]![/] {escape(line)}", soft_wrap=True)
     if as_json:
         console.print_json(data=r)
     else:
@@ -2683,8 +2897,9 @@ def _run_code_harness(prompt: str, as_json: bool, trust: bool = False) -> None:
 @click.option("--trust", "trust", is_flag=True, help="Approve every executable the lock would run.")
 @click.option("--allow-hidden", "allow_hidden", multiple=True, metavar="FILE", help="Let through hidden characters in FILE.")
 @click.option("--json", "as_json", is_flag=True, help="With --dry-run: print the launch plan as JSON.")
+@click.option("--no-sandbox", "no_sandbox", is_flag=True, help=_NO_SANDBOX_HELP)
 def launch(args: tuple[str, ...], lock: str | None, prefix: str | None, in_place: bool, allow_version_mismatch: bool,
-           dry_run: bool, trust: bool, allow_hidden: tuple[str, ...], as_json: bool) -> None:
+           dry_run: bool, trust: bool, allow_hidden: tuple[str, ...], as_json: bool, no_sandbox: bool) -> None:
     """Start a session in a harness that matches the lock.
 
     [cmd]hlock launch[/] starts the lock's harness; [cmd]hlock launch pi[/] starts another one with
@@ -2715,6 +2930,8 @@ def launch(args: tuple[str, ...], lock: str | None, prefix: str | None, in_place
             allow_version_mismatch = True
         elif a == "--trust":
             trust = True
+        elif a == "--no-sandbox":
+            no_sandbox = True
         elif a == "--allow-hidden" and i + 1 < len(items):
             allow_hidden = (*allow_hidden, items[i + 1])
             i += 1
@@ -2750,18 +2967,41 @@ def launch(args: tuple[str, ...], lock: str | None, prefix: str | None, in_place
         if untrusted and trust:
             with _friendly_errors():
                 _trust_approve(lock=lock or _l(), only=[e["digest"] for e in untrusted], manifest=_m())
+    proxy = None if dry_run else _sandbox_proxy(lock or _l(), no_sandbox)
     with _working("Preparing the locked environment…"):
         prep = json.loads(launch_prepare(lock or _l(), harness=harness, prefix=prefix,
                                          allow_version_mismatch=allow_version_mismatch,
                                          in_place=in_place, args=rest, manifest=_m(), trust=trust,
-                                         allow_hidden=list(allow_hidden)))
+                                         allow_hidden=list(allow_hidden), no_sandbox=no_sandbox,
+                                         proxy_env=proxy.env() if proxy else None, tty=sys.stdin.isatty()))
     secret_env = prep.pop("secret_env", {})  # values for the config's references; never shown
+    if (dry_run or as_json) and prep.get("sandbox"):
+        prep["sandbox"].pop("env", None)
+        prep["sandbox"].pop("session_env", None)
     if as_json:
         console.print_json(data=prep)
         return
-    _print_prep(prep)
     if dry_run:
+        _print_prep(prep)
+        if prep.get("sandbox"):
+            console.print(f"[muted]  runs[/] [cmd]{escape(' '.join(prep['sandbox']['argv']))}[/]", soft_wrap=True)
         return
+    sb = _sandbox_start(prep, proxy)
+    _print_prep(prep)
+    if sb:
+        # hlock stays as the parent: it stops the container and the proxy, and checks
+        # what the session changed
+        before = json.loads(_control_snapshot(sb["project"]))
+        sys.stdout.flush()
+        try:
+            with _friendly_errors():
+                code, _ = _sbx.run(sb, interactive=True)
+        finally:
+            if proxy:
+                proxy.stop()
+            _session_report(sb)
+        _control_report(sb["project"], before)
+        sys.exit(code or 0)
     env = {**os.environ, **prep["env"], **secret_env}
     sys.stdout.flush()
     sys.stderr.flush()
@@ -2769,6 +3009,68 @@ def launch(args: tuple[str, ...], lock: str | None, prefix: str | None, in_place
         os.execvpe(prep["argv"][0], prep["argv"], env)
     except OSError as e:
         _fail(f"cannot start {prep['argv'][0]}: {e}")
+
+
+def _sandbox_proxy(lock: str, no_sandbox: bool):
+    """The key proxy a sandboxed run needs (`secrets = "proxy"`), started, or None."""
+    manifest = _m() if Path(_m()).exists() else None
+    with _friendly_errors():
+        info = json.loads(_sandbox_info(lock, manifest=manifest, no_sandbox=no_sandbox))
+    spec = info.get("spec")
+    # OpenShell holds the keys in its own providers: no proxy of hlock's
+    if not spec or info["off"] or spec.get("secrets") != "proxy" or spec.get("runner") != "docker":
+        return None
+    keys = _sbx.proxy_keys()
+    if not keys:
+        _fail("the sandbox proxies provider keys (secrets = \"proxy\"), but neither ANTHROPIC_API_KEY nor OPENAI_API_KEY is set",
+              "export an API key (a subscription login can't be proxied), or set [sandbox] secrets = \"env\" and re-pin")
+    try:
+        host = _sbx.bind_address()
+        # in a directory of hlock's own, outside anything a sandbox mounts
+        log = Path(tempfile.mkdtemp(prefix="hlock-proxy-")) / "proxy.log"
+        return _sbx.Proxy(keys, host=host, log=log).start()
+    except (OSError, RuntimeError) as e:
+        _fail(f"can't start the key proxy: {e}")
+
+
+def _sandbox_start(prep: dict, proxy) -> dict | None:
+    """Pull the sandbox out of a prepared launch (with its environment, which holds
+    secret values and is never printed), check the image, and approve the proxy's token."""
+    sb = prep.get("sandbox")
+    if not sb:
+        return None
+    sb["env"] = sb.pop("env", {})
+    sb["session_env"] = sb.pop("session_env", {})
+    try:
+        prep["notes"].extend(_sbx.check_image(sb, prep["harness"]))
+    except RuntimeError as e:
+        _fail(str(e))
+    if proxy and prep.get("harness") == "claude-code" and prep.get("root"):
+        _sbx.approve_claude_key(prep["root"], proxy.token)
+    return sb
+
+
+def _control_report(project: str, before: dict) -> None:
+    """Warn about control files a sandboxed session created or changed."""
+    after = json.loads(_control_snapshot(project))
+    changed = [f"{'created' if before.get(k) is None else 'changed' if v else 'removed'} {k}"
+               for k, v in after.items() if before.get(k) != v]
+    for line in changed:
+        err_console.print(f"[warn]![/] the sandboxed session {escape(line)}: review it before you run hlock (or direnv) again",
+                          soft_wrap=True)
+
+
+def _session_report(sb: dict, notes: list[str] | None = None) -> None:
+    """What an OpenShell session said as it ended (what it copied back, what it didn't):
+    printed, or added to `notes`."""
+    for line in sb.get("after") or []:
+        if notes is not None:
+            if line not in notes:
+                notes.append(line)
+        elif line.startswith("copied back"):
+            err_console.print(f"[ok]✓[/] {escape(line)}", soft_wrap=True)
+        else:
+            err_console.print(f"[warn]![/] {escape(line)}", soft_wrap=True)
 
 
 def _print_prep(prep: dict) -> None:
@@ -2786,7 +3088,9 @@ def _print_prep(prep: dict) -> None:
                       + ", ".join(prep["missing_secrets"]))
     env_txt = " ".join(f"{k}={_rel(v)}" for k, v in prep["env"].items() if not k.startswith(("HLOCK_", "PYTHON")))
     shown = " ".join(prep["argv"][:1] + [a if len(a) < 60 else a[:57] + "…" for a in prep["argv"][1:]])
-    console.print(f"[brand]▶[/] {prep['harness_name']}  [muted]{env_txt}[/] [cmd]{shown}[/]", soft_wrap=True)
+    sb = prep.get("sandbox")
+    where = f" in {sb['summary']}" if sb else ""
+    console.print(f"[brand]▶[/] {prep['harness_name']}{where}  [muted]{env_txt}[/] [cmd]{shown}[/]", soft_wrap=True)
 
 
 @main.command()
@@ -2869,10 +3173,12 @@ def upgrade(target: str | None, to: str | None, all_: bool, apply: bool, rollbac
 @click.option("--budget-usd", default=None, type=float, help="Override \\[tune.budget] usd.")
 @click.option("-d", "--detach", is_flag=True,
               help="Run in the background as a tune job. See [cmd]hlock tune list[/].")
+@click.option("--no-sandbox", "no_sandbox", is_flag=True, help="Run trials and graders without [sandbox] (or set HLOCK_NO_SANDBOX=1).")
 @click.pass_context
 def tune(ctx: click.Context, depth: str, data: str, harness: str | None, out: str, strict: bool, apply: bool,
          max_trials: int | None, backend: str | None, workdir: str | None, optimizer: str | None,
-         edit: str | None, budget_rollouts: int | None, budget_usd: float | None, detach: bool) -> None:
+         edit: str | None, budget_rollouts: int | None, budget_usd: float | None, detach: bool,
+         no_sandbox: bool) -> None:
     """Tune prompts, hyperparameters and small models into [path]harness.tune.lock[/].
 
     Tune starts from [path]harness.lock[/]'s stack (its harness, models, skills and config)
@@ -2888,6 +3194,8 @@ def tune(ctx: click.Context, depth: str, data: str, harness: str | None, out: st
     Long tunes can run in the background: [cmd]hlock tune --detach[/] starts a tune job,
     and [cmd]hlock tune fetch[/] collects its result when it finishes.
     """
+    if no_sandbox:
+        os.environ["HLOCK_NO_SANDBOX"] = "1"  # the core (and a detached job) reads it
     if ctx.invoked_subcommand is not None:
         return
     kinds = [k.strip() for k in edit.split(",") if k.strip()] if edit is not None else None
@@ -3204,7 +3512,8 @@ def harness_list(as_json: bool) -> None:
     """List known harnesses and what's installed on this machine.
 
     [bold]cli[/] harnesses are agent CLIs, listed apart when they're autonomous agents (a
-    long-running gateway with chat channels, schedules and memory), [bold]framework[/]
+    long-running gateway with chat channels, schedules and memory), [bold]app[/] harnesses are
+    desktop apps whose config hlock pins and restores but never starts, [bold]framework[/]
     harnesses are agent libraries a project builds on, and [bold]custom[/] harnesses come from
     [key]\\[harnesses.<id>][/] in [path]harness.toml[/].
     """
@@ -3213,8 +3522,8 @@ def harness_list(as_json: bool) -> None:
     if as_json:
         console.print_json(data=rows)
         return
-    groups = (("cli", False, "Agent CLIs"), ("cli", True, "Autonomous agents"), ("framework", False, "Frameworks"),
-              ("custom", False, f"Project harnesses ({_md()})"))
+    groups = (("cli", False, "Agent CLIs"), ("cli", True, "Autonomous agents"), ("app", False, "Desktop apps"),
+              ("framework", False, "Frameworks"), ("custom", False, f"Project harnesses ({_md()})"))
     for kind, autonomous, title in groups:
         # only agent CLIs split on `autonomous`, so a framework that sets it still shows up
         group = [r for r in rows if r["kind"] == kind and (kind != "cli" or bool(r.get("autonomous")) == autonomous)]
@@ -3226,13 +3535,13 @@ def harness_list(as_json: bool) -> None:
         t.add_column("harness", style="key", no_wrap=True)
         t.add_column("installed", no_wrap=True)
         t.add_column("source", style="muted", overflow="fold")
-        if kind == "cli":
+        if kind in ("cli", "app"):
             t.add_column("support")
         for r in group:
             p = r["probe"]
             installed = f"[bold]{p.get('version') or 'yes'}[/]" if p["installed"] else "[muted]—[/]"
             cells = ["[ok]●[/]" if p["active"] else "", r["id"], installed, p.get("source") or ""]
-            if kind == "cli":
+            if kind in ("cli", "app"):
                 cells.append(_support_badge(r["support"]))
             t.add_row(*cells)
         console.print(t)
@@ -3262,8 +3571,9 @@ def harness_show(name: str | None, as_json: bool) -> None:
     t = _kv_table()
     t.add_row("id", f"[bold]{prof['id']}[/]  [muted]{', '.join(prof['aliases'])}[/]")
     t.add_row("kind", prof["kind"] + ("  [muted](autonomous agent)[/]" if prof.get("autonomous") else "")
+              + ("  [muted](desktop app: hlock restores its config, you start it)[/]" if prof["kind"] == "app" else "")
               + (f"  [muted](framework {prof['framework']})[/]" if prof.get("framework") else ""))
-    if prof["kind"] == "cli":
+    if prof["kind"] in ("cli", "app"):
         t.add_row("support", _support_badge(prof["support"]))
     run = prof.get("run") or {}
     if run.get("entrypoint"):
@@ -3273,7 +3583,7 @@ def harness_show(name: str | None, as_json: bool) -> None:
     for pkg in prof.get("packages") or []:
         have = (probe.get("packages") or {}).get(pkg)
         t.add_row("package", f"{pkg}  " + (f"[bold]{have}[/]" if have else "[muted]not installed[/]"))
-    if prof["kind"] == "cli":
+    if prof["kind"] in ("cli", "app"):
         if probe["installed"]:
             t.add_row("installed", f"[bold]{probe.get('version') or '?'}[/]  [muted]{probe.get('binary')}[/]")
             t.add_row("source", probe.get("source") or "[muted]unknown install method[/]")
@@ -3288,6 +3598,9 @@ def harness_show(name: str | None, as_json: bool) -> None:
     for d in paths["skills"]:
         mark = "" if d["exists"] else "  [muted](missing)[/]"
         t.add_row("skills", f"{d['path']}{mark}")
+    for u in prof.get("unmanaged") or []:
+        link = f"  [muted]{u['url']}[/]" if u.get("url") else ""
+        t.add_row("not restored", f"{u['what']}  [muted]in {u['where']}[/]{link}")
     t.add_row("profile", "[muted]built in[/]" if prof["origin"] == "builtin" else f"[path]{prof['origin']}[/]")
     console.print(Panel(t, title=f"[brand]{prof['name']}[/]", title_align="left", border_style="magenta",
                         expand=False, padding=(1, 2)))
@@ -3989,10 +4302,10 @@ def _print_verdict(v: dict) -> None:
         console.print(f"  [cmd]export {name}=…[/]")
 
 
-def _verify(job: str, out: str | None, count: int) -> dict:
+def _verify(job: str, out: str | None, count: int, apps: bool = False) -> dict:
     with _working(f"Checking the {job} job…"):
         return json.loads(meta_verify(job, lock=_l(), meta_lock=_ml(), meta_manifest=_mm(), manifest=_m(),
-                                      out=out, count=count))
+                                      out=out, count=count, apps=apps))
 
 
 @meta.command("run", context_settings={"ignore_unknown_options": True})
@@ -4006,11 +4319,12 @@ def _verify(job: str, out: str | None, count: int) -> dict:
               type=click.Choice([t for t in _evals.TEMPLATES if t != "hello-world"]),
               help="bootstrap-evals: the template to scaffold when there's no pack yet.")
 @click.option("--pin", "repin", is_flag=True, help="update: re-pin the project's lock when something changed.")
+@click.option("--apps", is_flag=True, help="install: let it write desktop apps' own config (hlock sync --apps).")
 @click.option("--allow-version-mismatch", is_flag=True, help="Run even if the installed meta harness differs from its lock.")
 @click.option("--dry-run", is_flag=True, help="Print the command and the prompt, and run nothing.")
 @click.option("--json", "as_json", is_flag=True, help="With --dry-run: print the run plan as JSON.")
 def meta_run_cmd(job: str, instructions: tuple[str, ...], headless: bool | None, out: str | None, count: int,
-                 template: str, repin: bool, allow_version_mismatch: bool, dry_run: bool, as_json: bool) -> None:
+                 template: str, repin: bool, apps: bool, allow_version_mismatch: bool, dry_run: bool, as_json: bool) -> None:
     """Run JOB in the meta harness, then check the result.
 
     hlock renders the job's prompt from the project's state, runs the locked meta
@@ -4032,7 +4346,7 @@ def meta_run_cmd(job: str, instructions: tuple[str, ...], headless: bool | None,
         prep = json.loads(meta_prepare(job, lock=_l(), meta_lock=_ml(), meta_manifest=_mm(), manifest=_m(), out=out,
                                        count=count, instructions=" ".join(instructions),
                                        guide=str(guide) if guide else None, headless=headless,
-                                       allow_version_mismatch=allow_version_mismatch, dry_run=dry_run))
+                                       allow_version_mismatch=allow_version_mismatch, dry_run=dry_run, apps=apps))
     secret_env = prep.pop("secret_env", {})  # values for the config's references; never shown
     prompt_file = run_dir / "prompt.md"
     prompt_file.write_text(prep["prompt"])
@@ -4079,7 +4393,7 @@ def meta_run_cmd(job: str, instructions: tuple[str, ...], headless: bool | None,
     except OSError as e:
         _fail(f"cannot start {prep['argv'][0]}: {e}")
 
-    v = _verify(job, out, count)
+    v = _verify(job, out, count, apps)
     if v["status"] == "unverified" and code not in (None, 0):
         v["status"] = "failed"
         v["summary"] = f"{prep['harness_name']} exited with {code}"
@@ -4200,13 +4514,14 @@ def _scaffold_evals(pack_dir: Path, template: str, count: int, run_dir: Path, dr
 @click.argument("job")
 @click.option("--out", default=None, help="bootstrap-evals: the pack directory.")
 @click.option("--count", default=0, help="bootstrap-evals: the number of tasks expected.")
+@click.option("--apps", is_flag=True, help="install: desktop apps' own config should be written too.")
 @click.option("--json", "as_json", is_flag=True, help="Print the verdict as JSON.")
-def meta_verify_cmd(job: str, out: str | None, count: int, as_json: bool) -> None:
+def meta_verify_cmd(job: str, out: str | None, count: int, apps: bool, as_json: bool) -> None:
     """Run only JOB's check: what [cmd]hlock meta run[/] does after the agent finishes.
 
     The meta harness runs it to know when it's done; CI can run it too.
     """
-    v = _verify(job, out, count)
+    v = _verify(job, out, count, apps)
     if as_json:
         console.print_json(data=v)
     else:

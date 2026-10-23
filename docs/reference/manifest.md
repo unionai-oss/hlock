@@ -226,6 +226,35 @@ budget = { rollouts = 100, usd = 20 }
 | `budget.rollouts` | `100` | The most trials the optimizer may run |
 | `budget.usd` | | The most it may spend on trials |
 
+## `[sandbox]`
+
+The [sandbox](../guides/sandbox.md) the lock runs in. `pin`, `resolve` and `tune` copy it
+into the lock's `[policy.sandbox]`; `resolve` and `tune` also run code-harness trials and
+`tests` graders in it.
+
+```toml title="harness.toml"
+[sandbox]
+runner = "docker"
+image = "ghcr.io/acme/agent@sha256:4f1c9e0b7d2a"
+network = "open"
+secrets = "proxy"
+applies-to = ["agent", "trials", "graders"]
+grader-image = "ghcr.io/acme/ci@sha256:9d03…"
+```
+
+| Key | Default | Description |
+|---|---|---|
+| `runner` | `"none"` | `docker`, [`openshell`](../guides/sandbox.md#run-the-lock-on-openshell), or a runner defined in `~/.config/hlock/sandbox.toml` or `[sandbox.runners.<name>]` |
+| `image` | | The image `docker` or `openshell` runs (required for them). Pin it `@sha256:` |
+| `network` | `"open"` (`"none"` for `openshell`) | `open` or `none`; `openshell` takes `none` only |
+| `secrets` | `"env"` (`"proxy"` for `openshell`) | `env` (provider keys as environment variables) or `proxy` (a [key proxy](../guides/sandbox.md#keep-provider-keys-out-of-the-agents-reach) on `docker`, OpenShell providers on `openshell`) |
+| `applies-to` | all three | What runs inside: `agent`, `trials`, `graders` |
+| `profile` | | A runtime policy file in the project (a seatbelt profile, an OpenShell policy), pinned by digest and passed as `{profile}` (to `openshell`, as `--policy`) |
+| `grader-image` | `image` | The image `tests` graders run in |
+
+`[sandbox.runners.<name>]` defines a [command runner](../guides/sandbox.md#define-your-own-runner)
+for the project: `command`, `mount-args`, `mount-ro-args`, `network-args` and `networks`.
+
 ## Dependencies
 
 `[skills]`, `[mcp]`, `[instructions]`, `[plugins]` and `[packages]` declare dependencies:

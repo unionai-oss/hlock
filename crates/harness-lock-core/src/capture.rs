@@ -632,7 +632,7 @@ pub fn portable_path(p: &Path, root: Option<&Path>, ctx: &Ctx) -> String {
 
 /// A project file: under the working directory, but not under the harness's own config
 /// root (an isolated root, like the meta harness's, can live inside the project).
-fn is_project_path(p: &Path, root: &Path, ctx: &Ctx) -> bool {
+pub(crate) fn is_project_path(p: &Path, root: &Path, ctx: &Ctx) -> bool {
     p.starts_with(&ctx.cwd) && !ctx.home.starts_with(&ctx.cwd) && !p.starts_with(root)
 }
 
@@ -1109,7 +1109,17 @@ pub(crate) fn mcp_tool(name: &str, v: &Value, scope: &str) -> Option<Tool> {
 
 /// Normalize one MCP server entry from any harness's config shape.
 fn normalize_mcp(name: &str, v: &Value, scope: &str, secrets: &mut Secrets) -> Option<Tool> {
-    let obj = v.as_object()?;
+    let mut obj = v.as_object()?.clone();
+    // Zed's older form: `"command": {"path": …, "args": […], "env": {…}}`
+    if let Some(Value::Object(c)) = obj.get("command").cloned() {
+        obj.remove("command");
+        for (from, to) in [("path", "command"), ("args", "args"), ("env", "env")] {
+            if let Some(x) = c.get(from) {
+                obj.insert(to.into(), x.clone());
+            }
+        }
+    }
+    let obj = &obj;
     let ctx = [name];
     let mut cmd_parts: Vec<String> = match obj.get("command").or_else(|| obj.get("cmd")) {
         Some(Value::String(s)) => vec![s.clone()],
@@ -1366,7 +1376,7 @@ pub fn capture(profile: &HarnessProfile, reg: &Registry, ctx: &Ctx, project: Opt
 
     // ---- harness ----
     let probe = probe_harness(profile, ctx);
-    if profile.kind == "cli" && !probe.installed {
+    if (profile.kind == "cli" || profile.is_app()) && !probe.installed {
         warnings.push(format!("{} isn't installed here; pinning its config only", profile.name));
     }
 
@@ -1753,6 +1763,11 @@ pub fn capture(profile: &HarnessProfile, reg: &Registry, ctx: &Ctx, project: Opt
             Err(e) => warnings.push(format!("{}: {e}", mpath.display())),
         }
     }
+    // the sandbox the lock runs in, as harness.toml declares it; a bad one stops the pin
+    let sandbox = match crate::manifest::find_manifest(&ctx.cwd) {
+        Some(mpath) => crate::manifest::Manifest::load(&mpath)?.sandbox_spec()?,
+        None => None,
+    };
     warnings.extend(src.warnings.borrow().iter().cloned());
     for pat in users.unmatched() {
         warnings.push(format!("--include-user-scope {pat:?} matched nothing in {}'s user config ({})", profile.name, portable_path(&root, None, ctx)));
@@ -1784,6 +1799,7 @@ pub fn capture(profile: &HarnessProfile, reg: &Registry, ctx: &Ctx, project: Opt
         script: scripts,
         middleware,
         context: Context { isolation: "locked-only".into(), ..Default::default() },
+        policy: crate::lockfile::Policy { sandbox: sandbox.map(|s| s.to_map()).unwrap_or_default(), ..Default::default() },
         provenance: Provenance {
             backend: "pin".into(),
             scopes: if *user == UserScope::None { vec!["project".into()] } else { vec!["project".into(), "user".into()] },
@@ -1928,7 +1944,35 @@ pub fn diff_locks(old: &Lockfile, new: &Lockfile) -> Vec<String> {
     diff_maps(&mut out, "script", index(&old.script, file_key), index(&new.script, file_key), file_sig);
     diff_maps(&mut out, "middleware", index(&old.middleware, file_key), index(&new.middleware, file_key), file_sig);
     diff_maps(&mut out, "config", index(&old.config, |c| c.path.clone()), index(&new.config, |c| c.path.clone()), |c: &&ConfigFile| short(&c.digest));
+    out.extend(diff_sandbox(old, new));
     out
+}
+
+/// The sandbox's change, marked `weakened` when it protects less than before.
+fn diff_sandbox(old: &Lockfile, new: &Lockfile) -> Vec<String> {
+    let (o, n) = (crate::sandbox::Spec::from_lock(old).ok().flatten(), crate::sandbox::Spec::from_lock(new).ok().flatten());
+    if o == n {
+        return Vec::new();
+    }
+    let show = |s: &crate::sandbox::Spec| {
+        let mut t = s.summary();
+        if let Some(i) = &s.image {
+            t.push_str(&format!(" {i}"));
+        }
+        t
+    };
+    let line = match (&o, &n) {
+        (None, Some(b)) => format!("+ sandbox {}", show(b)),
+        (Some(a), None) => format!("- sandbox {}", show(a)),
+        (Some(a), Some(b)) => format!("~ sandbox: {} → {}", show(a), show(b)),
+        (None, None) => return Vec::new(),
+    };
+    let weaker = crate::sandbox::weakened(o.as_ref(), n.as_ref());
+    if weaker.is_empty() {
+        vec![line]
+    } else {
+        vec![format!("{line}  weakened: {}", weaker.join("; "))]
+    }
 }
 
 // --------------------------------------------------------------------------- //
@@ -2046,6 +2090,8 @@ pub fn pin(
 ) -> Result<PinOutcome> {
     let selection = reg.select(harness, manifest_target, ctx)?;
     let profile = reg.require_harness(&selection.id)?;
+    // almost everything a desktop app reads is user-level: pin all of it unless told what
+    let user = if profile.is_app() && user == UserScope::None { UserScope::All } else { user };
     let previous = if out.exists() {
         match Lockfile::load(out) {
             Ok(l) if !l.is_pin() && l.evidence.trials > 0 && !force => {
@@ -2145,6 +2191,7 @@ pub fn check_pin_at(lock: &Lockfile, reg: &Registry, ctx: &Ctx, prefix: Option<&
     let Some(prefix) = prefix else {
         let mut cap = capture(profile, reg, ctx, project, &user)?;
         crate::deps::carry_from(lock, &mut cap);
+        keep_app_version(profile, lock, &mut cap.lock);
         return Ok(diff_locks(lock, &cap.lock));
     };
     let target = crate::sync::target_ctx(profile, ctx, &crate::sync::SyncOptions { prefix: Some(prefix.to_path_buf()), ..Default::default() }).0;
@@ -2157,12 +2204,45 @@ pub fn check_pin_at(lock: &Lockfile, reg: &Registry, ctx: &Ctx, prefix: Option<&
             c.path = locked.path.clone();
         }
     }
+    keep_app_version(profile, lock, &mut cap.lock);
     Ok(diff_locks(lock, &cap.lock))
+}
+
+/// A desktop app updates itself, so a newer installed version isn't drift: keep the
+/// locked version (and the source that carries it) when the install method is the same.
+fn keep_app_version(profile: &HarnessProfile, lock: &Lockfile, cap: &mut Lockfile) {
+    if !profile.is_app() || cap.harness.version.is_none() {
+        return;
+    }
+    let method = |s: &Option<String>| s.as_deref().map(|s| s.split([':', '@']).next().unwrap_or(s).to_string());
+    if method(&lock.harness.source) == method(&cap.harness.source) {
+        cap.harness.version = lock.harness.version.clone();
+        cap.harness.source = lock.harness.source.clone();
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_app_updating_itself_isnt_drift() {
+        let reg = Registry::builtin();
+        let lock = |v: &str, src: &str| Lockfile { harness: crate::lockfile::Harness { name: "claude-desktop".into(), version: Some(v.into()), source: Some(src.into()), ..Default::default() }, ..Default::default() };
+        let pinned = lock("1.0.3", "app@1.0.3");
+        let mut now = lock("1.0.4", "app@1.0.4");
+        keep_app_version(reg.harness("claude-desktop").unwrap(), &pinned, &mut now);
+        assert!(diff_locks(&pinned, &now).is_empty());
+        // a changed install method is still reported
+        let mut now = lock("1.0.4", "brew-cask:claude@1.0.4");
+        keep_app_version(reg.harness("claude-desktop").unwrap(), &pinned, &mut now);
+        assert!(!diff_locks(&pinned, &now).is_empty());
+        // and a CLI's version is drift as before
+        let cli = |v: &str| Lockfile { harness: crate::lockfile::Harness { name: "claude-code".into(), version: Some(v.into()), ..Default::default() }, ..Default::default() };
+        let mut now = cli("2.1.1");
+        keep_app_version(reg.harness("claude-code").unwrap(), &cli("2.1.0"), &mut now);
+        assert!(!diff_locks(&cli("2.1.0"), &now).is_empty());
+    }
 
     #[test]
     fn globs_stay_within_a_segment_unless_doubled() {
@@ -2317,6 +2397,13 @@ mod tests {
         assert!(remote.headers["Authorization"].starts_with("${HLOCK_SECRET_FLYTE_HEADER_AUTHORIZATION"));
         let docker = normalize_mcp("d", &json!({"command": "docker", "args": ["run", "-i", "--rm", "-e", "X", "ghcr.io/a/b:1"]}), "user", &mut s).unwrap();
         assert_eq!(docker.source.as_deref(), Some("oci:ghcr.io/a/b:1"));
+        // Zed's older forms nest the command, with or without `source`
+        for v in [json!({"command": {"path": "npx", "args": ["-y", "pkg"], "env": {"A": "b"}}}), json!({"source": "custom", "command": {"path": "npx", "args": ["-y", "pkg"], "env": {"A": "b"}}})] {
+            let zed = normalize_mcp("z", &v, "user", &mut s).unwrap();
+            assert_eq!((zed.command.as_deref(), zed.args.clone(), zed.env["A"].as_str()), (Some("npx"), vec!["-y".to_string(), "pkg".to_string()], "b"));
+        }
+        let vscode = normalize_mcp("v", &json!({"type": "stdio", "command": "uvx", "args": ["x"]}), "user", &mut s).unwrap();
+        assert_eq!((vscode.transport.as_deref(), vscode.command.as_deref()), (Some("stdio"), Some("uvx")));
     }
 
     #[test]
