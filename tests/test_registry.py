@@ -425,3 +425,15 @@ def test_gzip_bomb_guard_counts_unpacked_bytes(world):
     world["reg"].add("alice/bomb", "1", big)
     r = invoke("pull", "alice/bomb", "--registry", world["url"])
     assert r.exit_code == 1 and "MiB" in r.output
+
+
+def test_json_output_stays_clean_when_a_terminal_is_forced(world, monkeypatch):
+    # CI systems often set FORCE_COLOR; progress spinners must not land in --json output.
+    from hlock import cli
+
+    login(world)
+    monkeypatch.setattr(cli.console, "_force_terminal", True)
+    monkeypatch.setattr(cli.err_console, "_force_terminal", True)
+    r = CliRunner().invoke(main, ["whoami", "--json"])
+    assert r.exit_code == 0, r.output
+    assert json.loads(r.stdout)["user"]["handle"]

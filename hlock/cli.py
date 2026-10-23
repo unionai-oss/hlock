@@ -285,7 +285,9 @@ def _friendly_errors():
 
 @contextmanager
 def _working(message: str):
-    with _friendly_errors(), console.status(f"[brand]{message}[/]", spinner="dots"):
+    # Progress goes to stderr, so `--json` output on stdout stays parseable even when a CI
+    # forces a terminal (FORCE_COLOR).
+    with _friendly_errors(), err_console.status(f"[brand]{message}[/]", spinner="dots"):
         yield
 
 
@@ -1548,7 +1550,7 @@ def login(url: str | None, token: str | None, no_browser: bool) -> None:
         interval = float(start.get("interval", 5))
         deadline = time.time() + float(start.get("expires_in", 900))
         r = None
-        with _friendly_errors(), console.status("[brand]Waiting for you to confirm in the browser…[/]", spinner="dots"):
+        with _friendly_errors(), err_console.status("[brand]Waiting for you to confirm in the browser…[/]", spinner="dots"):
             while time.time() < deadline:
                 time.sleep(interval)
                 polled = json.loads(_registry_device_poll(url, start["device_code"]))
