@@ -1,0 +1,63 @@
+# Harness profile: the Cursor editor. A desktop app: hlock pins and restores its MCP
+# servers, skills and rules but never starts it. It shares ~/.cursor/mcp.json,
+# .cursor/mcp.json, the rules and the skill directories with the Cursor Agent CLI
+# (cursor-agent). Its settings.json and model choice are editor state, not pinned.
+# Windows paths are from the installer's defaults, not yet tried on a real install.
+id = "cursor-ide"
+name = "Cursor"
+kind = "app"
+aliases = ["cursor-app", "cursor-editor"]
+vendor = "Anysphere"
+homepage = "https://cursor.com"
+support = "basic"
+open-source = false
+local-models = false
+# the `cursor` shim the app installs (VS Code's `code`); the app's own executable is never run
+binaries = ["cursor"]
+version = { args = ["--version"] }
+config-root = { default = "~/.cursor" }
+instructions = ["AGENTS.md"]
+rules = { dir = ".cursor/rules", ext = ".mdc" }
+
+[app]
+bundles = ["Cursor.app"]
+paths.windows = ["~/AppData/Local/Programs/cursor/Cursor.exe"]
+# it watches mcp.json, but only a quit and reopen reliably reloads every server
+reload = "restart"
+
+[[install]]
+method = "brew-cask"
+package = "cursor"
+[[install]]
+method = "app"
+path-hints = ["/Cursor.app"]
+command = "Download Cursor from https://cursor.com/download"
+
+[files.mcp]
+path = "{root}/mcp.json"
+format = "jsonc"
+restore = "whole"
+[files.project-mcp]
+path = ".cursor/mcp.json"
+format = "jsonc"
+restore = "record"
+
+[mcp]
+sources = ["mcp#/mcpServers", "project-mcp#/mcpServers"]
+write = "mcp#/mcpServers"
+
+[skills]
+dirs = ["{root}/skills", ".cursor/skills", "~/.agents/skills", ".agents/skills"]
+write = "{root}/skills"
+builtin-dirs = ["{root}/skills-cursor"]
+
+[[unmanaged]]
+what = "User Rules and the model"
+where = "the app (Cursor Settings → Rules, Models)"
+[[unmanaged]]
+what = "Team Rules"
+where = "your Cursor team's dashboard"
+url = "https://cursor.com/dashboard"
+[[unmanaged]]
+what = "Which MCP servers are turned on, and tool approvals"
+where = "the app (Cursor Settings → MCP)"

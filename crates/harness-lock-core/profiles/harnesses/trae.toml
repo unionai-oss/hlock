@@ -1,0 +1,55 @@
+# Harness profile: TRAE, ByteDance's AI IDE (TraeCode and TraeWork, merged in 2026). A
+# desktop app: hlock pins and restores its MCP servers, rules and skills but never starts
+# it. Trae's docs don't give the user MCP file's path; {app-config}/Trae/User/mcp.json is
+# where MCP installers write it. Windows paths aren't yet tried on a real install.
+id = "trae"
+name = "TRAE"
+kind = "app"
+aliases = ["trae-ide"]
+vendor = "ByteDance"
+homepage = "https://www.trae.ai"
+support = "basic"
+open-source = false
+local-models = false
+config-root = { default = "{app-config}/Trae/User" }
+instructions = ["AGENTS.md"]
+rules = { dir = ".trae/rules", ext = ".md" }
+
+[app]
+bundles = ["Trae.app"]
+paths.windows = ["~/AppData/Local/Programs/Trae/Trae.exe"]
+reload = "restart"
+
+[[install]]
+method = "brew-cask"
+package = "trae"
+[[install]]
+method = "app"
+path-hints = ["/Trae.app"]
+command = "Download TRAE from https://www.trae.ai/download"
+
+[files.mcp]
+path = "{root}/mcp.json"
+format = "json"
+restore = "whole"
+# read only with Settings → MCP → "Enable Project MCP"
+[files.project-mcp]
+path = ".trae/mcp.json"
+format = "json"
+restore = "record"
+
+[mcp]
+sources = ["mcp#/mcpServers", "project-mcp#/mcpServers"]
+write = "mcp#/mcpServers"
+
+[skills]
+dirs = ["~/.trae/skills", ".trae/skills", ".agents/skills"]
+write = "~/.trae/skills"
+
+[[unmanaged]]
+what = "User rules (~/.trae/user_rules) and the model"
+where = "the app (Settings → Rules, the model picker)"
+[[unmanaged]]
+what = "Cloud MCP servers"
+where = "your TRAE account"
+url = "https://www.trae.ai"

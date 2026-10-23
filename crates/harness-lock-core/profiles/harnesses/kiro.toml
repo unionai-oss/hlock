@@ -1,0 +1,59 @@
+# Harness profile: Kiro, AWS's agentic IDE. A desktop app: hlock pins and restores its MCP
+# servers, steering files and skills but never starts it. Windows and Linux install paths
+# aren't documented; there the `kiro` shim finds it.
+id = "kiro"
+name = "Kiro"
+kind = "app"
+aliases = ["kiro-ide"]
+vendor = "AWS"
+homepage = "https://kiro.dev"
+support = "basic"
+open-source = false
+local-models = false
+# the `kiro` shim the app installs (VS Code's `code`); the app's own executable is never run
+binaries = ["kiro"]
+version = { args = ["--version"] }
+config-root = { default = "~/.kiro" }
+instructions = ["AGENTS.md", "{root}/steering/AGENTS.md"]
+# steering files: always-included or conditional Markdown
+rules = { dir = ".kiro/steering", ext = ".md" }
+
+[app]
+bundles = ["Kiro.app"]
+# it watches mcp.json and restarts the servers that changed
+reload = "auto"
+
+[[install]]
+method = "brew-cask"
+package = "kiro"
+[[install]]
+method = "app"
+path-hints = ["/Kiro.app"]
+command = "Download Kiro from https://kiro.dev/downloads"
+
+[files.mcp]
+path = "{root}/settings/mcp.json"
+format = "json"
+restore = "whole"
+[files.project-mcp]
+path = ".kiro/settings/mcp.json"
+format = "json"
+restore = "record"
+
+[mcp]
+sources = ["mcp#/mcpServers", "project-mcp#/mcpServers"]
+write = "mcp#/mcpServers"
+# stdio and remote HTTP
+transports = ["stdio", "http"]
+
+[skills]
+dirs = ["{root}/skills", ".kiro/skills"]
+write = "{root}/skills"
+
+[[unmanaged]]
+what = "The model"
+where = "the app (the model picker)"
+[[unmanaged]]
+what = "Cloud steering and skills, and your organization's MCP registry"
+where = "your Kiro account"
+url = "https://app.kiro.dev/settings/cloud-config"

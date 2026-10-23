@@ -1,0 +1,66 @@
+# Harness profile: Devin Desktop (Windsurf until June 2026), Cognition's editor. A desktop
+# app: hlock pins and restores the setup of its default agent, Devin Local, which reads the
+# Devin CLI's files under ~/.config/devin, but never starts it. The older Cascade agent
+# keeps its own files under ~/.codeium/windsurf, which this profile doesn't restore. On
+# Windows the config is %APPDATA%\devin, which this profile doesn't handle yet.
+id = "devin-desktop"
+name = "Devin Desktop"
+kind = "app"
+aliases = ["windsurf", "devin-app"]
+vendor = "Cognition"
+homepage = "https://devin.ai/desktop"
+support = "basic"
+open-source = false
+local-models = false
+config-root = { default = "~/.config/devin" }
+instructions = ["AGENTS.md", "CLAUDE.md", "{root}/AGENTS.md"]
+rules = { dir = ".devin/rules", ext = ".md" }
+
+[app]
+# Windsurf.app: the app's name before the rename
+bundles = ["Devin.app", "Windsurf.app"]
+reload = "restart"
+
+[[install]]
+method = "brew-cask"
+package = "devin-desktop"
+[[install]]
+method = "app"
+path-hints = ["/Devin.app", "/Windsurf.app"]
+command = "Download Devin Desktop from https://devin.ai/desktop"
+
+[files.config]
+path = "{root}/config.json"
+format = "json"
+restore = "pointers"
+pointers = ["/model"]
+[files.mcp]
+path = "{root}/mcp_config.json"
+format = "json"
+restore = "whole"
+[files.project-mcp]
+path = ".devin/mcp_config.json"
+format = "json"
+restore = "record"
+
+[model]
+default = ["config#/model"]
+default-provider = "devin"
+
+[mcp]
+sources = ["mcp#/mcpServers", "project-mcp#/mcpServers"]
+write = "mcp#/mcpServers"
+# remote servers say their transport: `"transport": "http" | "sse"`
+shape = "devin"
+
+[skills]
+dirs = ["{root}/skills", ".devin/skills", ".windsurf/skills", "~/.agents/skills", ".agents/skills"]
+write = "{root}/skills"
+
+[[unmanaged]]
+what = "The Cascade agent's MCP servers, memories and global rules"
+where = "~/.codeium/windsurf, which the app keeps"
+[[unmanaged]]
+what = "Your team's MCP allowlist, and whether Devin Local is on"
+where = "your Devin organization's settings"
+url = "https://app.devin.ai"

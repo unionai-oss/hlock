@@ -1,0 +1,66 @@
+# Harness profile: the ChatGPT desktop app (formerly the Codex app; OpenAI merged the two in
+# July 2026). A desktop app: hlock pins and restores its setup but never starts it. Its
+# agent reads the same ~/.codex files as the Codex CLI (config.toml, AGENTS.md, skills),
+# so a lock of either restores both. The older chat-only app, ChatGPT Classic, keeps its
+# setup in your OpenAI account and has no profile. The Windows app is a Microsoft Store
+# (MSIX) install, which this profile doesn't find yet.
+id = "chatgpt"
+name = "ChatGPT"
+kind = "app"
+aliases = ["chatgpt-desktop", "codex-app", "codex-desktop"]
+vendor = "OpenAI"
+homepage = "https://learn.chatgpt.com/docs/app"
+support = "basic"
+open-source = false
+local-models = false
+config-root = { env = "CODEX_HOME", default = "~/.codex" }
+instructions = ["AGENTS.md", "AGENTS.override.md", "{root}/AGENTS.md"]
+
+[app]
+# Codex.app: the app's name before the merge, still on machines that upgraded in place
+bundles = ["ChatGPT.app", "Codex.app"]
+# MCP servers load at start: "Restart" after editing config.toml
+reload = "restart"
+
+[[install]]
+method = "brew-cask"
+package = "chatgpt"
+[[install]]
+method = "app"
+path-hints = ["/ChatGPT.app", "/Codex.app"]
+command = "Download the ChatGPT desktop app from https://learn.chatgpt.com/docs/app"
+
+[files.config]
+path = "{root}/config.toml"
+format = "toml"
+restore = "whole"
+
+[model]
+default = ["config#/model"]
+provider = ["config#/model_provider"]
+default-provider = "openai"
+
+[providers]
+source = ["config#/model_providers"]
+base-url = ["/base_url"]
+
+[mcp]
+sources = ["config#/mcp_servers"]
+write = "config#/mcp_servers"
+shape = "codex"
+# stdio and streamable HTTP only
+transports = ["stdio", "http"]
+
+[skills]
+dirs = ["{root}/skills", "~/.agents/skills", ".agents/skills", ".codex/skills"]
+write = "{root}/skills"
+builtin-dirs = ["{root}/skills/.system"]
+
+[[unmanaged]]
+what = "Plugins and connectors"
+where = "your ChatGPT account (the plugin directory ChatGPT and Codex share)"
+url = "https://chatgpt.com"
+[[unmanaged]]
+what = "Chats, projects, memory and custom instructions"
+where = "your ChatGPT account"
+url = "https://chatgpt.com"

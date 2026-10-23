@@ -179,6 +179,20 @@ pub fn mcp_entry(t: &Tool, shape: &str) -> Value {
             }
             e
         }
+        ("devin", true) => {
+            let mut e = json!({"url": t.url, "transport": if t.transport.as_deref() == Some("sse") { "sse" } else { "http" }});
+            if !t.headers.is_empty() {
+                e["headers"] = headers;
+            }
+            e
+        }
+        ("antigravity", true) => {
+            let mut e = json!({"serverUrl": t.url});
+            if !t.headers.is_empty() {
+                e["headers"] = headers;
+            }
+            e
+        }
         ("zed", true) => {
             let mut e = json!({"url": t.url});
             if !t.headers.is_empty() {
@@ -827,8 +841,11 @@ mod tests {
         assert_eq!(mcp_entry(&http, "zed"), json!({"url": "https://x/mcp", "headers": {"Authorization": "Bearer t"}}));
         // Zed's local servers are the standard shape
         assert_eq!(mcp_entry(&stdio, "zed"), mcp_entry(&stdio, "standard"));
+        assert_eq!(mcp_entry(&http, "devin"), json!({"url": "https://x/mcp", "transport": "http", "headers": {"Authorization": "Bearer t"}}));
+        assert_eq!(mcp_entry(&http, "antigravity"), json!({"serverUrl": "https://x/mcp", "headers": {"Authorization": "Bearer t"}}));
+        assert_eq!(mcp_entry(&stdio, "antigravity"), mcp_entry(&stdio, "standard"));
         // every shape reads back as the same server
-        for shape in ["standard", "opencode", "codex", "goose", "openclaw", "nanobot", "vscode", "zed"] {
+        for shape in ["standard", "opencode", "codex", "goose", "openclaw", "nanobot", "vscode", "zed", "devin", "antigravity"] {
             for t in [&stdio, &http] {
                 let back = crate::capture::mcp_tool(&t.name, &mcp_entry(t, shape), "user").unwrap();
                 assert_eq!((back.command.as_deref(), &back.args, back.url.as_deref()), (t.command.as_deref(), &t.args, t.url.as_deref()), "{shape}");
