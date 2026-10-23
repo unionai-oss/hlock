@@ -282,7 +282,8 @@ adapters, the data split, and the budget, all content-addressed. Adopt it into
 `harness.lock` with `hlock tune apply`, which keeps the old lock in `harness.lock.prev`.
 
 When the [optimize stage](../guides/tune.md#tune-the-harness-text) ran, `[tune.optimizer]`
-records the optimizer, what it could edit, its budget and usage, and a digest of the splits;
+records the optimizer, the `backend` that hosted its search, what it could edit, its budget
+and usage, and a digest of the splits;
 `[tune.acceptance]` records the noise band, the paired test run (`base`, `candidate`,
 `better`, `worse`, `p`) and its cost, and why edits weren't accepted. Each accepted edit is
 a `[[tune.edit]]` (`component`, `kind`, `op`, `before`, `after`, `path`, `rationale`), and

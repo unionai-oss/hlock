@@ -660,6 +660,25 @@ List the backends you can select: the built-ins, the manifest's `[backends]`,
 hlock backend list
 ```
 
+## `optimizer status`
+
+Show tune's optimizer (`NAME`, else `[tune] optimizer`, else `hlock`), how hlock found it,
+its `[optimizers.<name>] options`, and what a Python optimizer says it is. See
+[Optimizers](../guides/optimizers.md).
+
+```bash
+hlock optimizer status [NAME]
+```
+
+## `optimizer list`
+
+List the optimizers you can select: the built-ins, the manifest's `[optimizers]`,
+`hlock-optimizer-*` executables on `PATH`, and installed `hlock.optimizers` entry points.
+
+```bash
+hlock optimizer list
+```
+
 ## `run`
 
 Load `harness.lock` and run the locked agent on `PROMPT`. Exits `0` when it succeeds and
@@ -724,9 +743,9 @@ hlock tune [--depth LEVEL] [--data SOURCE] [OPTIONS]
 | `--strict` | | Fail unless the result beats the lock's own configuration, measured on the same tasks |
 | `--apply` | | Also adopt the result into `harness.lock`, as `tune apply` does |
 | `--max-trials N` | | Cap the grid's trials in total, spread round-robin across the configurations |
-| `--backend` | manifest `[backend] target` | `offline`, `local`, `flyte`, or a [custom backend](../guides/backends.md#write-your-own-backend) |
+| `--backend` | manifest `[backend] target` | Where the work runs: `offline`, `local`, `flyte`, or a [custom backend](../guides/backends.md#write-your-own-backend) |
 | `--workdir DIR` | `.hlock` | Where trial artifacts go |
-| `--optimizer NAME` | `[tune] optimizer` | `hlock`, or a backend that runs `harness.optimize` |
+| `--optimizer NAME` | `[tune] optimizer` | What searches for edits: `hlock`, `harness2`, or an [optimizer of your own](../guides/optimizers.md) |
 | `--edit KINDS` | `[tune] edit` | What the optimizer may change: `instructions`, `skill`, comma-separated |
 | `--budget-rollouts N`, `--budget-usd X` | `[tune.budget]` | The optimizer's budget |
 | `-d`, `--detach` | | Run in the background as a tune job; can't be combined with `--apply` |

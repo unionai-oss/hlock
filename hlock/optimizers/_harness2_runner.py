@@ -11,7 +11,7 @@ measures the result.
 
     python _harness2_runner.py job.json result.json
 
-``job.json`` (written by ``hlock.backends.harness2``): ``root``, ``substrate`` (``oc`` or
+``job.json`` (written by ``hlock.optimizers.harness2``): ``root``, ``substrate`` (``oc`` or
 ``cx``), ``tree`` (rel path -> text, the seed harness), ``tasks`` (``id``, ``prompt``,
 ``fixtures``, ``expected``), ``domain``, ``work``, ``k``, ``mode``, ``timeout``, and for tests
 ``proposer`` / ``launcher`` (``module:attr``). ``result.json``: each task's adopted tree,

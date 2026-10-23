@@ -9,7 +9,6 @@ the Flyte lift degrades to in-process when the ``flyte`` SDK is absent.
 
 from __future__ import annotations
 
-import hashlib
 import json
 import subprocess
 import sys
@@ -188,8 +187,8 @@ def test_worker_contract_data_load_split():
 
 
 def test_tune_depth_prompt_on_a_backend_without_harness_optimize(tmp_path, monkeypatch):
-    """A backend from before harness.optimize: depth=prompt falls back to its prompt.search
-    (deprecated), which still writes the tuned prompt as a file the lock places."""
+    """A backend that doesn't host the search (no harness.optimize): the optimizer runs on
+    hlock's local worker, and the trials it evaluates still run on the backend."""
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("HL_PYTHON", sys.executable)
     monkeypatch.setenv("HL_LLM_BASE_URL", "")  # ensure deterministic reference path
@@ -231,20 +230,12 @@ python = "legacy_backend:Legacy"
     import hlock
 
     report = json.loads(hlock.tune(backend="legacy", depth="prompt", data="synthetic:2", max_trials=2))["report"]
-    assert any("prompt.search, which is deprecated" in n for n in report["notes"])
+    assert not any("prompt.search" in n for n in report["notes"])
+    assert any(s["stage"] == "optimize" and s["ran"] for s in report["stages"]), report["stages"]
     d = json.loads(hlock.Lockfile.load(str(tmp_path / "harness.tune.lock")).to_json())
-    applied = d["tune"]["prompt"]["applied"]
-    assert applied and "_placeholder" not in applied[0]  # a real prompt search ran
-    assert applied[0]["gain"]["success-rate"].startswith(("+", "-"))  # measured with and without it
-    after = applied[0]["after"]
-    assert after.startswith("sha256:") and after != applied[0]["before"]
+    assert d["tune"]["optimizer"]["name"] == "hlock" and d["tune"]["optimizer"]["backend"] == "local"
+    assert d["provenance"]["backend"] == "legacy" and "prompt" not in d["tune"]
     assert d["tune"]["data"]["mode"] == "synthetic"
-    # the tuned prompt's text is a file next to the tune lock, which the lock places
-    tuned = tmp_path / applied[0]["path"]
-    assert applied[0]["path"].startswith(".hlock/tuned/") and tuned.is_file()
-    assert "sha256:" + hashlib.sha256(tuned.read_bytes()).hexdigest() == after
-    entry = next(i for i in d["instructions"] if i["name"] == applied[0]["file"])
-    assert (entry["source"], entry["vendored"], entry["digest"]) == ("tune", applied[0]["path"], after)
 
 
 # ---- trials against a served model (HL_LLM_BASE_URL) -------------------------------

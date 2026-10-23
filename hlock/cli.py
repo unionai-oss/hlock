@@ -57,6 +57,7 @@ from hlock import (
     meta_pin,
     meta_prepare,
     meta_verify,
+    optimizer_describe,
     run_code_harness,
     runtimes,
     secret_delete,
@@ -211,7 +212,7 @@ click.rich_click.COMMAND_GROUPS = {
         {"name": "Optimize", "commands": ["evals", "init", "resolve", "tune", "upgrade", "decide"]},
         {"name": "Switch", "commands": ["migrate", "localize"]},
         {"name": "Harness", "commands": ["harness", "runtime"]},
-        {"name": "Inspect", "commands": ["show", "diff", "tree", "backend"]},
+        {"name": "Inspect", "commands": ["show", "diff", "tree", "backend", "optimizer"]},
         {"name": "Meta", "commands": ["meta"]},
     ],
     "hlock meta": [
@@ -2858,10 +2859,10 @@ def upgrade(target: str | None, to: str | None, all_: bool, apply: bool, rollbac
 @click.option("--max-trials", default=None, type=int,
               help="Cap the grid's trials in total, spread round-robin across the configurations.")
 @click.option("--backend", default=None, metavar="NAME",
-              help="Override the manifest's \\[backend] target: offline, local, flyte, or a custom backend.")
+              help="Where the work runs. Overrides \\[backend] target: offline, local, flyte, or a custom backend.")
 @click.option("--workdir", default=None, help="Where to put trial artifacts.")
 @click.option("--optimizer", default=None, metavar="NAME",
-              help="Override \\[tune] optimizer: hlock (built in) or a backend that runs harness.optimize.")
+              help="What searches for edits. Overrides \\[tune] optimizer: hlock, harness2, or a custom optimizer.")
 @click.option("--edit", "edit", default=None, metavar="KINDS",
               help="Override \\[tune] edit: what the optimizer may change (instructions,skill).")
 @click.option("--budget-rollouts", default=None, type=int, help="Override \\[tune.budget] rollouts.")
@@ -2881,7 +2882,8 @@ def tune(ctx: click.Context, depth: str, data: str, harness: str | None, out: st
 
     With [cmd]--depth prompt[/] or [key]\\[tune] edit[/], an optimizer edits the lock's
     instruction files (and skills, with [cmd]--edit instructions,skill[/]), and hlock keeps the
-    edits only if they beat the lock on held-out tasks.
+    edits only if they beat the lock on held-out tasks. The optimizer ([cmd]--optimizer[/]) is
+    what searches; the backend ([cmd]--backend[/]) is where its trials run.
 
     Long tunes can run in the background: [cmd]hlock tune --detach[/] starts a tune job,
     and [cmd]hlock tune fetch[/] collects its result when it finishes.
@@ -2947,7 +2949,9 @@ def _tune_panel(r: dict, title: str = "[brand]⚙ tune[/]") -> Panel:
         if test:
             line += (f"  [muted]{test.get('split')}: {_pct(test.get('base'))} → {_pct(test.get('candidate'))} on "
                      f"{test.get('tasks')} tasks, p = {test.get('p')}[/]")
-        run_info.add_row("optimizer", f"{escape(str((opt.get('optimizer') or {}).get('name')))}  {line}")
+        o = opt.get("optimizer") or {}
+        where = f" [muted]on {escape(str(o['backend']))}[/]" if o.get("backend") else ""
+        run_info.add_row("optimizer", f"{escape(str(o.get('name')))}{where}  {line}")
 
     measured = (r.get("baseline") or {}).get("measured")
     result_row = Text.assemble(
@@ -3525,7 +3529,7 @@ def localize(lock: str | None, out: str, harness: str | None, runtime: str | Non
 
 @main.group()
 def backend() -> None:
-    """Inspect the tuning backend."""
+    """Inspect backends: where resolve's and tune's work runs."""
 
 
 @backend.command("status")
@@ -3598,6 +3602,72 @@ def backend_list() -> None:
         rows.setdefault(n, f"Python entry point {spec}")
     t = Table(box=None, padding=(0, 2), show_header=True, header_style="muted")
     t.add_column("backend")
+    t.add_column("found")
+    for n, src in rows.items():
+        t.add_row(f"[bold]{n}[/]", src)
+    console.print(t)
+
+
+@main.group()
+def optimizer() -> None:
+    """Inspect tune's optimizers: what searches for harness edits."""
+
+
+@optimizer.command("status")
+@click.argument("name", required=False, metavar="[NAME]")
+def optimizer_status(name: str | None) -> None:
+    """Show the optimizer (NAME, else \\[tune] optimizer), how it was found, and its options."""
+    from hlock.optimizers import OptimizerError, load
+
+    has_manifest = Path(_m()).exists()
+    try:
+        info = json.loads(optimizer_describe(_m() if has_manifest else None, optimizer=name))
+    except ValueError as e:
+        _fail(str(e))
+    if name:
+        source = "named"
+    elif has_manifest:
+        source = f"from {_md()}"
+    else:
+        source = f"no {_md()}, using the default"
+    t = _kv_table()
+    t.add_row("optimizer", f"[bold]{escape(info['name'])}[/]  [muted]({source})[/]")
+    t.add_row("found", escape(info["source"]))
+    if info.get("options"):
+        t.add_row("options", escape(", ".join(f"{k}={v}" for k, v in info["options"].items())))
+    if not info.get("command"):
+        try:
+            about = getattr(load(info["name"], info.get("object")), "about", "")
+            if about:
+                t.add_row("about", escape(about))
+        except OptimizerError as e:
+            t.add_row("about", f"[err]{escape(str(e))}[/]")
+    console.print(t)
+
+
+@optimizer.command("list")
+def optimizer_list() -> None:
+    """List the optimizers you can select: built in, in the manifest, on PATH, and installed."""
+    from hlock.optimizers import BUILTIN, _entry_points
+
+    rows: dict[str, str] = {n: "built in" for n in BUILTIN}
+    try:
+        defined = json.loads(Manifest.load(_m()).optimizers()) if Path(_m()).exists() else {}
+    except ValueError:
+        defined = {}
+    for n, d in defined.items():
+        if n not in rows:
+            rows[n] = f"{_md()}: " + ("command " + " ".join(d["command"] if isinstance(d.get("command"), list) else [d["command"]])
+                                      if d.get("command") else f"Python object {d['python']}" if d.get("python") else "no command or python")
+    for d in os.environ.get("PATH", "").split(os.pathsep):
+        for exe in sorted(Path(d).glob("hlock-optimizer-*")) if d and Path(d).is_dir() else []:
+            n = exe.name.removeprefix("hlock-optimizer-")
+            if n and n not in rows and os.access(exe, os.X_OK):
+                rows[n] = f"{exe.name} on PATH"
+    for n, spec in sorted(_entry_points().items()):
+        rows.setdefault(n, f"Python entry point {spec}")
+    t = Table(box=None, padding=(0, 2), show_header=True, header_style="muted")
+    t.add_column("optimizer")
     t.add_column("found")
     for n, src in rows.items():
         t.add_row(f"[bold]{n}[/]", src)

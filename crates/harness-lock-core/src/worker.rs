@@ -42,7 +42,7 @@ pub const KINDS: &[&str] = &["llm.run_trial", "data.load", "data.synthetic", "gr
 /// The work item that asks a backend what it runs.
 pub const DESCRIBE: &str = "backend.describe";
 
-/// The keys a `[backends.<name>]` table may have.
+/// The keys a `[backends.<name>]` (or `[optimizers.<name>]`) table may have.
 pub const BACKEND_DEF_KEYS: &[&str] = &["command", "python", "options"];
 
 /// How a backend's work runs.
@@ -72,6 +72,37 @@ pub struct Backend {
     pub options: serde_json::Value,
 }
 
+/// A `[backends.<name>]` or `[optimizers.<name>]` table: its `command`, its `python`
+/// object, and its `options` (a table, `{}` when absent). `bad` makes the error for a
+/// malformed one.
+pub(crate) fn parse_def(def: Option<&serde_json::Value>, bad: &dyn Fn(String) -> Error) -> Result<(Option<Vec<String>>, Option<String>, serde_json::Value)> {
+    let def = match def {
+        Some(v) => Some(v.as_object().ok_or_else(|| bad("must be a table".into()))?),
+        None => None,
+    };
+    let field = |k: &str| def.and_then(|d| d.get(k));
+    let options = field("options").cloned().unwrap_or_else(|| json!({}));
+    if !options.is_object() {
+        return Err(bad("options must be a table".into()));
+    }
+    let command = match field("command") {
+        None => None,
+        Some(serde_json::Value::String(s)) if !s.trim().is_empty() => Some(vec![s.clone()]),
+        Some(serde_json::Value::Array(a)) if !a.is_empty() && a.iter().all(|v| v.as_str().is_some_and(|s| !s.is_empty())) => {
+            Some(a.iter().filter_map(|v| v.as_str().map(String::from)).collect::<Vec<_>>())
+        }
+        Some(_) => return Err(bad("command must be a program, or a list of a program and its arguments".into())),
+    };
+    let object = match field("python") {
+        None => None,
+        Some(v) => match v.as_str().and_then(|s| s.split_once(':')).filter(|(m, a)| !m.is_empty() && !a.is_empty()) {
+            Some(_) => v.as_str().map(String::from),
+            None => return Err(bad("python must be \"module:attribute\"".into())),
+        },
+    };
+    Ok((command, object, options))
+}
+
 impl Backend {
     /// The in-process reference harness.
     pub fn offline() -> Backend {
@@ -94,30 +125,8 @@ impl Backend {
             return Err(Error::Manifest(format!("backend {given:?} isn't a valid name: use letters, digits, '-' and '_'")));
         }
         let bad = |why: String| Error::Manifest(format!("[backends.{name}] {why}"));
-        let def = match manifest.backends.get(&name) {
-            Some(v) => Some(v.as_object().ok_or_else(|| bad("must be a table".into()))?),
-            None => None,
-        };
-        let field = |k: &str| def.and_then(|d| d.get(k));
-        let options = field("options").cloned().unwrap_or_else(|| json!({}));
-        if !options.is_object() {
-            return Err(bad("options must be a table".into()));
-        }
-        let command = match field("command") {
-            None => None,
-            Some(serde_json::Value::String(s)) if !s.trim().is_empty() => Some(vec![s.clone()]),
-            Some(serde_json::Value::Array(a)) if !a.is_empty() && a.iter().all(|v| v.as_str().is_some_and(|s| !s.is_empty())) => {
-                Some(a.iter().filter_map(|v| v.as_str().map(String::from)).collect::<Vec<_>>())
-            }
-            Some(_) => return Err(bad("command must be a program, or a list of a program and its arguments".into())),
-        };
-        let object = match field("python") {
-            None => None,
-            Some(v) => match v.as_str().and_then(|s| s.split_once(':')).filter(|(m, a)| !m.is_empty() && !a.is_empty()) {
-                Some(_) => v.as_str().map(String::from),
-                None => return Err(bad("python must be \"module:attribute\"".into())),
-            },
-        };
+        let def = manifest.backends.get(&name);
+        let (command, object, options) = parse_def(def, &bad)?;
         let runner = match name.as_str() {
             "offline" if def.is_some() => return Err(bad("can't be set: offline is built in and runs in process".into())),
             "offline" => Runner::Offline,
@@ -182,8 +191,10 @@ impl Backend {
 
 /// Current version of the backend contract. 2: a trial's `cost_usd` may be null
 /// (unknown), and `simulated` says the offline reference ran it. 3: backends are named
-/// (`backend_options`, `backend_object`) and answer `backend.describe`.
-pub const CONTRACT_VERSION: u64 = 4;
+/// (`backend_options`, `backend_object`) and answer `backend.describe`. 4:
+/// `harness.optimize`. 5: `harness.optimize` names its optimizer (`optimizer`), apart
+/// from the backend that hosts the search (`specs/optimizers.md`).
+pub const CONTRACT_VERSION: u64 = 5;
 
 /// One unit of work sent to a backend.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -215,6 +226,10 @@ pub struct TaskRequest {
     /// (`specs/tune-optimizers.md` §3.3).
     #[serde(default, skip_serializing_if = "serde_json::Value::is_null")]
     pub optimize: serde_json::Value,
+    /// `harness.optimize`'s optimizer: its name, `options`, and the `object` or `command`
+    /// that runs it ([`crate::optimize::Optimizer::to_value`]).
+    #[serde(default, skip_serializing_if = "serde_json::Value::is_null")]
+    pub optimizer: serde_json::Value,
 }
 
 impl TaskRequest {
@@ -235,6 +250,7 @@ impl TaskRequest {
             workdir: workdir.to_string_lossy().to_string(),
             plan: json!({}),
             optimize: serde_json::Value::Null,
+            optimizer: serde_json::Value::Null,
         }
     }
 
@@ -261,9 +277,10 @@ impl TaskRequest {
         self
     }
 
-    /// What `harness.optimize` works on.
-    pub fn optimize(mut self, payload: serde_json::Value) -> TaskRequest {
+    /// What `harness.optimize` works on, and the optimizer that searches.
+    pub fn optimize(mut self, optimizer: &crate::optimize::Optimizer, payload: serde_json::Value) -> TaskRequest {
         self.optimize = payload;
+        self.optimizer = optimizer.to_value();
         self
     }
 }
@@ -424,9 +441,9 @@ impl Worker {
         self.exec.call(&TaskRequest::new(&self.backend, kind, workspace).trial(stack, task, seed).plan(plan))
     }
 
-    /// Run `harness.optimize` on `payload`, in `workspace`.
-    pub fn optimize(&self, workspace: &Path, plan: &serde_json::Value, payload: serde_json::Value) -> Result<TaskResult> {
-        self.exec.call(&TaskRequest::new(&self.backend, "harness.optimize", workspace).plan(plan).optimize(payload))
+    /// Run `harness.optimize` with `optimizer` on `payload`, in `workspace`.
+    pub fn optimize(&self, optimizer: &crate::optimize::Optimizer, workspace: &Path, plan: &serde_json::Value, payload: serde_json::Value) -> Result<TaskResult> {
+        self.exec.call(&TaskRequest::new(&self.backend, "harness.optimize", workspace).plan(plan).optimize(optimizer, payload))
     }
 
     /// Fail before any trial when the backend can't run one of `stacks`: it doesn't run

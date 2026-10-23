@@ -16,7 +16,7 @@ executor do the work, in the environment Harness² is installed in, and hlock on
 4. ``tune`` then checks the candidate as it checks any optimizer's: held-out tasks, noise
    band, significance, cost, and edits that copy the pack.
 
-Options (``[backends.harness2] options``): ``python``, an interpreter with Harness²
+Options (``[optimizers.harness2] options``): ``python``, an interpreter with Harness²
 installed (else ``HARNESS2_PYTHON``); ``substrate``, ``oc`` or ``cx`` (default: ``cx`` for a
 Codex lock, else ``oc``); ``k`` (1); ``mode`` (``parallel`` or ``sequential``); ``timeout``
 per rollout in seconds (1800); ``work``, a description of the work for Harness²'s prompts.
@@ -34,7 +34,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from hlock.backends import Backend, BackendError
+from hlock.optimizers import Optimizer, OptimizerError
 
 RUNNER = Path(__file__).with_name("_harness2_runner.py")
 
@@ -197,29 +197,27 @@ def tree_to_bundle(tree: dict[str, str], seed: Path, out: Path, substrate: str) 
 def _python(opts: dict) -> str:
     py = opts.get("python") or os.environ.get("HARNESS2_PYTHON")
     if not py:
-        raise BackendError("the harness2 optimizer needs Harness²'s Python: set [backends.harness2] options.python "
+        raise OptimizerError("the harness2 optimizer needs Harness²'s Python: set [optimizers.harness2] options.python "
                            "or HARNESS2_PYTHON to the interpreter it's installed in (see its setup guide)")
     return os.path.expanduser(py)
 
 
-class Harness2Backend(Backend):
+class Harness2Optimizer(Optimizer):
     """Runs ``harness.optimize`` with Harness², as a black box."""
 
     name = "harness2"
-    kinds = ("harness.optimize",)
-    model_endpoint = False
     about = "Harness² (google-research/harness2), run as a black box in its own environment"
 
-    def run(self, request: dict) -> dict:
+    def optimize(self, request: dict) -> dict:
         from hlock.optimize import BudgetExhausted, Session
 
-        opts = request.get("backend_options") or {}
+        opts = (request.get("optimizer") or {}).get("options") or {}
         opt = request.get("optimize") or {}
         seed = Path(opt["seed"])
         spec = json.loads((seed / "bundle.json").read_text())
         substrate = opts.get("substrate") or ("cx" if spec.get("harness") == "codex" else "oc")
         if substrate not in ("oc", "cx"):
-            raise BackendError(f"[backends.harness2] options.substrate must be oc or cx, not {substrate!r}")
+            raise OptimizerError(f"[optimizers.harness2] options.substrate must be oc or cx, not {substrate!r}")
         ws = Path(request.get("workdir") or ".").resolve()
         ws.mkdir(parents=True, exist_ok=True)
         tree, left_out = bundle_to_tree(seed, substrate)
@@ -247,7 +245,7 @@ class Harness2Backend(Backend):
         argv = [_python(opts), str(RUNNER), str(ws / "job.json"), str(result_path)]
         proc = subprocess.run(argv, stdin=subprocess.DEVNULL, stdout=sys.stderr, stderr=sys.stderr, check=False)
         if proc.returncode != 0 or not result_path.is_file():
-            raise BackendError(f"Harness² failed (exit {proc.returncode}); its log is above, and its runs are in {ws / 'h2'}")
+            raise OptimizerError(f"Harness² failed (exit {proc.returncode}); its log is above, and its runs are in {ws / 'h2'}")
         result = json.loads(result_path.read_text())
 
         # each task's adopted harness is a candidate; the same tree twice is one

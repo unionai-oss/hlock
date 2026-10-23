@@ -11,7 +11,7 @@ image installs ``HLOCK_FLYTE_HLOCK``: a pip requirement, or the path of a Linux 
 (for an unreleased build); by default, ``hlock`` at this version.
 
 Options (``[backends.flyte] options``): ``config`` is the Flyte config file (default:
-the SDK's, ``~/.flyte/config.yaml``), ``project`` and ``domain`` override the ones in it,
+the SDK's, ``~/.flyte/config.yaml``; a devbox's or a cluster's: it decides where tasks go), ``project`` and ``domain`` override the ones in it,
 ``gpu`` is the accelerator for fine-tuning (default ``"A10G:1"``), and
 ``api_key_secret`` names the Flyte secret holding the model endpoint's key.
 
@@ -38,7 +38,7 @@ import sys
 import tempfile
 from pathlib import Path
 
-from hlock.backends import Backend, BackendError, run_local
+from hlock.backends import KINDS, Backend, BackendError, run_local
 
 try:
     import flyte
@@ -165,12 +165,12 @@ def _gpu_task(gpu: str):
 
 class FlyteBackend(Backend):
     name = "flyte"
+    # it doesn't host tune's search (harness.optimize): the search runs on this machine,
+    # where the tune session is, and each trial it evaluates runs here (specs/optimizers.md)
+    kinds = tuple(k for k in KINDS if k != "harness.optimize")
     about = "Flyte 2 tasks on the cluster in your Flyte config"
 
     def run(self, request: dict) -> dict:
-        if request.get("kind") == "harness.optimize":
-            # the search runs here, where the tune session is; its trials run on Flyte
-            return run_local(request)
         if flyte is None:
             sys.stderr.write(f"[flyte] the Flyte SDK isn't installed (pip install \"hlock[flyte]\"); "
                              f"running {request.get('kind')} in process\n")
