@@ -434,6 +434,10 @@ def test_json_output_stays_clean_when_a_terminal_is_forced(world, monkeypatch):
     login(world)
     monkeypatch.setattr(cli.console, "_force_terminal", True)
     monkeypatch.setattr(cli.err_console, "_force_terminal", True)
-    r = CliRunner().invoke(main, ["whoami", "--json"])
+    try:
+        runner = CliRunner(mix_stderr=False)  # click < 8.2 mixes stderr into stdout by default
+    except TypeError:
+        runner = CliRunner()
+    r = runner.invoke(main, ["whoami", "--json"])
     assert r.exit_code == 0, r.output
     assert json.loads(r.stdout)["user"]["handle"]
