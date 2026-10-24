@@ -50,7 +50,7 @@ pub const SELECTS: &[&str] = &["min-cost", "max-quality"];
 /// The keys of the manifest's fixed-shape tables; anything else is reported by
 /// [`Manifest::problems`]. Tables holding names (`[skills]`, `[harnesses]`, …) aren't
 /// checked, and neither are the reserved `[context]` and `[enforce]`.
-const TOP_KEYS: &[&str] = &["project", "evals", "tasks", "candidates", "tools", "skills", "instructions", "mcp", "plugins", "packages", "context", "objective", "budget", "enforce", "backend", "backends", "optimizers", "target", "harnesses", "deciders", "tune", "sandbox", "environment", "secrets"];
+const TOP_KEYS: &[&str] = &["project", "evals", "tasks", "candidates", "tools", "skills", "instructions", "mcp", "plugins", "packages", "context", "objective", "budget", "enforce", "backend", "backends", "optimizers", "target", "harnesses", "deciders", "tune", "sandbox", "environment", "secrets", "workspace", "commands"];
 const BUDGET_KEYS: &[&str] = &["max-spend-usd", "max-trials", "strategy", "random-seed", "max_spend_usd", "max_trials", "random_seed"];
 const OBJECTIVE_KEYS: &[&str] = &["primary", "constraints", "select"];
 const EVALS_KEYS: &[&str] = &["packs", "seeds", "splits", "judge"];
@@ -60,18 +60,24 @@ const BACKEND_KEYS: &[&str] = &["target"];
 const TARGET_KEYS: &[&str] = &["harness", "also"];
 const TUNE_KEYS: &[&str] = &["optimizer", "edit", "proposer", "budget", "trials", "alpha", "max-cost-increase"];
 const TUNE_BUDGET_KEYS: &[&str] = &["rollouts", "usd"];
-const ENVIRONMENT_KEYS: &[&str] = &["apt", "pip", "npm", "cargo", "go", "binaries"];
+const ENVIRONMENT_KEYS: &[&str] = &["apt", "brew", "pip", "npm", "cargo", "go", "binaries", "ignore"];
 const BINARY_KEYS: &[&str] = &["url", "sha256", "path"];
 const SECRET_KEYS: &[&str] = &["name", "used-by", "optional", "description"];
+const WORKSPACE_KEYS: &[&str] = &["repos", "files"];
+const REPO_KEYS: &[&str] = &["url", "ref", "path"];
+const SEED_FILE_KEYS: &[&str] = &["path", "target"];
 
 /// `[environment]`: what the agent needs installed, as package lists for each installer
-/// and binaries pinned by URL and SHA-256. The lock records it as declared; nothing
-/// installs it yet.
+/// and binaries pinned by URL and SHA-256. The system installers say the platform (`apt`
+/// for Debian and Ubuntu, `brew` for macOS); the language ones apply everywhere. The lock
+/// records it as declared; nothing installs it yet.
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
 #[serde(default)]
 pub struct Environment {
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub apt: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub brew: Vec<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub pip: Vec<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -83,6 +89,10 @@ pub struct Environment {
     /// `[[environment.binaries]]`.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub binaries: Vec<Binary>,
+    /// Programs the stack names that it doesn't need installed (`hlock env suggest`
+    /// stops suggesting them): `docker`, when a server that runs it is turned off.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub ignore: Vec<String>,
 }
 
 /// A file downloaded from `url`, checked against `sha256`, and placed at `path`.
@@ -102,8 +112,21 @@ impl Environment {
     }
 
     /// The package lists, by installer.
-    pub fn lists(&self) -> [(&'static str, &Vec<String>); 5] {
-        [("apt", &self.apt), ("pip", &self.pip), ("npm", &self.npm), ("cargo", &self.cargo), ("go", &self.go)]
+    pub fn lists(&self) -> [(&'static str, &Vec<String>); 6] {
+        [("apt", &self.apt), ("brew", &self.brew), ("pip", &self.pip), ("npm", &self.npm), ("cargo", &self.cargo), ("go", &self.go)]
+    }
+
+    /// The list for an installer, to add to.
+    pub fn list_mut(&mut self, installer: &str) -> Option<&mut Vec<String>> {
+        Some(match installer {
+            "apt" => &mut self.apt,
+            "brew" => &mut self.brew,
+            "pip" => &mut self.pip,
+            "npm" => &mut self.npm,
+            "cargo" => &mut self.cargo,
+            "go" => &mut self.go,
+            _ => return None,
+        })
     }
 
     /// Values that would reach an installer as something other than what they say: a
@@ -116,6 +139,9 @@ impl Environment {
                     return Err(format!("[environment] {list} entry {p:?} must be one package: no spaces, not starting with '-'"));
                 }
             }
+        }
+        if let Some(p) = self.ignore.iter().find(|p| !crate::fsutil::plain_name(p) || p.starts_with('-') || p.chars().any(char::is_whitespace)) {
+            return Err(format!("[environment] ignore entry {p:?} must be a program name (no '/', spaces, or leading '-')"));
         }
         let mut paths = std::collections::BTreeSet::new();
         for (i, b) in self.binaries.iter().enumerate() {
@@ -169,6 +195,178 @@ impl DeclaredSecret {
     /// The variable that supplies it, as the lock names it (`HLOCK_SECRET_…`).
     pub fn full_name(&self) -> String {
         crate::secrets::full_name(&self.name)
+    }
+}
+
+/// `[workspace]`: the state the agent's workspace starts from, as repositories to check
+/// out and files from the package to copy in. The lock records it, with each file's
+/// digest; the live state that grows from it is never locked.
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+#[serde(default)]
+pub struct Workspace {
+    /// `[[workspace.repos]]`.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub repos: Vec<SeedRepo>,
+    /// `[[workspace.files]]`.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub files: Vec<SeedFile>,
+}
+
+/// A repository checked out at `path` in the workspace.
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+#[serde(default)]
+pub struct SeedRepo {
+    pub url: String,
+    /// A branch, tag or commit; the default branch when there's none.
+    #[serde(rename = "ref", skip_serializing_if = "Option::is_none")]
+    pub reference: Option<String>,
+    /// Where it's checked out, relative to the workspace.
+    pub path: String,
+}
+
+/// A file or directory in the package (`path`), copied to `target` in the workspace.
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+#[serde(default)]
+pub struct SeedFile {
+    /// Relative to `harness.toml`.
+    pub path: String,
+    /// Relative to the workspace.
+    pub target: String,
+    /// The content's digest: the lock records it, the manifest leaves it out.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub digest: Option<String>,
+}
+
+impl Workspace {
+    pub fn is_empty(&self) -> bool {
+        self.repos.is_empty() && self.files.is_empty()
+    }
+
+    /// Values that would reach `git` or the filesystem as something other than what they
+    /// say: a URL that's an option, a ref with spaces, a path outside its directory, two
+    /// seeds at one place. The manifest and the lock both check it.
+    pub fn check(&self) -> std::result::Result<(), String> {
+        use crate::fsutil::{plain_token, safe_rel};
+        let mut targets = std::collections::BTreeSet::new();
+        for (i, r) in self.repos.iter().enumerate() {
+            let what = if r.url.is_empty() { format!("[[workspace.repos]] #{}", i + 1) } else { format!("[[workspace.repos]] {}", r.url) };
+            for (k, v) in [("url", &r.url), ("path", &r.path)] {
+                if v.is_empty() {
+                    return Err(format!("{what} needs `{k}` (each repo has `url` and `path`, and may have `ref`)"));
+                }
+            }
+            let scheme = ["https://", "http://", "ssh://", "git@"].iter().any(|s| r.url.starts_with(s));
+            if !scheme || r.url.chars().any(|c| c.is_whitespace() || c.is_control()) {
+                return Err(format!("{what} url {:?} must be an https, http, ssh or git@ URL", r.url));
+            }
+            if let Some(rf) = r.reference.as_deref().filter(|rf| !plain_token(rf)) {
+                return Err(format!("{what} ref {rf:?} must be a branch, tag or commit (letters, digits and ._:/@+- only, not starting with '-')"));
+            }
+            if !safe_rel(&r.path) {
+                return Err(format!("{what} path {:?} must be a relative path inside the workspace (no leading '/', no '..')", r.path));
+            }
+            if !targets.insert(crate::fsutil::normalize(Path::new(&r.path))) {
+                return Err(format!("{what}: {} is seeded twice", r.path));
+            }
+        }
+        for (i, f) in self.files.iter().enumerate() {
+            let what = if f.path.is_empty() { format!("[[workspace.files]] #{}", i + 1) } else { format!("[[workspace.files]] {}", f.path) };
+            for (k, v) in [("path", &f.path), ("target", &f.target)] {
+                if v.is_empty() {
+                    return Err(format!("{what} needs `{k}` (each file has `path`, in the package, and `target`, in the workspace)"));
+                }
+            }
+            if !safe_rel(&f.path) {
+                return Err(format!("{what} path {:?} must be a relative path inside the package (no leading '/', no '..')", f.path));
+            }
+            if !safe_rel(&f.target) {
+                return Err(format!("{what} target {:?} must be a relative path inside the workspace (no leading '/', no '..')", f.target));
+            }
+            if !targets.insert(crate::fsutil::normalize(Path::new(&f.target))) {
+                return Err(format!("{what}: {} is seeded twice", f.target));
+            }
+            if let Some(d) = f.digest.as_deref().filter(|d| !d.strip_prefix("sha256:").is_some_and(is_sha256_hex)) {
+                return Err(format!("{what} digest {d:?} must be sha256: and 64 lowercase hex digits"));
+            }
+        }
+        Ok(())
+    }
+}
+
+/// The user-profile modes `[context] profile` takes: the user's own memory and personal
+/// config (`shared`), a copy of them that writes back nowhere (`forked`), or neither (`none`).
+pub const PROFILE_MODES: &[&str] = &["shared", "forked", "none"];
+
+/// A slash command the agent offers: `[commands]` names a file in the package; the lock's
+/// `[[command]]` records it with its digest.
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+#[serde(default)]
+pub struct Command {
+    pub name: String,
+    /// Relative to `harness.toml`.
+    pub path: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub digest: Option<String>,
+}
+
+/// `[project]` `display-name` and `avatar`: how registry listings and launch UIs show
+/// the agent. The lock records it, with the avatar's digest.
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+#[serde(default, rename_all = "kebab-case")]
+pub struct Persona {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
+    /// An image in the package, relative to `harness.toml`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub avatar: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub avatar_digest: Option<String>,
+}
+
+impl Persona {
+    pub fn is_empty(&self) -> bool {
+        *self == Persona::default()
+    }
+}
+
+/// A command name: letters, digits, `-`, `_` and `.`, not starting with `-` or `.`.
+fn command_name(s: &str) -> bool {
+    !s.is_empty() && !s.starts_with(['-', '.']) && s.chars().all(|c| c.is_ascii_alphanumeric() || "-_.".contains(c))
+}
+
+/// What a manifest declares that isn't searched or resolved, only recorded: the
+/// environment, secrets, workspace seed, commands, profile mode and persona, with the
+/// digests of the files they name. The lock's copy is [`Declarations::from_lock`].
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Declarations {
+    pub environment: Environment,
+    pub secrets: Vec<DeclaredSecret>,
+    pub workspace: Workspace,
+    pub commands: Vec<Command>,
+    pub profile: Option<String>,
+    pub persona: Persona,
+}
+
+impl Declarations {
+    /// What a lock records as declared, to carry into another lock (`pin`).
+    pub fn from_lock(l: &crate::lockfile::Lockfile) -> Declarations {
+        Declarations {
+            environment: l.environment.clone(),
+            secrets: l
+                .secret
+                .iter()
+                .filter(|s| s.declared)
+                .map(|s| DeclaredSecret { name: s.name.clone(), used_by: s.used_by.clone(), optional: s.optional, description: s.description.clone() })
+                .collect(),
+            workspace: l.workspace.clone(),
+            commands: l.command.clone(),
+            profile: l.context.profile.clone(),
+            persona: l.project.clone(),
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        *self == Declarations::default()
     }
 }
 
@@ -301,6 +499,12 @@ pub struct Manifest {
     /// Secrets the agent needs (`[[secrets]]`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub secrets: Vec<DeclaredSecret>,
+    /// What the agent's workspace starts from (`[workspace]`).
+    #[serde(default, skip_serializing_if = "Workspace::is_empty")]
+    pub workspace: Workspace,
+    /// Slash commands, by name, each a file in the package (`[commands]`).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub commands: BTreeMap<String, String>,
     #[serde(skip)]
     pub source_path: Option<PathBuf>,
     /// The text this manifest was parsed from, which [`Manifest::manifest_hash`] hashes.
@@ -395,6 +599,13 @@ impl Manifest {
             for t in items(&[], "secrets") {
                 report(Some(t), SECRET_KEYS, "[[secrets]]");
             }
+            report(table(&["workspace"]), WORKSPACE_KEYS, "[workspace]");
+            for t in items(&["workspace"], "repos") {
+                report(Some(t), REPO_KEYS, "[[workspace.repos]]");
+            }
+            for t in items(&["workspace"], "files") {
+                report(Some(t), SEED_FILE_KEYS, "[[workspace.files]]");
+            }
         }
         let mut supported = |key: &str, value: &str, allowed: &[&str]| {
             if !value.is_empty() && !allowed.contains(&value) {
@@ -407,11 +618,71 @@ impl Manifest {
         out
     }
 
-    /// The values in `[environment]` and `[[secrets]]` that can't be used: checked when the
-    /// manifest is loaded, so a bad digest or secret name is an error rather than ignored.
+    /// The values in `[environment]`, `[[secrets]]`, `[workspace]`, `[commands]`,
+    /// `[context] profile` and `[project]` `display-name` and `avatar` that can't be used:
+    /// checked when the manifest is loaded, so a bad digest, name or path is an error
+    /// rather than ignored.
     pub fn check_declared(&self) -> Result<()> {
         self.environment.check().map_err(Error::Manifest)?;
-        check_secrets(&self.secrets, "[[secrets]]").map_err(Error::Manifest)
+        check_secrets(&self.secrets, "[[secrets]]").map_err(Error::Manifest)?;
+        if self.workspace.files.iter().any(|f| f.digest.is_some()) {
+            return Err(Error::Manifest("[[workspace.files]] digest is what the lock records; leave it out of harness.toml".into()));
+        }
+        self.workspace.check().map_err(Error::Manifest)?;
+        for (name, path) in &self.commands {
+            check_command(name, path).map_err(Error::Manifest)?;
+        }
+        self.profile_mode()?;
+        self.persona_decl()?;
+        Ok(())
+    }
+
+    /// `[context] profile`: whose memory and personal config the agent starts from.
+    pub fn profile_mode(&self) -> Result<Option<String>> {
+        match self.context.get("profile") {
+            None => Ok(None),
+            Some(serde_json::Value::String(p)) if PROFILE_MODES.contains(&p.as_str()) => Ok(Some(p.clone())),
+            Some(v) => Err(Error::Manifest(format!("[context] profile = {v} isn't one of {}", PROFILE_MODES.join(", ")))),
+        }
+    }
+
+    /// `[project]` `display-name` and `avatar`, as written (no digest).
+    fn persona_decl(&self) -> Result<Persona> {
+        let s = |k: &str| -> Result<Option<String>> {
+            match self.project.get(k) {
+                None => Ok(None),
+                Some(serde_json::Value::String(v)) => Ok(Some(v.clone())),
+                Some(_) => Err(Error::Manifest(format!("[project] {k} must be a string"))),
+            }
+        };
+        let p = Persona { display_name: s("display-name")?, avatar: s("avatar")?, avatar_digest: None };
+        check_persona(&p).map_err(Error::Manifest)?;
+        Ok(p)
+    }
+
+    /// What this manifest declares to record in a lock, with the digests of the workspace
+    /// files, commands and avatar it names, read from [`Manifest::root`]. A file that's
+    /// missing is an error.
+    pub fn declarations(&self) -> Result<Declarations> {
+        self.check_declared()?;
+        let root = self.root();
+        let digest = |what: &str, rel: &str| -> Result<String> {
+            crate::deps::content_digest(&root.join(rel)).map_err(|e| Error::Manifest(format!("{what} {rel}: {e}")))
+        };
+        let mut workspace = self.workspace.clone();
+        for f in &mut workspace.files {
+            f.digest = Some(digest("[[workspace.files]]", &f.path)?);
+        }
+        let commands = self
+            .commands
+            .iter()
+            .map(|(name, path)| Ok(Command { name: name.clone(), path: path.clone(), digest: Some(digest(&format!("[commands] {name}"), path)?) }))
+            .collect::<Result<Vec<_>>>()?;
+        let mut persona = self.persona_decl()?;
+        if let Some(a) = &persona.avatar {
+            persona.avatar_digest = Some(digest("[project] avatar", a)?);
+        }
+        Ok(Declarations { environment: self.environment.clone(), secrets: self.secrets.clone(), workspace, commands, profile: self.profile_mode()?, persona })
     }
 
     /// [`Manifest::problems`] as an error, for the commands that search.
@@ -545,8 +816,9 @@ impl Manifest {
     }
 
     /// Hash of the dependency sections only (`[skills]`, `[mcp]`, `[instructions]`,
-    /// `[plugins]`, `[packages]`, `[tools]`, and `[environment]` and `[[secrets]]` when
-    /// present): what a pinned lock's `manifest-hash`
+    /// `[plugins]`, `[packages]`, `[tools]`, and `[environment]`, `[[secrets]]`,
+    /// `[workspace]`, `[commands]`, `[context] profile` and `[project]` `display-name` and
+    /// `avatar` when present): what a pinned lock's `manifest-hash`
     /// records, so editing `[candidates]` in the same file doesn't invalidate a pin.
     pub fn deps_hash(&self) -> String {
         let mut sections = serde_json::json!({
@@ -564,6 +836,20 @@ impl Manifest {
         if !self.secrets.is_empty() {
             sections["secrets"] = serde_json::json!(self.secrets);
         }
+        if !self.workspace.is_empty() {
+            sections["workspace"] = serde_json::json!(self.workspace);
+        }
+        if !self.commands.is_empty() {
+            sections["commands"] = serde_json::json!(self.commands);
+        }
+        // the profile mode and persona as declared (an unusable value hashes as absent:
+        // loading the manifest refuses it anyway)
+        if let Some(p) = self.profile_mode().ok().flatten() {
+            sections["profile"] = serde_json::json!(p);
+        }
+        if let Some(p) = self.persona_decl().ok().filter(|p| !p.is_empty()) {
+            sections["persona"] = serde_json::json!(p);
+        }
         crate::hash::content_hash(&sections)
     }
 
@@ -578,6 +864,31 @@ impl Manifest {
             Err(_) => String::new(),
         }
     }
+}
+
+/// A command's name and file: a plain name, and a path inside the package.
+pub(crate) fn check_command(name: &str, path: &str) -> std::result::Result<(), String> {
+    if !command_name(name) {
+        return Err(format!("[commands] name {name:?} must be letters, digits, '-', '_' and '.', not starting with '-' or '.'"));
+    }
+    if !crate::fsutil::safe_rel(path) {
+        return Err(format!("[commands] {name} path {path:?} must be a relative path inside the package (no leading '/', no '..')"));
+    }
+    Ok(())
+}
+
+/// A display name is one line of text; an avatar is a path inside the package.
+pub(crate) fn check_persona(p: &Persona) -> std::result::Result<(), String> {
+    if let Some(n) = p.display_name.as_deref().filter(|n| n.trim().is_empty() || n.chars().any(char::is_control)) {
+        return Err(format!("[project] display-name {n:?} must be non-empty text on one line"));
+    }
+    if let Some(a) = p.avatar.as_deref().filter(|a| !crate::fsutil::safe_rel(a)) {
+        return Err(format!("[project] avatar {a:?} must be a relative path inside the package (no leading '/', no '..')"));
+    }
+    if let Some(d) = p.avatar_digest.as_deref().filter(|d| !d.strip_prefix("sha256:").is_some_and(is_sha256_hex)) {
+        return Err(format!("[project] avatar-digest {d:?} must be sha256: and 64 lowercase hex digits"));
+    }
+    Ok(())
 }
 
 /// Secret names are variable names (letters, digits and `_`), declared once each, and
@@ -662,12 +973,12 @@ optional = true
     #[test]
     fn unknown_environment_and_secret_keys_are_problems() {
         let m = Manifest::from_str(
-            "[environment]\nbrew = [\"x\"]\n[[environment.binaries]]\nurl = \"https://x/t\"\nsha265 = \"\"\npath = \"/t\"\n[[secrets]]\nname = \"A\"\nused_by = [\"x\"]\n",
+            "[environment]\nyum = [\"x\"]\n[[environment.binaries]]\nurl = \"https://x/t\"\nsha265 = \"\"\npath = \"/t\"\n[[secrets]]\nname = \"A\"\nused_by = [\"x\"]\n",
         )
         .unwrap();
         let p = m.problems();
         for want in [
-            "unknown key `brew` in [environment]",
+            "unknown key `yum` in [environment]",
             "unknown key `sha265` in [[environment.binaries]] (did you mean `sha256`?)",
             "unknown key `used_by` in [[secrets]] (did you mean `used-by`?)",
         ] {
@@ -711,6 +1022,125 @@ optional = true
         std::fs::write(&p, bin("https://x/t", "abc", "/t")).unwrap();
         assert!(Manifest::load(&p).unwrap_err().to_string().contains("sha256"));
         let _ = std::fs::remove_dir_all(&d);
+    }
+
+    const SEEDED: &str = r#"
+[project]
+name = "rbac"
+display-name = "RBAC reviewer"
+avatar = "./avatar.png"
+
+[context]
+profile = "forked"
+
+[[workspace.repos]]
+url = "https://github.com/org/repo"
+ref = "main"
+path = "src/repo"
+
+[[workspace.files]]
+path = "./seed/NOTES.md"
+target = "NOTES.md"
+
+[[workspace.files]]
+path = "seed/fixtures"
+target = "fixtures"
+
+[commands]
+review = "./commands/review.md"
+"#;
+
+    #[test]
+    fn workspace_commands_profile_and_persona_parse_and_digest() {
+        let d = std::env::temp_dir().join(format!("hlock-manifest-seeded-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(d.join("seed/fixtures")).unwrap();
+        std::fs::create_dir_all(d.join("commands")).unwrap();
+        std::fs::write(d.join("seed/NOTES.md"), "notes").unwrap();
+        std::fs::write(d.join("seed/fixtures/a.json"), "{}").unwrap();
+        std::fs::write(d.join("commands/review.md"), "Review the diff.").unwrap();
+        std::fs::write(d.join("avatar.png"), [0x89, b'P', b'N', b'G']).unwrap();
+        std::fs::write(d.join("harness.toml"), SEEDED).unwrap();
+        let m = Manifest::load(&d.join("harness.toml")).unwrap();
+        assert!(m.problems().is_empty(), "{:?}", m.problems());
+        assert_eq!(m.workspace.repos[0].reference.as_deref(), Some("main"));
+        assert_eq!(m.profile_mode().unwrap().as_deref(), Some("forked"));
+        let decl = m.declarations().unwrap();
+        assert_eq!(decl.workspace.files[0].digest.as_deref(), Some(crate::hash::sha256_text("notes").as_str()));
+        assert_eq!(decl.workspace.files[1].digest.as_deref(), Some(crate::capture::tree_digest(&d.join("seed/fixtures")).as_str()), "a directory: its tree digest");
+        assert_eq!(decl.commands, [Command { name: "review".into(), path: "./commands/review.md".into(), digest: Some(crate::hash::sha256_text("Review the diff.")) }]);
+        assert_eq!(decl.profile.as_deref(), Some("forked"));
+        assert_eq!(decl.persona.display_name.as_deref(), Some("RBAC reviewer"));
+        assert!(decl.persona.avatar_digest.as_deref().is_some_and(|x| x.starts_with("sha256:")));
+
+        // a file that isn't there is an error, naming it
+        std::fs::remove_file(d.join("commands/review.md")).unwrap();
+        let e = m.declarations().unwrap_err().to_string();
+        assert!(e.contains("[commands] review ./commands/review.md"), "{e}");
+        let _ = std::fs::remove_dir_all(&d);
+
+        // none of it declared: nothing to record
+        assert!(Manifest::from_str("").unwrap().declarations().unwrap().is_empty());
+    }
+
+    #[test]
+    fn unknown_workspace_keys_are_problems() {
+        let m = Manifest::from_str("[workspace]\nrepo = []\n[[workspace.repos]]\nurl = \"https://x/r\"\nbranch = \"main\"\npath = \"r\"\n[[workspace.files]]\npath = \"a\"\ntraget = \"a\"\n[command]\nx = \"y\"\n").unwrap();
+        let p = m.problems();
+        for want in [
+            "unknown key `repo` in [workspace] (did you mean `repos`?)",
+            "unknown key `branch` in [[workspace.repos]]",
+            "unknown key `traget` in [[workspace.files]] (did you mean `target`?)",
+            "unknown key `command` in harness.toml (did you mean `commands`?)",
+        ] {
+            assert!(p.iter().any(|x| x == want), "{want:?} not in {p:?}");
+        }
+    }
+
+    #[test]
+    fn bad_workspace_commands_profile_and_persona_values_are_errors() {
+        let repo = |url: &str, rf: &str, path: &str| format!("[[workspace.repos]]\nurl = {url:?}\nref = {rf:?}\npath = {path:?}\n");
+        let file = |path: &str, target: &str| format!("[[workspace.files]]\npath = {path:?}\ntarget = {target:?}\n");
+        for (text, want) in [
+            (repo("", "main", "r"), "[[workspace.repos]] #1 needs `url`"),
+            (repo("https://x/r", "main", ""), "needs `path`"),
+            (repo("--upload-pack=touch /tmp/x", "main", "r"), "must be an https, http, ssh or git@ URL"),
+            (repo("file:///etc", "main", "r"), "must be an https, http, ssh or git@ URL"),
+            (repo("https://x/r", "-b", "r"), "must be a branch, tag or commit"),
+            (repo("https://x/r", "main; rm", "r"), "must be a branch, tag or commit"),
+            (repo("https://x/r", "main", "/abs"), "inside the workspace"),
+            (repo("https://x/r", "main", "../up"), "inside the workspace"),
+            (format!("{}{}", repo("https://x/a", "main", "r"), file("a", "./r")), "r is seeded twice"),
+            (file("../outside", "a"), "inside the package"),
+            (file("a", ""), "needs `target`"),
+            (file("a", "/etc/passwd"), "inside the workspace"),
+            ("[[workspace.files]]\npath = \"a\"\ntarget = \"a\"\ndigest = \"sha256:x\"\n".to_string(), "digest is what the lock records"),
+            ("[commands]\n\"../x\" = \"c.md\"\n".to_string(), "[commands] name"),
+            ("[commands]\n\"-x\" = \"c.md\"\n".to_string(), "[commands] name"),
+            ("[commands]\nx = \"/etc/passwd\"\n".to_string(), "[commands] x path"),
+            ("[context]\nprofile = \"isolated\"\n".to_string(), "isn't one of shared, forked, none"),
+            ("[context]\nprofile = true\n".to_string(), "[context] profile"),
+            ("[project]\ndisplay-name = \"a\\nb\"\n".to_string(), "[project] display-name"),
+            ("[project]\ndisplay-name = 3\n".to_string(), "[project] display-name must be a string"),
+            ("[project]\navatar = \"/me.png\"\n".to_string(), "[project] avatar"),
+        ] {
+            let e = Manifest::from_str(&text).unwrap().check_declared().unwrap_err().to_string();
+            assert!(e.contains(want), "{text}: {e}");
+        }
+        // a [commands] value that isn't a path doesn't parse at all
+        assert!(Manifest::from_str("[commands]\nreview = { path = \"x\" }\n").is_err());
+    }
+
+    #[test]
+    fn deps_hash_counts_workspace_commands_profile_and_persona_only_when_present() {
+        let base = "[skills]\nsql = \"github:acme/skills/skills/sql\"\n";
+        let before = Manifest::from_str(base).unwrap().deps_hash();
+        // nor does the rest of [context] or [project]
+        assert_eq!(Manifest::from_str(&format!("[project]\nname = \"x\"\n[context]\nisolation = \"locked-only\"\n{base}")).unwrap().deps_hash(), before);
+        assert_ne!(Manifest::from_str(&format!("{base}[context]\nprofile = \"none\"\n")).unwrap().deps_hash(), before);
+        assert_ne!(Manifest::from_str(&format!("[project]\ndisplay-name = \"X\"\n{base}")).unwrap().deps_hash(), before);
+        assert_ne!(Manifest::from_str(&format!("{base}[commands]\nreview = \"c.md\"\n")).unwrap().deps_hash(), before);
+        assert_ne!(Manifest::from_str(&format!("{base}[[workspace.files]]\npath = \"a\"\ntarget = \"a\"\n")).unwrap().deps_hash(), before);
     }
 
     #[test]

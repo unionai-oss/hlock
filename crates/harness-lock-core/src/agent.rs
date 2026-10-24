@@ -36,7 +36,9 @@ pub const HLOCK_SAFE: &[&str] = &[
     "hlock meta check", "hlock meta show", "hlock meta jobs",
     // only the built-in jobs' checks: a custom job's runs a shell command from
     // harness.meta.toml, a file the agent can edit (hlock runs it after the job anyway)
-    "hlock meta verify install", "hlock meta verify bootstrap-evals", "hlock meta verify update",
+    "hlock meta verify install", "hlock meta verify bootstrap-evals", "hlock meta verify update", "hlock meta verify environment",
+    // the environment job's list; `--write` writes harness.toml, which the job edits anyway
+    "hlock env suggest",
     // the install job's last step, without package installs, model downloads, builds, or the user's own config
     "hlock sync", "!hlock sync --install", "!hlock sync --pull", "!hlock sync --build", "!hlock sync --in-place",
     "!hlock sync --prefix", "!hlock sync --skill-dir",
@@ -891,7 +893,7 @@ mod tests {
         let a = allow(DEFAULT_ALLOW);
         // a custom job's check runs a shell command from harness.meta.toml, which the agent can write
         assert!(!allowed("hlock meta verify notes", &a));
-        for job in ["install", "update", "bootstrap-evals --out evals"] {
+        for job in ["install", "update", "bootstrap-evals --out evals", "environment"] {
             assert!(allowed(&format!("hlock meta verify {job}"), &a), "{job}");
         }
         for cmd in ["hlock sync --skill-dir x", "hlock evals init --force", "hlock evals init evals --force",

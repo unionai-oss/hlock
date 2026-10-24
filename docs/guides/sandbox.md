@@ -282,6 +282,19 @@ network-args = { none = [], open = ["--share-net"] }
 | `{network-args}` | `network-args` for the network mode |
 
 `networks` (or the keys of `network-args`) lists the network modes the runner enforces.
+A runner that can limit the sandbox to some hosts lists `allowlist`, and its `allowlist`
+arguments get the hosts of `[sandbox] network = ["api.github.com", "pypi.org"]`: an
+argument with `{host}` is repeated once per host, and `{hosts}` becomes them all, joined
+with commas:
+
+```toml title="~/.config/hlock/sandbox.toml"
+[runners.egress]
+command = ["egress-jail", "{network-args}", "--"]
+network-args = { none = ["--deny-all"], allowlist = ["--allow={host}"] }
+```
+
+`docker` and `openshell` refuse an allowlist: Docker can't limit a container to some hosts,
+and on `openshell` the hosts belong in its policy (`profile`) with `network = "none"`.
 That's your claim; hlock only refuses a mode the runner doesn't list. The runner process
 gets the sandbox's environment, plus what it needs to start from yours (`PATH`, `USER`,
 `TMPDIR`, `DOCKER_*`, `OPENSHELL_*`), and hlock never puts a value in its arguments.
@@ -401,7 +414,8 @@ machine.
 
 - hlock doesn't check a runtime's claims. A command runner's network modes, and what its
   profile allows, are what you wrote.
-- Network is `open` or `none`. Per-host allowlists belong in a runtime that has them
+- Network is `open`, `none`, or a list of hosts, which only a command runner with an
+  `allowlist` entry enforces. Otherwise, per-host rules belong in a runtime that has them
   (an OpenShell policy, a seatbelt or firewall profile, passed as `profile`).
 - Keys are held for you for Anthropic and OpenAI only: by hlock's proxy on `docker` (not
   for a code harness's trials), by OpenShell's providers on `openshell`. MCP servers'

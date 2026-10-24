@@ -39,8 +39,11 @@ pub struct Spec {
     pub runner: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub image: Option<String>,
-    /// `open` or `none`.
+    /// `open`, `none`, or `allowlist` (`hosts` only).
     pub network: String,
+    /// The hosts an `allowlist` network reaches.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub hosts: Vec<String>,
     /// `env` or `proxy`.
     pub secrets: String,
     pub applies_to: Vec<String>,
@@ -89,9 +92,20 @@ impl Spec {
         };
         // OpenShell denies by default and holds keys itself: its defaults say so
         let openshell = runner == "openshell";
+        // `network = ["api.github.com", …]` is an allowlist of those hosts
+        let (network, hosts) = match t.get("network") {
+            Some(Value::Array(a)) => {
+                let hosts = a.iter().map(|v| v.as_str().map(str::to_string).ok_or_else(|| err("[sandbox] network must be \"open\", \"none\" or a list of hosts"))).collect::<Result<Vec<_>>>()?;
+                ("allowlist".to_string(), hosts)
+            }
+            Some(Value::String(n)) if n == "allowlist" => return Err(err("[sandbox] network = \"allowlist\": list the hosts instead (network = [\"api.github.com\"])")),
+            Some(Value::String(_)) | None => (s("network")?.unwrap_or_else(|| if openshell { "none" } else { "open" }.into()), Vec::new()),
+            Some(_) => return Err(err("[sandbox] network must be \"open\", \"none\" or a list of hosts")),
+        };
         let spec = Spec {
             image: s("image")?,
-            network: s("network")?.unwrap_or_else(|| if openshell { "none" } else { "open" }.into()),
+            network,
+            hosts,
             secrets: s("secrets")?.unwrap_or_else(|| if openshell { "proxy" } else { "env" }.into()),
             runner,
             applies_to,
@@ -129,8 +143,22 @@ impl Spec {
         if self.runner.is_empty() || !valid_name(&self.runner) {
             return Err(err(format!("[sandbox] runner {:?} isn't a runner name (letters, digits, - and _)", self.runner)));
         }
-        if !matches!(self.network.as_str(), "open" | "none") {
-            return Err(err(format!("[sandbox] network {:?} isn't open or none", self.network)));
+        if !matches!(self.network.as_str(), "open" | "none" | "allowlist") {
+            return Err(err(format!("[sandbox] network {:?} isn't open, none or a list of hosts", self.network)));
+        }
+        if self.network == "allowlist" {
+            if self.hosts.is_empty() {
+                return Err(err("[sandbox] network is an empty list of hosts; use network = \"none\" to reach none"));
+            }
+            if let Some(h) = self.hosts.iter().find(|h| !valid_host(h)) {
+                return Err(err(format!("[sandbox] network host {h:?} isn't a hostname (lowercase letters, digits, '-' and '.', optionally starting with \"*.\"; no scheme, port or path)")));
+            }
+            let mut seen = std::collections::BTreeSet::new();
+            if let Some(h) = self.hosts.iter().find(|h| !seen.insert(h.as_str())) {
+                return Err(err(format!("[sandbox] network lists {h} twice")));
+            }
+        } else if !self.hosts.is_empty() {
+            return Err(err(format!("[sandbox] hosts are for a network allowlist, not network = {:?}", self.network)));
         }
         if !matches!(self.secrets.as_str(), "env" | "proxy") {
             return Err(err(format!("[sandbox] secrets {:?} isn't env or proxy", self.secrets)));
@@ -150,6 +178,10 @@ impl Spec {
         if self.runner == "openshell" && self.network == "open" {
             return Err(err("[sandbox] OpenShell has no allow-all network rule: use network = \"none\" (the providers' hosts, plus what an OpenShell policy in profile allows)"));
         }
+        if self.network == "allowlist" && matches!(self.runner.as_str(), "docker" | "openshell") {
+            let how = if self.runner == "docker" { "Docker can't limit a container to some hosts" } else { "OpenShell's policy decides the hosts" };
+            return Err(err(format!("[sandbox] runner = \"{}\" can't enforce a network allowlist ({how}): use network = \"none\" and allow the hosts in an OpenShell policy (profile), or a runner whose network-args has an allowlist entry", self.runner)));
+        }
         if self.secrets == "proxy" && !matches!(self.runner.as_str(), "docker" | "openshell") {
             return Err(err("[sandbox] secrets = \"proxy\" works with runner = \"docker\" or \"openshell\" only; use secrets = \"env\""));
         }
@@ -161,7 +193,16 @@ impl Spec {
 
     /// One line for the run: `docker (network open, secrets proxy)`.
     pub fn summary(&self) -> String {
-        format!("{} (network {}, secrets {})", self.runner, self.network, self.secrets)
+        format!("{} (network {}, secrets {})", self.runner, self.network_label(), self.secrets)
+    }
+
+    /// `open`, `none`, or the allowlist's hosts.
+    pub fn network_label(&self) -> String {
+        if self.network == "allowlist" {
+            format!("allowlist {}", self.hosts.join(", "))
+        } else {
+            self.network.clone()
+        }
     }
 }
 
@@ -170,8 +211,19 @@ pub fn weakened(a: Option<&Spec>, b: Option<&Spec>) -> Vec<String> {
     let Some(a) = a else { return Vec::new() };
     let Some(b) = b else { return vec!["the sandbox is removed".into()] };
     let mut out = Vec::new();
-    if a.network == "none" && b.network == "open" {
-        out.push("network none → open".into());
+    // none, then an allowlist, then open: each reaches more than the one before
+    let reach = |s: &Spec| match s.network.as_str() {
+        "none" => 0,
+        "allowlist" => 1,
+        _ => 2,
+    };
+    if reach(b) > reach(a) {
+        out.push(format!("network {} → {}", a.network, b.network));
+    } else if a.network == "allowlist" && b.network == "allowlist" {
+        let more: Vec<&str> = b.hosts.iter().filter(|h| !a.hosts.contains(h)).map(String::as_str).collect();
+        if !more.is_empty() {
+            out.push(format!("network allows more hosts ({})", more.join(", ")));
+        }
     }
     if a.secrets == "proxy" && b.secrets == "env" {
         out.push("secrets proxy → env".into());
@@ -189,6 +241,15 @@ pub fn weakened(a: Option<&Spec>, b: Option<&Spec>) -> Vec<String> {
         _ => {}
     }
     out
+}
+
+/// A hostname for a network allowlist: lowercase labels of letters, digits and `-`,
+/// optionally after `*.` (its subdomains).
+pub fn valid_host(h: &str) -> bool {
+    let rest = h.strip_prefix("*.").unwrap_or(h);
+    !rest.is_empty()
+        && rest.len() <= 253
+        && rest.split('.').all(|l| !l.is_empty() && l.len() <= 63 && !l.starts_with('-') && !l.ends_with('-') && l.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-'))
 }
 
 fn valid_name(s: &str) -> bool {
@@ -711,7 +772,18 @@ impl Sandbox {
                         }
                     }
                 }
-                "{network-args}" => out.extend(r.network_args.get(&self.spec.network).cloned().unwrap_or_default().iter().map(|a| sub(a, None)).collect::<Result<Vec<_>>>()?),
+                "{network-args}" => {
+                    // for an allowlist, an argument with {host} repeats once per host, and {hosts} is them all
+                    for t in r.network_args.get(&self.spec.network).cloned().unwrap_or_default() {
+                        if t.contains("{host}") {
+                            for h in &self.spec.hosts {
+                                out.push(sub(&t.replace("{host}", h), None)?);
+                            }
+                        } else {
+                            out.push(sub(&t.replace("{hosts}", &self.spec.hosts.join(",")), None)?);
+                        }
+                    }
+                }
                 a => out.push(sub(a, None)?),
             }
         }
@@ -1077,7 +1149,8 @@ mod tests {
         for (bad, why) in [
             ("runner = \"docker\"", "needs an image"),
             ("runner = \"docker\"\nimage = \"--privileged\"", "isn't an image reference"),
-            ("runner = \"docker\"\nimage = \"x\"\nnetwork = \"allowlist\"", "isn't open or none"),
+            ("runner = \"docker\"\nimage = \"x\"\nnetwork = \"allowlist\"", "list the hosts instead"),
+            ("runner = \"docker\"\nimage = \"x\"\nnetwork = \"some\"", "isn't open, none or a list of hosts"),
             ("runner = \"jail\"\nsecrets = \"proxy\"", "\"openshell\" only"),
             ("runner = \"openshell\"", "needs an image"),
             ("runner = \"openshell\"\nimage = \"x\"\nnetwork = \"open\"", "no allow-all network rule"),
@@ -1110,6 +1183,52 @@ mod tests {
         assert_eq!(w.len(), 4, "{w:?}");
         assert_eq!(weakened(Some(&s), None), vec!["the sandbox is removed"]);
         assert!(weakened(None, Some(&s)).is_empty() && weakened(Some(&s), Some(&s)).is_empty());
+    }
+
+    #[test]
+    fn network_allowlist() {
+        let d = tmp("allow");
+        let c = ctx(&d);
+        let runner = "[runners.jail]\ncommand = [\"jail\", \"{network-args}\", \"--\"]\nnetwork-args = { none = [\"--unshare-net\"], allowlist = [\"--allow={host}\", \"--hosts={hosts}\"] }\n";
+        let project_table = table(&format!("runner = \"jail\"\nnetwork = [\"api.github.com\", \"*.pypi.org\"]\n{runner}"));
+        let spec = Spec::from_manifest(Some(&project_table), &d).unwrap().unwrap();
+        assert_eq!((spec.network.as_str(), spec.hosts.as_slice()), ("allowlist", &["api.github.com".to_string(), "*.pypi.org".to_string()][..]));
+        assert_eq!(spec.summary(), "jail (network allowlist api.github.com, *.pypi.org, secrets env)");
+        // the lock records the hosts, and reads them back
+        let mut lock = Lockfile::default();
+        lock.policy.sandbox = spec.to_map();
+        assert_eq!(lock.policy.sandbox["hosts"], json!(["api.github.com", "*.pypi.org"]));
+        assert_eq!(Spec::from_lock(&lock).unwrap().unwrap(), spec);
+        // {host} repeats per host; {hosts} is them all
+        let sb = Sandbox::new(&spec, &d, Some(&project_table), &c).unwrap();
+        let run = Run { kind: "agent".into(), argv: vec!["true".into()], cwd: d.clone(), home: d.join("h"), ..Default::default() };
+        let a = sb.wrap(&run, &c).unwrap().argv.join(" ");
+        assert!(a.starts_with("jail --allow=api.github.com --allow=*.pypi.org --hosts=api.github.com,*.pypi.org -- true"), "{a}");
+        // a runner without an allowlist entry can't enforce it
+        let plain = table("runner = \"jail\"\nnetwork = [\"api.github.com\"]\n[runners.jail]\ncommand = [\"jail\", \"{network-args}\"]\nnetwork-args = { none = [\"--unshare-net\"] }\n");
+        let e = Sandbox::new(&Spec::from_manifest(Some(&plain), &d).unwrap().unwrap(), &d, Some(&plain), &c).unwrap_err().to_string();
+        assert!(e.contains("can't enforce network = \"allowlist\""), "{e}");
+        for (bad, why) in [
+            ("runner = \"docker\"\nimage = \"x\"\nnetwork = [\"api.github.com\"]", "Docker can't limit"),
+            ("runner = \"openshell\"\nimage = \"x\"\nnetwork = [\"api.github.com\"]", "OpenShell's policy decides"),
+            ("runner = \"jail\"\nnetwork = []", "empty list of hosts"),
+            ("runner = \"jail\"\nnetwork = [\"https://api.github.com\"]", "isn't a hostname"),
+            ("runner = \"jail\"\nnetwork = [\"api.github.com:443\"]", "isn't a hostname"),
+            ("runner = \"jail\"\nnetwork = [\"API.github.com\"]", "isn't a hostname"),
+            ("runner = \"jail\"\nnetwork = [\"a.b\", \"a.b\"]", "twice"),
+            ("runner = \"jail\"\nnetwork = [1]", "a list of hosts"),
+        ] {
+            let e = Spec::from_manifest(Some(&table(bad)), &d).unwrap_err().to_string();
+            assert!(e.contains(why), "{bad}: {e}");
+        }
+        // reaching more is a weakening: none → allowlist → open, and hosts added
+        let none = Spec { network: "none".into(), hosts: Vec::new(), ..spec.clone() };
+        let open = Spec { network: "open".into(), hosts: Vec::new(), ..spec.clone() };
+        let more = Spec { hosts: vec!["api.github.com".into(), "*.pypi.org".into(), "evil.example".into()], ..spec.clone() };
+        assert_eq!(weakened(Some(&none), Some(&spec)), ["network none → allowlist"]);
+        assert_eq!(weakened(Some(&spec), Some(&open)), ["network allowlist → open"]);
+        assert_eq!(weakened(Some(&spec), Some(&more)), ["network allows more hosts (evil.example)"]);
+        assert!(weakened(Some(&more), Some(&spec)).is_empty() && weakened(Some(&spec), Some(&none)).is_empty());
     }
 
     #[test]

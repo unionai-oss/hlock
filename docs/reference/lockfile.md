@@ -188,7 +188,7 @@ trials = 16
 | `[[llm]]` | One entry per role: `provider`, `model`, the candidate string it came from, a `fingerprint`, and `params` |
 | `[decision]` | Decision model `kind`, its `decisions`, and `thresholds` |
 | `[harness]` | Harness `name` and `pattern`. For a harness with a profile, also the installed `version`, its install `source` (e.g. `brew-cask:claude-code@2.1.285`), and the `adapter` that ran the trials. |
-| `[policy]` | `retries`, `max-steps`, `human-approval`, `risky-actions`, `tool-allowlist`, and `[policy.sandbox]`: the [sandbox](../guides/sandbox.md) the lock runs in (`runner`, `image`, `network`, `secrets`, `applies-to`, `profile = { path, digest }`, `grader-image`), from `harness.toml`'s `[sandbox]`. Empty means none |
+| `[policy]` | `retries`, `max-steps`, `human-approval`, `risky-actions`, `tool-allowlist`, and `[policy.sandbox]`: the [sandbox](../guides/sandbox.md) the lock runs in (`runner`, `image`, `network`, with `hosts` for an allowlist, `secrets`, `applies-to`, `profile = { path, digest }`, `grader-image`), from `harness.toml`'s `[sandbox]`. Empty means none |
 | `[context]` | Context `isolation` and `compaction` settings |
 | `[[tool]]`, `[[skill]]`, `[[instructions]]` | MCP servers, skills, and instruction files, each with a source or digest. A pinned lock fills these in; see below. An `[[instructions]]` entry may have a `role` (`guardrails`, `memory`, `tool-guidance`) and `sections`, the roles it holds as `## Guardrails`-style sections |
 | `[[subagent]]`, `[[script]]`, `[[middleware]]` | Subagent definitions, helper scripts, and middleware files (OpenCode plugin files, Codex's `.codex/hooks.json`): `name`, `path`, `digest`, `scope`, `vendored`, `format` (middleware), `source` (`tune` when an optimizer wrote it), and `scan`. See [Harness components](../guides/pin.md#harness-components) |
@@ -200,6 +200,9 @@ the provider publishes a price. `[evidence.sandbox]` records what trials and gra
 | `[[package]]` | [APM packages](../guides/dependencies.md#apm-packages) declared dependencies resolved to (see below) |
 | `[environment]` | What `harness.toml`'s [`[environment]`](manifest.md#environment) declares the agent needs installed (see [below](#declared-environment-and-secrets)) |
 | `[[secret]]` | The secrets the stack needs: placeholders a [pin](#pinned-locks) replaced, and those `harness.toml`'s [`[[secrets]]`](manifest.md#secrets) declares (see [below](#declared-environment-and-secrets)) |
+| `[workspace]` | What `harness.toml`'s [`[workspace]`](manifest.md#workspace) seeds the workspace with, each file digested (see [below](#workspace-commands-profile-and-persona)) |
+| `[[command]]` | The slash commands `harness.toml`'s [`[commands]`](manifest.md#commands) declares: `name`, `path`, `digest` |
+| `[project]` | `harness.toml`'s [`[project]`](manifest.md#project) `display-name` and `avatar`, and the avatar's `avatar-digest` |
 
 ## Pinned locks
 
@@ -298,6 +301,43 @@ When a pin found a placeholder of the same name, the two are one entry. A secret
 longer declared leaves a resolved lock; a pinned one keeps the entry, undeclared, since the
 pin may have placed its placeholder, until the next `hlock pin`.
 
+## Workspace, commands, profile and persona
+
+`resolve`, `tune` and `sync` also record what `harness.toml` declares in
+[`[workspace]`](manifest.md#workspace), [`[commands]`](manifest.md#commands),
+[`[context] profile`](manifest.md#context) and [`[project]`](manifest.md#project)
+`display-name` and `avatar`, with the digest of each file they name, read when the lock is
+written. `pin` keeps what the previous lock recorded, and `sync --frozen` fails when any of
+it differs from the manifest, an edited command or seed file included.
+
+```toml title="harness.lock"
+[context]
+profile = "forked"
+
+[[workspace.repos]]
+url = "https://github.com/org/repo"
+ref = "main"
+path = "src/repo"
+
+[[workspace.files]]
+path = "./seed/NOTES.md"
+target = "NOTES.md"
+digest = "sha256:a881945d52b92959c44a8fba023591cb966513b7689644586e52fbb67832ec9f"
+
+[[command]]
+name = "review"
+path = "./commands/review.md"
+digest = "sha256:6352ca70b5dbfc2d51bb53175ad1c02579fdba4835990fcfe856db8afaf9a4b1"
+
+[project]
+display-name = "RBAC reviewer"
+avatar = "./avatar.png"
+avatar-digest = "sha256:e1dd52c4fded473678d49aa9270d577e5a8fb064b45824dc1dd200427ec3cb52"
+```
+
+A directory in `[[workspace.files]]` has a tree digest, like a skill's. The lock records a
+repository's `ref` as declared, not the commit it resolves to.
+
 ## Localized locks
 
 [`hlock localize`](../guides/localize.md) writes a lock with `kind = "localized"`,
@@ -374,7 +414,13 @@ command-line words:
 | `[[decider]] use` | `approve`, `stop`, `route`, or `tool` |
 | `[[secret]] name` | `HLOCK_SECRET_` and letters, digits and `_` |
 | `[environment]` package lists | One word each, not starting with `-` |
+| `[environment] ignore` | Program names: no `/`, spaces, or leading `-` |
 | `[[environment.binaries]]` | An `http(s)` `url`, a `sha256` of 64 lowercase hex digits, and an absolute `path` with no `..` |
+| `[[workspace.repos]]` | An `https`, `http`, `ssh` or `git@` `url`; a `ref` of letters, digits and `._:/@+-`, not starting with `-`; a relative `path` with no `..` |
+| `[[workspace.files]]` | Relative `path` and `target` with no `..`, each place seeded once, and a `sha256:` `digest` |
+| `[[command]]` | A `name` of letters, digits and `-_.`, not starting with `-` or `.`, recorded once; a relative `path` with no `..` |
+| `[context] profile` | `shared`, `forked` or `none` |
+| `[project]` | A one-line `display-name`; a relative `avatar` with no `..`; a `sha256:` `avatar-digest` |
 
 A lock that fails a check isn't read: the error names the field. hlock writes locks
 atomically (a temporary file, then a rename), and leaves out JSON `null`s, which TOML

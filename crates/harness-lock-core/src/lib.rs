@@ -19,6 +19,7 @@ pub mod components;
 pub mod contract;
 pub mod decide;
 pub mod deps;
+pub mod envsuggest;
 pub mod launch;
 pub mod localize;
 pub mod lockdiff;

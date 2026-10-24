@@ -87,6 +87,7 @@ from hlock import deps_record_configs as _deps_record_configs
 from hlock import deps_refresh as _deps_refresh
 from hlock import deps_remove as _deps_remove
 from hlock import deps_upgrade as _deps_upgrade
+from hlock import env_suggest as _env_suggest
 from hlock import eval_packs_digest as _eval_packs_digest
 from hlock import evals as _evals
 from hlock import export_apm_lock as _export_apm_lock
@@ -224,7 +225,7 @@ click.rich_click.MAX_WIDTH = 100
 click.rich_click.COMMAND_GROUPS = {
     "hlock": [
         {"name": "Lock", "commands": ["pin", "check"]},
-        {"name": "Dependencies", "commands": ["add", "remove", "outdated", "export"]},
+        {"name": "Dependencies", "commands": ["add", "remove", "outdated", "export", "env"]},
         {"name": "Audit", "commands": ["audit", "trust"]},
         {"name": "Rehydrate & run", "commands": ["sync", "launch", "run"]},
         {"name": "Optimize", "commands": ["evals", "init", "resolve", "tune", "upgrade", "decide"]},
@@ -1260,7 +1261,23 @@ def pin(harness: str | None, out: str | None, user: bool, include: tuple[str, ..
             _diff_hint(result["diff"], out)
         else:
             console.print("[muted]no changes since the last pin[/]")
-    _next("hlock check", "hlock sync")
+    missing = _undeclared_programs(out)
+    if missing:
+        console.print(f"[warn]![/] the stack runs {len(missing)} program{'' if len(missing) == 1 else 's'} [key]\\[environment][/] doesn't declare: "
+                      f"{', '.join(missing)}", soft_wrap=True)
+        _next("hlock check", "hlock sync", "hlock env suggest")
+    else:
+        _next("hlock check", "hlock sync")
+
+
+def _undeclared_programs(lock: str) -> list[str]:
+    """The programs a lock runs as written (MCP servers, hooks) that `[environment]`
+    neither declares nor ignores. Empty when that can't be worked out: it's a hint."""
+    try:
+        found = json.loads(_env_suggest(lock=lock, manifest=_m()))["candidates"]
+    except Exception:  # noqa: BLE001 - a hint never fails the command it follows
+        return []
+    return [c["program"] for c in found if c["status"] == "missing" and c["confidence"] == "high"]
 
 
 def _user_scope(lf) -> tuple[bool, list[str]]:
@@ -2279,7 +2296,8 @@ def sandbox_cmd(as_json: bool) -> None:
         t.add_row("image", escape(spec["image"]))
     if spec.get("grader-image"):
         t.add_row("grader image", escape(spec["grader-image"]))
-    t.add_row("network", spec["network"])
+    hosts = spec.get("hosts") or []
+    t.add_row("network", f"allowlist: {escape(', '.join(hosts))}" if hosts else spec["network"])
     t.add_row("secrets", spec["secrets"])
     t.add_row("applies to", ", ".join(spec["applies-to"]))
     if spec.get("profile"):
@@ -3959,6 +3977,61 @@ def harness_show(name: str | None, as_json: bool) -> None:
     t.add_row("profile", "[muted]built in[/]" if prof["origin"] == "builtin" else f"[path]{prof['origin']}[/]")
     console.print(Panel(t, title=f"[brand]{prof['name']}[/]", title_align="left", border_style="magenta",
                         expand=False, padding=(1, 2)))
+
+
+@main.group("env")
+def env_group() -> None:
+    """Declare what the agent needs installed: [key]\\[environment][/] in [path]harness.toml[/]."""
+
+
+@env_group.command("suggest")
+@click.option("--write", is_flag=True, help="Add the missing programs' packages to [key]\\[environment][/] (high-confidence ones).")
+@click.option("--all", "all_", is_flag=True, help="With --write: the low-confidence ones too.")
+@click.option("--json", "as_json", is_flag=True, help="Print the programs as JSON and change nothing else.")
+def env_suggest(write: bool, all_: bool, as_json: bool) -> None:
+    """List the programs the lock runs, and what would install them.
+
+    [key]high[/]: run as written (an MCP server's command, a hook, a setting).
+    [key]low[/]: found in a skill's scripts, a hook's script, or a shell code block, which may
+    be only an example. Package names come from this machine's package manager where it
+    knows the program, else from a table of common tools: check them before you commit.
+    [cmd]--write[/] adds each missing program's package to [key]apt[/] and [key]brew[/] (or
+    [key]pip[/] / [key]npm[/]); list a program the stack doesn't need under
+    [key]\\[environment] ignore[/]. [cmd]hlock meta run environment[/] has an agent decide.
+    """
+    if write and not Path(_m()).is_file():
+        _fail(f"{_show(_m())} doesn't exist, so there's no [environment] to add to",
+              "write one with [cmd]hlock init[/] or [cmd]hlock add[/]")
+    with _working("Reading what the lock runs…"):
+        result = json.loads(_env_suggest(lock=_l(), manifest=_m(), write=write and not as_json, all=all_))
+    found = result["candidates"]
+    if as_json:
+        console.print_json(data=found)
+        return
+    for a in result["added"]:
+        _ok(f"added to [key]\\[environment][/] {escape(a)}")
+    for u in result["unknown"]:
+        console.print(f"[warn]![/] no package known for [key]{escape(u)}[/]: add it by hand, or to [key]ignore[/]")
+    if not found:
+        _ok("the lock runs no programs besides the harness")
+        return
+    t = Table(box=None, header_style="bold", pad_edge=False)
+    t.add_column("program", style="key")
+    t.add_column("confidence")
+    t.add_column("status")
+    t.add_column("packages")
+    t.add_column("run by", style="muted")
+    style = {"declared": "[ok]declared[/]", "ignored": "[muted]ignored[/]", "missing": "[warn]missing[/]"}
+    for c in found:
+        pkgs = ", ".join(f"{i} {p}" for i, p in c["packages"].items()) or "[muted]—[/]"
+        more = f" (+{len(c['sources']) - 1})" if len(c["sources"]) > 1 else ""
+        t.add_row(c["program"], c["confidence"], style.get(c["status"], c["status"]), escape(pkgs), escape(c["sources"][0] + more))
+    console.print(t)
+    missing = [c for c in found if c["status"] == "missing"]
+    if any(c["confidence"] == "high" for c in missing):
+        _next("hlock env suggest --write", "hlock meta run environment")
+    elif missing:
+        _next("hlock env suggest --write --all", "hlock meta run environment")
 
 
 @main.group()

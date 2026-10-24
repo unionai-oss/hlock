@@ -673,7 +673,8 @@ fn stage(name: &str, ran: bool, detail: impl Into<String>) -> serde_json::Value 
 /// recorded.
 pub fn tune(manifest: Manifest, spec: &TuneSpec) -> Result<TuneOutcome> {
     manifest.check_search()?;
-    manifest.check_declared()?;
+    // read now, so a missing workspace file or command stops the tune before any trial
+    let declared = manifest.declarations()?;
     let depth = spec.resolved_depth().to_string();
     let backend = crate::worker::Backend::resolve(&manifest, spec.backend.as_deref())?;
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
@@ -973,6 +974,8 @@ pub fn tune(manifest: Manifest, spec: &TuneSpec) -> Result<TuneOutcome> {
         None => None,
     };
     let mut tune_lock = build_tuned_lock(&manifest, base_lock.as_ref(), &winner, &measured, &split, scored.len(), backend.as_str(), &prompt_meta, prompt_gain, tuned_file.as_ref(), &ft_meta, &data_meta, &spec.data, data_mode, simulated, &plan_value, Some(resolver.evidence_sandbox(&winner.stack.harness)));
+    // the environment, secrets, workspace seed and the rest are harness.toml's, as is the sandbox
+    tune_lock.declare(&declared);
     resolver.approve_sandbox(&tune_lock)?;
     let mut optimize_report = serde_json::Value::Null;
     if let Some(o) = &optimized {
@@ -1117,8 +1120,6 @@ fn build_tuned_lock(
     lf.policy.retries = stack.retries;
     // the sandbox is harness.toml's, whatever the base lock had
     lf.policy.sandbox = manifest.sandbox_spec().ok().flatten().map(|s| s.to_map()).unwrap_or_default();
-    // so are the environment and the declared secrets
-    lf.declare(&manifest.environment, &manifest.secrets);
     let r4 = |v: f64| (v * 1e4).round() / 1e4;
     let mut success = BTreeMap::from([("mean".to_string(), r4(measured.success_rate()))]);
     if split == "holdout" {

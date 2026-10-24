@@ -1321,6 +1321,28 @@ fn deps_refresh(py: Python<'_>, lock: String, manifest: String, frozen: bool, wr
     })
 }
 
+/// The programs a lock runs and what would install them, against `harness.toml`'s
+/// `[environment]`: JSON `{"candidates": [{program, confidence, sources, packages, found,
+/// status}], "added": […], "unknown": […]}`. With `write`, adds the missing ones (`high`
+/// ones, or all with `all`) to `[environment]`; `added` lists them (`apt: ripgrep`) and
+/// `unknown` the programs with no package to add.
+#[pyfunction]
+#[pyo3(signature = (lock="harness.lock".to_string(), manifest="harness.toml".to_string(), write=false, all=false))]
+fn env_suggest(py: Python<'_>, lock: String, manifest: String, write: bool, all: bool) -> PyResult<String> {
+    interruptible(py, move || {
+        let (reg, ctx, _) = registry(Some(&manifest), Some(&lock_dir(&lock)))?;
+        let m = project_manifest(&manifest)?;
+        let mut found = core::envsuggest::for_lock(Path::new(&lock), m.as_ref(), &reg, &ctx).map_err(py_err)?;
+        let (mut added, mut unknown) = (Vec::new(), Vec::new());
+        if write {
+            (added, unknown) = core::envsuggest::write(Path::new(&manifest), &found, all).map_err(py_err)?;
+            let m = project_manifest(&manifest)?;
+            found = core::envsuggest::for_lock(Path::new(&lock), m.as_ref(), &reg, &ctx).map_err(py_err)?;
+        }
+        Ok(json_str(serde_json::json!({"candidates": found, "added": added, "unknown": unknown})))
+    })
+}
+
 /// After `sync` wrote declared MCP servers into project config files (`files`, profile file
 /// ids), re-record them in the lock. Returns whether the lock changed.
 #[pyfunction]
@@ -2345,6 +2367,7 @@ fn _hlock(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(deps_remove, m)?)?;
     m.add_function(wrap_pyfunction!(deps_check, m)?)?;
     m.add_function(wrap_pyfunction!(deps_refresh, m)?)?;
+    m.add_function(wrap_pyfunction!(env_suggest, m)?)?;
     m.add_function(wrap_pyfunction!(deps_outdated, m)?)?;
     m.add_function(wrap_pyfunction!(deps_record_configs, m)?)?;
     m.add_function(wrap_pyfunction!(trust_list, m)?)?;

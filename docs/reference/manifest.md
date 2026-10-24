@@ -48,14 +48,20 @@ target = "local"
 
 `resolve` and `tune` refuse a manifest with a key they don't know in `[budget]`,
 `[objective]`, `[evals]`, `[evals.splits]`, `[candidates]`, `[backend]`, `[target]`,
-`[environment]`, `[[environment.binaries]]`, `[[secrets]]`, or at the top level, and name
-the closest known key: a mistyped key is otherwise ignored.
+`[environment]`, `[[environment.binaries]]`, `[[secrets]]`, `[workspace]`,
+`[[workspace.repos]]`, `[[workspace.files]]`, or at the top level, and name the closest
+known key: a mistyped key is otherwise ignored.
 
 ## `[project]`
 
 | Key | Description |
 |---|---|
 | `name` | Project name, recorded as the lock's stack name |
+| `display-name` | The agent's name in registry listings and launch UIs (`"RBAC reviewer"`): one line of text |
+| `avatar` | An image in the package, relative to `harness.toml` (`"./avatar.png"`) |
+
+The lock records `display-name` and `avatar` in its own
+[`[project]`](lockfile.md#workspace-commands-profile-and-persona), with the avatar's digest.
 
 ## `[evals]`
 
@@ -247,7 +253,7 @@ grader-image = "ghcr.io/acme/ci@sha256:9d03…"
 |---|---|---|
 | `runner` | `"none"` | `docker`, [`openshell`](../guides/sandbox.md#run-the-lock-on-openshell), or a runner defined in `~/.config/hlock/sandbox.toml` or `[sandbox.runners.<name>]` |
 | `image` | | The image `docker` or `openshell` runs (required for them). Pin it `@sha256:` |
-| `network` | `"open"` (`"none"` for `openshell`) | `open` or `none`; `openshell` takes `none` only |
+| `network` | `"open"` (`"none"` for `openshell`) | `open`, `none`, or a list of hosts the sandbox may reach (`["api.github.com", "*.pypi.org"]`); `openshell` takes `none` only |
 | `secrets` | `"env"` (`"proxy"` for `openshell`) | `env` (provider keys as environment variables) or `proxy` (a [key proxy](../guides/sandbox.md#keep-provider-keys-out-of-the-agents-reach) on `docker`, OpenShell providers on `openshell`) |
 | `applies-to` | all three | What runs inside: `agent`, `trials`, `graders` |
 | `profile` | | A runtime policy file in the project (a seatbelt profile, an OpenShell policy), pinned by digest and passed as `{profile}` (to `openshell`, as `--policy`) |
@@ -255,6 +261,11 @@ grader-image = "ghcr.io/acme/ci@sha256:9d03…"
 
 `[sandbox.runners.<name>]` defines a [command runner](../guides/sandbox.md#define-your-own-runner)
 for the project: `command`, `mount-args`, `mount-ro-args`, `network-args` and `networks`.
+
+A list of hosts is an allowlist: each is a lowercase hostname, with `*.` for its subdomains,
+and no scheme, port or path. The lock records `network = "allowlist"` and the `hosts`. Only
+a command runner with an `allowlist` entry in `network-args` (or `networks`)
+[enforces it](../guides/sandbox.md#define-your-own-runner); `docker` and `openshell` refuse it.
 
 ## `[environment]`
 
@@ -265,7 +276,8 @@ of it yet.
 
 ```toml title="harness.toml"
 [environment]
-apt = ["protobuf-compiler", "ripgrep"]
+apt = ["protobuf-compiler", "ripgrep"]    # Debian and Ubuntu
+brew = ["protobuf", "ripgrep"]            # macOS
 pip = ["ruff==0.6.9"]
 npm = ["pnpm@9"]
 cargo = ["cargo-nextest"]
@@ -279,8 +291,16 @@ path = "/usr/local/bin/tool"
 
 | Key | Description |
 |---|---|
-| `apt`, `pip`, `npm`, `cargo`, `go` | Packages, as that installer names them (`ruff==0.6.9`, `pnpm@9`, `golang.org/x/tools/gopls@v0.16.2`). Each is one word, not starting with `-` |
+| `apt`, `brew`, `pip`, `npm`, `cargo`, `go` | Packages, as that installer names them (`ruff==0.6.9`, `pnpm@9`, `golang.org/x/tools/gopls@v0.16.2`). Each is one word, not starting with `-` |
 | `[[environment.binaries]]` | A file to download: `url` (`http://` or `https://`), `sha256` (64 lowercase hex digits) and `path`, the absolute path it's installed at, with no `..`. All three are required, and each `path` appears once |
+| `ignore` | Programs the stack names but doesn't need installed, so [`hlock env suggest`](cli.md#env-suggest) stops suggesting them. Each is a program name, not a path |
+
+The system installers say the platform: `apt` is for Debian and Ubuntu, `brew` for macOS,
+and a program often has a different package name in each (`protobuf-compiler`,
+`protobuf`), so each lists its own. `pip`, `npm`, `cargo` and `go` apply everywhere.
+
+[`hlock env suggest`](cli.md#env-suggest) lists the programs the lock runs that these lists
+don't cover, and `--write` adds their packages.
 
 ## `[[secrets]]`
 
@@ -307,8 +327,63 @@ description = "Opens PRs on the user's behalf."
 The lock merges each into its [`[[secret]]`](lockfile.md#declared-environment-and-secrets)
 entries.
 
-hlock checks `[environment]` and `[[secrets]]` when it reads `harness.toml`: a bad digest,
-path, package or secret name is an error rather than ignored.
+## `[workspace]`
+
+The state the agent's workspace starts from: repositories to check out, and files from the
+package to copy in. The seed is portable; the live state that grows from it isn't, and is
+never locked. The lock records the seed in its own
+[`[workspace]`](lockfile.md#workspace-commands-profile-and-persona), with each file's
+digest. hlock doesn't check out or copy any of it yet.
+
+```toml title="harness.toml"
+[[workspace.repos]]
+url = "https://github.com/org/repo"
+ref = "main"
+path = "src/repo"
+
+[[workspace.files]]
+path = "./seed/NOTES.md"    # in the package
+target = "NOTES.md"         # in the workspace
+```
+
+| Key | Description |
+|---|---|
+| `[[workspace.repos]]` | A repository: `url` (`https://`, `http://`, `ssh://` or `git@`), an optional `ref` (a branch, tag or commit; the default branch without one), and `path`, where it's checked out in the workspace |
+| `[[workspace.files]]` | A file or directory: `path`, relative to `harness.toml`, and `target`, where it goes in the workspace |
+
+Paths are relative, with no `..`, and each place in the workspace is seeded once.
+
+## `[commands]`
+
+Slash commands the agent offers, by name, each a file in the package. The lock records
+each as a [`[[command]]`](lockfile.md#workspace-commands-profile-and-persona) with its
+digest, so an edited command shows up like an edited skill. hlock doesn't install them into
+the harness yet.
+
+```toml title="harness.toml"
+[commands]
+review = "./commands/review.md"
+```
+
+A name is letters, digits, `-`, `_` and `.`, not starting with `-` or `.`; a path is
+relative to `harness.toml`, with no `..`.
+
+## `[context]`
+
+```toml title="harness.toml"
+[context]
+profile = "forked"
+```
+
+| Key | Description |
+|---|---|
+| `profile` | Whose memory and personal config the agent starts from: `shared` (the user's own), `forked` (a copy of them that writes back nowhere), or `none` (neither). A demo or customer-facing agent shouldn't see its author's memory; a personal one should. The lock records it as `[context] profile`; `launch` doesn't apply it yet |
+
+hlock checks `[environment]`, `[[secrets]]`, `[workspace]`, `[commands]`,
+`[context] profile`, and `[project]` `display-name` and `avatar` when it reads
+`harness.toml`: a bad digest, path, package, name or mode is an error rather than ignored.
+`sync`, `resolve` and `tune` also read the files `[workspace]`, `[commands]` and `avatar`
+name, and stop when one is missing.
 
 ## Dependencies
 
@@ -351,8 +426,8 @@ dependencies as well ([APM packages](../guides/dependencies.md#a-project-that-al
 
 ## Reserved sections
 
-`[context]` and `[enforce]` are parsed and included in the manifest hash. They're
-placeholders for the peripherals described in the
+`[enforce]`, and `[context]`'s keys besides `profile`, are parsed and included in the
+manifest hash. They're placeholders for the peripherals described in the
 [design spec](https://github.com/unionai-oss/hlock/blob/main/specs/v0.md). The resolver
 doesn't search over dependencies yet: `hlock resolve` treats `[skills]` and `[tools]` names
 as fixed parts of every stack.
@@ -366,7 +441,8 @@ and whitespace included: the text the run read, even if the file changes during 
 
 A pinned lock with declared dependencies records a hash of the dependency sections only
 (`[skills]`, `[mcp]`, `[instructions]`, `[plugins]`, `[packages]` and `[tools]`, and
-`[environment]` and `[[secrets]]` when there are any), so editing `[candidates]` or
+`[environment]`, `[[secrets]]`, `[workspace]`, `[commands]`, `[context] profile`, and
+`[project]` `display-name` and `avatar` when there are any), so editing `[candidates]` or
 `[evals]` in the same file doesn't invalidate the pin.
 
 ## `[deciders.<use>]`
