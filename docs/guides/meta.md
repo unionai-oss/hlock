@@ -79,6 +79,7 @@ job                        description
 install          built in  Install what the project's lock still needs on this machine
 bootstrap-evals  built in  Fill in an eval pack with real tasks from this project
 update           built in  Update the lock's skills, MCP servers and plugins
+environment      built in  Declare in harness.toml the packages the lock's programs need
 next → hlock meta run <job>
 ```
 
@@ -204,6 +205,27 @@ hlock then re-captures your harness and prints what changed. `--pin` re-pins
 `harness.lock` so the update is recorded; without it, review the diff and run
 `hlock pin` yourself.
 
+### `environment`
+
+Declares in `harness.toml`'s [`[environment]`](../reference/manifest.md#environment) what the
+lock needs installed. hlock gives the agent the list
+[`hlock env suggest`](../reference/cli.md#env-suggest) makes: each program the lock runs,
+where it runs it, and the packages that would install it. The agent decides for each
+missing one whether the stack needs it, reading the scripts named. It adds the package to
+`apt` and `brew` (or `pip`, `npm`), checking names with `apt-cache` or `brew info`, or lists the
+program under `ignore`. It edits only `[environment]` and installs nothing.
+
+hlock's check fails while a `high` program (an MCP server's command, a hook's) is neither
+declared nor ignored. It warns about each `low` one left, and, when `harness.toml` is
+committed, about any other table that changed since the last commit:
+
+```console
+$ hlock meta verify environment
+✓ verified  4 programs declared, 0 ignored
+  warning: maybe needed: gh (low, missing): skill release: scripts/pr.sh. Packages: apt gh, brew gh. Found at /opt/homebrew/bin/gh.
+  warning: maybe needed: protoc (low, missing): skill release: scripts/pr.sh. Packages: apt protobuf-compiler, brew protobuf. Found at /opt/homebrew/bin/protoc.
+```
+
 ### Custom jobs
 
 ```toml title="harness.meta.toml"
@@ -273,11 +295,12 @@ that don't run code from the project or install software:
   `--force`), `evals templates`, and `evals check`, but not `evals check --run` or
   `evals grade`, which run the pack's test scripts
 - `hlock meta check`, `meta show`, `meta jobs`, and `meta verify` for the built-in jobs
-  (`install`, `bootstrap-evals`, `update`). A custom job's `verify` runs a shell command
+  (`install`, `bootstrap-evals`, `update`, `environment`). A custom job's `verify` runs a shell command
   from `harness.meta.toml`, so the agent asks you before it runs `hlock meta verify` for
   one; hlock runs the check itself after the agent finishes either way.
 - `hlock sync`, but not with `--install`, `--pull`, `--build`, `--in-place`, `--prefix`,
   or `--skill-dir`
+- `hlock env suggest`, including `--write`, which edits `harness.toml`'s `[environment]`
 
 An `@hlock` command with a path argument that's absolute, starts with `~`, or climbs out
 with `..` isn't allowlisted either.

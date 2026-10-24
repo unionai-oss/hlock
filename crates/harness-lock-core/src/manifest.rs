@@ -60,7 +60,7 @@ const BACKEND_KEYS: &[&str] = &["target"];
 const TARGET_KEYS: &[&str] = &["harness", "also"];
 const TUNE_KEYS: &[&str] = &["optimizer", "edit", "proposer", "budget", "trials", "alpha", "max-cost-increase"];
 const TUNE_BUDGET_KEYS: &[&str] = &["rollouts", "usd"];
-const ENVIRONMENT_KEYS: &[&str] = &["apt", "pip", "npm", "cargo", "go", "binaries"];
+const ENVIRONMENT_KEYS: &[&str] = &["apt", "brew", "pip", "npm", "cargo", "go", "binaries", "ignore"];
 const BINARY_KEYS: &[&str] = &["url", "sha256", "path"];
 const SECRET_KEYS: &[&str] = &["name", "used-by", "optional", "description"];
 const WORKSPACE_KEYS: &[&str] = &["repos", "files"];
@@ -68,13 +68,16 @@ const REPO_KEYS: &[&str] = &["url", "ref", "path"];
 const SEED_FILE_KEYS: &[&str] = &["path", "target"];
 
 /// `[environment]`: what the agent needs installed, as package lists for each installer
-/// and binaries pinned by URL and SHA-256. The lock records it as declared; nothing
-/// installs it yet.
+/// and binaries pinned by URL and SHA-256. The system installers say the platform (`apt`
+/// for Debian and Ubuntu, `brew` for macOS); the language ones apply everywhere. The lock
+/// records it as declared; nothing installs it yet.
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
 #[serde(default)]
 pub struct Environment {
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub apt: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub brew: Vec<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub pip: Vec<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -86,6 +89,10 @@ pub struct Environment {
     /// `[[environment.binaries]]`.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub binaries: Vec<Binary>,
+    /// Programs the stack names that it doesn't need installed (`hlock env suggest`
+    /// stops suggesting them): `docker`, when a server that runs it is turned off.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub ignore: Vec<String>,
 }
 
 /// A file downloaded from `url`, checked against `sha256`, and placed at `path`.
@@ -105,8 +112,21 @@ impl Environment {
     }
 
     /// The package lists, by installer.
-    pub fn lists(&self) -> [(&'static str, &Vec<String>); 5] {
-        [("apt", &self.apt), ("pip", &self.pip), ("npm", &self.npm), ("cargo", &self.cargo), ("go", &self.go)]
+    pub fn lists(&self) -> [(&'static str, &Vec<String>); 6] {
+        [("apt", &self.apt), ("brew", &self.brew), ("pip", &self.pip), ("npm", &self.npm), ("cargo", &self.cargo), ("go", &self.go)]
+    }
+
+    /// The list for an installer, to add to.
+    pub fn list_mut(&mut self, installer: &str) -> Option<&mut Vec<String>> {
+        Some(match installer {
+            "apt" => &mut self.apt,
+            "brew" => &mut self.brew,
+            "pip" => &mut self.pip,
+            "npm" => &mut self.npm,
+            "cargo" => &mut self.cargo,
+            "go" => &mut self.go,
+            _ => return None,
+        })
     }
 
     /// Values that would reach an installer as something other than what they say: a
@@ -119,6 +139,9 @@ impl Environment {
                     return Err(format!("[environment] {list} entry {p:?} must be one package: no spaces, not starting with '-'"));
                 }
             }
+        }
+        if let Some(p) = self.ignore.iter().find(|p| !crate::fsutil::plain_name(p) || p.starts_with('-') || p.chars().any(char::is_whitespace)) {
+            return Err(format!("[environment] ignore entry {p:?} must be a program name (no '/', spaces, or leading '-')"));
         }
         let mut paths = std::collections::BTreeSet::new();
         for (i, b) in self.binaries.iter().enumerate() {
@@ -950,12 +973,12 @@ optional = true
     #[test]
     fn unknown_environment_and_secret_keys_are_problems() {
         let m = Manifest::from_str(
-            "[environment]\nbrew = [\"x\"]\n[[environment.binaries]]\nurl = \"https://x/t\"\nsha265 = \"\"\npath = \"/t\"\n[[secrets]]\nname = \"A\"\nused_by = [\"x\"]\n",
+            "[environment]\nyum = [\"x\"]\n[[environment.binaries]]\nurl = \"https://x/t\"\nsha265 = \"\"\npath = \"/t\"\n[[secrets]]\nname = \"A\"\nused_by = [\"x\"]\n",
         )
         .unwrap();
         let p = m.problems();
         for want in [
-            "unknown key `brew` in [environment]",
+            "unknown key `yum` in [environment]",
             "unknown key `sha265` in [[environment.binaries]] (did you mean `sha256`?)",
             "unknown key `used_by` in [[secrets]] (did you mean `used-by`?)",
         ] {

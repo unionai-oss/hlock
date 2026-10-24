@@ -276,7 +276,8 @@ of it yet.
 
 ```toml title="harness.toml"
 [environment]
-apt = ["protobuf-compiler", "ripgrep"]
+apt = ["protobuf-compiler", "ripgrep"]    # Debian and Ubuntu
+brew = ["protobuf", "ripgrep"]            # macOS
 pip = ["ruff==0.6.9"]
 npm = ["pnpm@9"]
 cargo = ["cargo-nextest"]
@@ -290,8 +291,16 @@ path = "/usr/local/bin/tool"
 
 | Key | Description |
 |---|---|
-| `apt`, `pip`, `npm`, `cargo`, `go` | Packages, as that installer names them (`ruff==0.6.9`, `pnpm@9`, `golang.org/x/tools/gopls@v0.16.2`). Each is one word, not starting with `-` |
+| `apt`, `brew`, `pip`, `npm`, `cargo`, `go` | Packages, as that installer names them (`ruff==0.6.9`, `pnpm@9`, `golang.org/x/tools/gopls@v0.16.2`). Each is one word, not starting with `-` |
 | `[[environment.binaries]]` | A file to download: `url` (`http://` or `https://`), `sha256` (64 lowercase hex digits) and `path`, the absolute path it's installed at, with no `..`. All three are required, and each `path` appears once |
+| `ignore` | Programs the stack names but doesn't need installed, so [`hlock env suggest`](cli.md#env-suggest) stops suggesting them. Each is a program name, not a path |
+
+The system installers say the platform: `apt` is for Debian and Ubuntu, `brew` for macOS,
+and a program often has a different package name in each (`protobuf-compiler`,
+`protobuf`), so each lists its own. `pip`, `npm`, `cargo` and `go` apply everywhere.
+
+[`hlock env suggest`](cli.md#env-suggest) lists the programs the lock runs that these lists
+don't cover, and `--write` adds their packages.
 
 ## `[[secrets]]`
 

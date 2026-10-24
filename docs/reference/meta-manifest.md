@@ -76,7 +76,7 @@ What the built-in agent may do. Other harnesses use their own permission setting
 
 ## `[jobs.<name>]`
 
-For a built-in job (`install`, `bootstrap-evals`, `update`):
+For a built-in job (`install`, `bootstrap-evals`, `update`, `environment`):
 
 | Key | Description |
 |---|---|

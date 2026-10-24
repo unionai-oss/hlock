@@ -304,6 +304,9 @@ hlock pin [--harness NAME] [-o FILE] [--user | -i GLOB ...] [--no-vendor] [--for
 | `--force` | | Replace a resolved lock (one with evidence) |
 | `--json` | | Print the lock, the diff from the previous pin, vendored files, warnings, and what a project-only pin left out (`skipped`) as JSON |
 
+When the lock runs programs that `harness.toml`'s `[environment]` doesn't declare, `pin`
+names them and suggests [`hlock env suggest`](#env-suggest).
+
 ## `check`
 
 Compare the manifest hash recorded in `harness.lock` with the hash of the current
@@ -400,6 +403,43 @@ hlock export --format apm-lock|cyclonedx|spdx [-o FILE] [--force] [--json]
 | `-o`, `--out` | Where to write it (default `apm.lock.yaml`, `sbom.cdx.json` or `sbom.spdx.json` next to the lock; `-` for stdout) |
 | `--force` | Overwrite an `apm.lock.yaml` that pins a commit `harness.lock` doesn't know |
 | `--json` | Print a summary as JSON |
+
+## `env suggest`
+
+List the programs the lock runs, the packages that would install each, and whether
+`harness.toml`'s [`[environment]`](manifest.md#environment) declares them. `high` ones the
+lock runs as written: an MCP server's command, a hook, a setting's command. `low` ones are
+in a skill's scripts, a script a hook runs, or a shell code block in a skill or
+instructions file, and may be only an example. Package names come from this machine's
+package manager where it has the program (Homebrew's Cellar, an npm or uv tool, `dpkg -S`),
+else from a table of common tools, so check them before you commit.
+
+```bash
+hlock env suggest [--write [--all]] [--json]
+```
+
+```console
+$ hlock env suggest
+program  confidence  status   packages                              run by
+jq       high        missing  apt jq, brew jq                       hook PreToolUse Bash
+npx      high        missing  apt npm, brew node                    mcp github
+rg       high        missing  apt ripgrep, brew ripgrep             hook PreToolUse Bash
+uvx      high        missing  brew uv, pip uv                       mcp fetch
+gh       low         missing  apt gh, brew gh                       skill release: scripts/pr.sh
+protoc   low         missing  apt protobuf-compiler, brew protobuf  skill release: scripts/pr.sh
+next → hlock env suggest --write  ·  hlock meta run environment
+```
+
+| Option | Description |
+|---|---|
+| `--write` | Add each missing `high` program's packages to `[environment]`: to `apt` and `brew` when both have one, else to a language installer that has it everywhere (`pip uv`), keeping the file's comments and layout |
+| `--all` | With `--write`: the `low` ones too |
+| `--json` | Print the programs as JSON (`program`, `confidence`, `sources`, `packages`, `found`, `status`) |
+
+A program the stack doesn't need goes under `[environment] ignore`.
+[`hlock meta run environment`](../guides/meta.md#environment) has an agent decide each
+one. `hlock pin` ends with a line naming the `high` programs `[environment]` neither
+declares nor ignores.
 
 ## `audit`
 

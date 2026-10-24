@@ -45,10 +45,11 @@ pub const META_HARNESSES: &[&str] = &[BUILTIN, "pi", "codex", "goose", "opencode
 pub const DEFAULT_MODELS: &[(&str, &str)] = &[("anthropic", "claude-sonnet-5-5"), ("openai", "gpt-5.5"), ("google", "gemini-3.5-flash")];
 
 /// Built-in jobs: name and description.
-pub const BUILTIN_JOBS: [(&str, &str); 3] = [
+pub const BUILTIN_JOBS: [(&str, &str); 4] = [
     ("install", "Install what the project's lock still needs on this machine"),
     ("bootstrap-evals", "Fill in an eval pack with real tasks from this project"),
     ("update", "Update the lock's skills, MCP servers and plugins"),
+    ("environment", "Declare in harness.toml the packages the lock's programs need"),
 ];
 
 // --------------------------------------------------------------------------- //
@@ -695,6 +696,7 @@ pub fn render(job: &str, input: &JobInput, meta: Option<&MetaManifest>, reg: &Re
         "install" => install_goal(input, reg, ctx)?,
         "bootstrap-evals" => pack_goal(input),
         "update" => update_goal(input, reg, ctx)?,
+        "environment" => environment_goal(input, reg, ctx)?,
         _ => {
             let spec = spec.expect("custom jobs have a spec");
             let body = substitute(spec.prompt.as_deref().unwrap_or_default(), input);
@@ -881,6 +883,57 @@ fn pack_goal(input: &JobInput) -> (String, Option<String>) {
         s.push_str(&format!("\n\nThe project's agent runs in {t}."));
     }
     (s, check)
+}
+
+/// The manifest the `environment` job edits, read again from disk (the agent changed it).
+fn environment_manifest(input: &JobInput) -> Result<(PathBuf, Manifest)> {
+    let path = input.manifest_path.clone().unwrap_or_else(|| input.project.join(crate::MANIFEST_PATH));
+    if !path.is_file() {
+        return Err(Error::Manifest(format!("the environment job declares packages in harness.toml, and {} doesn't exist; write one with `hlock init` or `hlock add`", input.show(&path))));
+    }
+    Ok((path.clone(), Manifest::load(&path)?))
+}
+
+fn environment_goal(input: &JobInput, reg: &Registry, ctx: &Ctx) -> Result<(String, Option<String>)> {
+    let (path, m) = environment_manifest(input)?;
+    let found = crate::envsuggest::for_lock(&input.lock_path, Some(&m), reg, ctx)?;
+    let manifest = input.show(&path);
+    let mut s = format!(
+        "Declare in `{manifest}`'s `[environment]` what the stack in `{}` needs installed, so a fresh machine or image can be set up from it.\n\n",
+        input.show(&input.lock_path)
+    );
+    if found.is_empty() {
+        s.push_str("hlock found no programs the stack runs besides the harness. Look over its skills and instructions for any it calls, and declare those.\n\n");
+    } else {
+        s.push_str("hlock found these programs the stack runs. `high` ones it runs as written (an MCP server, a hook, a setting); `low` ones are in a script or a code block, and may be only an example:\n\n");
+        for c in &found {
+            s.push_str(&format!("- {}\n", crate::envsuggest::describe(c)));
+        }
+        s.push('\n');
+    }
+    s.push_str(&format!(
+        "For each `missing` one:\n\n\
+         1. Decide whether the stack needs it: read the scripts and instructions named.\n\
+         2. If it does, add its package to `[environment]`: to `apt` (Debian and Ubuntu) and `brew` (macOS) for a system program, or to `pip` or `npm` when that's how it installs everywhere. The package names above are suggestions: check them (`apt-cache show NAME`, `brew info NAME`) when you're unsure, and use the right one.\n\
+         3. If it doesn't, add the program's name to `[environment] ignore`.\n\n\
+         Edit only `[environment]` in `{manifest}`: leave the rest of the file, and its comments, as they are. Don't install anything. `hlock env suggest` lists the programs again, with what's declared now."
+    ));
+    Ok((s, Some("hlock meta verify environment".into())))
+}
+
+/// The top-level tables of `harness.toml` besides `[environment]` that differ from its
+/// committed version, or `None` when git has no committed version to compare.
+fn changed_outside_environment(input: &JobInput, path: &Path) -> Option<Vec<String>> {
+    let rel = path.strip_prefix(&input.project).ok()?.to_string_lossy().replace('\\', "/");
+    let mut c = std::process::Command::new("git");
+    c.args(["show", &format!("HEAD:{rel}")]).current_dir(&input.project).stdin(std::process::Stdio::null());
+    let out = crate::process::run(c, &crate::process::Limits::timeout(std::time::Duration::from_secs(10))).ok().filter(|o| o.success)?;
+    let mut before: toml::Table = out.stdout_text().parse().ok()?;
+    let mut now: toml::Table = std::fs::read_to_string(path).ok()?.parse().ok()?;
+    before.remove("environment");
+    now.remove("environment");
+    let keys: std::collections::BTreeSet<&String> = before.keys().chain(now.keys()).collect();
+    Some(keys.into_iter().filter(|k| before.get(*k) != now.get(*k)).map(|k| k.to_string()).collect())
 }
 
 fn update_goal(input: &JobInput, reg: &Registry, ctx: &Ctx) -> Result<(String, Option<String>)> {
@@ -1143,6 +1196,33 @@ pub fn verify(job: &str, input: &JobInput, meta: Option<&MetaManifest>, reg: &Re
             v.diff = diff;
             Ok(v)
         }
+        "environment" => {
+            let (path, m) = match environment_manifest(input) {
+                Ok(x) => x,
+                Err(e) => {
+                    let mut v = Verdict::new(job, "failed", "harness.toml doesn't load");
+                    v.details.push(e.to_string());
+                    return Ok(v);
+                }
+            };
+            let found = crate::envsuggest::for_lock(&input.lock_path, Some(&m), reg, ctx)?;
+            let missing = |conf: &str| found.iter().filter(|c| c.status == "missing" && c.confidence == conf).collect::<Vec<_>>();
+            let (high, low) = (missing("high"), missing("low"));
+            let declared = found.iter().filter(|c| c.status == "declared").count();
+            let ignored = found.iter().filter(|c| c.status == "ignored").count();
+            let mut v = if high.is_empty() {
+                Verdict::new(job, "verified", format!("{declared} program{} declared, {ignored} ignored", if declared == 1 { "" } else { "s" }))
+            } else {
+                let mut v = Verdict::new(job, "failed", format!("{} program{} the stack runs {} neither declared nor ignored", high.len(), if high.len() == 1 { "" } else { "s" }, if high.len() == 1 { "is" } else { "are" }));
+                v.details = high.iter().map(|c| crate::envsuggest::describe(c)).collect();
+                v
+            };
+            v.details.extend(low.iter().map(|c| format!("warning: maybe needed: {}", crate::envsuggest::describe(c))));
+            if let Some(keys) = changed_outside_environment(input, &path).filter(|k| !k.is_empty()) {
+                v.details.push(format!("warning: {} changed outside [environment] since the last commit: {}", input.show(&path), keys.join(", ")));
+            }
+            Ok(v)
+        }
         _ => {
             let spec = spec.expect("custom jobs have a spec");
             let Some(cmd) = &spec.verify else {
@@ -1398,7 +1478,7 @@ mod tests {
         assert_eq!(m.target_harness().as_deref(), Some("pi"));
         assert!(m.headless());
         let names: Vec<String> = jobs(Some(&m)).into_iter().map(|j| j.name).collect();
-        assert_eq!(names, ["install", "bootstrap-evals", "update", "notes"]);
+        assert_eq!(names, ["install", "bootstrap-evals", "update", "environment", "notes"]);
         assert!(MetaManifest::from_str("[jobs.install]\nprompt = \"x\"\n").is_err());
         assert!(MetaManifest::from_str("[jobs.notes]\nverify = \"true\"\n").is_err());
         assert!(MetaManifest::from_str("[run]\nmode = \"yolo\"\n").is_err());
@@ -1467,6 +1547,39 @@ mod tests {
         assert_eq!(v.status, "verified", "{v:?}");
         assert!(!project.join("pwned").exists() && !dir.join("pwned").exists());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn environment_job_lists_programs_and_checks_each_is_declared_or_ignored() {
+        let project = std::env::temp_dir().join(format!("hlock-meta-env-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&project);
+        std::fs::create_dir_all(&project).unwrap();
+        let mut lock = Lockfile { kind: Some("pin".into()), ..Default::default() };
+        lock.harness.name = "claude-code".into();
+        lock.tool.push(crate::lockfile::Tool { name: "fetch".into(), kind: "mcp".into(), command: Some("uvx".into()), args: vec!["mcp-server-fetch".into()], ..Default::default() });
+        lock.save(&project.join("harness.lock")).unwrap();
+        let manifest = project.join("harness.toml");
+        std::fs::write(&manifest, "[project]\nname = \"x\"\n").unwrap();
+        let input = JobInput { project: project.clone(), lock_path: project.join("harness.lock"), manifest_path: Some(manifest.clone()), ..Default::default() };
+        let (ctx, reg) = (Ctx::at(&project), Registry::builtin());
+
+        let prompt = render("environment", &input, None, &reg, &ctx, "").unwrap();
+        assert!(prompt.contains("- uvx (high, missing): mcp fetch. Packages: brew uv, pip uv.") && prompt.contains("hlock meta verify environment"), "{prompt}");
+        let v = verify("environment", &input, None, &reg, &ctx).unwrap();
+        assert_eq!(v.status, "failed", "{v:?}");
+        assert!(v.details[0].starts_with("uvx (high, missing)"), "{v:?}");
+
+        // declared, or ignored: verified
+        std::fs::write(&manifest, "[project]\nname = \"x\"\n\n[environment]\npip = [\"uv==0.5.0\"]\n").unwrap();
+        let v = verify("environment", &input, None, &reg, &ctx).unwrap();
+        assert_eq!((v.status.as_str(), v.summary.as_str()), ("verified", "1 program declared, 0 ignored"));
+        std::fs::write(&manifest, "[project]\nname = \"x\"\n\n[environment]\nignore = [\"uvx\"]\n").unwrap();
+        assert_eq!(verify("environment", &input, None, &reg, &ctx).unwrap().summary, "0 programs declared, 1 ignored");
+        // a manifest that doesn't load fails the check, saying why
+        std::fs::write(&manifest, "[environment]\nignore = [\"../x\"]\n").unwrap();
+        let v = verify("environment", &input, None, &reg, &ctx).unwrap();
+        assert!(v.status == "failed" && v.details[0].contains("ignore entry"), "{v:?}");
+        let _ = std::fs::remove_dir_all(&project);
     }
 
     #[cfg(unix)]

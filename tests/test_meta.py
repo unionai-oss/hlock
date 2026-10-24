@@ -320,7 +320,7 @@ def test_custom_job_and_jobs_list(project, monkeypatch):
     mm.write_text(mm.read_text() + '\n[jobs.notes]\ndescription = "Write notes"\nprompt = "Write NOTES.md about {lock}"\n'
                   'verify = "test -s NOTES.md"\n')
     r = invoke("meta", "jobs", "--json")
-    assert [j["name"] for j in json.loads(r.output)] == ["install", "bootstrap-evals", "update", "notes"]
+    assert [j["name"] for j in json.loads(r.output)] == ["install", "bootstrap-evals", "update", "environment", "notes"]
     monkeypatch.setenv("FAKE_AGENT", "echo hi > NOTES.md")
     r = invoke("meta", "run", "notes", "--headless", "be", "brief")
     assert r.exit_code == 0, r.output

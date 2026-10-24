@@ -414,6 +414,7 @@ command-line words:
 | `[[decider]] use` | `approve`, `stop`, `route`, or `tool` |
 | `[[secret]] name` | `HLOCK_SECRET_` and letters, digits and `_` |
 | `[environment]` package lists | One word each, not starting with `-` |
+| `[environment] ignore` | Program names: no `/`, spaces, or leading `-` |
 | `[[environment.binaries]]` | An `http(s)` `url`, a `sha256` of 64 lowercase hex digits, and an absolute `path` with no `..` |
 | `[[workspace.repos]]` | An `https`, `http`, `ssh` or `git@` `url`; a `ref` of letters, digits and `._:/@+-`, not starting with `-`; a relative `path` with no `..` |
 | `[[workspace.files]]` | Relative `path` and `target` with no `..`, each place seeded once, and a `sha256:` `digest` |
