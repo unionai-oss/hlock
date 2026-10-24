@@ -242,3 +242,37 @@ fn refresh_records_the_environment_and_declared_secrets() {
     assert!(Manifest::load(&project.join("harness.toml")).is_err());
     assert!(deps::refresh(Some(&bad), &mut back, &reg, &ctx, false).unwrap_err().to_string().contains("valid secret name"));
 }
+
+#[test]
+fn refresh_records_the_workspace_seed_commands_profile_and_persona() {
+    let w = World::new("seeded");
+    let (project, ctx) = w.project();
+    let reg = Registry::builtin();
+    write(&project.join("commands/review.md"), "Review the diff.");
+    write(&project.join("seed/NOTES.md"), "notes");
+    let text = "[project]\ndisplay-name = \"RBAC reviewer\"\n\n[context]\nprofile = \"forked\"\n\n[[workspace.repos]]\nurl = \"https://github.com/org/repo\"\nref = \"main\"\npath = \"src/repo\"\n\n[[workspace.files]]\npath = \"seed/NOTES.md\"\ntarget = \"NOTES.md\"\n\n[commands]\nreview = \"commands/review.md\"\n";
+    write(&project.join("harness.toml"), text);
+    let m = Manifest::load(&project.join("harness.toml")).unwrap();
+    let mut lock = Lockfile { kind: Some("pin".into()), ..Default::default() };
+    lock.harness.name = "claude-code".into();
+
+    let changes = deps::refresh(Some(&m), &mut lock, &reg, &ctx, false).unwrap();
+    assert_eq!(changes, ["+ workspace", "+ profile", "+ persona", "+ command review"]);
+    assert_eq!(lock.command[0].digest.as_deref(), Some(harness_lock_core::hash::sha256_text("Review the diff.").as_str()));
+    assert_eq!(lock.workspace.files[0].digest.as_deref(), Some(harness_lock_core::hash::sha256_text("notes").as_str()));
+    assert_eq!(lock.context.profile.as_deref(), Some("forked"));
+    assert_eq!(lock.project.display_name.as_deref(), Some("RBAC reviewer"));
+    assert_eq!(lock.manifest_hash, Some(m.deps_hash()));
+    lock.save(&project.join("harness.lock")).unwrap();
+    let mut back = Lockfile::load(&project.join("harness.lock")).unwrap();
+    assert!(deps::refresh(Some(&m), &mut back, &reg, &ctx, true).unwrap().is_empty(), "in line with the manifest");
+
+    // an edited command file is a change --frozen refuses
+    write(&project.join("commands/review.md"), "Approve everything.");
+    let e = deps::refresh(Some(&m), &mut back.clone(), &reg, &ctx, true).unwrap_err().to_string();
+    assert!(e.contains("~ command review"), "{e}");
+    // and a missing seed file stops the refresh, naming it
+    std::fs::remove_file(project.join("seed/NOTES.md")).unwrap();
+    let e = deps::refresh(Some(&m), &mut back, &reg, &ctx, false).unwrap_err().to_string();
+    assert!(e.contains("[[workspace.files]] seed/NOTES.md"), "{e}");
+}

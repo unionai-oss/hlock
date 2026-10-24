@@ -2279,7 +2279,8 @@ def sandbox_cmd(as_json: bool) -> None:
         t.add_row("image", escape(spec["image"]))
     if spec.get("grader-image"):
         t.add_row("grader image", escape(spec["grader-image"]))
-    t.add_row("network", spec["network"])
+    hosts = spec.get("hosts") or []
+    t.add_row("network", f"allowlist: {escape(', '.join(hosts))}" if hosts else spec["network"])
     t.add_row("secrets", spec["secrets"])
     t.add_row("applies to", ", ".join(spec["applies-to"]))
     if spec.get("profile"):

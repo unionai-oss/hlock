@@ -479,7 +479,8 @@ impl Resolver {
     /// target, the stacks (less those the policy denies), and the search tasks.
     fn prepare_search(&mut self) -> Result<Search> {
         self.manifest.check_search()?;
-        self.manifest.check_declared()?;
+        // a missing workspace file or command stops the resolve before any trial
+        self.manifest.declarations()?;
         self.prepare_trials()?;
         // problems in the objective or the deciders stop the resolve before any trial runs
         crate::search::parse_constraints(&self.manifest.objective.constraints)?;
@@ -794,7 +795,7 @@ impl Resolver {
             },
             ..Default::default()
         };
-        lf.declare(&self.manifest.environment, &self.manifest.secrets);
+        lf.declare(&self.manifest.declarations()?);
         Ok(lf)
     }
 

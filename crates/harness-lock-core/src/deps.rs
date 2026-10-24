@@ -2679,12 +2679,13 @@ fn undeclared(lock: &Lockfile, env: &Env) -> Vec<Issue> {
 /// network when nothing changed). Returns what changed, as diff lines. With `frozen`, a
 /// lock that would change is an error instead.
 pub fn refresh(manifest: Option<&crate::manifest::Manifest>, lock: &mut Lockfile, reg: &crate::profiles::Registry, ctx: &Ctx, frozen: bool) -> Result<Vec<String>> {
-    // `[environment]` and `[[secrets]]` are recorded as declared: nothing to resolve
+    // `[environment]`, `[[secrets]]`, `[workspace]`, `[commands]` and the rest are
+    // recorded as declared: nothing to resolve
     let mut changes = match manifest {
         Some(m) => {
-            m.check_declared()?;
+            let declared = m.declarations()?;
             let mut next = lock.clone();
-            let changes = next.declare(&m.environment, &m.secrets);
+            let changes = next.declare(&declared);
             if !frozen {
                 *lock = next;
             }
@@ -3127,15 +3128,11 @@ pub(crate) fn carry_from(prev: &Lockfile, cap: &mut crate::capture::Capture) {
     if !lock.package.is_empty() {
         lock.provenance.openapm = prev.provenance.openapm.clone();
     }
-    // the declared environment and secrets, merged with the placeholders this pin found
-    let secrets: Vec<crate::manifest::DeclaredSecret> = prev
-        .secret
-        .iter()
-        .filter(|s| s.declared)
-        .map(|s| crate::manifest::DeclaredSecret { name: s.name.clone(), used_by: s.used_by.clone(), optional: s.optional, description: s.description.clone() })
-        .collect();
-    lock.declare(&prev.environment, &secrets);
-    if prev.skill.iter().any(|s| s.dep.declared) || prev.tool.iter().any(|t| t.dep.declared) || prev.instructions.iter().any(|i| i.dep.declared) || prev.native.iter().any(|n| n.dep.declared) || !prev.package.is_empty() || !secrets.is_empty() || !prev.environment.is_empty() {
+    // what the previous lock recorded as declared (the environment, secrets merged with
+    // the placeholders this pin found, the workspace seed, commands, profile and persona)
+    let declared = crate::manifest::Declarations::from_lock(prev);
+    lock.declare(&declared);
+    if prev.skill.iter().any(|s| s.dep.declared) || prev.tool.iter().any(|t| t.dep.declared) || prev.instructions.iter().any(|i| i.dep.declared) || prev.native.iter().any(|n| n.dep.declared) || !prev.package.is_empty() || !declared.is_empty() {
         lock.manifest_hash = prev.manifest_hash.clone();
     }
     for v in unvendor {

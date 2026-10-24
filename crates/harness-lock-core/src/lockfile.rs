@@ -529,6 +529,9 @@ pub struct Policy {
 pub struct Context {
     pub isolation: String,
     pub compaction: BTreeMap<String, serde_json::Value>,
+    /// `harness.toml`'s `[context] profile`: `shared`, `forked` or `none`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub profile: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -656,6 +659,15 @@ pub struct Lockfile {
     /// What `harness.toml`'s `[environment]` declares the agent needs installed.
     #[serde(default, skip_serializing_if = "crate::manifest::Environment::is_empty")]
     pub environment: crate::manifest::Environment,
+    /// What `harness.toml`'s `[workspace]` seeds the workspace with, files digested.
+    #[serde(default, skip_serializing_if = "crate::manifest::Workspace::is_empty")]
+    pub workspace: crate::manifest::Workspace,
+    /// The slash commands `harness.toml`'s `[commands]` declares, digested.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub command: Vec<crate::manifest::Command>,
+    /// `harness.toml`'s `[project]` `display-name` and `avatar`, the avatar digested.
+    #[serde(default, skip_serializing_if = "crate::manifest::Persona::is_empty")]
+    pub project: crate::manifest::Persona,
     /// Tune-lock-only fields (see §5.9 / `harness.tune.lock`).
     #[serde(default, skip_serializing_if = "Option::is_none", rename = "base-lock")]
     pub base_lock: Option<String>,
@@ -703,6 +715,9 @@ impl Default for Lockfile {
             secret: Vec::new(),
             package: Vec::new(),
             environment: crate::manifest::Environment::default(),
+            workspace: crate::manifest::Workspace::default(),
+            command: Vec::new(),
+            project: crate::manifest::Persona::default(),
             base_lock: None,
             kind: None,
             tune: None,
@@ -833,6 +848,18 @@ impl Lockfile {
             }
         }
         self.environment.check().map_err(Error::Lockfile)?;
+        self.workspace.check().map_err(Error::Lockfile)?;
+        let mut commands = std::collections::BTreeSet::new();
+        for c in &self.command {
+            crate::manifest::check_command(&c.name, &c.path).map_err(|e| Error::Lockfile(e.replace("[commands]", "[[command]]")))?;
+            if !commands.insert(&c.name) {
+                return Err(Error::Lockfile(format!("[[command]] {} is recorded twice", c.name)));
+            }
+        }
+        if let Some(p) = self.context.profile.as_deref().filter(|p| !crate::manifest::PROFILE_MODES.contains(p)) {
+            return Err(Error::Lockfile(format!("[context] profile {p:?} isn't one of {}", crate::manifest::PROFILE_MODES.join(", "))));
+        }
+        crate::manifest::check_persona(&self.project).map_err(Error::Lockfile)?;
         for d in &self.decider {
             if !crate::decide::AGENT_USES.contains(&d.use_.as_str()) {
                 return Err(Error::Lockfile(format!("[[decider]] use {:?} isn't one of {}", d.use_, crate::decide::AGENT_USES.join(", "))));
@@ -851,26 +878,44 @@ impl Lockfile {
         Ok(())
     }
 
-    /// Bring `[environment]` and the declared `[[secret]]` entries in line with a
-    /// manifest's `[environment]` and `[[secrets]]`; returns what changed (`+ secret X`,
-    /// `- secret X`, `~ environment`), empty when nothing did.
+    /// Bring what the lock records as declared in line with `d` (a manifest's
+    /// [`crate::manifest::Manifest::declarations`]): `[environment]`, the declared
+    /// `[[secret]]` entries, `[workspace]`, `[[command]]`, `[context] profile` and
+    /// `[project]`. Returns what changed (`+ secret X`, `~ command review`, `- workspace`),
+    /// empty when nothing did.
     ///
     /// A declared secret's entry takes `used-by`, `optional` and `description` from the
     /// declaration, and keeps the `used-by` it has (what `pin` found under the same name)
     /// when the declaration gives none. An entry no longer declared is dropped, except in a
     /// pinned lock, where `pin` may have placed the placeholder: there it stays,
     /// undeclared, until the next pin.
-    pub fn declare(&mut self, environment: &crate::manifest::Environment, secrets: &[crate::manifest::DeclaredSecret]) -> Vec<String> {
+    pub fn declare(&mut self, d: &crate::manifest::Declarations) -> Vec<String> {
         let mut changes = Vec::new();
-        if &self.environment != environment {
-            changes.push(match (self.environment.is_empty(), environment.is_empty()) {
-                (true, _) => "+ environment".to_string(),
-                (_, true) => "- environment".to_string(),
-                _ => "~ environment".to_string(),
-            });
-            self.environment = environment.clone();
+        fn section<T: PartialEq + Clone + Default>(changes: &mut Vec<String>, name: &str, have: &mut T, want: &T) {
+            if have != want {
+                let none = T::default();
+                changes.push(format!("{} {name}", if *have == none { "+" } else if *want == none { "-" } else { "~" }));
+                *have = want.clone();
+            }
         }
-        let wanted: BTreeMap<String, &crate::manifest::DeclaredSecret> = secrets.iter().map(|d| (d.full_name(), d)).collect();
+        section(&mut changes, "environment", &mut self.environment, &d.environment);
+        section(&mut changes, "workspace", &mut self.workspace, &d.workspace);
+        section(&mut changes, "profile", &mut self.context.profile, &d.profile);
+        section(&mut changes, "persona", &mut self.project, &d.persona);
+        let want: BTreeMap<&str, &crate::manifest::Command> = d.commands.iter().map(|c| (c.name.as_str(), c)).collect();
+        let have: BTreeMap<&str, &crate::manifest::Command> = self.command.iter().map(|c| (c.name.as_str(), c)).collect();
+        for name in have.keys().chain(want.keys()).collect::<std::collections::BTreeSet<_>>() {
+            match (have.get(name), want.get(name)) {
+                (Some(a), Some(b)) if a != b => changes.push(format!("~ command {name}")),
+                (Some(_), None) => changes.push(format!("- command {name}")),
+                (None, Some(_)) => changes.push(format!("+ command {name}")),
+                _ => {}
+            }
+        }
+        let mut commands = d.commands.clone();
+        commands.sort_by(|a, b| a.name.cmp(&b.name));
+        self.command = commands;
+        let wanted: BTreeMap<String, &crate::manifest::DeclaredSecret> = d.secrets.iter().map(|d| (d.full_name(), d)).collect();
         let pin = self.is_pin();
         self.secret.retain_mut(|s| {
             if !s.declared || wanted.contains_key(&s.name) {
@@ -1039,6 +1084,10 @@ mod tests {
         crate::manifest::DeclaredSecret { name: name.into(), used_by: used_by.iter().map(|s| s.to_string()).collect(), optional, description: description.map(str::to_string) }
     }
 
+    fn decl(environment: &crate::manifest::Environment, secrets: &[crate::manifest::DeclaredSecret]) -> crate::manifest::Declarations {
+        crate::manifest::Declarations { environment: environment.clone(), secrets: secrets.to_vec(), ..Default::default() }
+    }
+
     #[test]
     fn secret_used_by_reads_a_string_or_a_list_and_writes_one_as_a_string() {
         // what pin has always written
@@ -1069,7 +1118,7 @@ mod tests {
         )
         .unwrap();
         let secrets = [declared("GH", &[], false, Some("Opens PRs.")), declared("LINEAR", &["mcp:linear"], true, None)];
-        let changes = l.declare(&m.environment, &secrets);
+        let changes = l.declare(&decl(&m.environment, &secrets));
         assert_eq!(changes, ["+ environment", "+ secret HLOCK_SECRET_GH", "+ secret HLOCK_SECRET_LINEAR"]);
         let gh = l.secret.iter().find(|s| s.name == "HLOCK_SECRET_GH").unwrap();
         assert_eq!(gh.used_by, ["mcp github GITHUB_TOKEN"], "no used-by declared: pin's stays");
@@ -1077,7 +1126,7 @@ mod tests {
         let lin = l.secret.iter().find(|s| s.name == "HLOCK_SECRET_LINEAR").unwrap();
         assert!(lin.declared && lin.optional && lin.used_by == ["mcp:linear"]);
         assert!(!l.secret.iter().find(|s| s.name == "HLOCK_SECRET_OTHER").unwrap().declared, "pin's own entries are left alone");
-        assert!(l.declare(&m.environment, &secrets).is_empty(), "applying it again changes nothing");
+        assert!(l.declare(&decl(&m.environment, &secrets)).is_empty(), "applying it again changes nothing");
 
         // the environment round-trips through the lock file
         let back = Lockfile::from_str(&toml::to_string(&l).unwrap()).unwrap();
@@ -1087,7 +1136,7 @@ mod tests {
         assert!(text.contains("[environment]\napt = [\"ripgrep\"]") && text.contains("[[environment.binaries]]"), "{text}");
 
         // a declaration that changes, and one that goes: in a pin, its entry stays undeclared
-        let changes = l.declare(&Default::default(), &[declared("GH", &["mcp:github"], false, None)]);
+        let changes = l.declare(&decl(&Default::default(), &[declared("GH", &["mcp:github"], false, None)]));
         assert_eq!(changes, ["- environment", "- secret HLOCK_SECRET_LINEAR", "~ secret HLOCK_SECRET_GH"]);
         assert!(l.environment.is_empty());
         let lin = l.secret.iter().find(|s| s.name == "HLOCK_SECRET_LINEAR").unwrap();
@@ -1096,9 +1145,45 @@ mod tests {
 
         // in a resolved lock, an entry no longer declared is dropped
         let mut r = Lockfile::default();
-        r.declare(&Default::default(), &[declared("GH", &[], false, None)]);
-        assert_eq!(r.declare(&Default::default(), &[]), ["- secret HLOCK_SECRET_GH"]);
+        r.declare(&decl(&Default::default(), &[declared("GH", &[], false, None)]));
+        assert_eq!(r.declare(&Default::default()), ["- secret HLOCK_SECRET_GH"]);
         assert!(r.secret.is_empty());
+    }
+
+    #[test]
+    fn declare_records_the_workspace_commands_profile_and_persona() {
+        use crate::manifest::{Command, Declarations, Persona, SeedFile, SeedRepo, Workspace};
+        let dg = |c: char| format!("sha256:{}", c.to_string().repeat(64));
+        let mut d = Declarations {
+            workspace: Workspace {
+                repos: vec![SeedRepo { url: "https://github.com/org/repo".into(), reference: Some("main".into()), path: "src/repo".into() }],
+                files: vec![SeedFile { path: "seed/NOTES.md".into(), target: "NOTES.md".into(), digest: Some(dg('a')) }],
+            },
+            commands: vec![Command { name: "review".into(), path: "commands/review.md".into(), digest: Some(dg('b')) }, Command { name: "fix".into(), path: "commands/fix.md".into(), digest: Some(dg('c')) }],
+            profile: Some("forked".into()),
+            persona: Persona { display_name: Some("RBAC reviewer".into()), avatar: Some("avatar.png".into()), avatar_digest: Some(dg('d')) },
+            ..Default::default()
+        };
+        let mut l = Lockfile::default();
+        assert_eq!(l.declare(&d), ["+ workspace", "+ profile", "+ persona", "+ command fix", "+ command review"]);
+        assert_eq!(l.command.iter().map(|c| c.name.as_str()).collect::<Vec<_>>(), ["fix", "review"], "sorted by name");
+        assert!(l.declare(&d).is_empty(), "applying it again changes nothing");
+
+        // round-trips through the lock file
+        let text = toml::to_string(&l).unwrap();
+        for want in ["[[workspace.repos]]", "ref = \"main\"", "[[workspace.files]]", "target = \"NOTES.md\"", "[[command]]", "name = \"review\"", "profile = \"forked\"", "[project]", "display-name = \"RBAC reviewer\"", "avatar-digest = "] {
+            assert!(text.contains(want), "{want:?} not in {text}");
+        }
+        let back = Lockfile::from_str(&text).unwrap();
+        assert_eq!(crate::manifest::Declarations::from_lock(&back), crate::manifest::Declarations::from_lock(&l));
+
+        // a command's file that changed, one that went, and the rest removed
+        d.commands = vec![Command { digest: Some(dg('e')), ..d.commands[0].clone() }];
+        d.profile = Some("none".into());
+        assert_eq!(l.declare(&d), ["~ profile", "- command fix", "~ command review"]);
+        assert_eq!(l.declare(&Declarations::default()), ["- workspace", "- profile", "- persona", "- command review"]);
+        let text = toml::to_string(&l).unwrap();
+        assert!(!text.contains("workspace") && !text.contains("[project]") && !text.contains("profile") && !text.contains("[[command]]"), "{text}");
     }
 
     #[test]
@@ -1119,6 +1204,16 @@ mod tests {
             ("[[secret]]\nname = \"GITHUB_TOKEN\"\n", "[[secret]] name"),
             ("[[environment.binaries]]\nurl = \"https://x/t\"\nsha256 = \"abc\"\npath = \"/t\"\n", "sha256"),
             ("[environment]\napt = [\"--allow-unauthenticated\"]\n", "[environment] apt entry"),
+            ("[[workspace.repos]]\nurl = \"--upload-pack=x\"\npath = \"r\"\n", "[[workspace.repos]] --upload-pack=x url"),
+            ("[[workspace.repos]]\nurl = \"https://x/r\"\nref = \"-x\"\npath = \"r\"\n", "ref"),
+            ("[[workspace.repos]]\nurl = \"https://x/r\"\npath = \"../r\"\n", "path"),
+            ("[[workspace.files]]\npath = \"a\"\ntarget = \"/etc/passwd\"\n", "target"),
+            ("[[workspace.files]]\npath = \"a\"\ntarget = \"a\"\ndigest = \"md5:x\"\n", "digest"),
+            ("[[command]]\nname = \"../x\"\npath = \"c.md\"\n", "[[command]] name"),
+            ("[[command]]\nname = \"x\"\npath = \"/etc/passwd\"\n", "[[command]] x path"),
+            ("[[command]]\nname = \"x\"\npath = \"a.md\"\n[[command]]\nname = \"x\"\npath = \"b.md\"\n", "recorded twice"),
+            ("[context]\nprofile = \"everything\"\n", "[context] profile"),
+            ("[project]\navatar = \"../me.png\"\n", "[project] avatar"),
         ] {
             let e = Lockfile::from_str(&format!("{HEAD}{body}")).unwrap_err().to_string();
             assert!(e.contains(field), "{body}: {e}");
