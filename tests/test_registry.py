@@ -50,6 +50,9 @@ class Registry:
     def __init__(self):
         self.packages: dict[str, dict] = {}
         self.archives: dict[tuple[str, str], bytes] = {}
+        self.evals: dict[tuple[str, str], bytes] = {}
+        # whether it takes eval packs (specs/registry.md §5.2): a registry from before them doesn't
+        self.takes_evals = True
         self.polls = 0
         self.tamper = False
         self.searches: list[dict] = []
@@ -136,12 +139,18 @@ def handler_for(reg: Registry):
                     return self.send(200, pkg)
                 if len(parts) == 4 and parts[3] == "versions":
                     return self.send(200, {"package": pkg["package"], "versions": pkg["versions"]})
-                versions = [v for v in pkg["versions"] if not v["yanked"]]
+                # a version whose eval packs are declared but not uploaded isn't `latest` yet
+                versions = [v for v in pkg["versions"] if not v["yanked"] and (v.get("evals") or {}).get("uploaded", True)]
                 v = versions[0] if parts[4] == "latest" else next((x for x in pkg["versions"] if x["version"] == parts[4]), None)
                 if v is None:
                     return self.problem(404, "Not Found", "no such version")
                 if len(parts) == 5:
                     return self.send(200, {**v, "pull": pkg.get("pull")})
+                if parts[5] == "evals":
+                    if not reg.takes_evals or (pkg["package"], v["version"]) not in reg.evals:
+                        return self.problem(404, "Not Found")
+                    return self.send(200, reg.evals[(pkg["package"], v["version"])], "application/gzip",
+                                     {"x-hlock-digest": v["evals"]["digest"]})
                 data = reg.archives[(pkg["package"], v["version"])]
                 if reg.tamper:
                     data = data[:-1] + bytes([data[-1] ^ 1])
@@ -157,6 +166,19 @@ def handler_for(reg: Registry):
             if parts[1] != "alice":
                 return self.problem(403, "Forbidden", "no publish scope on " + parts[1])
             package, version = f"{parts[1]}/{parts[2]}", parts[4]
+            if len(parts) == 6 and parts[5] == "evals":
+                if not reg.takes_evals:
+                    return self.problem(404, "Not Found")
+                v = next((x for x in reg.packages.get(package, {}).get("versions", []) if x["version"] == version), None)
+                if v is None:
+                    return self.problem(404, "Not Found", "no such version")
+                digest = "sha256:" + hashlib.sha256(data).hexdigest()
+                declared = v.get("evals")
+                if not declared or declared["uploaded"] or declared["digest"] != digest:
+                    return self.problem(409, "Conflict", "the version declared no evals archive, another, or has one")
+                reg.evals[(package, version)] = data
+                declared["uploaded"] = True
+                return self.send(201, {"digest": digest, "size_bytes": len(data)})
             if (package, version) in reg.archives:
                 return self.problem(409, "Conflict", "version exists")
             meta = {}
@@ -177,8 +199,15 @@ def handler_for(reg: Registry):
                     return self.problem(422, "Unprocessable", errors=["not a tar.gz"])
             reg.content_types[(package, version)] = self.headers.get("content-type")
             digest = reg.add(package, version, data, **meta)
-            self.send(201, {"package": package, "version": version, "digest": digest, "published_at": "2026-10-22T00:00:00Z",
-                            "size_bytes": len(data), "files": names, "url": f"http://registry/{package}"})
+            created = {"package": package, "version": version, "digest": digest, "published_at": "2026-10-22T00:00:00Z",
+                       "size_bytes": len(data), "files": names, "url": f"http://registry/{package}"}
+            if reg.takes_evals:
+                # the setup commits to its evals archive: `evals` is null when it has none
+                declared = self.headers.get("x-hlock-evals-digest")
+                evals = {"digest": declared, "uploaded": False} if declared else None
+                reg.packages[package]["versions"][0]["evals"] = evals
+                created["evals"] = evals
+            self.send(201, created)
 
     return Handler
 
@@ -588,3 +617,267 @@ def test_apm_pull_checks_what_it_downloads(world):
     world["reg"].tamper = True
     r = invoke("apm", "pull", "alice/review-skills")
     assert r.exit_code == 1 and "doesn't match its digest" in r.output
+
+
+# --------------------------------------------------------------------------- #
+# a package is a project: its name, its locks, its eval packs
+# --------------------------------------------------------------------------- #
+
+
+def dry_run(world, *args) -> dict:
+    r = invoke("push", "-C", str(world["author"]), "--dry-run", "--json", *args)
+    assert r.exit_code == 0, r.output
+    return json.loads(r.output)
+
+
+def test_the_name_comes_from_the_git_remote_at_the_repository_root(world):
+    login(world)
+    author = world["author"]
+    assert dry_run(world)["package"] == "alice/my-setup"  # not a repository: [project] name
+    git(author, "init", "-q")
+    assert dry_run(world)["name_from"] == "project"  # no remote yet
+    git(author, "remote", "add", "upstream", "https://github.com/cosmicbboy/hlock.git")
+    out = dry_run(world)
+    assert (out["package"], out["name_from"]) == ("alice/hlock", "git-remote")  # the only remote
+    git(author, "remote", "add", "origin", "git@github.com:alice/agent-setup.git")
+    assert dry_run(world)["package"] == "alice/agent-setup"  # origin wins
+    r = invoke("push", "-C", str(author), "--dry-run")
+    assert "(name from the git remote)" in r.output and "github.com" not in r.output
+    # a project in a subdirectory of a repository (a monorepo) isn't named after it
+    sub = author / "team"
+    sub.mkdir()
+    (sub / "harness.toml").write_text('[project]\nname = "Team Bot"\n')
+    r = invoke("push", "-C", str(sub), "--dry-run", "--json")
+    assert json.loads(r.output)["package"] == "alice/team-bot"
+    # NAMESPACE/NAME overrides it
+    assert dry_run(world, "alice/other")["package"] == "alice/other"
+
+
+def test_renaming_to_the_repository_name_is_refused_when_you_published_the_old_name(world):
+    login(world)
+    author = world["author"]
+    assert invoke("push", "-C", str(author)).exit_code == 0  # alice/my-setup, from [project] name
+    git(author, "init", "-q")
+    git(author, "remote", "add", "origin", "https://github.com/alice/hlock.git")
+    r = invoke("push", "-C", str(author))
+    assert r.exit_code == 1, r.output
+    assert "you published alice/my-setup before" in r.output and "pass alice/hlock" in r.output
+    assert "alice/hlock" not in world["reg"].packages
+    assert invoke("push", "-C", str(author), "alice/hlock").exit_code == 0
+    # once the repository's name is published too, the default is fine
+    (author / "README.md").write_text("# new\n")
+    assert invoke("push", "-C", str(author), "--version", "2").exit_code == 0
+    assert "2" in [v["version"] for v in world["reg"].packages["alice/hlock"]["versions"]]
+
+
+def with_evals(author: Path) -> Path:
+    """An eval pack in the author's project, with an executable grader script."""
+    pack = author / "evals"
+    (pack / "fix_bug/workspace").mkdir(parents=True)
+    (pack / "pack.toml").write_text('[pack]\nname = "alice/demo"\nversion = "0.1.0"\n')
+    (pack / "fix_bug/prompt.md").write_text("Fix the bug.\n")
+    (pack / "fix_bug/workspace/app.py").write_text("print('hi')\n")
+    (pack / "fix_bug/check.sh").write_text("#!/bin/sh\nexit 0\n")
+    (pack / "fix_bug/check.sh").chmod(0o755)
+    m = author / "harness.toml"
+    m.write_text(m.read_text() + '\n[evals]\npacks = ["./evals"]\n')
+    return pack
+
+
+def test_eval_packs_are_pushed_beside_the_setup_and_pulled_into_a_project(world):
+    login(world)
+    pack = with_evals(world["author"])
+    out = dry_run(world)
+    assert out["evals"]["packs"] == ["evals"]
+    assert {f["path"] for f in out["evals"]["files"]} == {"evals/pack.toml", "evals/fix_bug/prompt.md",
+                                                          "evals/fix_bug/workspace/app.py", "evals/fix_bug/check.sh"}
+    # the setup archive itself is unchanged: older clients can still pull it
+    assert not any(f["path"].startswith("evals/") for f in out["files"])
+    r = invoke("push", "-C", str(world["author"]))
+    assert r.exit_code == 0, r.output
+    assert "with eval packs: evals/" in r.output
+    reg = world["reg"]
+    (package, version), = reg.evals.keys()
+    v = next(x for x in reg.packages[package]["versions"] if x["version"] == version)
+    assert v["evals"]["uploaded"]
+    assert v["evals"]["digest"] == "sha256:" + hashlib.sha256(reg.evals[(package, version)]).hexdigest()
+    with tarfile.open(fileobj=io.BytesIO(reg.archives[(package, version)])) as t:
+        assert not any(n.startswith("evals/") for n in t.getnames())
+
+    r = invoke("pull", package, "--into", "new")
+    assert r.exit_code == 0, r.output
+    new = world["me"] / "new"
+    assert (new / "evals/fix_bug/prompt.md").read_text() == "Fix the bug.\n"
+    assert (new / "evals/fix_bug/check.sh").stat().st_mode & 0o777 == 0o755
+    assert (new / "evals/pack.toml").stat().st_mode & 0o777 == 0o644
+    assert "evals/ eval pack, 4 files" in r.output
+    assert "eval packs run commands when graded" in r.output
+    assert pulled_table(new / "harness.lock")["evals-digest"] == v["evals"]["digest"]
+    for f in ("pack.toml", "fix_bug/check.sh", "fix_bug/workspace/app.py"):
+        assert (new / "evals" / f).read_bytes() == (pack / f).read_bytes()
+    # --no-evals leaves them out; into the store they never come
+    r = invoke("pull", package, "--into", "bare", "--no-evals")
+    assert r.exit_code == 0 and not (world["me"] / "bare/evals").exists()
+    assert invoke("pull", package).exit_code == 0
+    assert not (world["home"] / "pulls/my-setup/evals").exists()
+    r = invoke("pull", package, "--no-evals")
+    assert r.exit_code == 1 and "only applies with --into" in r.output
+
+
+def test_a_version_is_fixed_once_published(world):
+    login(world)
+    author = world["author"]
+    pack = with_evals(author)
+    assert invoke("push", "-C", str(author), "--version", "1.0.0", "--no-evals").exit_code == 0
+    r = invoke("push", "-C", str(author), "--version", "1.0.0")
+    assert r.exit_code == 1 and "published with no eval packs" in r.output, r.output
+    assert invoke("push", "-C", str(author), "--version", "2.0.0").exit_code == 0
+    (pack / "fix_bug/prompt.md").write_text("Fix the other bug.\n")
+    r = invoke("push", "-C", str(author), "--version", "2.0.0")
+    assert r.exit_code == 1 and "published with other eval packs" in r.output, r.output
+    # the default version covers the eval packs: changing only a pack gives a new one
+    (author / "apm.yml").unlink()  # its version would be the default
+    a = dry_run(world)["version"]
+    assert a.startswith("sha-")
+    (pack / "fix_bug/prompt.md").write_text("Fix a third bug.\n")
+    assert dry_run(world)["version"] != a
+
+
+def test_an_old_registry_takes_the_setup_without_its_eval_packs(world):
+    world["reg"].takes_evals = False
+    login(world)
+    with_evals(world["author"])
+    r = invoke("push", "-C", str(world["author"]))
+    assert r.exit_code == 0, r.output
+    assert "doesn't take eval packs; published without them" in r.output
+    r = invoke("push", "-C", str(world["author"]))
+    assert r.exit_code == 0 and "already published" in r.output, r.output
+    assert not world["reg"].evals
+
+
+def test_eval_packs_declared_but_not_uploaded_are_refused_by_pull_into(world):
+    login(world)
+    with_evals(world["author"])
+    assert invoke("push", "-C", str(world["author"]), "--version", "1").exit_code == 0
+    v = world["reg"].packages["alice/my-setup"]["versions"][0]
+    v["evals"]["uploaded"] = False
+    r = invoke("pull", "alice/my-setup@1", "--into", "new")
+    assert r.exit_code == 1 and "aren't uploaded yet" in r.output, r.output
+    assert not (world["me"] / "new").exists()
+
+
+def _dotenv(p: Path) -> None:
+    (p / "fix_bug/workspace/.env").write_text("TOKEN=x\n")
+
+
+def _keyed(p: Path) -> None:
+    (p / "fix_bug/workspace/conf.py").write_text("KEY = 'ghp_abcdefghijklmnopqrstuvwxyz0123'\n")
+
+
+def _dot_hlock(p: Path) -> None:
+    (p / "fix_bug/.hlock").mkdir()
+    (p / "fix_bug/.hlock/x").write_text("x")
+
+
+def _spaced(p: Path) -> None:
+    (p / "fix_bug/notes v2.md").write_text("x")
+
+
+@pytest.mark.parametrize("setup,why", [
+    (_dotenv, "named like a credential"),
+    (_keyed, "conf.py:1: looks like a credential"),
+    (_dot_hlock, "a `.hlock` directory"),
+    (_spaced, "a character other than"),
+])
+def test_eval_packs_that_cant_be_published_stop_the_push(world, setup, why):
+    login(world)
+    setup(with_evals(world["author"]))
+    r = invoke("push", "-C", str(world["author"]))
+    assert r.exit_code == 1 and why in r.output and "--no-evals" in r.output, r.output
+    assert not world["reg"].packages
+    assert invoke("push", "-C", str(world["author"]), "--no-evals").exit_code == 0
+
+
+def test_an_eval_pack_outside_the_project_stops_the_push(world):
+    login(world)
+    outside = world["tmp"] / "elsewhere"
+    outside.mkdir()
+    (outside / "pack.toml").write_text("[pack]\n")
+    (world["author"] / "evals").symlink_to(outside)
+    m = world["author"] / "harness.toml"
+    m.write_text(m.read_text() + '\n[evals]\npacks = ["evals"]\n')
+    r = invoke("push", "-C", str(world["author"]))
+    assert r.exit_code == 1 and "symlink" in r.output, r.output
+
+
+def with_pi_lock(author: Path) -> None:
+    """A second lock, for pi, under .hlock/locks/, vendoring a skill beside it."""
+    (author / ".hlock/locks/.hlock/vendor/pi/skills/review").mkdir(parents=True)
+    (author / ".hlock/locks/.hlock/vendor/pi/skills/review/SKILL.md").write_text("Review it, pi.\n")
+    (author / ".hlock/locks/harness.pi.lock").write_text(LOCK)
+
+
+def test_pulling_one_lock_of_a_package(world):
+    login(world)
+    with_pi_lock(world["author"])
+    assert invoke("push", "-C", str(world["author"]), "--version", "1").exit_code == 0
+    # the root lock, and a pointer to the other one
+    r = invoke("pull", "alice/my-setup")
+    assert r.exit_code == 0, r.output
+    assert "also in the package: .hlock/locks/harness.pi.lock" in r.output
+    assert "hlock pull alice/my-setup//.hlock/locks/harness.pi.lock" in r.output
+    assert pulled_table(world["home"] / "pulls/my-setup/harness.lock")["from"] == f"registry:{world['url']}/alice/my-setup"
+    # that lock, by its path: stored under its own name, with the files it vendors
+    r = invoke("pull", "alice/my-setup//.hlock/locks/harness.pi.lock")
+    assert r.exit_code == 0, r.output
+    stored = world["home"] / "pulls/my-setup-pi"
+    assert (stored / ".hlock/vendor/pi/skills/review/SKILL.md").read_text() == "Review it, pi.\n"
+    pulled = pulled_table(stored / "harness.lock")
+    assert pulled["path"] == ".hlock/locks/harness.pi.lock"
+    assert pulled["from"] == f"registry:{world['url']}/alice/my-setup//.hlock/locks/harness.pi.lock"
+    # a refresh pulls the same lock
+    r = invoke("pull", "my-setup-pi")
+    assert r.exit_code == 0 and "up to date" in r.output, r.output
+    # by its directory, and at a version (the version goes last)
+    assert invoke("pull", "alice/my-setup//.hlock/locks@1", "--as", "pi-again").exit_code == 0
+    assert pulled_table(world["home"] / "pulls/pi-again/harness.lock")["path"] == ".hlock/locks/harness.pi.lock"
+    r = invoke("pull", "alice/my-setup@1//.hlock/locks")
+    assert r.exit_code == 1 and "the version goes last: alice/my-setup//.hlock/locks@1" in r.output, r.output
+    r = invoke("pull", "alice/my-setup//.hlock/locks/harness.nope.lock")
+    assert r.exit_code == 1 and "has no lock .hlock/locks/harness.nope.lock" in r.output
+    # another lock of the same package under a stored name is a clash
+    r = invoke("pull", "alice/my-setup//.hlock/locks/harness.pi.lock", "--as", "my-setup")
+    assert r.exit_code == 1 and "was pulled from harness.lock" in r.output and "--as NAME" in r.output, r.output
+    r = invoke("pull", "alice/my-setup//.hlock/locks/harness.pi.lock", "--into", "x")
+    assert r.exit_code == 1 and "--into writes the whole package" in r.output
+
+
+def test_a_pinned_from_without_a_path_still_refreshes(world):
+    # the [pulled] from of a registry pull before packages had paths: registry:URL/NS/NAME@V
+    published(world)
+    assert invoke("pull", "alice/my-setup@1.2.0").exit_code == 0
+    stored = world["home"] / "pulls/my-setup/harness.lock"
+    assert pulled_table(stored)["from"] == f"registry:{world['url']}/alice/my-setup@1.2.0"
+    r = invoke("pull", "my-setup")
+    assert r.exit_code == 0 and "up to date" in r.output, r.output
+
+
+def test_push_warns_about_evidence_from_other_eval_packs(world):
+    login(world)
+    with_evals(world["author"])
+    lock = world["author"] / "harness.lock"
+    lock.write_text(lock.read_text() + '\n[evidence]\neval-pack-digest = "sha256:measured-on-something-else"\n')
+    out = dry_run(world)
+    assert any("harness.lock's evidence was measured on other eval packs" in w for w in out["warnings"]), out["warnings"]
+
+
+def test_a_package_with_only_nested_locks(world):
+    login(world)
+    author = world["author"]
+    (author / "harness.lock").unlink()
+    with_pi_lock(author)
+    assert invoke("push", "-C", str(author)).exit_code == 0
+    r = invoke("pull", "alice/my-setup")  # the only lock
+    assert r.exit_code == 0, r.output
+    pulled = pulled_table(world["home"] / "pulls/my-setup-pi/harness.lock")
+    assert pulled["from"].endswith("//.hlock/locks/harness.pi.lock")

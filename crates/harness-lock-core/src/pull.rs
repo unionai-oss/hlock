@@ -495,14 +495,18 @@ pub(crate) struct Fetched<'a> {
     pub commit: String,
     /// The lock to place; `None` for a setup without one (`pull --into` only).
     pub remote_lock: Option<PathBuf>,
-    /// Other harness locks next to it.
-    pub others: Vec<String>,
+    /// Other harness locks in the source, and the source that pulls each.
+    pub others: Vec<OtherLock>,
     /// A git checkout is sparse: vendored paths are checked out before they're copied.
     pub git: bool,
     /// The lock's `[pulled]` table (`at` is added when it's written).
     pub pulled: Value,
     /// A registry version's archive digest.
     pub digest: Option<String>,
+    /// Eval packs unpacked next to the setup (`pull --into` from a registry): the pack
+    /// directories, and every file in them.
+    pub eval_packs: Vec<String>,
+    pub eval_files: Vec<String>,
 }
 
 /// What [`pull`] did.
@@ -718,7 +722,8 @@ pub fn pull_allowing(spec: &str, target: &Target, force: bool, allow_hidden: &[S
     let commit = fetch(&src, &scratch.0)?;
     let (remote_lock, others) = choose_lock(&src, &scratch.0)?;
     let pulled = git_pulled(&src, &scratch.0, &remote_lock, &commit);
-    place(Fetched { src, root: &scratch.0, commit, remote_lock: Some(remote_lock), others, git: true, pulled, digest: None }, target, force, allow_hidden)
+    let others = others.into_iter().map(|p| OtherLock { source: with_path(&src, &p), path: p }).collect();
+    place(Fetched { src, root: &scratch.0, commit, remote_lock: Some(remote_lock), others, git: true, pulled, digest: None, eval_packs: Vec::new(), eval_files: Vec::new() }, target, force, allow_hidden)
 }
 
 /// The `[pulled]` table of a lock pulled from git.
@@ -734,7 +739,7 @@ fn git_pulled(src: &Source, root: &Path, remote_lock: &Path, commit: &str) -> Va
 /// Place what [`Fetched`] holds into `target`: the shared second half of a git pull and a
 /// registry pull.
 pub(crate) fn place(f: Fetched<'_>, target: &Target, force: bool, allow_hidden: &[String]) -> Result<PullOutcome> {
-    let Fetched { src, root, commit, remote_lock, others, git: is_git, pulled, digest } = f;
+    let Fetched { src, root, commit, remote_lock, others, git: is_git, pulled, digest, .. } = f;
     if let Target::Store(Some(n)) = target {
         check_name(n)?;
     }
@@ -770,9 +775,20 @@ pub(crate) fn place(f: Fetched<'_>, target: &Target, force: bool, allow_hidden: 
     };
     let previous = if out.exists() { Lockfile::load(&out).ok() } else { None };
     if out.exists() && !force {
-        let prev_url = previous.as_ref().and_then(pulled_from).and_then(|p| p.get("url")).and_then(Value::as_str);
+        let prev = previous.as_ref().and_then(pulled_from);
+        let prev_url = prev.and_then(|p| p.get("url")).and_then(Value::as_str);
+        // the same source, but another lock in it (an older [pulled] without a path is the same)
+        let prev_path = prev.and_then(|p| p.get("path")).and_then(Value::as_str);
+        let new_path = pulled.get("path").and_then(Value::as_str);
         let other_name = if matches!(target, Target::Store(_)) { "pass --as NAME to keep both" } else { "pass another -o FILE to keep both" };
         match prev_url {
+            Some(u) if same_repo(u, &src.url) && prev_path.is_some() && new_path.is_some() && prev_path != new_path => {
+                return Err(Error::Lockfile(format!(
+                    "{shown} was pulled from {} in {u}, not {}; {other_name}, or --force to replace it",
+                    prev_path.unwrap_or_default(),
+                    new_path.unwrap_or_default()
+                )))
+            }
             Some(u) if same_repo(u, &src.url) => {}
             Some(u) => {
                 return Err(Error::Lockfile(format!("{shown} was pulled from {u}, not {}; {other_name}, or --force to replace it", src.url)))
@@ -782,7 +798,6 @@ pub(crate) fn place(f: Fetched<'_>, target: &Target, force: bool, allow_hidden: 
     }
 
     // Fetch the vendored paths too, then copy them into the target's vendor directory.
-    let others = others.into_iter().map(|p| OtherLock { source: with_path(&src, &p), path: p }).collect();
     let lock_dir_rel = remote_lock.parent().and_then(|p| p.strip_prefix(root).ok()).map(Path::to_path_buf).unwrap_or_default();
     let harness = lock.harness.name.clone();
     // both name the vendor directory that's replaced below
@@ -943,8 +958,13 @@ pub struct IntoOutcome {
     pub commit: String,
     pub version: Option<String>,
     pub digest: Option<String>,
+    /// The eval packs written (directories relative to `dir`).
+    pub eval_packs: Vec<String>,
     pub warnings: Vec<String>,
 }
+
+/// The one warning every pull of eval packs ends with.
+pub const EVALS_WARNING: &str = "eval packs run commands when graded, and their fixtures are the agent's workspace: read them before hlock tune";
 
 /// Pull the setup at a git `spec` and write its files (the lock, the files it vendors,
 /// `harness.toml`, `apm.yml`, `apm.lock.yaml`) into the directory `into`.
@@ -973,14 +993,14 @@ pub fn pull_into(spec: &str, into: &Path, force: bool, allow_hidden: &[String]) 
         (None, Some(p)) => scratch.0.join(p),
         (None, None) => scratch.0.clone(),
     };
-    place_into(Fetched { src, root: &scratch.0, commit, remote_lock: lock, others: Vec::new(), git: true, pulled, digest: None }, &base, into, force, allow_hidden)
+    place_into(Fetched { src, root: &scratch.0, commit, remote_lock: lock, others: Vec::new(), git: true, pulled, digest: None, eval_packs: Vec::new(), eval_files: Vec::new() }, &base, into, force, allow_hidden)
 }
 
 /// Write a fetched setup's files from `base` (the directory holding them in the scratch
 /// directory) into `into`, checked like a pull: hidden characters and the project policy
 /// first, then nothing is overwritten without `force`.
 pub(crate) fn place_into(f: Fetched<'_>, base: &Path, into: &Path, force: bool, allow_hidden: &[String]) -> Result<IntoOutcome> {
-    let Fetched { src, root, commit, remote_lock, git: is_git, pulled, digest, .. } = f;
+    let Fetched { src, root, commit, remote_lock, git: is_git, pulled, digest, eval_packs, eval_files, .. } = f;
     if !crate::fsutil::within(root, base) {
         return Err(Error::Pull(format!("{}: the setup isn't inside the repository; refusing to pull it", src.spec)));
     }
@@ -1052,6 +1072,11 @@ pub(crate) fn place_into(f: Fetched<'_>, base: &Path, into: &Path, force: bool, 
             Err(_) => {}
         }
     }
+    // eval packs, checked and written like the rest (a registry's evals archive)
+    files.extend(eval_files.iter().map(|p| (p.clone(), p.clone())));
+    if !eval_packs.is_empty() {
+        warnings.push(EVALS_WARNING.to_string());
+    }
     // the lock's own entry: its destination is its file name
     for (from, to) in files.iter_mut() {
         if to.is_empty() {
@@ -1097,7 +1122,7 @@ pub(crate) fn place_into(f: Fetched<'_>, base: &Path, into: &Path, force: bool, 
         l.save(&into.join(name))?;
     }
     let version = digest.is_some().then(|| commit.clone());
-    Ok(IntoOutcome { dir: into.to_path_buf(), files: files.into_iter().map(|(_, to)| to).collect(), lock, source: src, commit, version, digest, warnings })
+    Ok(IntoOutcome { dir: into.to_path_buf(), files: files.into_iter().map(|(_, to)| to).collect(), lock, source: src, commit, version, digest, eval_packs, warnings })
 }
 
 #[cfg(test)]

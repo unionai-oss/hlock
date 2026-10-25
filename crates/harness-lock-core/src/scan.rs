@@ -201,12 +201,12 @@ fn scan_invalid(bytes: &[u8], file: &str) -> Vec<Finding> {
 }
 
 /// The largest file scanned; a larger one is reported as unscanned (critical).
-const MAX_SCAN: usize = 20 << 20;
+pub(crate) const MAX_SCAN: usize = 20 << 20;
 
 /// Extensions of files that are never text (images, archives, fonts): not scanned.
 const BINARY: [&str; 18] = ["png", "jpg", "jpeg", "gif", "webp", "ico", "pdf", "zip", "gz", "tgz", "bz2", "xz", "woff", "woff2", "ttf", "otf", "mp4", "wasm"];
 
-fn is_binary_name(file: &str) -> bool {
+pub(crate) fn is_binary_name(file: &str) -> bool {
     file.rsplit('/').next().and_then(|f| f.rsplit_once('.')).is_some_and(|(_, e)| BINARY.contains(&e.to_ascii_lowercase().as_str()))
 }
 
