@@ -400,23 +400,75 @@ pub fn is_harness_file(name: &str) -> bool {
     name == "harness.toml" || name == "harness.lock" || (name.starts_with("harness.") && name.ends_with(".lock") && name.len() > "harness..lock".len())
 }
 
-/// Whether `path` is a harness file under `.hlock/` (but not `.hlock/vendor/`), such as
-/// `.hlock/locks/harness.pi.lock`: one of a setup's files besides those at its root.
+/// The directories under a project's `.hlock/` that hlock writes itself (vendored files, synced
+/// environments, the dependency store, trial and run artifacts, backups): never part of a setup's
+/// own files, even when a harness file is in one.
+pub const HLOCK_STATE_DIRS: &[&str] = &["vendor", "env", "store", "tune", "tuned", "trials", "runs", "result", "report", "bak", "meta", "cache", "docker", "sandbox-env", "pulls", "approve", "trust"];
+
+/// Whether `path` is a harness file under `.hlock/`, such as `.hlock/locks/harness.pi.lock`: one
+/// of a setup's files besides those at its root. Not one in [`HLOCK_STATE_DIRS`], or under any
+/// `.hlock/vendor/`.
 pub fn is_hlock_setup_path(path: &str) -> bool {
-    path.starts_with(".hlock/") && !path.starts_with(".hlock/vendor/") && safe_rel(path) && path.rsplit('/').next().is_some_and(is_harness_file)
+    let Some(rest) = path.strip_prefix(".hlock/") else { return false };
+    let in_state = rest.split_once('/').is_some_and(|(top, _)| HLOCK_STATE_DIRS.contains(&top));
+    !in_state
+        && !in_vendor(path)
+        && safe_rel(path)
+        && path.rsplit('/').next().is_some_and(is_harness_file)
+}
+
+/// Whether `path` is under a `.hlock/vendor/` segment, at the root or below.
+pub fn in_vendor(path: &str) -> bool {
+    path.starts_with(".hlock/vendor/") || path.contains("/.hlock/vendor/")
+}
+
+/// The directory of a relative path, `""` for one at the root.
+pub fn parent_dir(path: &str) -> &str {
+    path.rsplit_once('/').map(|(d, _)| d).unwrap_or("")
+}
+
+/// `path` in the directory `dir` (`""` for the root).
+pub fn in_dir(dir: &str, path: &str) -> String {
+    if dir.is_empty() { path.to_string() } else { format!("{dir}/{path}") }
+}
+
+/// Whether `path` may be a file a harness file at `dir` vendors: `dir/.hlock/vendor/…`, where
+/// `dir` is the root or under `.hlock/` (outside any `.hlock/vendor/`).
+pub fn is_vendored_path(path: &str) -> bool {
+    let Some((dir, rest)) = (if let Some(r) = path.strip_prefix(".hlock/vendor/") { Some(("", r)) } else { path.split_once("/.hlock/vendor/") }) else {
+        return false;
+    };
+    !rest.is_empty() && safe_rel(path) && (dir.is_empty() || (dir.starts_with(".hlock/") || dir == ".hlock") && !in_vendor(&format!("{dir}/")))
 }
 
 /// The harness files under `dir/.hlock/` (see [`is_hlock_setup_path`]), as sorted paths
-/// relative to `dir`. Symlinks aren't followed.
+/// relative to `dir`. Symlinks and `.git` aren't followed, and hlock's own state directories
+/// aren't walked at all (the dependency store and environments can be large).
 pub fn hlock_setup_files(dir: &Path) -> Vec<String> {
-    if !std::fs::symlink_metadata(dir.join(".hlock")).is_ok_and(|m| m.is_dir()) {
-        return Vec::new();
+    fn rec(base: &Path, d: &Path, out: &mut Vec<String>) {
+        let Ok(rd) = std::fs::read_dir(d) else { return };
+        for e in rd.flatten() {
+            let Ok(t) = e.file_type() else { continue };
+            let Some(rel) = e.path().strip_prefix(base).ok().map(|r| r.to_string_lossy().replace('\\', "/")) else { continue };
+            if t.is_symlink() || e.file_name() == ".git" {
+                continue;
+            }
+            if t.is_dir() {
+                let state = parent_dir(&rel) == ".hlock" && HLOCK_STATE_DIRS.contains(&e.file_name().to_string_lossy().as_ref());
+                if !state && !in_vendor(&format!("{rel}/")) {
+                    rec(base, &e.path(), out);
+                }
+            } else if t.is_file() && is_hlock_setup_path(&rel) {
+                out.push(rel);
+            }
+        }
     }
-    crate::scan::text_files(&dir.join(".hlock"))
-        .into_iter()
-        .filter_map(|f| f.strip_prefix(dir).ok().map(|r| r.to_string_lossy().replace('\\', "/")))
-        .filter(|r| is_hlock_setup_path(r))
-        .collect()
+    let mut out = Vec::new();
+    if std::fs::symlink_metadata(dir.join(".hlock")).is_ok_and(|m| m.is_dir()) {
+        rec(dir, &dir.join(".hlock"), &mut out);
+    }
+    out.sort();
+    out
 }
 
 /// The paths a lock vendors, sorted and deduplicated.
@@ -936,17 +988,19 @@ pub(crate) fn place_into(f: Fetched<'_>, base: &Path, into: &Path, force: bool, 
     // (path under `base`, path under `into`)
     let mut files: Vec<(String, String)> = Vec::new();
     let mut lock = None;
-    // a lock's vendored files, added to `files`
-    let vendored = |parsed: &Lockfile, files: &mut Vec<(String, String)>, warnings: &mut Vec<String>| -> Result<()> {
+    // a lock's vendored files, added to `files`; they're relative to the lock's directory
+    // `dir` (under `base`, "" for the root)
+    let vendored = |parsed: &Lockfile, dir: &str, files: &mut Vec<(String, String)>, warnings: &mut Vec<String>| -> Result<()> {
         let paths = vendored_paths(parsed);
         if let Some(p) = paths.iter().find(|p| !safe_rel(p)) {
             return Err(Error::Lockfile(format!("{} vendors {p:?}, which isn't a path inside the repository; refusing to pull it", src.spec)));
         }
         if is_git {
-            let rel = base.strip_prefix(root).map(Path::to_path_buf).unwrap_or_default();
+            let rel = base.strip_prefix(root).map(Path::to_path_buf).unwrap_or_default().join(dir);
             checkout_paths(root, &rel, &paths)?;
         }
         for p in &paths {
+            let p = &in_dir(dir, p);
             let from = base.join(p);
             match std::fs::symlink_metadata(&from) {
                 Ok(m) if m.file_type().is_symlink() || !crate::fsutil::within(root, &from) => warnings.push(format!("{p} is a symlink in the source; skipped")),
@@ -975,7 +1029,7 @@ pub(crate) fn place_into(f: Fetched<'_>, base: &Path, into: &Path, force: bool, 
         warnings.extend(policy.enforce(policy.check_lock(&parsed), &src.spec)?);
         let name = l.file_name().and_then(|n| n.to_str()).unwrap_or(crate::LOCKFILE_PATH).to_string();
         files.push((name, String::new()));
-        vendored(&parsed, &mut files, &mut warnings)?;
+        vendored(&parsed, "", &mut files, &mut warnings)?;
         lock = Some(parsed);
     }
     // the other harness files under .hlock/, such as .hlock/locks/harness.pi.lock (a
@@ -984,7 +1038,7 @@ pub(crate) fn place_into(f: Fetched<'_>, base: &Path, into: &Path, force: bool, 
         if let Some(policy) = policy.filter(|_| p.ends_with(".lock")) {
             let parsed = Lockfile::load(&base.join(&p))?;
             warnings.extend(policy.enforce(policy.check_lock(&parsed), &format!("{} ({p})", src.spec))?);
-            vendored(&parsed, &mut files, &mut warnings)?;
+            vendored(&parsed, parent_dir(&p), &mut files, &mut warnings)?;
         }
         files.push((p.clone(), p));
     }

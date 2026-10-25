@@ -486,7 +486,7 @@ pub struct Packed {
 
 /// Whether `path` may be in a setup archive.
 pub fn allowed_path(path: &str) -> bool {
-    SETUP_FILES.contains(&path) || path == "README.md" || pull::is_hlock_setup_path(path) || (path.starts_with(".hlock/vendor/") && path.len() > ".hlock/vendor/".len())
+    SETUP_FILES.contains(&path) || path == "README.md" || pull::is_hlock_setup_path(path) || pull::is_vendored_path(path)
 }
 
 /// Whether `path` is one of a setup's own files (not README.md or a vendored file).
@@ -565,11 +565,14 @@ pub fn pack(dir: &Path) -> Result<Packed> {
     let locks = std::iter::once("harness.lock".to_string()).filter(|l| dir.join(l).is_file()).chain(nested.iter().filter(|p| p.ends_with(".lock")).cloned());
     for l in locks {
         let lock = Lockfile::load(&dir.join(&l))?;
-        for p in pull::vendored_paths(&lock) {
-            if !safe_rel(&p) || !p.starts_with(".hlock/vendor/") {
-                warnings.push(format!("{l} vendors {p}, outside .hlock/vendor/; left out"));
+        // vendored paths are relative to the lock's directory
+        let at = pull::parent_dir(&l).to_string();
+        for v in pull::vendored_paths(&lock) {
+            if !safe_rel(&v) || !v.starts_with(".hlock/vendor/") {
+                warnings.push(format!("{l} vendors {v}, outside .hlock/vendor/; left out"));
                 continue;
             }
+            let p = pull::in_dir(&at, &v);
             let from = dir.join(&p);
             match std::fs::symlink_metadata(&from) {
                 Ok(m) if m.file_type().is_symlink() => warnings.push(format!("{p} is a symlink; left out")),
@@ -942,20 +945,38 @@ mod tests {
         std::fs::write(d.join(".hlock/locks/notes.txt"), "not pushed").unwrap();
         std::fs::create_dir_all(d.join(".hlock/team")).unwrap();
         std::fs::write(d.join(".hlock/team/harness.toml"), "[project]\nname = \"team\"\n").unwrap();
+        // a lock's vendored paths are relative to its own directory
+        std::fs::create_dir_all(d.join(".hlock/locks/.hlock/vendor/pi/skills/x")).unwrap();
+        std::fs::write(d.join(".hlock/locks/.hlock/vendor/pi/skills/x/SKILL.md"), "Run the tests.\n").unwrap();
+        std::fs::write(d.join(".hlock/locks/.hlock/vendor/harness.y.lock"), LOCK).unwrap();
+        // the root's vendor directory belongs to the root lock, which there isn't
         std::fs::create_dir_all(d.join(".hlock/vendor/pi/skills/x")).unwrap();
-        std::fs::write(d.join(".hlock/vendor/pi/skills/x/SKILL.md"), "Run the tests.\n").unwrap();
+        std::fs::write(d.join(".hlock/vendor/pi/skills/x/SKILL.md"), "not pushed\n").unwrap();
         std::fs::write(d.join(".hlock/vendor/harness.lock"), LOCK).unwrap();
+        // hlock's own state: an eval environment's candidate lock, a stored dependency tree
+        for state in [".hlock/env/eval/x", ".hlock/store/trees/abc", ".hlock/tune/1"] {
+            std::fs::create_dir_all(d.join(state)).unwrap();
+            std::fs::write(d.join(state).join("harness.lock"), LOCK).unwrap();
+        }
         let a = pack(&d).unwrap();
         let paths: Vec<&str> = a.files.iter().map(|f| f.path.as_str()).collect();
-        assert_eq!(paths, [".hlock/locks/harness.pi.lock", ".hlock/team/harness.toml", ".hlock/vendor/pi/skills/x/SKILL.md", "harness.toml"]);
+        assert_eq!(paths, [".hlock/locks/.hlock/vendor/pi/skills/x/SKILL.md", ".hlock/locks/harness.pi.lock", ".hlock/team/harness.toml", "harness.toml"]);
+        assert!(a.warnings.is_empty(), "{:?}", a.warnings);
         let out = d.join("out");
         std::fs::create_dir_all(&out).unwrap();
         assert_eq!(unpack(&a.bytes, &out).unwrap().len(), 4);
         assert_eq!(std::fs::read_to_string(out.join(".hlock/locks/harness.pi.lock")).unwrap(), LOCK);
+        assert_eq!(std::fs::read_to_string(out.join(".hlock/locks/.hlock/vendor/pi/skills/x/SKILL.md")).unwrap(), "Run the tests.\n");
         // nested harness files alone are a setup
         std::fs::remove_file(d.join("harness.toml")).unwrap();
         assert!(pack(&d).is_ok());
         assert!(allowed_path(".hlock/locks/harness.pi.lock") && !allowed_path(".hlock/locks/notes.txt") && !allowed_path(".hlock/../harness.lock"));
+        assert!(allowed_path(".hlock/locks/.hlock/vendor/pi/x") && allowed_path(".hlock/vendor/pi/x"));
+        for bad in ["src/.hlock/vendor/x", ".hlock/locks/.hlock/vendor/", ".hlock/locks/.hlock/vendor/x/../../../../../x"] {
+            assert!(!allowed_path(bad), "{bad}");
+        }
+        assert!(!pull::is_hlock_setup_path(".hlock/locks/.hlock/vendor/harness.y.lock"));
+        assert!(!allowed_path(".hlock/env/eval/x/harness.lock") && allowed_path(".hlock/harness.x.lock"));
         let _ = std::fs::remove_dir_all(&d);
     }
 
