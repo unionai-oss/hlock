@@ -581,8 +581,9 @@ pub struct Packed {
     pub project: String,
     /// Where `project` came from.
     pub name_from: NameFrom,
-    /// `[project] name`, slugified, when there is one.
-    pub project_name: Option<String>,
+    /// The names the package would have without the git remote, in order (`[project] name`
+    /// unless it's `hlock init`'s `demo`, `apm.yml`'s `name`, the directory's), slugified.
+    pub fallback_names: Vec<String>,
     /// `apm.yml`'s `version`, if it has one.
     pub apm_version: Option<String>,
     pub warnings: Vec<String>,
@@ -750,7 +751,15 @@ pub fn pack(dir: &Path) -> Result<Packed> {
     }
     let digest = format!("sha256:{}", crate::sha256_hex(&bytes));
     let dir_name = std::fs::canonicalize(dir).ok().and_then(|d| d.file_name().map(|n| n.to_string_lossy().into_owned())).unwrap_or_else(|| "setup".into());
-    let project_name = project.as_deref().map(slug).filter(|s| !s.is_empty());
+    // the names push defaulted to before the git remote's, for the rename guard; not
+    // `hlock init`'s default `demo`, which many unrelated projects share
+    let mut fallback_names: Vec<String> = Vec::new();
+    for n in [project.as_deref().filter(|p| slug(p) != "demo"), apm_name.as_deref(), Some(dir_name.as_str())].into_iter().flatten() {
+        let s = slug(n);
+        if !s.is_empty() && !fallback_names.contains(&s) {
+            fallback_names.push(s);
+        }
+    }
     let (name, name_from) = [
         (git_repo_name(dir), NameFrom::GitRemote),
         (project, NameFrom::Project),
@@ -760,7 +769,7 @@ pub fn pack(dir: &Path) -> Result<Packed> {
     .into_iter()
     .find_map(|(n, from)| n.map(|n| slug(&n)).filter(|s| !s.is_empty()).map(|s| (s, from)))
     .unwrap_or_else(|| ("setup".into(), NameFrom::Directory));
-    Ok(Packed { size_bytes: bytes.len() as u64, bytes, digest, files, project: name, name_from, project_name, apm_version, warnings })
+    Ok(Packed { size_bytes: bytes.len() as u64, bytes, digest, files, project: name, name_from, fallback_names, apm_version, warnings })
 }
 
 /// Where a package's default name came from.
@@ -849,7 +858,13 @@ pub fn unpack(bytes: &[u8], dest: &Path) -> Result<Vec<String>> {
         if !allowed_path(&path) {
             return Err(bad(format!("{path:?} isn't a file a setup may contain")));
         }
-        total += entry.header().size().unwrap_or(0);
+        // the size the body is read with (a PAX `size` overrides the ustar one), which must be
+        // the header's, so the limit counts what's actually written
+        let size = entry.size();
+        if entry.header().size().ok() != Some(size) {
+            return Err(bad(format!("{path:?} has a size that differs from its header's")));
+        }
+        total += size;
         if total > MAX_UNPACKED {
             return Err(bad(format!("it unpacks to more than {} MiB", MAX_UNPACKED >> 20)));
         }
@@ -859,7 +874,10 @@ pub fn unpack(bytes: &[u8], dest: &Path) -> Result<Vec<String>> {
             std::fs::create_dir_all(parent).map_err(|e| crate::error::io_at(parent, e))?;
         }
         let mut buf = Vec::new();
-        entry.by_ref().take(MAX_UNPACKED + 1).read_to_end(&mut buf).map_err(|e| bad(e.to_string()))?;
+        entry.by_ref().take(size + 1).read_to_end(&mut buf).map_err(|e| bad(e.to_string()))?;
+        if buf.len() as u64 != size {
+            return Err(bad(format!("{path:?} isn't the size its header says")));
+        }
         let mut f = std::fs::OpenOptions::new().write(true).create_new(true).open(&to).map_err(|e| bad(format!("{path}: {e}")))?;
         f.write_all(&buf).map_err(|e| crate::error::io_at(&to, e))?;
         out.push(path);
@@ -1025,19 +1043,25 @@ fn stale_evidence(dir: &Path, packed: &Packed) -> Vec<String> {
         .collect()
 }
 
-/// Refuse to publish under the repository's name a project that was published under its
-/// `[project] name` before, so people pulling the old name don't silently stop getting updates.
+/// Refuse to publish under the repository's name a project that may have been published under
+/// a name push used to default to (`[project] name`, `apm.yml`'s, the directory's), so people
+/// pulling the old name don't silently stop getting updates.
 fn rename_guard(client: &Client, r: &Ref, packed: &Packed) -> Result<()> {
-    let Some(old) = packed.project_name.as_deref().filter(|p| *p != r.name) else { return Ok(()) };
-    let before = Ref { name: old.to_string(), version: None, path: None, ..r.clone() };
-    if client.exists(&before)? && !client.exists(r)? {
-        return Err(err(format!(
-            "you published {} before, and the default name is now the repository's, {}; pass {} to publish under the repository's name, or {} to keep publishing there",
-            before.package(),
-            r.package(),
-            r.package(),
-            before.package()
-        )));
+    let olds: Vec<&String> = packed.fallback_names.iter().filter(|n| **n != r.name).collect();
+    if olds.is_empty() || client.exists(r)? {
+        return Ok(());
+    }
+    for old in olds {
+        let before = Ref { name: old.to_string(), version: None, path: None, ..r.clone() };
+        if client.exists(&before)? {
+            return Err(err(format!(
+                "a package named {} exists, and this project's default name is now its repository's, {}; pass {} to publish under the repository's name, or {} to publish there",
+                before.package(),
+                r.package(),
+                r.package(),
+                before.package()
+            )));
+        }
     }
     Ok(())
 }
@@ -1130,7 +1154,8 @@ pub fn pull(url_flag: Option<&str>, spec: &str, dest: Dest<'_>, force: bool, all
         }
         let src = pull::parse(&git)?;
         if let Some(p) = &r.path {
-            git = pull::with_path(&src, p);
+            // PATH is inside the package, which may itself be a directory of its repository
+            git = pull::with_path(&src, &pull::in_dir(src.path.as_deref().unwrap_or(""), p));
             pull::parse(&git)?;
         }
         let mut v = match dest {
@@ -1413,6 +1438,12 @@ mod tests {
             assert!(e.contains(why), "{why}: {e}");
         }
         assert!(unpack(b"not a tarball", &d).is_err());
+        // a PAX size bigger than the header's, which the limit wouldn't count
+        let out = d.join("pax");
+        std::fs::create_dir_all(&out).unwrap();
+        let bytes = crate::evals_archive::pax_sized_tarball(&[("harness.lock", b"x")], "README.md", &vec![b'x'; 4096]);
+        let e = unpack(&bytes, &out).unwrap_err().to_string();
+        assert!(e.contains("differs from its header"), "{e}");
         let _ = std::fs::remove_dir_all(&d);
     }
 

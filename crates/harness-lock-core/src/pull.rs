@@ -1093,7 +1093,12 @@ pub(crate) fn place_into(f: Fetched<'_>, base: &Path, into: &Path, force: bool, 
         found.extend(crate::scan::scan_path(&base.join(from), to));
     }
     crate::audit::blocking(&found, allow_hidden, &src.spec)?;
-    let existing: Vec<&str> = files.iter().filter(|(_, to)| std::fs::symlink_metadata(into.join(to)).is_ok()).map(|(_, to)| to.as_str()).collect();
+    // an eval pack is a whole directory: one that's there is replaced, never merged into, so
+    // no task of another version survives in it (and its digest matches the lock's)
+    let in_pack = |to: &str| eval_packs.iter().any(|p| to.starts_with(&format!("{p}/")));
+    let packs_there: Vec<&String> = eval_packs.iter().filter(|p| std::fs::symlink_metadata(into.join(p)).is_ok()).collect();
+    let mut existing: Vec<String> = packs_there.iter().map(|p| format!("{p}/")).collect();
+    existing.extend(files.iter().filter(|(_, to)| !in_pack(to) && std::fs::symlink_metadata(into.join(to)).is_ok()).map(|(_, to)| to.clone()));
     if !existing.is_empty() && !force {
         return Err(Error::Lockfile(format!(
             "{} already has {}; nothing was written. Pass --force to replace {}",
@@ -1101,6 +1106,15 @@ pub(crate) fn place_into(f: Fetched<'_>, base: &Path, into: &Path, force: bool, 
             existing.join(", "),
             if existing.len() == 1 { "it" } else { "them" }
         )));
+    }
+    for p in packs_there {
+        let dest = into.join(p);
+        crate::fsutil::check_within(p, into, &dest)?;
+        let gone = match std::fs::symlink_metadata(&dest) {
+            Ok(m) if m.is_dir() => std::fs::remove_dir_all(&dest),
+            _ => std::fs::remove_file(&dest),
+        };
+        gone.map_err(|e| crate::error::io_at(&dest, e))?;
     }
     let lock_name = remote_lock.as_ref().and_then(|l| l.file_name()).map(|n| n.to_string_lossy().into_owned());
     for (from, to) in &files {

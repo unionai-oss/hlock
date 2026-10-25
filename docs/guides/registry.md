@@ -85,9 +85,10 @@ next → hlock pull alice/review-bot@1.0.0
   holds when the project is the repository's root; a project in a subdirectory of a
   repository, or one that isn't in one, is named by `[project] name` in `harness.toml`, else
   `name` in `apm.yml`, else the directory's. `push` says where the name came from. Pass
-  another, such as an organization's, as an argument: `hlock push acme/review-bot`. If you
-  published the project under its `[project] name` before, `push` stops rather than start a
-  second package under the repository's name, and asks you to pass the one you want.
+  another, such as an organization's, as an argument: `hlock push acme/review-bot`. When the
+  repository's name isn't published yet but one of the names `push` used to default to is
+  (`[project] name`, unless it's `hlock init`'s `demo`, `apm.yml`'s, the directory's),
+  `push` stops rather than start a second package, and asks you to pass the one you want.
 - **The version** is `--version`, else `apm.yml`'s `version`, else `sha-` and the first 12
   hex digits of a digest of everything pushed, eval packs included. A version can't change
   once it's published, eval packs included.
@@ -116,9 +117,11 @@ what's in them, and stops (listing every problem) rather than leave a file out:
   letters, digits and `._-`. A remote pack (`github:…`) is left out with a note;
 - file names must be safe on every OS: letters, digits and `._+@=,-` only, no Windows device
   names like `CON`, no two that differ only in case, and no `.hlock` directory;
-- no credentials: no file named like one (`.env`, `*.pem`, `*.key`, `id_rsa`, …), no
-  credential-shaped value in TOML, JSON or YAML, and no token with a known prefix (`sk-`,
-  `ghp_`, `AKIA`, …) in a text file;
+- no credentials: no file named like one (`.env`, `.netrc`, `.npmrc`, `credentials`,
+  `*.pem`, `*.key`, `*.p12`, `id_rsa`, …), no private key block, no credential-shaped value in
+  TOML, JSON or YAML, and in a text file no token with a known prefix (`sk-`, `ghp_`, `AKIA`,
+  `npm_`, …) and no `password = …`-style line with a literal value that isn't a
+  `${…}` placeholder;
 - no critical hidden characters, and no file over 20 MiB.
 
 `push --no-evals` publishes without them. The eval packs are at most 32 MiB and 5,000 files.
@@ -224,8 +227,10 @@ $ hlock pull alice/review-bot --into .
 next → hlock sync --plan  ·  apm install --frozen
 ```
 
-It refuses to replace a file that's already there unless you pass `--force`. The eval packs
-are checked against their digest, and scanned like everything else; nothing in them runs
+It refuses to replace a file that's already there unless you pass `--force`. An eval pack
+directory that's already there counts too, and `--force` replaces it whole, so no task from
+another version is left in it. The eval packs are checked against their digest, and scanned
+like everything else; nothing in them runs
 until you evaluate with them. `--no-evals` leaves them out, and pulling a lock into the store
 never downloads them. `--into` works with git sources too
 (`hlock pull github:alice/agent-setup --into .`).

@@ -53,6 +53,8 @@ class Registry:
         self.evals: dict[tuple[str, str], bytes] = {}
         # whether it takes eval packs (specs/registry.md §5.2): a registry from before them doesn't
         self.takes_evals = True
+        # an evals upload that loses a race: None, "uploaded" (these packs), "other" (others)
+        self.evals_race: str | None = None
         self.polls = 0
         self.tamper = False
         self.searches: list[dict] = []
@@ -174,6 +176,12 @@ def handler_for(reg: Registry):
                     return self.problem(404, "Not Found", "no such version")
                 digest = "sha256:" + hashlib.sha256(data).hexdigest()
                 declared = v.get("evals")
+                if reg.evals_race and declared:
+                    # another push got there first: with these eval packs, or (a server's bug) others
+                    declared["uploaded"] = True
+                    if reg.evals_race == "other":
+                        declared["digest"] = "sha256:" + "0" * 64
+                    return self.problem(409, "Conflict", "the version already has its evals archive")
                 if not declared or declared["uploaded"] or declared["digest"] != digest:
                     return self.problem(409, "Conflict", "the version declared no evals archive, another, or has one")
                 reg.evals[(package, version)] = data
@@ -493,6 +501,28 @@ def test_a_remote_package_is_pulled_from_git(world, monkeypatch):
     assert (world["me"] / "from-git/apm.lock.yaml").is_file() and (world["me"] / "from-git/harness.toml").is_file()
 
 
+def test_a_path_in_a_remote_package_is_inside_its_own_subpath(world, monkeypatch):
+    # a package that's a directory of a monorepo: its //PATH is joined to that directory
+    remotes = world["tmp"] / "remotes"
+    repo = remotes / "o/mono.git"
+    shutil.copytree(world["author"], repo / "agents/review")
+    (repo / "agents/review/.hlock/locks").mkdir(parents=True)
+    (repo / "agents/review/.hlock/locks/harness.pi.lock").write_text(LOCK)
+    (repo / "harness.lock").write_text(LOCK.replace('"pi"', '"codex"'))  # the repo root's, not the package's
+    git(repo, "init", "-q", "-b", "main")
+    git(repo, "add", "-A")
+    git(repo, "commit", "-q", "-m", "pin")
+    sha = git(repo, "rev-parse", "HEAD")
+    monkeypatch.setenv("HLOCK_GITHUB_URL", remotes.as_uri())
+    world["reg"].packages["github/mono"] = {"package": "github/mono", "type": "setup", "source": "github",
+                                            "pull": f"github:o/mono//agents/review@{sha}", "versions": []}
+    r = invoke("pull", "github/mono//.hlock/locks/harness.pi.lock", "--registry", world["url"], "--json")
+    assert r.exit_code == 0, r.output
+    out = json.loads(r.output)
+    assert out["source"]["path"] == "agents/review/.hlock/locks/harness.pi.lock", out["source"]
+    assert out["lock"]["harness"]["name"] == "pi"
+
+
 def test_gzip_bomb_guard_counts_unpacked_bytes(world):
     # a small archive that would unpack past the limit is refused before it's written
     big = tarball({"harness.lock": LOCK.encode(), "README.md": b"0" * (65 << 20)})
@@ -661,13 +691,42 @@ def test_renaming_to_the_repository_name_is_refused_when_you_published_the_old_n
     git(author, "remote", "add", "origin", "https://github.com/alice/hlock.git")
     r = invoke("push", "-C", str(author))
     assert r.exit_code == 1, r.output
-    assert "you published alice/my-setup before" in r.output and "pass alice/hlock" in r.output
+    assert "a package named alice/my-setup exists" in r.output and "pass alice/hlock" in r.output
     assert "alice/hlock" not in world["reg"].packages
     assert invoke("push", "-C", str(author), "alice/hlock").exit_code == 0
     # once the repository's name is published too, the default is fine
     (author / "README.md").write_text("# new\n")
     assert invoke("push", "-C", str(author), "--version", "2").exit_code == 0
     assert "2" in [v["version"] for v in world["reg"].packages["alice/hlock"]["versions"]]
+
+
+@pytest.mark.parametrize("old,setup", [
+    ("apm-name", lambda a: (a / "harness.toml").unlink() or (a / "apm.yml").write_text("name: apm-name\nversion: 1.2.0\n")),
+    ("author", lambda a: (a / "harness.toml").unlink() or (a / "apm.yml").unlink()),
+])
+def test_the_rename_guard_checks_every_old_default_name(world, old, setup):
+    login(world)
+    author = world["author"]
+    setup(author)
+    assert invoke("push", "-C", str(author)).exit_code == 0
+    assert f"alice/{old}" in world["reg"].packages
+    git(author, "init", "-q")
+    git(author, "remote", "add", "origin", "https://github.com/alice/hlock.git")
+    r = invoke("push", "-C", str(author))
+    assert r.exit_code == 1 and f"a package named alice/{old} exists" in r.output, r.output
+
+
+def test_the_rename_guard_skips_hlock_inits_default_name(world):
+    login(world)
+    author = world["author"]
+    (author / "harness.toml").write_text('[project]\nname = "demo"\n')
+    (author / "apm.yml").unlink()
+    world["reg"].add("alice/demo", "1", tarball({"harness.lock": LOCK.encode()}))  # someone else's demo
+    git(author, "init", "-q")
+    git(author, "remote", "add", "origin", "https://github.com/alice/hlock.git")
+    r = invoke("push", "-C", str(author))
+    assert r.exit_code == 0, r.output
+    assert "alice/hlock" in world["reg"].packages
 
 
 def with_evals(author: Path) -> Path:
@@ -704,7 +763,12 @@ def test_eval_packs_are_pushed_beside_the_setup_and_pulled_into_a_project(world)
     with tarfile.open(fileobj=io.BytesIO(reg.archives[(package, version)])) as t:
         assert not any(n.startswith("evals/") for n in t.getnames())
 
-    r = invoke("pull", package, "--into", "new")
+    # under a strict umask, so the modes come from the archive, not the default umask
+    old_umask = os.umask(0o077)
+    try:
+        r = invoke("pull", package, "--into", "new")
+    finally:
+        os.umask(old_umask)
     assert r.exit_code == 0, r.output
     new = world["me"] / "new"
     assert (new / "evals/fix_bug/prompt.md").read_text() == "Fix the bug.\n"
@@ -741,6 +805,45 @@ def test_a_version_is_fixed_once_published(world):
     assert a.startswith("sha-")
     (pack / "fix_bug/prompt.md").write_text("Fix a third bug.\n")
     assert dry_run(world)["version"] != a
+
+
+@pytest.mark.parametrize("race,ok", [("uploaded", True), ("other", False)])
+def test_an_evals_upload_that_conflicts(world, race, ok):
+    login(world)
+    with_evals(world["author"])
+    world["reg"].evals_race = race
+    r = invoke("push", "-C", str(world["author"]), "--version", "1", "--json")
+    if ok:
+        assert r.exit_code == 0, r.output
+        assert json.loads(r.output)["evals"]["already_published"]
+    else:
+        assert r.exit_code == 1 and "has other eval packs" in r.output, r.output
+
+
+def test_pull_into_replaces_an_eval_pack_rather_than_merge_into_it(world):
+    login(world)
+    pack = with_evals(world["author"])
+    (pack / "old_task").mkdir()
+    (pack / "old_task/prompt.md").write_text("An old task.\n")
+    assert invoke("push", "-C", str(world["author"]), "--version", "1").exit_code == 0
+    new = world["me"] / "new"
+    # a pack directory that's already there, with another task in it, is a conflict
+    (new / "evals/mine").mkdir(parents=True)
+    (new / "evals/mine/prompt.md").write_text("Mine.\n")
+    r = invoke("pull", "alice/my-setup@1", "--into", "new")
+    assert r.exit_code == 1 and "already has evals/" in r.output and "--force" in r.output, r.output
+    assert (new / "evals/mine/prompt.md").is_file()
+    # with --force, the whole directory is replaced
+    assert invoke("pull", "alice/my-setup@1", "--into", "new", "--force").exit_code == 0
+    assert not (new / "evals/mine").exists() and (new / "evals/old_task/prompt.md").is_file()
+    # a newer version that drops a task leaves no trace of it
+    shutil.rmtree(pack / "old_task")
+    assert invoke("push", "-C", str(world["author"]), "--version", "2").exit_code == 0
+    assert invoke("pull", "alice/my-setup@2", "--into", "new", "--force").exit_code == 0
+    assert not (new / "evals/old_task").exists()
+    got = sorted(str(p.relative_to(new / "evals")) for p in (new / "evals").rglob("*") if p.is_file())
+    want = sorted(str(p.relative_to(pack)) for p in pack.rglob("*") if p.is_file())
+    assert got == want
 
 
 def test_an_old_registry_takes_the_setup_without_its_eval_packs(world):
@@ -783,7 +886,35 @@ def _spaced(p: Path) -> None:
     (p / "fix_bug/notes v2.md").write_text("x")
 
 
+def _netrc(p: Path) -> None:
+    (p / "fix_bug/workspace/.netrc").write_text("machine example.com login me password hunter2\n")
+
+
+def _npmrc(p: Path) -> None:
+    (p / "fix_bug/workspace/npmrc.txt").write_text("//registry.npmjs.org/:_authToken=npm_abcdefghijklmnopqrstuvwxyz0123\n")
+
+
+def _aws(p: Path) -> None:
+    (p / "fix_bug/workspace/.aws").mkdir()
+    (p / "fix_bug/workspace/.aws/credentials").write_text("[default]\naws_access_key_id = x\n")
+
+
+def _deploy_key(p: Path) -> None:
+    # split so the repository's own private-key hook doesn't take the fixture for one
+    begin, end = "-----BEGIN OPENSSH " + "PRIVATE KEY-----", "-----END OPENSSH " + "PRIVATE KEY-----"
+    (p / "fix_bug/workspace/deploy_key").write_text(f"{begin}\nb3BlbnNzaA==\n{end}\n")
+
+
+def _keyed_line(p: Path) -> None:
+    (p / "fix_bug/workspace/settings.ini").write_text("[db]\npassword = correct-horse-battery\n")
+
+
 @pytest.mark.parametrize("setup,why", [
+    (_netrc, ".netrc: named like a credential"),
+    (_npmrc, "npmrc.txt:1: looks like a credential"),
+    (_aws, ".aws/credentials: named like a credential"),
+    (_deploy_key, "deploy_key:1: looks like a credential"),
+    (_keyed_line, "settings.ini:2: looks like a credential"),
     (_dotenv, "named like a credential"),
     (_keyed, "conf.py:1: looks like a credential"),
     (_dot_hlock, "a `.hlock` directory"),

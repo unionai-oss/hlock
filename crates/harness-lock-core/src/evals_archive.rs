@@ -100,18 +100,52 @@ pub fn path_problem(path: &str) -> Option<&'static str> {
 fn sensitive_name(name: &str) -> bool {
     let n = name.to_ascii_lowercase();
     (n == ".env" || (n.starts_with(".env.") && n != ".env.example"))
-        || n.ends_with(".pem")
-        || n.ends_with(".key")
+        || [".netrc", ".npmrc", ".pypirc", "credentials"].contains(&n.as_str())
+        || [".pem", ".key", ".p12", ".pfx"].iter().any(|e| n.ends_with(e))
         || ["id_rsa", "id_ed25519", "id_ecdsa"].iter().any(|p| n.starts_with(p))
 }
 
-/// Credential-shaped words in free text (tokens with a known prefix), as `file:line` labels.
-fn secret_lines(text: &str, file: &str, out: &mut Vec<String>) {
+/// Token prefixes of credentials, for free text: the capture scanner's, and npm's.
+fn token_prefix(w: &str) -> bool {
+    crate::capture::SECRET_PREFIXES.iter().filter(|p| !p.ends_with(' ')).chain(["npm_"].iter()).any(|p| w.starts_with(p))
+}
+
+/// The value of a `key = value` or `key: value` line, when it's a literal (quoted, or one bare
+/// token): `api_key = os.environ["X"]` reads a credential rather than holding one.
+fn keyed_value(line: &str) -> Option<(&str, &str)> {
+    let line = line.trim_start().strip_prefix("export ").unwrap_or(line.trim_start());
+    let i = line.find(['=', ':'])?;
+    let key = line[..i].trim().trim_matches(['"', '\'']);
+    if key.is_empty() || !key.chars().all(|c| c.is_ascii_alphanumeric() || "_.-".contains(c)) {
+        return None;
+    }
+    let v = line[i + 1..].trim().trim_end_matches([',', ';']);
+    let v = match v.chars().next() {
+        Some(q @ ('"' | '\'')) => v[1..].split(q).next()?,
+        _ if v.contains(|c: char| c.is_whitespace() || "()[]{}".contains(c)) => return None,
+        _ => v,
+    };
+    Some((key, v))
+}
+
+/// Credential-shaped text, as `file:line` labels: a private key block, a token with a known
+/// prefix, or a credential-named key with a literal value that isn't a placeholder (the rule
+/// parsed TOML, JSON and YAML get). Only the private key block when it isn't `text_file`.
+fn secret_lines(text: &str, file: &str, text_file: bool, out: &mut Vec<String>) {
     for (i, line) in text.lines().enumerate() {
-        let hit = line
-            .split(|c: char| c.is_whitespace() || "=:\"'`,;()[]{}<>".contains(c))
-            .any(|w| w.len() >= 20 && crate::capture::SECRET_PREFIXES.iter().filter(|p| !p.ends_with(' ')).any(|p| w.starts_with(p)));
-        if hit {
+        let private_key = line.find("-----BEGIN ").is_some_and(|s| {
+            let rest = &line[s + "-----BEGIN ".len()..];
+            rest.find("PRIVATE KEY-----").is_some_and(|e| rest[..e].chars().all(|c| c.is_ascii_uppercase() || c == ' '))
+        });
+        if !text_file {
+            if private_key {
+                out.push(format!("{file}:{}", i + 1));
+            }
+            continue;
+        }
+        let token = line.split(|c: char| c.is_whitespace() || "=:\"'`,;()[]{}<>".contains(c)).any(|w| w.len() >= 20 && token_prefix(w));
+        let keyed = keyed_value(line).is_some_and(|(k, v)| crate::capture::is_secret_key(k) && v.len() >= 8 && !v.contains("HLOCK_SECRET_") && !v.starts_with('$'));
+        if private_key || token || keyed {
             out.push(format!("{file}:{}", i + 1));
         }
     }
@@ -234,11 +268,9 @@ pub fn pack(dir: &Path) -> Result<Option<PackedEvals>> {
         if let Some(v) = crate::registry::parsed(rel, &bytes) {
             crate::registry::secret_lines(&v, rel, "", &mut secrets);
         }
-        if !crate::scan::is_binary_name(rel) {
-            if let Ok(t) = std::str::from_utf8(&bytes) {
-                secret_lines(t, rel, &mut secrets);
-            }
-        }
+        // every rule in a text file; a private key block in any file
+        let text = (!crate::scan::is_binary_name(rel)).then(|| std::str::from_utf8(&bytes).ok()).flatten();
+        secret_lines(text.map(std::borrow::Cow::Borrowed).unwrap_or_else(|| String::from_utf8_lossy(&bytes)).as_ref(), rel, text.is_some(), &mut secrets);
         hidden.extend(crate::scan::scan_bytes(&bytes, rel));
         let mut h = tar::Header::new_ustar();
         h.set_size(bytes.len() as u64);
@@ -279,6 +311,7 @@ pub fn unpack(bytes: &[u8], dest: &Path, declared: &[String]) -> Result<(Vec<Str
     let bad = |why: String| err(format!("the evals archive is unsafe or invalid: {why}; nothing was written"));
     // first pass: the entries, so the pack directories are known before anything is written
     let mut list: Vec<(String, bool)> = Vec::new();
+    let mut sizes: std::collections::HashMap<String, u64> = std::collections::HashMap::new();
     let mut total = 0u64;
     {
         let mut archive = tar::Archive::new(flate2::read::GzDecoder::new(bytes));
@@ -304,10 +337,17 @@ pub fn unpack(bytes: &[u8], dest: &Path, declared: &[String]) -> Result<(Vec<Str
             if let Some(why) = path_problem(&path) {
                 return Err(bad(format!("{path:?} has {why}")));
             }
-            total += entry.header().size().unwrap_or(0);
+            // the size the body is read with (a PAX `size` overrides the ustar one), which
+            // must be the header's, so the limit counts what's actually written
+            let size = entry.size();
+            if entry.header().size().ok() != Some(size) {
+                return Err(bad(format!("{path:?} has a size that differs from its header's")));
+            }
+            total += size;
             if total > MAX_UNPACKED {
                 return Err(bad(format!("it unpacks to more than {} MiB", MAX_UNPACKED >> 20)));
             }
+            sizes.insert(path.clone(), size);
             list.push((path, mode == 0o755));
         }
     }
@@ -347,8 +387,12 @@ pub fn unpack(bytes: &[u8], dest: &Path, declared: &[String]) -> Result<(Vec<Str
         if let Some(parent) = to.parent() {
             std::fs::create_dir_all(parent).map_err(|e| crate::error::io_at(parent, e))?;
         }
+        let size = *sizes.get(&path).ok_or_else(|| bad(format!("{path:?} wasn't in the first read")))?;
         let mut buf = Vec::new();
-        entry.by_ref().take(MAX_UNPACKED + 1).read_to_end(&mut buf).map_err(|e| bad(e.to_string()))?;
+        entry.by_ref().take(size + 1).read_to_end(&mut buf).map_err(|e| bad(e.to_string()))?;
+        if buf.len() as u64 != size {
+            return Err(bad(format!("{path:?} isn't the size its header says")));
+        }
         let mut f = std::fs::OpenOptions::new().write(true).create_new(true).open(&to).map_err(|e| bad(format!("{path}: {e}")))?;
         f.write_all(&buf).map_err(|e| crate::error::io_at(&to, e))?;
         drop(f);
@@ -380,9 +424,86 @@ pub fn version_evals(v: &Value) -> Option<Option<&Value>> {
     Some(m.get("evals").filter(|e| e.get("digest").and_then(Value::as_str).is_some()))
 }
 
+/// A tar.gz of plain `entries`, then `path` whose ustar header says it's empty while a PAX
+/// `size` record says it's `data`'s length: the body a reader reads isn't the header's size.
+#[cfg(test)]
+pub(crate) fn pax_sized_tarball(entries: &[(&str, &[u8])], path: &str, data: &[u8]) -> Vec<u8> {
+    let mut t = tar::Builder::new(flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default()));
+    let file = |p: &str, size: u64| {
+        let mut h = tar::Header::new_ustar();
+        h.set_path(p).unwrap();
+        h.set_size(size);
+        h.set_mode(0o644);
+        h.set_entry_type(tar::EntryType::Regular);
+        h.set_cksum();
+        h
+    };
+    for (p, d) in entries {
+        t.append(&file(p, d.len() as u64), *d).unwrap();
+    }
+    let body = format!(" size={}\n", data.len());
+    let record = (1..).map(|n: usize| format!("{}{body}", n + body.len())).find(|r| r.len() == r.split(' ').next().unwrap().parse::<usize>().unwrap()).unwrap();
+    let mut x = tar::Header::new_ustar();
+    x.set_path("PaxHeader").unwrap();
+    x.set_size(record.len() as u64);
+    x.set_entry_type(tar::EntryType::XHeader);
+    x.set_cksum();
+    t.append(&x, record.as_bytes()).unwrap();
+    t.append(&file(path, 0), data).unwrap();
+    t.into_inner().unwrap().finish().unwrap()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn credentials_in_text_and_names() {
+        let hits = |text: &str, text_file: bool| {
+            let mut out = Vec::new();
+            secret_lines(text, "f", text_file, &mut out);
+            out
+        };
+        // a private key block, in any file
+        // split so the repository's own private-key hook doesn't take these for keys
+        assert_eq!(hits(concat!("x\n-----BEGIN OPENSSH ", "PRIVATE KEY-----\nb3Blbn\n"), true), ["f:2"]);
+        assert_eq!(hits(concat!("-----BEGIN RSA ", "PRIVATE KEY-----"), false), ["f:1"]);
+        assert!(hits("-----BEGIN PUBLIC KEY-----", true).is_empty());
+        // a token with a known prefix, npm's too
+        assert_eq!(hits("//registry.npmjs.org/:_authToken=npm_abcdefghijklmnopqrstuvwxyz0123", true), ["f:1"]);
+        // a credential-named key with a literal value that isn't a placeholder
+        for (line, hit) in [
+            ("API_KEY=abc123defg", true),
+            ("export GITHUB_TOKEN='abcdef123456'", true),
+            ("password: hunter2hunter2", true),
+            ("\"client_secret\": \"s3cr3t-value\",", true),
+            ("api_key = os.environ[\"API_KEY\"]", false),
+            ("token = get_token()", false),
+            ("token: ${HLOCK_SECRET_TOKEN}", false),
+            ("password = \"$PASS\"", false),
+            ("password = short", false),
+            ("name = a-long-ordinary-value", false),
+        ] {
+            assert_eq!(!hits(line, true).is_empty(), hit, "{line}");
+            assert!(hits(line, false).is_empty(), "{line}: only a key block counts outside text files");
+        }
+        for n in [".netrc", ".npmrc", ".pypirc", "credentials", "cert.p12", "cert.PFX", "server.key", "id_ed25519"] {
+            assert!(sensitive_name(n), "{n}");
+        }
+        assert!(!sensitive_name("credentials.md") && !sensitive_name("netrc.txt"));
+    }
+
+    #[test]
+    fn a_pax_size_that_isnt_the_headers_is_refused() {
+        let d = std::env::temp_dir().join(format!("hlock-evals-pax-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        let bytes = pax_sized_tarball(&[("evals/pack.toml", b"[pack]\n")], "evals/big", &vec![b'x'; 4096]);
+        let e = unpack(&bytes, &d, &["evals".into()]).unwrap_err().to_string();
+        assert!(e.contains("differs from its header"), "{e}");
+        assert!(!d.join("evals/big").exists());
+        let _ = std::fs::remove_dir_all(&d);
+    }
 
     fn tmp(tag: &str) -> PathBuf {
         let d = std::env::temp_dir().join(format!("hlock-evals-test-{tag}-{}", std::process::id()));

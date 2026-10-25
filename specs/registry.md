@@ -129,6 +129,8 @@ A gzip'd tar. A server must refuse (`422`), and the client refuses before writin
     `.hlock/locks/.hlock/vendor/`;
 - an archive with none of `harness.toml`, `harness.lock`, `apm.yml`, `apm.lock.yaml`, or a
   nested harness file;
+- an entry whose size isn't its header's (a PAX `size` record that differs from the ustar
+  size: the limits count the ustar sizes, and readers read the PAX one);
 - more than 500 entries, more than 4 MiB compressed, or more than 64 MiB unpacked.
 
 A server should also check that `harness.lock` and `harness.toml` parse as TOML and the APM
@@ -168,6 +170,7 @@ anything:
   `LPT1`–`LPT9`, with or without an extension, in any case), or is `.git` or `.hlock` (in any
   case);
 - two paths that are equal when lowercased;
+- an entry whose size isn't its header's, as for the setup archive;
 - more than 5,000 entries, more than 32 MiB compressed, or more than 256 MiB unpacked.
 
 A server needs no TOML for this. The client also refuses, on pull, a pack directory that the
@@ -183,10 +186,21 @@ different files). Each pack is packed as exactly the files `tree_digest` hashes:
 but `.git`, `.DS_Store`, `__pycache__`, `node_modules` and symlinks. `push` stops, listing every
 problem, on a file that breaks the path rules above, one it can't read or that's larger than
 20 MiB (it can't be scanned), one with critical hidden characters, and one that looks like a
-credential: a credential-shaped value in a TOML, JSON or YAML file, a token with a known
-credential prefix (`sk-`, `ghp_`, `AKIA`, `xoxb-`, …) on a line of a text file, or a file named
-`.env` or `.env.*` (except `.env.example`), `*.pem`, `*.key`, `id_rsa*`, `id_ed25519*` or
-`id_ecdsa*`. `push --no-evals` publishes without the eval packs.
+credential:
+
+- a private key block (`-----BEGIN … PRIVATE KEY-----`) in any file;
+- a credential-shaped value in a TOML, JSON or YAML file;
+- on a line of a text file, a token with a known credential prefix (`sk-`, `ghp_`, `AKIA`,
+  `xoxb-`, `npm_`, …), or a `key = value` / `key: value` whose key names a credential
+  (`password`, `api_key`, `token`, …) and whose value is a literal of at least 8 characters
+  that isn't a placeholder (`${…}`, `HLOCK_SECRET_…`). A value that's an expression
+  (`os.environ["KEY"]`) isn't a literal. The general long-mixed-case-token rule the setup
+  archive uses isn't applied to free text, where fixtures are full of hashes;
+- a file named `.env` or `.env.*` (except `.env.example`), `.netrc`, `.npmrc`, `.pypirc`,
+  `credentials` (in any directory), `*.pem`, `*.key`, `*.p12`, `*.pfx`, `id_rsa*`,
+  `id_ed25519*` or `id_ecdsa*`.
+
+`push --no-evals` publishes without the eval packs.
 
 ## 6. Client behavior
 
@@ -219,9 +233,11 @@ The name is `NAMESPACE/NAME`, else `whoami`'s `user.handle` and the first of:
 4. the directory's name;
 
 slugified. The output says where the name came from, never the remote's URL. When the name
-came from the git remote, `[project] name` slugifies to another one, the registry has
-`NS/<that>` and doesn't have `NS/<repo>`, push stops and asks for `NAMESPACE/NAME`, so people
-pulling the old name don't silently stop getting updates.
+came from the git remote and the registry doesn't have `NS/<repo>`, push checks each name it
+would otherwise have defaulted to, in order (`[project] name`, unless it's `demo`, which
+`hlock init` writes and unrelated projects share; `apm.yml`'s `name`; the directory's). If the
+registry has `NS/<that>`, push stops ("a package named NS/X exists") and asks for
+`NAMESPACE/NAME`, so people pulling the old name don't silently stop getting updates.
 
 The version is `--version`, else `apm.yml`'s `version`, else `sha-` and the first 12 hex of
 the SHA-256 of `<setup digest>\n<evals digest>` when there's an evals archive (so changing
@@ -249,8 +265,9 @@ reference that isn't an existing file is a registry reference; `github:`, `gitla
 URLs stay git sources.
 
 The client reads the package; an `apm-package` is refused with a pointer to `apm install`; a
-remote one is pulled from its `pull` git source (with PATH added the way a git source takes a
-path). A hosted one: read the version, download, check the bytes against the version's `digest`
+remote one is pulled from its `pull` git source, with PATH joined to that source's own path
+(a package at `github:o/mono//agents/review@<sha>` pulls `//.hlock/locks/harness.pi.lock` as
+`agents/review/.hlock/locks/harness.pi.lock`). A hosted one: read the version, download, check the bytes against the version's `digest`
 and `X-Hlock-Digest`, unpack into a scratch directory (§5.1), choose the lock, then place it as
 a git pull does.
 
@@ -290,8 +307,11 @@ and fails with a not-found error rather than refresh another lock.
 files without `--force`, and takes no PATH. When the version has an uploaded evals archive (and
 no `--no-evals`), it downloads it too (at most 32 MiB), checks it against `Version.evals.digest`
 and `X-Hlock-Digest`, unpacks it (§5.2, restoring `0755` explicitly), scans it for hidden
-characters like the rest (honouring `--allow-hidden`), and writes the packs with the same
-conflict check. A version whose evals archive is committed to but not uploaded is refused.
+characters like the rest (honouring `--allow-hidden`), and writes the packs. A pack
+directory that's already in DIR is a conflict like an existing file; with `--force` the whole
+directory is replaced, never merged into, so no task of another version survives and the
+packs' digest matches the lock's. A version whose evals archive is committed to but not
+uploaded is refused.
 The lock's `[pulled]` gains `evals-digest`, and the output warns that eval packs run commands
 when graded and their fixtures are the agent's workspace. Store pulls and `-o FILE` never
 fetch the evals archive.
