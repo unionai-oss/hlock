@@ -536,7 +536,11 @@ fn resolve(
                 }));
             }
         }
-        let lf = resolver.resolve_lock().map_err(py_err)?;
+        let mut lf = resolver.resolve_lock().map_err(py_err)?;
+        // the pins `hlock add` and `hlock sync` recorded stay; only the stack is resolved
+        if let Ok(prev) = core::Lockfile::load(&lock) {
+            lf.keep_declared(&prev);
+        }
         lf.save(&lock).map_err(py_err)?;
         Ok(lf)
     })?;

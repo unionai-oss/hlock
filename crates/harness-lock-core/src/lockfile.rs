@@ -990,6 +990,34 @@ impl Lockfile {
         self.kind.as_deref() == Some("pin")
     }
 
+    /// Keep the declared dependencies `prev` pinned (`hlock add`, `hlock sync`): its declared
+    /// skills, MCP servers, instruction files and plugins replace the bare entries of the same
+    /// name, along with its APM packages and the secrets those MCP servers use. `resolve`
+    /// builds a lock from the manifest's names alone, so without this a re-resolve would drop
+    /// every pin and `hlock check` would fail on each one. Returns how many it kept.
+    pub fn keep_declared(&mut self, prev: &Lockfile) -> usize {
+        fn keep<T: Clone>(have: &mut Vec<T>, prev: &[T], declared: impl Fn(&T) -> bool, name: impl Fn(&T) -> &str) -> usize {
+            let mut n = 0;
+            for p in prev.iter().filter(|p| declared(p)) {
+                match have.iter_mut().find(|h| name(h) == name(p)) {
+                    Some(h) => *h = p.clone(),
+                    None => have.push(p.clone()),
+                }
+                n += 1;
+            }
+            n
+        }
+        let mut n = keep(&mut self.skill, &prev.skill, |s| s.dep.declared, |s| &s.name);
+        n += keep(&mut self.tool, &prev.tool, |t| t.dep.declared, |t| &t.name);
+        n += keep(&mut self.instructions, &prev.instructions, |i| i.dep.declared, |i| &i.name);
+        n += keep(&mut self.native, &prev.native, |p| p.dep.declared, |p| &p.name);
+        n += keep(&mut self.package, &prev.package, |_| true, |p| &p.name);
+        let tools: std::collections::BTreeSet<&str> = self.tool.iter().filter(|t| t.dep.declared).map(|t| t.name.as_str()).collect();
+        let secrets: Vec<SecretRef> = prev.secret.iter().filter(|s| s.used_by.iter().any(|u| tools.contains(u.as_str())) &&!self.secret.iter().any(|h| h.name == s.name)).cloned().collect();
+        self.secret.extend(secrets);
+        n
+    }
+
     /// Whether this pin captured any user-level setup (`--user` or `--include-user-scope`).
     /// Locks pinned before scopes were recorded captured everything, so they count too.
     pub fn pins_user_scope(&self) -> bool {
@@ -1225,5 +1253,25 @@ mod tests {
              [[decider]]\nuse = \"approve\"\nmodel = \"kev:4b\"\nruntime = \"ollama\"\n"
         );
         Lockfile::from_str(&ok).unwrap();
+    }
+    #[test]
+    fn keep_declared_carries_pins_into_a_resolved_lock() {
+        let prev = Lockfile::from_str(&format!(
+            "{HEAD}[[skill]]\nname = \"sql\"\norigin = \"third-party\"\nsource = \"github:acme/skills/skills/sql@^1.2\"\ndeclared = true\ncommit = \"abc123\"\n\
+             [[skill]]\nname = \"found\"\norigin = \"first-party\"\n\
+             [[tool]]\nname = \"github\"\nkind = \"mcp\"\ndeclared = true\n\
+             [[secret]]\nname = \"HLOCK_SECRET_GITHUB_TOKEN\"\nused-by = [\"github\"]\n\
+             [[secret]]\nname = \"HLOCK_SECRET_OTHER\"\nused-by = [\"other\"]\n"
+        ))
+        .unwrap();
+        let mut lf = Lockfile::from_str(&format!("{HEAD}[[skill]]\nname = \"sql\"\norigin = \"first-party\"\n")).unwrap();
+        assert_eq!(lf.keep_declared(&prev), 2);
+        assert_eq!(lf.skill.len(), 1, "what pin only found installed isn't carried");
+        assert_eq!(lf.skill[0].dep.commit.as_deref(), Some("abc123"));
+        assert_eq!(lf.tool[0].name, "github");
+        assert_eq!(lf.secret.iter().map(|s| s.name.as_str()).collect::<Vec<_>>(), ["HLOCK_SECRET_GITHUB_TOKEN"]);
+        // carrying twice changes nothing
+        lf.keep_declared(&prev);
+        assert_eq!((lf.skill.len(), lf.tool.len(), lf.secret.len()), (1, 1, 1));
     }
 }

@@ -398,3 +398,25 @@ def test_apm_yml_mcp_servers_are_the_projects_own(world, tmp_path):
     assert r.exit_code == 0, r.output
     assert json.loads(Path(".mcp.json").read_text())["mcpServers"]["local"]["command"] == "my-server"
     assert invoke("check").exit_code == 0, invoke("check").output
+
+
+def test_resolve_keeps_what_add_pinned(world):
+    assert invoke("evals", "init").exit_code == 0
+    assert invoke("add", "skill", "github:acme/skills/skills/sql@^1.2").exit_code == 0
+    assert invoke("add", "mcp", "npm:@modelcontextprotocol/server-github@^1").exit_code == 0
+    manifest = Path("harness.toml")
+    manifest.write_text(manifest.read_text() + '\n[evals]\npacks = ["./evals"]\nseeds = 1\n\n'
+                        '[candidates.llm.planner]\nany_of = ["anthropic:sonnet", "anthropic:haiku"]\n')
+    r = invoke("resolve")
+    assert r.exit_code == 0, r.output
+    lf = lock()
+    assert lf["evidence"]["split"] == "holdout"
+    s = next(x for x in lf["skill"] if x["name"] == "sql")
+    assert s["declared"] and s["resolved-tag"] == "v1.3.0" and len(s["commit"]) == 40
+    t = next(x for x in lf["tool"] if x["name"] == "github")
+    assert t["declared"] and t["version"] == "1.4.0"
+    r = invoke("check")
+    assert "not in the lock" not in r.output, r.output
+    # a second resolve keeps them too
+    assert invoke("resolve").exit_code == 0
+    assert next(x for x in lock()["skill"] if x["name"] == "sql")["resolved-tag"] == "v1.3.0"
