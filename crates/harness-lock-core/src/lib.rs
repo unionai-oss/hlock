@@ -24,6 +24,7 @@ pub mod launch;
 pub mod localize;
 pub mod lockdiff;
 pub mod error;
+pub mod evals_archive;
 pub mod fsutil;
 pub mod graders;
 pub mod hash;

@@ -194,7 +194,7 @@ pub fn push(url: &str, dir: &Path, name: Option<&str>, dry_run: bool) -> Result<
     let project = slug(packed.name.rsplit('/').next().unwrap_or(&packed.name));
     let package = match name {
         Some(n) => {
-            let r = parse_ref(n).ok_or_else(|| err(format!("{n:?} isn't NAMESPACE/NAME (lowercase letters, digits, - and, in the name, _ .)")))?;
+            let r = parse_ref(n).filter(|r| r.path.is_none()).ok_or_else(|| err(format!("{n:?} isn't NAMESPACE/NAME (lowercase letters, digits, - and, in the name, _ .)")))?;
             if r.version.is_some() {
                 return Err(err(format!("{n}: the version comes from apm.yml ({}); pass NAMESPACE/NAME without @VERSION", packed.version)));
             }
@@ -224,11 +224,11 @@ pub fn push(url: &str, dir: &Path, name: Option<&str>, dry_run: bool) -> Result<
         out["dry_run"] = json!(true);
         return Ok(out);
     }
-    let r = parse_ref(&package).ok_or_else(|| err(format!("{package:?} isn't NAMESPACE/NAME")))?;
+    let r = parse_ref(&package).filter(|r| r.path.is_none()).ok_or_else(|| err(format!("{package:?} isn't NAMESPACE/NAME")))?;
     if !client.has_token() {
         return Err(err(format!("not logged in to {url}: run `hlock login {url}` (or set {})", crate::registry::TOKEN_ENV)));
     }
-    match client.publish_as(&r, &version, &packed.bytes, "application/zip")? {
+    match client.publish_as(&r, &version, &packed.bytes, "application/zip", None)? {
         Some(resp) => {
             if let Value::Object(m) = resp {
                 for (k, v) in m {
@@ -341,7 +341,7 @@ pub fn unpack(bytes: &[u8], dest: &Path) -> Result<Vec<String>> {
 /// `hlock apm pull NS/NAME[@VERSION]`: download a published APM package, check it against
 /// its digest and for hidden characters, and write its files into `into` (default `./NAME`).
 pub fn pull(url: &str, spec: &str, into: Option<&Path>, force: bool, allow_hidden: &[String]) -> Result<Value> {
-    let r = parse_ref(spec).ok_or_else(|| err(format!("{spec:?} isn't NAMESPACE/NAME[@VERSION]")))?;
+    let r = parse_ref(spec).filter(|r| r.path.is_none()).ok_or_else(|| err(format!("{spec:?} isn't NAMESPACE/NAME[@VERSION]")))?;
     let client = Client::for_url(url);
     let versions = published(&client, &r)?;
     let chosen = match &r.version {
