@@ -254,6 +254,16 @@ def _fail(message: str, hint: str | None = None) -> None:
     sys.exit(1)
 
 
+def _one_option(*given: tuple[str, str | None]) -> str | None:
+    """The value of an option passed under any of its names (`--root`, `-C`, …); a usage error
+    when two of them differ."""
+    passed = [(flag, v) for flag, v in given if v is not None]
+    if len({v for _, v in passed}) > 1:
+        raise click.UsageError(f"{' and '.join(flag for flag, _ in passed)} are names for the same option; "
+                               f"pass one of them")
+    return passed[0][1] if passed else None
+
+
 def _hint_for(e: Exception) -> str | None:
     """A hint for a core error, by its type (see harness_lock.HarnessLockError) and what it names."""
     message = str(e)
@@ -1409,10 +1419,11 @@ def _lock_ref(arg: str, as_json: bool = False) -> tuple[str, str | None]:
               help="Name to store the lock under.  [dim]\\[default: the repo owner][/]")
 @click.option("-o", "--out", default=None, metavar="FILE",
               help="Write the lock into the project as FILE (e.g. harness.alice.lock) instead of the store.")
-@click.option("--root", "--into", "into", default=None, metavar="DIR",
+@click.option("--root", "into", default=None, metavar="DIR",
               help="Write the whole setup (harness.toml, its locks and what they vendor, apm.yml, "
                    "apm.lock.yaml, and a registry package's eval packs) with DIR as its root. Refuses to "
                    "overwrite files without --force. [cmd]--into[/] is another name for it.")
+@click.option("--into", "into_alias", default=None, metavar="DIR", hidden=True)
 @click.option("--no-evals", is_flag=True, help="With --root from a registry: leave out the package's eval packs.")
 @click.option("--force", is_flag=True, help="Replace an existing lock of that name that came from somewhere else "
                                             "(with --root: files that already exist).")
@@ -1421,8 +1432,8 @@ def _lock_ref(arg: str, as_json: bool = False) -> tuple[str, str | None]:
 @click.option("--registry", default=None, metavar="URL",
               help="The registry a NAMESPACE/NAME source is in.  [dim]\\[default: $HLOCK_REGISTRY, else the one you logged in to][/]")
 @click.option("--json", "as_json", is_flag=True, help="Print the result as JSON.")
-def pull(sources: tuple[str, ...], name: str | None, out: str | None, into: str | None, no_evals: bool, force: bool,
-         allow_hidden: tuple[str, ...], registry: str | None, as_json: bool) -> None:
+def pull(sources: tuple[str, ...], name: str | None, out: str | None, into: str | None, into_alias: str | None,
+         no_evals: bool, force: bool, allow_hidden: tuple[str, ...], registry: str | None, as_json: bool) -> None:
     """Pull someone else's [path]harness.lock[/] from a git repository or a registry.
 
     SOURCE is [cmd]github:OWNER/REPO\\[/PATH]\\[@REF][/], [cmd]gitlab:GROUP/REPO\\[//PATH]\\[@REF][/],
@@ -1435,6 +1446,7 @@ def pull(sources: tuple[str, ...], name: str | None, out: str | None, into: str 
 
     With no SOURCE, refreshes every pulled lock; with NAMEs or LOCK files, refreshes those.
     """
+    into = _one_option(("--root", into), ("--into", into_alias))
     if no_evals and not into:
         _fail("--no-evals only applies with --root", "eval packs are written only by [cmd]hlock pull NAMESPACE/NAME --root DIR[/]")
     remote = [s for s in sources if is_pull_source(s) or is_registry_ref(s)]
@@ -1694,15 +1706,17 @@ def whoami(registry: str | None, as_json: bool) -> None:
 @click.argument("name", required=False, metavar="[NAMESPACE/NAME]")
 @click.option("--version", "version", default=None, metavar="VERSION",
               help="The version to publish.  [dim]\\[default: apm.yml's version, else sha-<digest>][/]")
-@click.option("--root", "-C", "--dir", "directory", default=None, metavar="DIR",
+@click.option("--root", "directory", default=None, metavar="DIR",
               help="The project to push: its harness.toml, locks and the rest are read from DIR. [cmd]-C[/] and "
                    "[cmd]--dir[/] are other names for it.  [dim]\\[default: the git repository's root, else .][/]")
+@click.option("-C", "c_alias", default=None, metavar="DIR", hidden=True)
+@click.option("--dir", "dir_alias", default=None, metavar="DIR", hidden=True)
 @click.option("--no-evals", is_flag=True, help="Publish without the eval packs harness.toml names.")
 @click.option("--dry-run", is_flag=True, help="Show what would be pushed, and push nothing.")
 @click.option("--registry", default=None, metavar="URL", help="The registry to push to.  [dim]\\[default: your default registry][/]")
 @click.option("--json", "as_json", is_flag=True, help="Print the result as JSON.")
-def push(name: str | None, version: str | None, directory: str | None, no_evals: bool, dry_run: bool,
-         registry: str | None, as_json: bool) -> None:
+def push(name: str | None, version: str | None, directory: str | None, c_alias: str | None, dir_alias: str | None,
+         no_evals: bool, dry_run: bool, registry: str | None, as_json: bool) -> None:
     """Publish this project's agent setup to a registry.
 
     The project is the git repository you're in, from its root, wherever in it you run this
@@ -1717,6 +1731,7 @@ def push(name: str | None, version: str | None, directory: str | None, no_evals:
     project is the repository's root), else [key]\\[project] name[/]. The same files always pack to
     the same digest, so pushing twice is safe.
     """
+    directory = _one_option(("--root", directory), ("-C", c_alias), ("--dir", dir_alias))
     url = _registry(registry)
     with _working(f"{'Packing' if dry_run else 'Pushing to ' + url}…"):
         r = json.loads(_registry_push(url, root=directory, name=name, version=version, dry_run=dry_run,
@@ -1763,7 +1778,8 @@ def push(name: str | None, version: str | None, directory: str | None, no_evals:
 _NAME_FROM = {"git-remote": "the git remote", "project": "\\[project] name", "apm": "apm.yml's name",
               "directory": "the directory's name"}
 _ROOT_FROM = {"flag": "--root", "repository": "the repository root",
-              "current-directory": "the current directory; not in a git repository"}
+              "current-directory": "the current directory; not in a git repository",
+              "current-directory-git-failed": "the current directory; git couldn't find the repository"}
 
 
 @main.command()

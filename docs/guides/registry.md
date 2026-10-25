@@ -87,7 +87,11 @@ next → hlock pull alice/review-bot@1.0.0
 - **The root** is the directory whose files are pushed: the root of the git repository
   you're in, else (outside a repository) the current directory. `--root DIR` pushes DIR
   instead, such as one project of a monorepo; `-C DIR` and `--dir DIR` are other names for
-  it. `push` says which root it packed and why. When the repository's root has nothing to
+  it; passing two of them with different directories is an error. `push` says which root it
+  packed and why. It warns when the directory you're in has a setup of its own that isn't
+  the one pushed (pass `--root .` to push it), and when git can't tell whether you're in a
+  repository (it isn't installed, say, or doesn't trust the repository), in which case it
+  pushes the current directory. When the repository's root has nothing to
   push, `push` says so, and names the `--root` of the nearest directory above you that has a
   setup:
 

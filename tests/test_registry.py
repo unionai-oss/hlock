@@ -226,6 +226,9 @@ def world(tmp_path, monkeypatch):
     for key in list(os.environ):
         if key.startswith(("HLOCK_", "GIT_")):
             monkeypatch.delenv(key)
+    # git never finds a repository above the test's directory, nor reads the machine's config
+    monkeypatch.setenv("GIT_CEILING_DIRECTORIES", str(tmp_path.parent))
+    monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
     monkeypatch.setenv("HLOCK_HOME", str(tmp_path / "hlock-home"))
     monkeypatch.setenv("HLOCK_KEYCHAIN", "0")
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
@@ -773,13 +776,67 @@ def test_a_repository_root_with_nothing_to_push_points_at_the_project(world, mon
     assert r.exit_code == 1 and "pass --root DIR" in r.output, r.output
     (review / "harness.toml").write_text('[project]\nname = "Review Bot"\n')
     r = invoke("push", "--dry-run")
-    assert r.exit_code == 1 and "hlock push --root .." in r.output, r.output
+    assert r.exit_code == 1 and "`hlock push --root ..`" in r.output, r.output
     monkeypatch.chdir(review)
     r = invoke("push", "--dry-run")
-    assert r.exit_code == 1 and "hlock push --root ." in r.output, r.output
+    assert r.exit_code == 1 and "`hlock push --root .`" in r.output, r.output
     # and --root pushes it, named after [project] name (it isn't the repository's root)
     out = json.loads(invoke("push", "--root", ".", "--dry-run", "--json").output)
     assert out["package"] == "alice/review-bot" and out["root_from"] == "flag"
+
+
+def test_a_project_in_a_subdirectory_is_told_the_repository_root_is_pushed(world, monkeypatch):
+    login(world)
+    author = world["author"]
+    git(author, "init", "-q")
+    team = author / "team"
+    team.mkdir()
+    (team / "harness.toml").write_text('[project]\nname = "Team Bot"\n')
+    monkeypatch.chdir(team)
+    out = json.loads(invoke("push", "--dry-run", "--json").output)
+    assert out["root_from"] == "repository"
+    warning = "this directory has its own hlock setup; pushing the repository root. Pass --root . to push this one"
+    assert warning in out["warnings"]
+    assert warning in invoke("push", "--dry-run").output
+    assert warning not in json.loads(invoke("push", "--root", ".", "--dry-run", "--json").output)["warnings"]
+
+
+@pytest.mark.parametrize("fake,why", [
+    ("#!/bin/sh\necho \"fatal: detected dubious ownership in repository at '/x'\" >&2\nexit 128\n",
+     "fatal: detected dubious ownership in repository at '/x'"),
+    (None, "git isn't installed"),
+])
+def test_push_says_so_when_git_cant_find_the_repository(world, monkeypatch, fake, why):
+    login(world)
+    bin_dir = world["tmp"] / "bin"
+    bin_dir.mkdir()
+    if fake:
+        (bin_dir / "git").write_text(fake)
+        (bin_dir / "git").chmod(0o755)
+    monkeypatch.setenv("PATH", str(bin_dir))
+    monkeypatch.chdir(world["author"])
+    r = invoke("push", "--dry-run", "--json")
+    assert r.exit_code == 0, r.output
+    out = json.loads(r.output)
+    assert out["root_from"] == "current-directory-git-failed"
+    assert any(f"couldn't find the git repository ({why}); pushing the current directory" in w for w in out["warnings"])
+    r = invoke("push", "--dry-run")
+    assert f"({why})" in r.output and "git couldn't find the repository" in r.output
+
+
+def test_two_names_for_the_root_must_agree(world):
+    login(world)
+    author = str(world["author"])
+    for args in (["-C", author, "--root", "elsewhere"], ["--dir", author, "-C", "elsewhere"]):
+        r = invoke("push", *args, "--dry-run")
+        assert r.exit_code == 2 and "are names for the same option" in r.output, r.output
+    assert invoke("push", "-C", author, "--root", author, "--dry-run").exit_code == 0
+    r = invoke("pull", "alice/my-setup", "--root", "a", "--into", "b")
+    assert r.exit_code == 2 and "--root and --into are names for the same option" in r.output, r.output
+    # the help shows one option, naming its alias
+    help_text = invoke("pull", "--help").output
+    assert re.search(r"^│ --root\b", help_text, re.MULTILINE) and not re.search(r"^│ --into\b", help_text, re.MULTILINE)
+    assert "--into is another name for it" in " ".join(help_text.split())
 
 
 def test_pull_root_and_into_name_the_same_option(world):
@@ -811,7 +868,8 @@ def test_the_sdk_pushes_the_repository_root_and_takes_root_aliases(world, monkey
     for given in ({"root": str(author)}, {"dir": str(author)}, {"directory": str(author)}):
         out = json.loads(hl.registry_push(url, dry_run=True, **given))
         assert (out["digest"], out["root_from"]) == (default["digest"], "flag"), given
-    assert json.loads(hl.registry_push(url, str(author), dry_run=True))["digest"] == default["digest"]  # positional
+    positional = json.loads(hl.registry_push(url, str(author), dry_run=True))
+    assert (positional["digest"], positional["root_from"]) == (default["digest"], "flag")
     with pytest.raises(TypeError, match="root= and dir="):
         hl.registry_push(url, root=str(author), dir="elsewhere", dry_run=True)
     assert invoke("push", "--root", str(author)).exit_code == 0

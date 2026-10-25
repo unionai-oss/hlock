@@ -638,7 +638,7 @@ hlock push [NAMESPACE/NAME] [--version V] [--root DIR] [--no-evals] [--dry-run] 
 | `--no-evals` | | Publish without the eval packs |
 | `--dry-run` | | List the files, size and digest; push nothing |
 | `--registry URL` | `HLOCK_REGISTRY`, else the one you logged in to | The registry to push to |
-| `--json` | | Print the package, version, digest, size, files, where the name came from (`name_from`), the root it packed and why (`root`; `root_from`: `flag`, `repository` or `current-directory`), the eval packs (`evals`) and warnings as JSON |
+| `--json` | | Print the package, version, digest, size, files, where the name came from (`name_from`), the root it packed and why (`root`; `root_from`: `flag`, `repository`, `current-directory`, or `current-directory-git-failed` when git couldn't tell, with a warning saying why), the eval packs (`evals`) and warnings as JSON |
 
 ## `search`
 

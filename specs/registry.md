@@ -221,8 +221,13 @@ keychain.
 
 **Push.** The project pushed is the **root**: `--root DIR` (`-C` and `--dir` are aliases), else
 the root of the git work tree the working directory is in (`git rev-parse --show-toplevel`,
-without the caller's `GIT_DIR` or `GIT_WORK_TREE`), else the working directory. The result
-says which (`root`, and `root_from`: `flag`, `repository`, `current-directory`). When the
+without the caller's `GIT_DIR` or `GIT_WORK_TREE`), else the working directory. Only git's
+"not a git repository (or any …)" means "not in one"; when git fails otherwise (it isn't
+installed, `safe.directory`, a broken `.git`), the root is the working directory and push warns
+with git's first line of error. The result says which (`root`, and `root_from`: `flag`,
+`repository`, `current-directory`, `current-directory-git-failed`). Pushing the repository's
+root from a subdirectory that has a setup of its own warns that that setup isn't the one
+pushed. Two names for `--root` with different values are a usage error. When the
 root is a repository's and has no setup, push fails and names the `--root` of the nearest
 directory from the working directory up that has one. Push packs the setup archive (§5.1),
 refusing values that look like credentials (by key name, or by shape: `sk-…`, `ghp_…`, long

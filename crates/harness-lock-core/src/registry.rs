@@ -812,16 +812,59 @@ pub fn git_repo_name(dir: &Path) -> Option<String> {
     repo_name_of(&run(&["remote", "get-url", remote])?)
 }
 
-/// `git -C dir ARGS`'s output, trimmed, when it succeeds; the caller's `GIT_DIR` and
-/// `GIT_WORK_TREE` don't leak in, and git never prompts.
+#[cfg(test)]
+thread_local! {
+    /// What this thread's tests add to every git command's environment (a ceiling, no
+    /// system or user config), so tests running in parallel don't share it.
+    static GIT_TEST_ENV: std::cell::RefCell<Vec<(String, String)>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// `git -C dir ARGS`: the caller's `GIT_DIR` and `GIT_WORK_TREE` don't leak in, git never
+/// prompts, and its messages are untranslated.
+fn git_command(dir: &Path, args: &[&str]) -> std::process::Command {
+    let mut c = std::process::Command::new("git");
+    c.arg("-C").arg(dir).args(args).env("GIT_TERMINAL_PROMPT", "0").env("LC_ALL", "C").env_remove("GIT_DIR").env_remove("GIT_WORK_TREE").stdin(std::process::Stdio::null());
+    #[cfg(test)]
+    GIT_TEST_ENV.with(|e| {
+        for (k, v) in e.borrow().iter() {
+            c.env(k, v);
+        }
+    });
+    c
+}
+
+/// `git -C dir ARGS`'s output, trimmed, when it succeeds.
 fn git_in(dir: &Path, args: &[&str]) -> Option<String> {
-    let out = std::process::Command::new("git").arg("-C").arg(dir).args(args).env("GIT_TERMINAL_PROMPT", "0").env_remove("GIT_DIR").env_remove("GIT_WORK_TREE").stdin(std::process::Stdio::null()).stderr(std::process::Stdio::null()).output().ok()?;
+    let out = git_command(dir, args).stderr(std::process::Stdio::null()).output().ok()?;
     out.status.success().then(|| String::from_utf8_lossy(&out.stdout).trim().to_string())
 }
 
-/// The root of the git work tree `dir` is in, canonicalized; `None` outside one.
+/// The root of the git work tree `dir` is in, canonicalized: `Ok(None)` when git says `dir`
+/// isn't in one, and `Err` with why when git can't tell (it isn't installed, the repository
+/// isn't trusted (`safe.directory`), its `.git` is broken).
+pub fn git_toplevel_checked(dir: &Path) -> std::result::Result<Option<PathBuf>, String> {
+    let out = match git_command(dir, &["rev-parse", "--show-toplevel"]).stderr(std::process::Stdio::piped()).output() {
+        Ok(o) => o,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Err("git isn't installed".into()),
+        Err(e) => return Err(format!("can't run git: {e}")),
+    };
+    if out.status.success() {
+        let top = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        return std::fs::canonicalize(&top).map(Some).map_err(|e| format!("can't read the repository's root {top}: {e}"));
+    }
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    // "not a git repository (or any of the parent directories)", or "… (or any parent up to
+    // mount point …)"; "not a git repository: PATH" is a `.git` file pointing nowhere
+    if stderr.contains("not a git repository (or any") {
+        return Ok(None);
+    }
+    Err(stderr.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or("git rev-parse failed").to_string())
+}
+
+/// The root of the git work tree `dir` is in, canonicalized; `None` outside one, or when git
+/// can't tell.
 pub fn git_toplevel(dir: &Path) -> Option<PathBuf> {
-    std::fs::canonicalize(git_in(dir, &["rev-parse", "--show-toplevel"])?).ok()
+    git_toplevel_checked(dir).ok().flatten()
 }
 
 /// Where a push's root came from.
@@ -834,17 +877,31 @@ pub enum RootFrom {
     Repository,
     /// The working directory, outside any git work tree.
     CurrentDirectory,
+    /// The working directory, because git couldn't tell whether it's in a work tree.
+    CurrentDirectoryGitFailed,
 }
 
 /// The directory `hlock push` packs: `root` (relative to `cwd`), else the root of the git work
-/// tree `cwd` is in, else `cwd`.
-pub fn push_root(root: Option<&Path>, cwd: &Path) -> (PathBuf, RootFrom) {
+/// tree `cwd` is in, else `cwd`. When git can't tell whether `cwd` is in a work tree, `cwd`,
+/// with a warning that says why.
+pub fn push_root(root: Option<&Path>, cwd: &Path) -> (PathBuf, RootFrom, Option<String>) {
     match root {
-        Some(r) => (cwd.join(r), RootFrom::Flag),
-        None => match git_toplevel(cwd) {
-            Some(top) => (top, RootFrom::Repository),
-            None => (cwd.to_path_buf(), RootFrom::CurrentDirectory),
+        Some(r) => (cwd.join(r), RootFrom::Flag, None),
+        None => match git_toplevel_checked(cwd) {
+            Ok(Some(top)) => (top, RootFrom::Repository, None),
+            Ok(None) => (cwd.to_path_buf(), RootFrom::CurrentDirectory, None),
+            Err(why) => (cwd.to_path_buf(), RootFrom::CurrentDirectoryGitFailed, Some(format!("couldn't find the git repository ({why}); pushing the current directory. Pass --root DIR to choose"))),
         },
+    }
+}
+
+/// `p` for display: without the `\\?\` prefix Windows' canonical paths have.
+fn shown_path(p: &Path) -> String {
+    let s = p.display().to_string();
+    if let Some(rest) = s.strip_prefix(r"\\?\UNC\") {
+        format!(r"\\{rest}")
+    } else {
+        s.strip_prefix(r"\\?\").map(str::to_string).unwrap_or(s)
     }
 }
 
@@ -961,7 +1018,7 @@ pub fn login_with_token(url: &str, token: &str) -> Result<Value> {
 /// `name@version`.
 pub fn push(url: &str, root: Option<&Path>, name: Option<&str>, version: Option<&str>, dry_run: bool, no_evals: bool) -> Result<Value> {
     let cwd = std::env::current_dir().map_err(|e| err(format!("can't read the working directory: {e}")))?;
-    let (dir, root_from) = push_root(root, &cwd);
+    let (dir, root_from, git_warning) = push_root(root, &cwd);
     let dir = dir.as_path();
     if root_from == RootFrom::Repository && !has_setup(dir) {
         let hint = match nearer_root(&cwd, dir) {
@@ -970,12 +1027,21 @@ pub fn push(url: &str, root: Option<&Path>, name: Option<&str>, version: Option<
         };
         return Err(err(format!(
             "the repository root {} has none of {}, apm.yaml, or harness files under .hlock/; nothing to push{hint}",
-            dir.display(),
+            shown_path(dir),
             SETUP_FILES.join(", ")
         )));
     }
+    let mut root_warnings: Vec<String> = git_warning.into_iter().collect();
+    // a project in a subdirectory of the repository, pushed from there: say it isn't the one pushed
+    if root_from == RootFrom::Repository && std::fs::canonicalize(&cwd).ok().as_deref() != Some(dir) && has_setup(&cwd) {
+        root_warnings.push("this directory has its own hlock setup; pushing the repository root. Pass --root . to push this one".into());
+    }
     let client = Client::for_url(url);
-    let packed = pack(dir)?;
+    let packed = match pack(dir) {
+        Ok(p) => p,
+        Err(e) if !root_warnings.is_empty() => return Err(err(format!("{e}\n{}", root_warnings.join("\n")))),
+        Err(e) => return Err(e),
+    };
     let namespace = match name {
         Some(_) => None,
         None if client.has_token() => {
@@ -990,7 +1056,8 @@ pub fn push(url: &str, root: Option<&Path>, name: Option<&str>, version: Option<
         (None, Some(ns)) => format!("{ns}/{}", packed.project),
         (None, None) => format!("<your-namespace>/{}", packed.project),
     };
-    let mut warnings = packed.warnings.clone();
+    let mut warnings = root_warnings;
+    warnings.extend(packed.warnings.iter().cloned());
     let evals = if no_evals { None } else { crate::evals_archive::pack(dir)? };
     if let Some(e) = &evals {
         warnings.extend(e.warnings.iter().cloned());
@@ -1019,7 +1086,7 @@ pub fn push(url: &str, root: Option<&Path>, name: Option<&str>, version: Option<
         "warnings": warnings,
         "registry": url,
         "name_from": if name.is_some() { Value::Null } else { json!(packed.name_from) },
-        "root": dir.display().to_string(),
+        "root": shown_path(dir),
         "root_from": root_from,
     });
     if let Some(e) = &evals {
@@ -1368,18 +1435,36 @@ mod tests {
     #[test]
     fn the_push_root_is_the_repository_root_by_default() {
         let d = std::fs::canonicalize(tmp("root")).unwrap();
+        // git never looks above the temp directory, nor at the machine's or the user's config
+        let env: Vec<(String, String)> = [
+            ("GIT_CEILING_DIRECTORIES", d.parent().unwrap().display().to_string()),
+            ("GIT_CONFIG_NOSYSTEM", "1".into()),
+            ("GIT_CONFIG_GLOBAL", "/dev/null".into()),
+        ]
+        .into_iter()
+        .map(|(k, v)| (k.to_string(), v))
+        .collect();
+        GIT_TEST_ENV.with(|e| *e.borrow_mut() = env.clone());
         // outside any git work tree: the working directory
-        assert_eq!(push_root(None, &d), (d.clone(), RootFrom::CurrentDirectory));
-        let ok = std::process::Command::new("git").arg("-C").arg(&d).args(["init", "-q"]).env_remove("GIT_DIR").env_remove("GIT_WORK_TREE").status().is_ok_and(|s| s.success());
+        assert_eq!(push_root(None, &d), (d.clone(), RootFrom::CurrentDirectory, None));
+        let ok = std::process::Command::new("git").arg("-C").arg(&d).args(["init", "-q"]).envs(env.iter().map(|(k, v)| (k, v))).env_remove("GIT_DIR").env_remove("GIT_WORK_TREE").status().is_ok_and(|s| s.success());
         if !ok {
             return; // no git here
         }
         let sub = d.join("agents/review");
         std::fs::create_dir_all(&sub).unwrap();
-        assert_eq!(push_root(None, &d), (d.clone(), RootFrom::Repository));
-        assert_eq!(push_root(None, &sub), (d.clone(), RootFrom::Repository));
-        assert_eq!(push_root(Some(Path::new("agents/review")), &d), (sub.clone(), RootFrom::Flag));
-        assert_eq!(push_root(Some(Path::new(".")), &sub), (sub.join("."), RootFrom::Flag));
+        assert_eq!(push_root(None, &d), (d.clone(), RootFrom::Repository, None));
+        assert_eq!(push_root(None, &sub), (d.clone(), RootFrom::Repository, None));
+        assert_eq!(push_root(Some(Path::new("agents/review")), &d), (sub.clone(), RootFrom::Flag, None));
+        assert_eq!(push_root(Some(Path::new(".")), &sub), (sub.join("."), RootFrom::Flag, None));
+        // a `.git` that points nowhere: git can't tell, so the working directory, with why
+        let broken = d.join("agents/broken");
+        std::fs::create_dir_all(&broken).unwrap();
+        std::fs::write(broken.join(".git"), "gitdir: /nonexistent/hlock-test\n").unwrap();
+        let (got, from, warning) = push_root(None, &broken);
+        assert_eq!((got, from), (broken.clone(), RootFrom::CurrentDirectoryGitFailed));
+        assert!(warning.as_deref().is_some_and(|w| w.contains("couldn't find the git repository (fatal: not a git repository: /nonexistent")), "{warning:?}");
+        std::fs::remove_dir_all(&broken).unwrap();
         // nothing at the root: the nearest directory up from the working directory that has a setup
         assert!(!has_setup(&d));
         assert_eq!(nearer_root(&sub, &d), None);
@@ -1389,7 +1474,15 @@ mod tests {
         assert_eq!(nearer_root(&sub, &d).as_deref(), Some("."));
         // a project in a subdirectory doesn't take the repository's name
         assert_eq!(git_repo_name(&sub), None);
+        GIT_TEST_ENV.with(|e| e.borrow_mut().clear());
         let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn windows_verbatim_prefixes_are_not_shown() {
+        assert_eq!(shown_path(Path::new(r"\\?\C:\repos\hlock")), r"C:\repos\hlock");
+        assert_eq!(shown_path(Path::new(r"\\?\UNC\server\share\hlock")), r"\\server\share\hlock");
+        assert_eq!(shown_path(Path::new("/home/alice/hlock")), "/home/alice/hlock");
     }
 
     #[test]
