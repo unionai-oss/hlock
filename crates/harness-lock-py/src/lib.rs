@@ -1105,12 +1105,12 @@ fn registry_search(py: Python<'_>, url: String, query: String, r#type: Option<St
     })
 }
 
-/// `hlock push`: pack the setup in `dir` and publish it (or, with `dry_run`, say what
-/// would be published). Returns JSON.
+/// `hlock push`: pack the setup in `dir`, and its eval packs unless `no_evals`, and publish
+/// it (or, with `dry_run`, say what would be published). Returns JSON.
 #[pyfunction]
-#[pyo3(signature = (url, dir=".".to_string(), name=None, version=None, dry_run=false))]
-fn registry_push(py: Python<'_>, url: String, dir: String, name: Option<String>, version: Option<String>, dry_run: bool) -> PyResult<String> {
-    interruptible(py, move || to_json(&core::registry::push(&url, Path::new(&dir), name.as_deref(), version.as_deref(), dry_run).map_err(py_err)?))
+#[pyo3(signature = (url, dir=".".to_string(), name=None, version=None, dry_run=false, no_evals=false))]
+fn registry_push(py: Python<'_>, url: String, dir: String, name: Option<String>, version: Option<String>, dry_run: bool, no_evals: bool) -> PyResult<String> {
+    interruptible(py, move || to_json(&core::registry::push(&url, Path::new(&dir), name.as_deref(), version.as_deref(), dry_run, no_evals).map_err(py_err)?))
 }
 
 /// `hlock apm push`: pack the APM package in `dir` (`apm.yml` and `.apm/`) and publish it
@@ -1133,25 +1133,26 @@ fn registry_apm_pull(py: Python<'_>, url: String, spec: String, into: Option<Str
     })
 }
 
-/// `hlock pull NS/NAME[@VERSION]` (or a `registry:` spec): into the store as `name`, into
-/// the project lock file `out`, or every file of the setup into the directory `into`.
+/// `hlock pull NS/NAME[//PATH][@VERSION]` (or a `registry:` spec): into the store as `name`,
+/// into the project lock file `out`, or every file of the setup into the directory `into`
+/// (with its eval packs, unless `no_evals`).
 #[pyfunction]
-#[pyo3(signature = (spec, registry=None, out=None, name=None, into=None, force=false, allow_hidden=None))]
-fn registry_pull(py: Python<'_>, spec: String, registry: Option<String>, out: Option<String>, name: Option<String>, into: Option<String>, force: bool, allow_hidden: Option<Vec<String>>) -> PyResult<String> {
+#[pyo3(signature = (spec, registry=None, out=None, name=None, into=None, force=false, allow_hidden=None, no_evals=false))]
+fn registry_pull(py: Python<'_>, spec: String, registry: Option<String>, out: Option<String>, name: Option<String>, into: Option<String>, force: bool, allow_hidden: Option<Vec<String>>, no_evals: bool) -> PyResult<String> {
     let cwd = std::env::current_dir().unwrap_or_default();
     interruptible(py, move || {
         let allow = allow_hidden.unwrap_or_default();
         let v = match into {
             Some(d) => {
                 let d = cwd.join(d);
-                core::registry::pull(registry.as_deref(), &spec, core::registry::Dest::Into(&d), force, &allow)
+                core::registry::pull(registry.as_deref(), &spec, core::registry::Dest::Into(&d), force, &allow, no_evals)
             }
             None => {
                 let target = match out {
                     Some(o) => core::pull::Target::File(cwd.join(o)),
                     None => core::pull::Target::Store(name),
                 };
-                core::registry::pull(registry.as_deref(), &spec, core::registry::Dest::Target(&target), force, &allow)
+                core::registry::pull(registry.as_deref(), &spec, core::registry::Dest::Target(&target), force, &allow, no_evals)
             }
         }
         .map_err(py_err)?;

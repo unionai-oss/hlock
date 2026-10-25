@@ -313,7 +313,7 @@ const SECRET_WORDS: &[&str] = &[
     "key", "apikey", "token", "secret", "password", "passwd", "pwd", "credential", "credentials", "auth",
     "authorization", "bearer", "cookie", "accesskey", "privatekey", "clientsecret",
 ];
-const SECRET_PREFIXES: &[&str] = &[
+pub(crate) const SECRET_PREFIXES: &[&str] = &[
     "sk-", "sk_", "ghp_", "gho_", "ghs_", "github_pat_", "xoxb-", "xoxp-", "xapp-", "AKIA", "AIza", "hf_", "glpat-",
     "Bearer ", "bearer ", "Basic ", "ya29.", "eyJ",
 ];
@@ -817,13 +817,13 @@ pub(crate) fn walk_files(dir: &Path) -> Vec<PathBuf> {
 }
 
 #[cfg(unix)]
-fn is_executable(p: &Path) -> bool {
+pub(crate) fn is_executable(p: &Path) -> bool {
     use std::os::unix::fs::PermissionsExt;
     std::fs::metadata(p).map(|m| m.permissions().mode() & 0o111 != 0).unwrap_or(false)
 }
 
 #[cfg(not(unix))]
-fn is_executable(_p: &Path) -> bool {
+pub(crate) fn is_executable(_p: &Path) -> bool {
     false
 }
 

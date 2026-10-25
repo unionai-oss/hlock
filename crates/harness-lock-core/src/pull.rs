@@ -395,6 +395,96 @@ pub struct OtherLock {
 /// and `pull --into` writes.
 pub const SETUP_FILES: [&str; 4] = ["harness.toml", "harness.lock", "apm.yml", "apm.lock.yaml"];
 
+/// Whether `name` is a harness file's name: `harness.toml`, `harness.lock` or `harness.NAME.lock`.
+pub fn is_harness_file(name: &str) -> bool {
+    name == "harness.toml" || name == "harness.lock" || (name.starts_with("harness.") && name.ends_with(".lock") && name.len() > "harness..lock".len())
+}
+
+/// The directories under a project's `.hlock/` that hlock writes itself (vendored files, synced
+/// environments, the dependency store, trial and run artifacts, backups): never part of a setup's
+/// own files, even when a harness file is in one.
+pub const HLOCK_STATE_DIRS: &[&str] = &["vendor", "env", "store", "tune", "tuned", "trials", "runs", "result", "report", "bak", "meta", "cache", "docker", "sandbox-env", "pulls", "approve", "trust"];
+
+/// Whether `path` is a harness file under `.hlock/`, such as `.hlock/locks/harness.pi.lock`: one
+/// of a setup's files besides those at its root. Not one in [`HLOCK_STATE_DIRS`], or under any
+/// `.hlock/vendor/`.
+pub fn is_hlock_setup_path(path: &str) -> bool {
+    let Some(rest) = path.strip_prefix(".hlock/") else { return false };
+    let in_state = rest.split_once('/').is_some_and(|(top, _)| HLOCK_STATE_DIRS.contains(&top));
+    !in_state
+        && !in_vendor(path)
+        && safe_rel(path)
+        && path.rsplit('/').next().is_some_and(is_harness_file)
+}
+
+/// Whether `path` is under a `.hlock/vendor/` segment, at the root or below.
+pub fn in_vendor(path: &str) -> bool {
+    path.starts_with(".hlock/vendor/") || path.contains("/.hlock/vendor/")
+}
+
+/// The directory of a relative path, `""` for one at the root.
+pub fn parent_dir(path: &str) -> &str {
+    path.rsplit_once('/').map(|(d, _)| d).unwrap_or("")
+}
+
+/// `path` in the directory `dir` (`""` for the root).
+pub fn in_dir(dir: &str, path: &str) -> String {
+    if dir.is_empty() { path.to_string() } else { format!("{dir}/{path}") }
+}
+
+/// Whether `path` may be a file a harness file at `dir` vendors: `dir/.hlock/vendor/…`, where
+/// `dir` is the root or under `.hlock/` (outside any `.hlock/vendor/`).
+pub fn is_vendored_path(path: &str) -> bool {
+    let Some((dir, rest)) = (if let Some(r) = path.strip_prefix(".hlock/vendor/") { Some(("", r)) } else { path.split_once("/.hlock/vendor/") }) else {
+        return false;
+    };
+    !rest.is_empty() && safe_rel(path) && (dir.is_empty() || (dir.starts_with(".hlock/") || dir == ".hlock") && !in_vendor(&format!("{dir}/")))
+}
+
+/// The harness files under `dir/.hlock/` (see [`is_hlock_setup_path`]), as sorted paths
+/// relative to `dir`. Symlinks and `.git` aren't followed, and hlock's own state directories
+/// aren't walked at all (the dependency store and environments can be large).
+pub fn hlock_setup_files(dir: &Path) -> Vec<String> {
+    fn rec(base: &Path, d: &Path, out: &mut Vec<String>) {
+        let Ok(rd) = std::fs::read_dir(d) else { return };
+        for e in rd.flatten() {
+            let Ok(t) = e.file_type() else { continue };
+            let Some(rel) = e.path().strip_prefix(base).ok().map(|r| r.to_string_lossy().replace('\\', "/")) else { continue };
+            if t.is_symlink() || e.file_name() == ".git" {
+                continue;
+            }
+            if t.is_dir() {
+                let state = parent_dir(&rel) == ".hlock" && HLOCK_STATE_DIRS.contains(&e.file_name().to_string_lossy().as_ref());
+                if !state && !in_vendor(&format!("{rel}/")) {
+                    rec(base, &e.path(), out);
+                }
+            } else if t.is_file() && is_hlock_setup_path(&rel) {
+                out.push(rel);
+            }
+        }
+    }
+    let mut out = Vec::new();
+    if std::fs::symlink_metadata(dir.join(".hlock")).is_ok_and(|m| m.is_dir()) {
+        rec(dir, &dir.join(".hlock"), &mut out);
+    }
+    out.sort();
+    out
+}
+
+/// The paths a lock vendors, sorted and deduplicated.
+pub(crate) fn vendored_paths(lock: &Lockfile) -> Vec<String> {
+    let mut paths: Vec<String> = Vec::new();
+    paths.extend(lock.skill.iter().filter_map(|s| s.vendored.clone()));
+    paths.extend(lock.instructions.iter().filter_map(|i| i.vendored.clone()));
+    paths.extend(lock.config.iter().filter_map(|c| c.vendored.clone()));
+    for fc in lock.subagent.iter().chain(&lock.script).chain(&lock.middleware) {
+        paths.extend(fc.vendored.clone());
+    }
+    paths.sort();
+    paths.dedup();
+    paths
+}
+
 /// What was fetched into a scratch directory (a git checkout, or an unpacked registry
 /// archive), ready to be placed.
 pub(crate) struct Fetched<'a> {
@@ -405,14 +495,18 @@ pub(crate) struct Fetched<'a> {
     pub commit: String,
     /// The lock to place; `None` for a setup without one (`pull --into` only).
     pub remote_lock: Option<PathBuf>,
-    /// Other harness locks next to it.
-    pub others: Vec<String>,
+    /// Other harness locks in the source, and the source that pulls each.
+    pub others: Vec<OtherLock>,
     /// A git checkout is sparse: vendored paths are checked out before they're copied.
     pub git: bool,
     /// The lock's `[pulled]` table (`at` is added when it's written).
     pub pulled: Value,
     /// A registry version's archive digest.
     pub digest: Option<String>,
+    /// Eval packs unpacked next to the setup (`pull --into` from a registry): the pack
+    /// directories, and every file in them.
+    pub eval_packs: Vec<String>,
+    pub eval_files: Vec<String>,
 }
 
 /// What [`pull`] did.
@@ -628,7 +722,8 @@ pub fn pull_allowing(spec: &str, target: &Target, force: bool, allow_hidden: &[S
     let commit = fetch(&src, &scratch.0)?;
     let (remote_lock, others) = choose_lock(&src, &scratch.0)?;
     let pulled = git_pulled(&src, &scratch.0, &remote_lock, &commit);
-    place(Fetched { src, root: &scratch.0, commit, remote_lock: Some(remote_lock), others, git: true, pulled, digest: None }, target, force, allow_hidden)
+    let others = others.into_iter().map(|p| OtherLock { source: with_path(&src, &p), path: p }).collect();
+    place(Fetched { src, root: &scratch.0, commit, remote_lock: Some(remote_lock), others, git: true, pulled, digest: None, eval_packs: Vec::new(), eval_files: Vec::new() }, target, force, allow_hidden)
 }
 
 /// The `[pulled]` table of a lock pulled from git.
@@ -644,7 +739,7 @@ fn git_pulled(src: &Source, root: &Path, remote_lock: &Path, commit: &str) -> Va
 /// Place what [`Fetched`] holds into `target`: the shared second half of a git pull and a
 /// registry pull.
 pub(crate) fn place(f: Fetched<'_>, target: &Target, force: bool, allow_hidden: &[String]) -> Result<PullOutcome> {
-    let Fetched { src, root, commit, remote_lock, others, git: is_git, pulled, digest } = f;
+    let Fetched { src, root, commit, remote_lock, others, git: is_git, pulled, digest, .. } = f;
     if let Target::Store(Some(n)) = target {
         check_name(n)?;
     }
@@ -680,9 +775,20 @@ pub(crate) fn place(f: Fetched<'_>, target: &Target, force: bool, allow_hidden: 
     };
     let previous = if out.exists() { Lockfile::load(&out).ok() } else { None };
     if out.exists() && !force {
-        let prev_url = previous.as_ref().and_then(pulled_from).and_then(|p| p.get("url")).and_then(Value::as_str);
+        let prev = previous.as_ref().and_then(pulled_from);
+        let prev_url = prev.and_then(|p| p.get("url")).and_then(Value::as_str);
+        // the same source, but another lock in it (an older [pulled] without a path is the same)
+        let prev_path = prev.and_then(|p| p.get("path")).and_then(Value::as_str);
+        let new_path = pulled.get("path").and_then(Value::as_str);
         let other_name = if matches!(target, Target::Store(_)) { "pass --as NAME to keep both" } else { "pass another -o FILE to keep both" };
         match prev_url {
+            Some(u) if same_repo(u, &src.url) && prev_path.is_some() && new_path.is_some() && prev_path != new_path => {
+                return Err(Error::Lockfile(format!(
+                    "{shown} was pulled from {} in {u}, not {}; {other_name}, or --force to replace it",
+                    prev_path.unwrap_or_default(),
+                    new_path.unwrap_or_default()
+                )))
+            }
             Some(u) if same_repo(u, &src.url) => {}
             Some(u) => {
                 return Err(Error::Lockfile(format!("{shown} was pulled from {u}, not {}; {other_name}, or --force to replace it", src.url)))
@@ -692,7 +798,6 @@ pub(crate) fn place(f: Fetched<'_>, target: &Target, force: bool, allow_hidden: 
     }
 
     // Fetch the vendored paths too, then copy them into the target's vendor directory.
-    let others = others.into_iter().map(|p| OtherLock { source: with_path(&src, &p), path: p }).collect();
     let lock_dir_rel = remote_lock.parent().and_then(|p| p.strip_prefix(root).ok()).map(Path::to_path_buf).unwrap_or_default();
     let harness = lock.harness.name.clone();
     // both name the vendor directory that's replaced below
@@ -853,8 +958,13 @@ pub struct IntoOutcome {
     pub commit: String,
     pub version: Option<String>,
     pub digest: Option<String>,
+    /// The eval packs written (directories relative to `dir`).
+    pub eval_packs: Vec<String>,
     pub warnings: Vec<String>,
 }
+
+/// The one warning every pull of eval packs ends with.
+pub const EVALS_WARNING: &str = "eval packs run commands when graded, and their fixtures are the agent's workspace: read them before hlock tune";
 
 /// Pull the setup at a git `spec` and write its files (the lock, the files it vendors,
 /// `harness.toml`, `apm.yml`, `apm.lock.yaml`) into the directory `into`.
@@ -883,14 +993,14 @@ pub fn pull_into(spec: &str, into: &Path, force: bool, allow_hidden: &[String]) 
         (None, Some(p)) => scratch.0.join(p),
         (None, None) => scratch.0.clone(),
     };
-    place_into(Fetched { src, root: &scratch.0, commit, remote_lock: lock, others: Vec::new(), git: true, pulled, digest: None }, &base, into, force, allow_hidden)
+    place_into(Fetched { src, root: &scratch.0, commit, remote_lock: lock, others: Vec::new(), git: true, pulled, digest: None, eval_packs: Vec::new(), eval_files: Vec::new() }, &base, into, force, allow_hidden)
 }
 
 /// Write a fetched setup's files from `base` (the directory holding them in the scratch
 /// directory) into `into`, checked like a pull: hidden characters and the project policy
 /// first, then nothing is overwritten without `force`.
 pub(crate) fn place_into(f: Fetched<'_>, base: &Path, into: &Path, force: bool, allow_hidden: &[String]) -> Result<IntoOutcome> {
-    let Fetched { src, root, commit, remote_lock, git: is_git, pulled, digest, .. } = f;
+    let Fetched { src, root, commit, remote_lock, git: is_git, pulled, digest, eval_packs, eval_files, .. } = f;
     if !crate::fsutil::within(root, base) {
         return Err(Error::Pull(format!("{}: the setup isn't inside the repository; refusing to pull it", src.spec)));
     }
@@ -898,30 +1008,19 @@ pub(crate) fn place_into(f: Fetched<'_>, base: &Path, into: &Path, force: bool, 
     // (path under `base`, path under `into`)
     let mut files: Vec<(String, String)> = Vec::new();
     let mut lock = None;
-    if let Some(l) = &remote_lock {
-        if !std::fs::symlink_metadata(l).is_ok_and(|m| m.is_file()) || !crate::fsutil::within(root, l) {
-            return Err(Error::Pull(format!("{}'s lock is a symlink or outside the repository; refusing to pull it", src.spec)));
-        }
-        let parsed = Lockfile::load(l)?;
-        let policy = crate::policy::Policy::for_dir(into)?;
-        warnings.extend(policy.enforce(policy.check_lock(&parsed), &src.spec)?);
-        let mut paths: Vec<String> = Vec::new();
-        paths.extend(parsed.skill.iter().filter_map(|s| s.vendored.clone()));
-        paths.extend(parsed.instructions.iter().filter_map(|i| i.vendored.clone()));
-        paths.extend(parsed.config.iter().filter_map(|c| c.vendored.clone()));
-        for fc in parsed.subagent.iter().chain(&parsed.script).chain(&parsed.middleware) {
-            paths.extend(fc.vendored.clone());
-        }
+    // a lock's vendored files, added to `files`; they're relative to the lock's directory
+    // `dir` (under `base`, "" for the root)
+    let vendored = |parsed: &Lockfile, dir: &str, files: &mut Vec<(String, String)>, warnings: &mut Vec<String>| -> Result<()> {
+        let paths = vendored_paths(parsed);
         if let Some(p) = paths.iter().find(|p| !safe_rel(p)) {
             return Err(Error::Lockfile(format!("{} vendors {p:?}, which isn't a path inside the repository; refusing to pull it", src.spec)));
         }
         if is_git {
-            let rel = base.strip_prefix(root).map(Path::to_path_buf).unwrap_or_default();
+            let rel = base.strip_prefix(root).map(Path::to_path_buf).unwrap_or_default().join(dir);
             checkout_paths(root, &rel, &paths)?;
         }
-        let name = l.file_name().and_then(|n| n.to_str()).unwrap_or(crate::LOCKFILE_PATH).to_string();
-        files.push((name, String::new()));
         for p in &paths {
+            let p = &in_dir(dir, p);
             let from = base.join(p);
             match std::fs::symlink_metadata(&from) {
                 Ok(m) if m.file_type().is_symlink() || !crate::fsutil::within(root, &from) => warnings.push(format!("{p} is a symlink in the source; skipped")),
@@ -937,7 +1036,31 @@ pub(crate) fn place_into(f: Fetched<'_>, base: &Path, into: &Path, force: bool, 
                 Err(_) => warnings.push(format!("{p} isn't in the source; sync will treat it as manual")),
             }
         }
+        Ok(())
+    };
+    let nested = hlock_setup_files(base);
+    let policy = if remote_lock.is_some() || nested.iter().any(|p| p.ends_with(".lock")) { Some(crate::policy::Policy::for_dir(into)?) } else { None };
+    let policy = policy.as_ref();
+    if let (Some(l), Some(policy)) = (&remote_lock, policy) {
+        if !std::fs::symlink_metadata(l).is_ok_and(|m| m.is_file()) || !crate::fsutil::within(root, l) {
+            return Err(Error::Pull(format!("{}'s lock is a symlink or outside the repository; refusing to pull it", src.spec)));
+        }
+        let parsed = Lockfile::load(l)?;
+        warnings.extend(policy.enforce(policy.check_lock(&parsed), &src.spec)?);
+        let name = l.file_name().and_then(|n| n.to_str()).unwrap_or(crate::LOCKFILE_PATH).to_string();
+        files.push((name, String::new()));
+        vendored(&parsed, "", &mut files, &mut warnings)?;
         lock = Some(parsed);
+    }
+    // the other harness files under .hlock/, such as .hlock/locks/harness.pi.lock (a
+    // registry archive carries them; a git checkout doesn't fetch them)
+    for p in nested {
+        if let Some(policy) = policy.filter(|_| p.ends_with(".lock")) {
+            let parsed = Lockfile::load(&base.join(&p))?;
+            warnings.extend(policy.enforce(policy.check_lock(&parsed), &format!("{} ({p})", src.spec))?);
+            vendored(&parsed, parent_dir(&p), &mut files, &mut warnings)?;
+        }
+        files.push((p.clone(), p));
     }
     for f in SETUP_FILES.iter().filter(|f| **f != crate::LOCKFILE_PATH) {
         let from = base.join(f);
@@ -948,6 +1071,11 @@ pub(crate) fn place_into(f: Fetched<'_>, base: &Path, into: &Path, force: bool, 
             Ok(_) => warnings.push(format!("{f} isn't a regular file in the source; skipped")),
             Err(_) => {}
         }
+    }
+    // eval packs, checked and written like the rest (a registry's evals archive)
+    files.extend(eval_files.iter().map(|p| (p.clone(), p.clone())));
+    if !eval_packs.is_empty() {
+        warnings.push(EVALS_WARNING.to_string());
     }
     // the lock's own entry: its destination is its file name
     for (from, to) in files.iter_mut() {
@@ -965,7 +1093,12 @@ pub(crate) fn place_into(f: Fetched<'_>, base: &Path, into: &Path, force: bool, 
         found.extend(crate::scan::scan_path(&base.join(from), to));
     }
     crate::audit::blocking(&found, allow_hidden, &src.spec)?;
-    let existing: Vec<&str> = files.iter().filter(|(_, to)| std::fs::symlink_metadata(into.join(to)).is_ok()).map(|(_, to)| to.as_str()).collect();
+    // an eval pack is a whole directory: one that's there is replaced, never merged into, so
+    // no task of another version survives in it (and its digest matches the lock's)
+    let in_pack = |to: &str| eval_packs.iter().any(|p| to.starts_with(&format!("{p}/")));
+    let packs_there: Vec<&String> = eval_packs.iter().filter(|p| std::fs::symlink_metadata(into.join(p)).is_ok()).collect();
+    let mut existing: Vec<String> = packs_there.iter().map(|p| format!("{p}/")).collect();
+    existing.extend(files.iter().filter(|(_, to)| !in_pack(to) && std::fs::symlink_metadata(into.join(to)).is_ok()).map(|(_, to)| to.clone()));
     if !existing.is_empty() && !force {
         return Err(Error::Lockfile(format!(
             "{} already has {}; nothing was written. Pass --force to replace {}",
@@ -973,6 +1106,15 @@ pub(crate) fn place_into(f: Fetched<'_>, base: &Path, into: &Path, force: bool, 
             existing.join(", "),
             if existing.len() == 1 { "it" } else { "them" }
         )));
+    }
+    for p in packs_there {
+        let dest = into.join(p);
+        crate::fsutil::check_within(p, into, &dest)?;
+        let gone = match std::fs::symlink_metadata(&dest) {
+            Ok(m) if m.is_dir() => std::fs::remove_dir_all(&dest),
+            _ => std::fs::remove_file(&dest),
+        };
+        gone.map_err(|e| crate::error::io_at(&dest, e))?;
     }
     let lock_name = remote_lock.as_ref().and_then(|l| l.file_name()).map(|n| n.to_string_lossy().into_owned());
     for (from, to) in &files {
@@ -994,7 +1136,7 @@ pub(crate) fn place_into(f: Fetched<'_>, base: &Path, into: &Path, force: bool, 
         l.save(&into.join(name))?;
     }
     let version = digest.is_some().then(|| commit.clone());
-    Ok(IntoOutcome { dir: into.to_path_buf(), files: files.into_iter().map(|(_, to)| to).collect(), lock, source: src, commit, version, digest, warnings })
+    Ok(IntoOutcome { dir: into.to_path_buf(), files: files.into_iter().map(|(_, to)| to).collect(), lock, source: src, commit, version, digest, eval_packs, warnings })
 }
 
 #[cfg(test)]

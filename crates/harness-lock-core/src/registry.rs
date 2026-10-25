@@ -7,7 +7,8 @@
 //! `HLOCK_REGISTRY_TOKEN`, else the OS keychain, else `~/.hlock/credentials.toml`.
 //!
 //! A setup travels as a deterministic `tar.gz`: `harness.toml`, `harness.lock` and the
-//! files it vendors, `apm.yml`, `apm.lock.yaml` and `README.md`, sorted, with zero times
+//! files it vendors, `apm.yml`, `apm.lock.yaml` and `README.md`, and the harness files under
+//! `.hlock/` (`.hlock/locks/harness.pi.lock`, say) with the files they vendor, sorted, with zero times
 //! and owners, so the same files always give the same digest.
 
 use std::io::{Read, Write};
@@ -59,7 +60,8 @@ pub fn normalize_url(url: &str) -> Result<String> {
     let u = url.trim().trim_end_matches('/');
     let rest = u.strip_prefix("https://").or_else(|| u.strip_prefix("http://")).ok_or_else(|| err(format!("{u:?} isn't a registry URL: it must start with https://")))?;
     let host = rest.split('/').next().unwrap_or("");
-    if host.is_empty() || host.contains('@') || u.chars().any(|c| c.is_whitespace() || c.is_control()) || u.contains(['?', '#']) {
+    // `//` in the path would read as the start of a package path in a `[pulled] from`
+    if host.is_empty() || host.contains('@') || rest.contains("//") || u.chars().any(|c| c.is_whitespace() || c.is_control()) || u.contains(['?', '#']) {
         return Err(err(format!("{u:?} isn't a registry URL")));
     }
     let hostname = host.rsplit_once(':').map_or(host, |(h, _)| h);
@@ -189,17 +191,25 @@ pub fn forget(url: &str) -> Result<bool> {
 // references: NS/NAME[@VERSION]
 // --------------------------------------------------------------------------- //
 
-/// A package in a registry.
+/// A package in a registry, and optionally a path in it (a lock, or a directory of locks).
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Ref {
     pub namespace: String,
     pub name: String,
     pub version: Option<String>,
+    pub path: Option<String>,
 }
 
 impl Ref {
     pub fn package(&self) -> String {
         format!("{}/{}", self.namespace, self.name)
+    }
+
+    /// `NS/NAME[//PATH][@VERSION]`, as it's written.
+    pub fn spec(&self) -> String {
+        let path = self.path.as_deref().map(|p| format!("//{p}")).unwrap_or_default();
+        let v = self.version.as_deref().map(|v| format!("@{v}")).unwrap_or_default();
+        format!("{}{path}{v}", self.package())
     }
 }
 
@@ -216,35 +226,76 @@ pub fn version_ok(s: &str) -> bool {
     !s.is_empty() && s.len() <= 64 && s.chars().all(|c| c.is_ascii_alphanumeric() || "._+-".contains(c)) && s.starts_with(|c: char| c.is_ascii_alphanumeric())
 }
 
-/// Parse `NS/NAME[@VERSION]`; `None` if it isn't one.
+/// `s` without a trailing `@VERSION` (one after its last `/`), and the version.
+fn split_version(s: &str) -> std::result::Result<(&str, Option<String>), ()> {
+    match s.rfind('@') {
+        Some(i) if !s[i..].contains('/') => {
+            let v = &s[i + 1..];
+            if version_ok(v) { Ok((&s[..i], Some(v.to_string()))) } else { Err(()) }
+        }
+        _ => Ok((s, None)),
+    }
+}
+
+/// A path in a package: `/`-separated, inside it, without `@`.
+fn ref_path(p: &str) -> Option<String> {
+    let p = p.trim_matches('/');
+    (!p.is_empty() && !p.contains('@') && safe_rel(p) && !p.split('/').any(str::is_empty)).then(|| p.to_string())
+}
+
+/// Parse `NS/NAME[//PATH][@VERSION]`; `None` if it isn't one.
 pub fn parse_ref(s: &str) -> Option<Ref> {
-    let (body, version) = match s.split_once('@') {
-        Some((b, v)) if version_ok(v) => (b, Some(v.to_string())),
-        Some(_) => return None,
-        None => (s, None),
+    let (body, version) = split_version(s).ok()?;
+    let (pkg, path) = match body.split_once("//") {
+        Some((pkg, p)) => (pkg, Some(ref_path(p)?)),
+        None => (body, None),
     };
-    let (ns, name) = body.split_once('/')?;
-    (namespace_ok(ns) && name_ok(name)).then(|| Ref { namespace: ns.into(), name: name.into(), version })
+    let (ns, name) = pkg.split_once('/')?;
+    (namespace_ok(ns) && name_ok(name)).then(|| Ref { namespace: ns.into(), name: name.into(), version, path })
+}
+
+/// A reference with the version before the path (`NS/NAME@V//PATH`): the hint for it.
+fn misordered(s: &str) -> Option<String> {
+    let (head, path) = s.split_once("//")?;
+    let (pkg, v) = head.split_once('@')?;
+    let fixed = format!("{pkg}//{path}@{v}");
+    parse_ref(&fixed).is_some().then(|| format!("{s:?} puts the version before the path; the version goes last: {fixed}"))
+}
+
+/// Parse a registry reference, with an error saying what's wrong with it.
+pub fn parse_ref_checked(s: &str) -> Result<Ref> {
+    if let Some(hint) = misordered(s) {
+        return Err(err(hint));
+    }
+    parse_ref(s).ok_or_else(|| err(format!("{s:?} isn't NAMESPACE/NAME[//PATH][@VERSION]")))
 }
 
 /// True if `arg` is a registry reference rather than a file, a git source or a pulled name.
 pub fn is_ref(arg: &str) -> bool {
-    parse_ref(arg).is_some() && !pull::is_source(arg) && std::fs::symlink_metadata(arg).is_err()
+    (parse_ref(arg).is_some() || misordered(arg).is_some()) && !pull::is_source(arg) && std::fs::symlink_metadata(arg).is_err()
 }
 
-/// A `[pulled] from` of a registry pull: `registry:<url>/<ns>/<name>[@<version>]`.
+/// A `[pulled] from` of a registry pull: `registry:<url>/<ns>/<name>[//<path>][@<version>]`.
 pub fn pulled_spec(url: &str, r: &Ref) -> String {
-    let v = r.version.as_deref().map(|v| format!("@{v}")).unwrap_or_default();
-    format!("registry:{url}/{}{v}", r.package())
+    format!("registry:{url}/{}", r.spec())
 }
 
-/// Split a `registry:<url>/<ns>/<name>[@version]` back into its URL and reference.
+/// Split a `registry:<url>/<ns>/<name>[//<path>][@version]` back into its URL and reference.
 pub fn parse_pulled_spec(spec: &str) -> Result<(String, Ref)> {
-    let bad = || err(format!("{spec:?} isn't a registry source (registry:URL/NAMESPACE/NAME)"));
+    let bad = || err(format!("{spec:?} isn't a registry source (registry:URL/NAMESPACE/NAME[//PATH][@VERSION])"));
     let rest = spec.strip_prefix("registry:").ok_or_else(bad)?;
-    let (head, name) = rest.rsplit_once('/').ok_or_else(bad)?;
+    let (rest, version) = split_version(rest).map_err(|_| bad())?;
+    // the path starts at the first `//` after the URL's scheme
+    let after_scheme = rest.find("://").map(|i| i + 3).ok_or_else(bad)?;
+    let (head, path) = match rest[after_scheme..].find("//") {
+        Some(i) => (&rest[..after_scheme + i], Some(ref_path(&rest[after_scheme + i + 2..]).ok_or_else(bad)?)),
+        None => (rest, None),
+    };
+    let (head, name) = head.rsplit_once('/').ok_or_else(bad)?;
     let (url, ns) = head.rsplit_once('/').ok_or_else(bad)?;
-    let r = parse_ref(&format!("{ns}/{name}")).ok_or_else(bad)?;
+    let mut r = parse_ref(&format!("{ns}/{name}")).ok_or_else(bad)?;
+    r.version = version;
+    r.path = path;
     Ok((normalize_url(url)?, r))
 }
 
@@ -437,15 +488,63 @@ impl Client {
         Ok((bytes, header))
     }
 
-    /// Publish an archive. `Ok(None)` when the version already exists (409).
-    pub fn publish(&self, r: &Ref, version: &str, bytes: &[u8]) -> Result<Option<Value>> {
-        self.publish_as(r, version, bytes, "application/gzip")
+    /// Whether a package exists (`GET /packages/{ns}/{name}` isn't a 404).
+    pub fn exists(&self, r: &Ref) -> Result<bool> {
+        let url = self.endpoint(&format!("/packages/{}/{}", enc(&r.namespace), enc(&r.name)));
+        let mut resp = self.auth(self.agent.get(&url)).header("accept", "application/json").call().map_err(|e| self.unreachable(e))?;
+        let status = resp.status().as_u16();
+        match status {
+            200..=299 => Ok(true),
+            404 => Ok(false),
+            _ => Err(self.problem(status, &resp.body_mut().read_to_string().unwrap_or_default())),
+        }
     }
 
-    /// [`Client::publish`] with another archive type (`application/zip` for APM packages).
-    pub fn publish_as(&self, r: &Ref, version: &str, bytes: &[u8], content_type: &str) -> Result<Option<Value>> {
+    /// A version's evals archive and the digest the server sent with it.
+    pub fn download_evals(&self, r: &Ref, version: &str) -> Result<(Vec<u8>, Option<String>)> {
+        let url = self.endpoint(&format!("/packages/{}/{}/versions/{}/evals", enc(&r.namespace), enc(&r.name), enc(version)));
+        let mut resp = self.auth(self.agent.get(&url)).header("accept", "application/gzip").call().map_err(|e| self.unreachable(e))?;
+        let status = resp.status().as_u16();
+        if !(200..300).contains(&status) {
+            let text = resp.body_mut().read_to_string().unwrap_or_default();
+            return Err(self.problem(status, &text));
+        }
+        let header = resp.headers().get("x-hlock-digest").and_then(|h| h.to_str().ok()).map(str::to_string);
+        let limit = crate::evals_archive::MAX_ARCHIVE;
+        let bytes = resp.body_mut().with_config().limit(limit as u64 + 1).read_to_vec().map_err(|e| err(format!("can't download {url}: {e}")))?;
+        if bytes.len() > limit {
+            return Err(err(format!("{}@{version}'s eval packs are larger than {} MiB; refusing them", r.package(), limit >> 20)));
+        }
+        Ok((bytes, header))
+    }
+
+    /// Upload a version's evals archive. `Ok(None)` on 409 (it has one, or declared another).
+    pub fn publish_evals(&self, r: &Ref, version: &str, bytes: &[u8]) -> Result<Option<Value>> {
+        let url = self.endpoint(&format!("/packages/{}/{}/versions/{}/evals", enc(&r.namespace), enc(&r.name), enc(version)));
+        let mut resp = self.auth(self.agent.put(&url)).header("content-type", "application/gzip").header("accept", "application/json").send(bytes).map_err(|e| self.unreachable(e))?;
+        let status = resp.status().as_u16();
+        let text = resp.body_mut().read_to_string().unwrap_or_default();
+        match status {
+            200..=299 => Ok(Some(serde_json::from_str(&text).unwrap_or(Value::Null))),
+            409 => Ok(None),
+            _ => Err(self.problem(status, &text)),
+        }
+    }
+
+    /// Publish an archive. `Ok(None)` when the version already exists (409).
+    pub fn publish(&self, r: &Ref, version: &str, bytes: &[u8]) -> Result<Option<Value>> {
+        self.publish_as(r, version, bytes, "application/gzip", None)
+    }
+
+    /// [`Client::publish`] with another archive type (`application/zip` for APM packages),
+    /// and the digest of the evals archive the version will have (`X-Hlock-Evals-Digest`).
+    pub fn publish_as(&self, r: &Ref, version: &str, bytes: &[u8], content_type: &str, evals_digest: Option<&str>) -> Result<Option<Value>> {
         let url = self.endpoint(&format!("/packages/{}/{}/versions/{}", enc(&r.namespace), enc(&r.name), enc(version)));
-        let mut resp = self.auth(self.agent.put(&url)).header("content-type", content_type).header("accept", "application/json").send(bytes).map_err(|e| self.unreachable(e))?;
+        let mut req = self.auth(self.agent.put(&url)).header("content-type", content_type).header("accept", "application/json");
+        if let Some(d) = evals_digest {
+            req = req.header("x-hlock-evals-digest", d);
+        }
+        let mut resp = req.send(bytes).map_err(|e| self.unreachable(e))?;
         let status = resp.status().as_u16();
         let text = resp.body_mut().read_to_string().unwrap_or_default();
         match status {
@@ -476,8 +575,15 @@ pub struct Packed {
     pub digest: String,
     pub size_bytes: u64,
     pub files: Vec<PackFile>,
-    /// The project's name (`[project] name`, else `apm.yml`'s `name`, else the directory's), slugified.
+    /// The package's default name, slugified: the git remote's repository name (when the
+    /// project is its work tree's root), else `[project] name`, else `apm.yml`'s `name`, else
+    /// the directory's.
     pub project: String,
+    /// Where `project` came from.
+    pub name_from: NameFrom,
+    /// The names the package would have without the git remote, in order (`[project] name`
+    /// unless it's `hlock init`'s `demo`, `apm.yml`'s `name`, the directory's), slugified.
+    pub fallback_names: Vec<String>,
     /// `apm.yml`'s `version`, if it has one.
     pub apm_version: Option<String>,
     pub warnings: Vec<String>,
@@ -485,7 +591,12 @@ pub struct Packed {
 
 /// Whether `path` may be in a setup archive.
 pub fn allowed_path(path: &str) -> bool {
-    SETUP_FILES.contains(&path) || path == "README.md" || (path.starts_with(".hlock/vendor/") && path.len() > ".hlock/vendor/".len())
+    SETUP_FILES.contains(&path) || path == "README.md" || pull::is_hlock_setup_path(path) || pull::is_vendored_path(path)
+}
+
+/// Whether `path` is one of a setup's own files (not README.md or a vendored file).
+fn setup_path(path: &str) -> bool {
+    SETUP_FILES.contains(&path) || pull::is_hlock_setup_path(path)
 }
 
 /// `s` as a package name: lowercase letters, digits and `-_.`.
@@ -546,27 +657,27 @@ pub fn pack(dir: &Path) -> Result<Packed> {
         (false, true) => add(&mut entries, "apm.yml", dir.join("apm.yaml"), &mut warnings),
         _ => {}
     }
+    // harness files under .hlock/ too, such as .hlock/locks/harness.pi.lock
+    let nested = pull::hlock_setup_files(dir);
+    for p in &nested {
+        add(&mut entries, p, dir.join(p), &mut warnings);
+    }
     if entries.is_empty() {
-        return Err(err(format!("{} has none of {}, apm.yaml; nothing to push", dir.display(), SETUP_FILES.join(", "))));
+        return Err(err(format!("{} has none of {}, apm.yaml, or harness files under .hlock/; nothing to push", dir.display(), SETUP_FILES.join(", "))));
     }
     add(&mut entries, "README.md", dir.join("README.md"), &mut warnings);
     let mut project = None;
-    if dir.join("harness.lock").is_file() {
-        let lock = Lockfile::load(&dir.join("harness.lock"))?;
-        let mut paths: Vec<String> = Vec::new();
-        paths.extend(lock.skill.iter().filter_map(|s| s.vendored.clone()));
-        paths.extend(lock.instructions.iter().filter_map(|i| i.vendored.clone()));
-        paths.extend(lock.config.iter().filter_map(|c| c.vendored.clone()));
-        for fc in lock.subagent.iter().chain(&lock.script).chain(&lock.middleware) {
-            paths.extend(fc.vendored.clone());
-        }
-        paths.sort();
-        paths.dedup();
-        for p in paths {
-            if !safe_rel(&p) || !p.starts_with(".hlock/vendor/") {
-                warnings.push(format!("harness.lock vendors {p}, outside .hlock/vendor/; left out"));
+    let locks = std::iter::once("harness.lock".to_string()).filter(|l| dir.join(l).is_file()).chain(nested.iter().filter(|p| p.ends_with(".lock")).cloned());
+    for l in locks {
+        let lock = Lockfile::load(&dir.join(&l))?;
+        // vendored paths are relative to the lock's directory
+        let at = pull::parent_dir(&l).to_string();
+        for v in pull::vendored_paths(&lock) {
+            if !safe_rel(&v) || !v.starts_with(".hlock/vendor/") {
+                warnings.push(format!("{l} vendors {v}, outside .hlock/vendor/; left out"));
                 continue;
             }
+            let p = pull::in_dir(&at, &v);
             let from = dir.join(&p);
             match std::fs::symlink_metadata(&from) {
                 Ok(m) if m.file_type().is_symlink() => warnings.push(format!("{p} is a symlink; left out")),
@@ -578,7 +689,7 @@ pub fn pack(dir: &Path) -> Result<Packed> {
                     }
                 }
                 Ok(_) => entries.push((p, from)),
-                Err(_) => warnings.push(format!("{p} (vendored by harness.lock) is missing; left out")),
+                Err(_) => warnings.push(format!("{p} (vendored by {l}) is missing; left out")),
             }
         }
     }
@@ -586,13 +697,14 @@ pub fn pack(dir: &Path) -> Result<Packed> {
         let m: toml::Value = toml::from_str(&t).map_err(|e| err(format!("harness.toml isn't valid TOML: {e}")))?;
         project = m.get("project").and_then(|p| p.get("name")).and_then(|n| n.as_str()).map(str::to_string);
     }
+    let mut apm_name = None;
     let mut apm_version = None;
     for (rel, p) in &entries {
         if rel == "apm.yml" || rel == "apm.lock.yaml" {
             let t = std::fs::read_to_string(p).map_err(|e| crate::error::io_at(p, e))?;
             let v: Value = serde_norway::from_str(&t).map_err(|e| err(format!("{rel} isn't valid YAML: {e}")))?;
             if rel == "apm.yml" {
-                project = project.or_else(|| v["name"].as_str().map(str::to_string));
+                apm_name = v["name"].as_str().map(str::to_string);
                 apm_version = v["version"].as_str().map(str::to_string).or_else(|| v["version"].as_f64().map(|f| f.to_string()));
             }
         }
@@ -639,9 +751,78 @@ pub fn pack(dir: &Path) -> Result<Packed> {
     }
     let digest = format!("sha256:{}", crate::sha256_hex(&bytes));
     let dir_name = std::fs::canonicalize(dir).ok().and_then(|d| d.file_name().map(|n| n.to_string_lossy().into_owned())).unwrap_or_else(|| "setup".into());
-    let project = slug(&project.unwrap_or(dir_name));
-    let project = if project.is_empty() { "setup".into() } else { project };
-    Ok(Packed { size_bytes: bytes.len() as u64, bytes, digest, files, project, apm_version, warnings })
+    // the names push defaulted to before the git remote's, for the rename guard; not
+    // `hlock init`'s default `demo`, which many unrelated projects share
+    let mut fallback_names: Vec<String> = Vec::new();
+    for n in [project.as_deref().filter(|p| slug(p) != "demo"), apm_name.as_deref(), Some(dir_name.as_str())].into_iter().flatten() {
+        let s = slug(n);
+        if !s.is_empty() && !fallback_names.contains(&s) {
+            fallback_names.push(s);
+        }
+    }
+    let (name, name_from) = [
+        (git_repo_name(dir), NameFrom::GitRemote),
+        (project, NameFrom::Project),
+        (apm_name, NameFrom::Apm),
+        (Some(dir_name), NameFrom::Directory),
+    ]
+    .into_iter()
+    .find_map(|(n, from)| n.map(|n| slug(&n)).filter(|s| !s.is_empty()).map(|s| (s, from)))
+    .unwrap_or_else(|| ("setup".into(), NameFrom::Directory));
+    Ok(Packed { size_bytes: bytes.len() as u64, bytes, digest, files, project: name, name_from, fallback_names, apm_version, warnings })
+}
+
+/// Where a package's default name came from.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum NameFrom {
+    /// The repository name of the git remote (the project is its work tree's root).
+    GitRemote,
+    /// `[project] name` in `harness.toml`.
+    Project,
+    /// `apm.yml`'s `name`.
+    Apm,
+    /// The project directory's name.
+    Directory,
+}
+
+impl NameFrom {
+    pub fn describe(self) -> &'static str {
+        match self {
+            NameFrom::GitRemote => "the git remote",
+            NameFrom::Project => "[project] name",
+            NameFrom::Apm => "apm.yml's name",
+            NameFrom::Directory => "the directory's name",
+        }
+    }
+}
+
+/// The repository name of `dir`'s git remote (`origin`, else the only one), when `dir` is the
+/// root of a git work tree; `None` otherwise (a project in a subdirectory of a repository, no
+/// remote, no git).
+pub fn git_repo_name(dir: &Path) -> Option<String> {
+    let run = |args: &[&str]| -> Option<String> {
+        let out = std::process::Command::new("git").arg("-C").arg(dir).args(args).env("GIT_TERMINAL_PROMPT", "0").env_remove("GIT_DIR").env_remove("GIT_WORK_TREE").stdin(std::process::Stdio::null()).stderr(std::process::Stdio::null()).output().ok()?;
+        out.status.success().then(|| String::from_utf8_lossy(&out.stdout).trim().to_string())
+    };
+    let top = run(&["rev-parse", "--show-toplevel"])?;
+    if std::fs::canonicalize(&top).ok()? != std::fs::canonicalize(dir).ok()? {
+        return None;
+    }
+    let remotes = run(&["remote"])?;
+    let remotes: Vec<&str> = remotes.lines().map(str::trim).filter(|r| !r.is_empty()).collect();
+    let remote = if remotes.contains(&"origin") { "origin" } else if remotes.len() == 1 { remotes[0] } else { return None };
+    repo_name_of(&run(&["remote", "get-url", remote])?)
+}
+
+/// The repository name in a git remote URL: its last path segment without `.git`
+/// (`https://…/owner/repo.git`, `git@host:owner/repo.git`, `file:///…/repo`, a local path).
+pub fn repo_name_of(url: &str) -> Option<String> {
+    let u = url.trim().trim_end_matches('/');
+    let u = u.split(['?', '#']).next().unwrap_or(u);
+    let last = u.rsplit(['/', ':', '\\']).next()?;
+    let name = last.strip_suffix(".git").unwrap_or(last);
+    (!name.is_empty()).then(|| name.to_string())
 }
 
 /// Unpack a setup archive into `dest` (an empty directory), refusing anything that isn't
@@ -677,7 +858,13 @@ pub fn unpack(bytes: &[u8], dest: &Path) -> Result<Vec<String>> {
         if !allowed_path(&path) {
             return Err(bad(format!("{path:?} isn't a file a setup may contain")));
         }
-        total += entry.header().size().unwrap_or(0);
+        // the size the body is read with (a PAX `size` overrides the ustar one), which must be
+        // the header's, so the limit counts what's actually written
+        let size = entry.size();
+        if entry.header().size().ok() != Some(size) {
+            return Err(bad(format!("{path:?} has a size that differs from its header's")));
+        }
+        total += size;
         if total > MAX_UNPACKED {
             return Err(bad(format!("it unpacks to more than {} MiB", MAX_UNPACKED >> 20)));
         }
@@ -687,13 +874,16 @@ pub fn unpack(bytes: &[u8], dest: &Path) -> Result<Vec<String>> {
             std::fs::create_dir_all(parent).map_err(|e| crate::error::io_at(parent, e))?;
         }
         let mut buf = Vec::new();
-        entry.by_ref().take(MAX_UNPACKED + 1).read_to_end(&mut buf).map_err(|e| bad(e.to_string()))?;
+        entry.by_ref().take(size + 1).read_to_end(&mut buf).map_err(|e| bad(e.to_string()))?;
+        if buf.len() as u64 != size {
+            return Err(bad(format!("{path:?} isn't the size its header says")));
+        }
         let mut f = std::fs::OpenOptions::new().write(true).create_new(true).open(&to).map_err(|e| bad(format!("{path}: {e}")))?;
         f.write_all(&buf).map_err(|e| crate::error::io_at(&to, e))?;
         out.push(path);
     }
-    if !out.iter().any(|p| SETUP_FILES.contains(&p.as_str())) {
-        return Err(bad(format!("it has none of {}", SETUP_FILES.join(", "))));
+    if !out.iter().any(|p| setup_path(p)) {
+        return Err(bad(format!("it has none of {}, or harness files under .hlock/", SETUP_FILES.join(", "))));
     }
     Ok(out)
 }
@@ -711,8 +901,9 @@ pub fn login_with_token(url: &str, token: &str) -> Result<Value> {
     Ok(json!({ "url": url, "whoami": who, "stored": stored }))
 }
 
-/// `hlock push`: pack `dir`, then publish it as `name@version`.
-pub fn push(url: &str, dir: &Path, name: Option<&str>, version: Option<&str>, dry_run: bool) -> Result<Value> {
+/// `hlock push`: pack `dir` (and its eval packs, unless `no_evals`), then publish it as
+/// `name@version`.
+pub fn push(url: &str, dir: &Path, name: Option<&str>, version: Option<&str>, dry_run: bool, no_evals: bool) -> Result<Value> {
     let client = Client::for_url(url);
     let packed = pack(dir)?;
     let namespace = match name {
@@ -729,9 +920,22 @@ pub fn push(url: &str, dir: &Path, name: Option<&str>, version: Option<&str>, dr
         (None, Some(ns)) => format!("{ns}/{}", packed.project),
         (None, None) => format!("<your-namespace>/{}", packed.project),
     };
+    let mut warnings = packed.warnings.clone();
+    let evals = if no_evals { None } else { crate::evals_archive::pack(dir)? };
+    if let Some(e) = &evals {
+        warnings.extend(e.warnings.iter().cloned());
+        warnings.extend(stale_evidence(dir, &packed));
+    }
     let version = match version {
         Some(v) => v.to_string(),
-        None => packed.apm_version.clone().filter(|v| version_ok(v)).unwrap_or_else(|| format!("sha-{}", &packed.digest["sha256:".len().."sha256:".len() + 12])),
+        None => packed.apm_version.clone().filter(|v| version_ok(v)).unwrap_or_else(|| {
+            // a change to the eval packs alone gives a new version too
+            let d = match &evals {
+                Some(e) => crate::hash::sha256_text(&format!("{}\n{}", packed.digest, e.digest)),
+                None => packed.digest["sha256:".len()..].to_string(),
+            };
+            format!("sha-{}", &d[d.len() - 64..][..12])
+        }),
     };
     if !version_ok(&version) {
         return Err(err(format!("{version:?} isn't a version: letters, digits and ._+- only, starting with a letter or digit")));
@@ -742,43 +946,124 @@ pub fn push(url: &str, dir: &Path, name: Option<&str>, version: Option<&str>, dr
         "digest": packed.digest,
         "size_bytes": packed.size_bytes,
         "files": packed.files,
-        "warnings": packed.warnings,
+        "warnings": warnings,
         "registry": url,
+        "name_from": if name.is_some() { Value::Null } else { json!(packed.name_from) },
     });
+    if let Some(e) = &evals {
+        out["evals"] = json!({ "digest": e.digest, "size_bytes": e.size_bytes, "packs": e.packs, "files": e.files });
+    }
     if dry_run {
         out["dry_run"] = json!(true);
         return Ok(out);
     }
-    let r = parse_ref(&package).ok_or_else(|| err(format!("{package:?} isn't NAMESPACE/NAME (lowercase letters, digits, - and, in the name, _ .)")))?;
+    let r = parse_ref(&package).filter(|r| r.path.is_none()).ok_or_else(|| err(format!("{package:?} isn't NAMESPACE/NAME (lowercase letters, digits, - and, in the name, _ .)")))?;
     if !client.has_token() {
         return Err(err(format!("not logged in to {url}: run `hlock login {url}` (or set {TOKEN_ENV})")));
     }
-    match client.publish(&r, &version, &packed.bytes)? {
+    if name.is_none() && packed.name_from == NameFrom::GitRemote {
+        rename_guard(&client, &r, &packed)?;
+    }
+    let evals_digest = evals.as_ref().map(|e| e.digest.as_str());
+    // the version as the registry has it: from the 201, or read back after a 409
+    let ver = match client.publish_as(&r, &version, &packed.bytes, "application/gzip", evals_digest)? {
         Some(resp) => {
-            if let Value::Object(m) = resp {
+            if let Value::Object(m) = &resp {
                 for (k, v) in m {
-                    if !v.is_null() && k != "files" {
-                        out[k] = v;
+                    if !v.is_null() && k != "files" && k != "evals" {
+                        out[k] = v.clone();
                     }
                 }
             }
             out["published"] = json!(true);
+            resp
         }
         None => {
             let existing = client.version(&r, &version)?;
-            if existing["digest"].as_str() == Some(packed.digest.as_str()) {
-                out["published"] = json!(false);
-                out["already_published"] = json!(true);
-                out["published_at"] = existing["published_at"].clone();
-            } else {
+            if existing["digest"].as_str() != Some(packed.digest.as_str()) {
                 return Err(err(format!(
                     "{package}@{version} is already published with other content ({}); versions can't change. Push with another --version",
                     existing["digest"].as_str().unwrap_or("unknown digest")
                 )));
             }
+            out["published"] = json!(false);
+            out["already_published"] = json!(true);
+            out["published_at"] = existing["published_at"].clone();
+            existing
         }
+    };
+    let Some(e) = &evals else { return Ok(out) };
+    // whether the registry takes eval packs is in its answer: a `Version` with an `evals` field
+    match crate::evals_archive::version_evals(&ver) {
+        None => {
+            out["warnings"].as_array_mut().unwrap().push(json!("the registry doesn't take eval packs; published without them"));
+            out["evals"]["published"] = json!(false);
+            out["evals"]["unsupported"] = json!(true);
+        }
+        Some(declared) if declared.and_then(|d| d["digest"].as_str()) != Some(e.digest.as_str()) => {
+            return Err(err(format!(
+                "{package}@{version} is published with {}; versions can't change. Push with another --version",
+                if declared.is_some() { "other eval packs" } else { "no eval packs" }
+            )));
+        }
+        Some(declared) if declared.is_some_and(|d| d["uploaded"].as_bool() == Some(true)) => {
+            out["evals"]["published"] = json!(false);
+            out["evals"]["already_published"] = json!(true);
+        }
+        Some(_) => match client.publish_evals(&r, &version, &e.bytes)? {
+            Some(_) => out["evals"]["published"] = json!(true),
+            None => {
+                let now = client.version(&r, &version)?;
+                let same = now.pointer("/evals/digest").and_then(Value::as_str) == Some(e.digest.as_str()) && now.pointer("/evals/uploaded").and_then(Value::as_bool) == Some(true);
+                if !same {
+                    return Err(err(format!("{package}@{version} has other eval packs; versions can't change. Push with another --version")));
+                }
+                out["evals"]["published"] = json!(false);
+                out["evals"]["already_published"] = json!(true);
+            }
+        },
     }
     Ok(out)
+}
+
+/// Locks being pushed whose `[evidence] eval-pack-digest` isn't the eval packs' digest now.
+fn stale_evidence(dir: &Path, packed: &Packed) -> Vec<String> {
+    let Ok(m) = crate::manifest::Manifest::load(&dir.join("harness.toml")) else { return Vec::new() };
+    let now = crate::tasks::packs_digest(&m);
+    packed
+        .files
+        .iter()
+        .map(|f| f.path.as_str())
+        .filter(|p| *p == crate::LOCKFILE_PATH || (pull::is_hlock_setup_path(p) && p.ends_with(".lock")))
+        .filter_map(|p| {
+            let l = Lockfile::load(&dir.join(p)).ok()?;
+            let recorded = l.evidence.eval_pack_digest.clone().filter(|d| !d.is_empty())?;
+            (recorded != now).then(|| format!("{p}'s evidence was measured on other eval packs than these (eval-pack-digest {}…); re-run `hlock resolve` to refresh it", &recorded[..recorded.len().min(19)]))
+        })
+        .collect()
+}
+
+/// Refuse to publish under the repository's name a project that may have been published under
+/// a name push used to default to (`[project] name`, `apm.yml`'s, the directory's), so people
+/// pulling the old name don't silently stop getting updates.
+fn rename_guard(client: &Client, r: &Ref, packed: &Packed) -> Result<()> {
+    let olds: Vec<&String> = packed.fallback_names.iter().filter(|n| **n != r.name).collect();
+    if olds.is_empty() || client.exists(r)? {
+        return Ok(());
+    }
+    for old in olds {
+        let before = Ref { name: old.to_string(), version: None, path: None, ..r.clone() };
+        if client.exists(&before)? {
+            return Err(err(format!(
+                "a package named {} exists, and this project's default name is now its repository's, {}; pass {} to publish under the repository's name, or {} to publish there",
+                before.package(),
+                r.package(),
+                r.package(),
+                before.package()
+            )));
+        }
+    }
+    Ok(())
 }
 
 /// Where a registry pull writes.
@@ -789,15 +1074,61 @@ pub enum Dest<'a> {
     Into(&'a Path),
 }
 
-/// `hlock pull NS/NAME[@VERSION]` (or a `registry:` spec from a `[pulled]` table). A
+/// Whether `path` is one of a package's locks: the root `harness.lock` or `harness.*.lock`, or
+/// a nested harness lock under `.hlock/`.
+fn package_lock(path: &str) -> bool {
+    path.ends_with(".lock") && ((!path.contains('/') && pull::is_harness_file(path)) || pull::is_hlock_setup_path(path))
+}
+
+/// The lock a registry reference picks in a package's `files`, and the package's other locks
+/// (when no path was given and the root lock was taken).
+fn choose_lock(r: &Ref, files: &[String]) -> Result<(String, Vec<String>)> {
+    let locks: Vec<&String> = files.iter().filter(|p| package_lock(p)).collect();
+    let refs = |ps: &[&String]| ps.iter().map(|p| format!("  hlock pull {}", Ref { path: Some(p.to_string()), ..r.clone() }.spec())).collect::<Vec<_>>().join("\n");
+    let pkg = r.package();
+    match r.path.as_deref() {
+        Some(p) if p.ends_with(".lock") => match locks.iter().find(|l| l.as_str() == p) {
+            Some(_) => Ok((p.to_string(), Vec::new())),
+            None if locks.is_empty() => Err(err(format!("{pkg} has no lock {p}, nor any other"))),
+            None => Err(err(format!("{pkg} has no lock {p}; its locks:\n{}", refs(&locks)))),
+        },
+        Some(d) => {
+            let here: Vec<&String> = locks.iter().copied().filter(|l| pull::parent_dir(l) == d).collect();
+            if let Some(l) = here.iter().find(|l| l.ends_with("/harness.lock")) {
+                return Ok((l.to_string(), Vec::new()));
+            }
+            match here.len() {
+                1 => Ok((here[0].clone(), Vec::new())),
+                0 => Err(err(format!("{pkg} has no lock in {d}/{}", if locks.is_empty() { String::new() } else { format!("; its locks:\n{}", refs(&locks)) }))),
+                _ => Err(err(format!("{pkg} has {} locks in {d}/; pick one:\n{}", here.len(), refs(&here)))),
+            }
+        }
+        None => {
+            if locks.iter().any(|l| l.as_str() == crate::LOCKFILE_PATH) {
+                let others = locks.iter().filter(|l| l.as_str() != crate::LOCKFILE_PATH).map(|l| l.to_string()).collect();
+                return Ok((crate::LOCKFILE_PATH.to_string(), others));
+            }
+            match locks.len() {
+                1 => Ok((locks[0].clone(), Vec::new())),
+                0 => Err(err(format!("{pkg} has no harness.lock; write its files into a project with --into DIR"))),
+                _ => Err(err(format!("{pkg} has {} locks and no harness.lock; pick one:\n{}", locks.len(), refs(&locks)))),
+            }
+        }
+    }
+}
+
+/// `hlock pull NS/NAME[//PATH][@VERSION]` (or a `registry:` spec from a `[pulled]` table). A
 /// remote package (`source` github or gitlab) is pulled from git, as its `pull` field says.
-pub fn pull(url_flag: Option<&str>, spec: &str, dest: Dest<'_>, force: bool, allow_hidden: &[String]) -> Result<Value> {
+/// `no_evals` leaves out the eval packs `--into` writes.
+pub fn pull(url_flag: Option<&str>, spec: &str, dest: Dest<'_>, force: bool, allow_hidden: &[String], no_evals: bool) -> Result<Value> {
     let (url, r) = if spec.starts_with("registry:") {
         parse_pulled_spec(spec)?
     } else {
-        let r = parse_ref(spec).ok_or_else(|| err(format!("{spec:?} isn't NAMESPACE/NAME[@VERSION]")))?;
-        (resolve_url(url_flag)?, r)
+        (resolve_url(url_flag)?, parse_ref_checked(spec)?)
     };
+    if let (Dest::Into(_), Some(p)) = (&dest, &r.path) {
+        return Err(err(format!("--into writes the whole package; drop //{p}, or pull that lock into the store without --into")));
+    }
     let client = Client::for_url(&url);
     let pkg = client.package(&r)?;
     let ty = pkg["type"].as_str().unwrap_or("setup");
@@ -821,7 +1152,12 @@ pub fn pull(url_flag: Option<&str>, spec: &str, dest: Dest<'_>, force: bool, all
         if !pull::is_source(&git) {
             git = format!("{source}:{git}");
         }
-        pull::parse(&git)?;
+        let src = pull::parse(&git)?;
+        if let Some(p) = &r.path {
+            // PATH is inside the package, which may itself be a directory of its repository
+            git = pull::with_path(&src, &pull::in_dir(src.path.as_deref().unwrap_or(""), p));
+            pull::parse(&git)?;
+        }
         let mut v = match dest {
             Dest::Target(t) => serde_json::to_value(pull::pull_allowing(&git, t, force, allow_hidden)?)?,
             Dest::Into(d) => serde_json::to_value(pull::pull_into(&git, d, force, allow_hidden)?)?,
@@ -839,19 +1175,44 @@ pub fn pull(url_flag: Option<&str>, spec: &str, dest: Dest<'_>, force: bool, all
         return Err(err(format!("{}@{version}'s archive doesn't match its digest (expected {expected}, got {got}); nothing was written", r.package())));
     }
     let scratch = pull::scratch_dir()?;
-    unpack(&bytes, &scratch.0)?;
-    let reference = Ref { version: r.version.clone(), ..r.clone() };
-    let mut pulled = json!({ "from": pulled_spec(&url, &reference), "url": format!("{url}/{}", r.package()), "path": crate::LOCKFILE_PATH, "version": version, "digest": expected });
+    let files = unpack(&bytes, &scratch.0)?;
+    // the lock: the one PATH names, else the root harness.lock, else the only one (for
+    // --into, the root lock if there is one; every file is written anyway)
+    let (lock_path, others) = match dest {
+        Dest::Target(_) => choose_lock(&r, &files)?,
+        Dest::Into(_) => (crate::LOCKFILE_PATH.to_string(), Vec::new()),
+    };
+    // `from` names the lock unless it's the root one, so a refresh never switches locks
+    let chosen = Ref { path: (lock_path != crate::LOCKFILE_PATH).then(|| lock_path.clone()), ..r.clone() };
+    let mut pulled = json!({ "from": pulled_spec(&url, &chosen), "url": format!("{url}/{}", r.package()), "path": lock_path, "version": version, "digest": expected });
     if let Some(v) = &r.version {
         pulled["ref"] = json!(v);
     }
-    let shown = match &r.version {
-        Some(v) => format!("{}@{v}", r.package()),
-        None => r.package(),
+    let (eval_packs, eval_files) = match dest {
+        Dest::Into(_) if !no_evals => match crate::evals_archive::version_evals(&ver).flatten() {
+            Some(e) => {
+                let digest = e["digest"].as_str().unwrap_or_default().to_string();
+                if e["uploaded"].as_bool() != Some(true) {
+                    return Err(err(format!("{}@{version}'s eval packs aren't uploaded yet; nothing was written. Try again later, or pass --no-evals", r.package())));
+                }
+                let (ebytes, eheader) = client.download_evals(&r, &version)?;
+                let got = format!("sha256:{}", crate::sha256_hex(&ebytes));
+                if got != digest || eheader.as_ref().is_some_and(|h| *h != digest) {
+                    return Err(err(format!("{}@{version}'s eval packs don't match their digest (expected {digest}, got {got}); nothing was written", r.package())));
+                }
+                let manifest = std::fs::read_to_string(scratch.0.join("harness.toml")).ok().and_then(|t| toml::from_str::<toml::Value>(&t).ok());
+                let declared = manifest.as_ref().map(crate::evals_archive::declared_packs).unwrap_or_default();
+                pulled["evals-digest"] = json!(digest);
+                crate::evals_archive::unpack(&ebytes, &scratch.0, &declared)?
+            }
+            None => (Vec::new(), Vec::new()),
+        },
+        _ => (Vec::new(), Vec::new()),
     };
-    let src = Source { spec: shown, url: format!("{url}/{}", r.package()), fetch_url: String::new(), reference: r.version.clone(), path: None, owner: r.name.clone() };
-    let lock = scratch.0.join(crate::LOCKFILE_PATH);
-    let fetched = Fetched { src, root: &scratch.0, commit: version.clone(), remote_lock: lock.is_file().then_some(lock), others: Vec::new(), git: false, pulled, digest: Some(expected) };
+    let src = Source { spec: chosen.spec(), url: format!("{url}/{}", r.package()), fetch_url: String::new(), reference: r.version.clone(), path: chosen.path.clone(), owner: r.name.clone() };
+    let others = others.into_iter().map(|p| pull::OtherLock { source: Ref { path: Some(p.clone()), ..r.clone() }.spec(), path: p }).collect();
+    let lock = scratch.0.join(&lock_path);
+    let fetched = Fetched { src, root: &scratch.0, commit: version.clone(), remote_lock: lock.is_file().then_some(lock), others, git: false, pulled, digest: Some(expected), eval_packs, eval_files };
     let mut v = match dest {
         Dest::Target(t) => serde_json::to_value(pull::place(fetched, t, force, allow_hidden)?)?,
         Dest::Into(d) => {
@@ -887,15 +1248,68 @@ mod tests {
 
     #[test]
     fn refs() {
-        assert_eq!(parse_ref("acme/review-bot"), Some(Ref { namespace: "acme".into(), name: "review-bot".into(), version: None }));
+        assert_eq!(parse_ref("acme/review-bot"), Some(Ref { namespace: "acme".into(), name: "review-bot".into(), version: None, path: None }));
         assert_eq!(parse_ref("acme/review-bot@1.2.0").unwrap().version.as_deref(), Some("1.2.0"));
-        for bad in ["acme", "Acme/x", "acme/x/y", "acme/x@", "acme/x@-1", "-a/x", "acme/.x", "github:a/b", "./a/b", "a/b@1 2"] {
+        for bad in ["acme", "Acme/x", "acme/x/y", "acme/x@", "acme/x@-1", "-a/x", "acme/.x", "github:a/b", "./a/b", "a/b@1 2", "a/b//", "a/b//x/../../y", "a/b//x@y/z", "a/b@1//x"] {
             assert!(parse_ref(bad).is_none(), "{bad}");
         }
+        // a path in the package, the version last
+        let r = parse_ref("acme/hlock//.hlock/locks/harness.pi.lock@1.2.0").unwrap();
+        assert_eq!((r.package().as_str(), r.path.as_deref(), r.version.as_deref()), ("acme/hlock", Some(".hlock/locks/harness.pi.lock"), Some("1.2.0")));
+        assert_eq!(r.spec(), "acme/hlock//.hlock/locks/harness.pi.lock@1.2.0");
+        let e = parse_ref_checked("acme/hlock@1.2.0//.hlock/locks").unwrap_err().to_string();
+        assert!(e.contains("the version goes last: acme/hlock//.hlock/locks@1.2.0"), "{e}");
+        assert!(is_ref("acme/hlock@1.2.0//.hlock/locks"));
         let (url, r) = parse_pulled_spec("registry:https://registry.example.com/sub/acme/bot@2").unwrap();
         assert_eq!((url.as_str(), r.package().as_str(), r.version.as_deref()), ("https://registry.example.com/sub", "acme/bot", Some("2")));
         assert_eq!(pulled_spec(&url, &r), "registry:https://registry.example.com/sub/acme/bot@2");
+        // a [pulled] from with a path: the `//` after the scheme isn't the path's
+        for (spec, path, version) in [
+            ("registry:https://h.example.com/acme/hlock//.hlock/locks/harness.pi.lock", Some(".hlock/locks/harness.pi.lock"), None),
+            ("registry:https://h.example.com/acme/hlock//.hlock/locks/harness.pi.lock@1.0", Some(".hlock/locks/harness.pi.lock"), Some("1.0")),
+            ("registry:http://127.0.0.1:8080/acme/hlock", None, None),
+        ] {
+            let (url, r) = parse_pulled_spec(spec).unwrap();
+            assert_eq!((r.package().as_str(), r.path.as_deref(), r.version.as_deref()), ("acme/hlock", path, version), "{spec}");
+            assert_eq!(pulled_spec(&url, &r), spec);
+        }
         assert!(parse_pulled_spec("github:a/b").is_err());
+        assert!(normalize_url("https://h.example.com/a//b").is_err());
+    }
+
+    #[test]
+    fn repository_names() {
+        for (url, name) in [
+            ("https://github.com/cosmicbboy/hlock.git", "hlock"),
+            ("https://github.com/cosmicbboy/hlock/", "hlock"),
+            ("git@github.com:cosmicbboy/hlock.git", "hlock"),
+            ("ssh://git@host:2222/team/agents.git", "agents"),
+            ("file:///srv/repos/setup", "setup"),
+            ("/srv/repos/setup.git", "setup"),
+            ("C:\\repos\\setup", "setup"),
+        ] {
+            assert_eq!(repo_name_of(url).as_deref(), Some(name), "{url}");
+        }
+        assert_eq!(repo_name_of(""), None);
+    }
+
+    #[test]
+    fn choosing_a_lock_in_a_package() {
+        let files: Vec<String> = ["harness.lock", "harness.toml", ".hlock/locks/harness.pi.lock", ".hlock/locks/harness.codex.lock", ".hlock/team/harness.lock", ".hlock/vendor/x/harness.lock", ".hlock/locks/.hlock/vendor/y/harness.z.lock"].iter().map(|s| s.to_string()).collect();
+        let r = |s: &str| parse_ref(s).unwrap();
+        let (l, others) = choose_lock(&r("a/p"), &files).unwrap();
+        assert_eq!(l, "harness.lock");
+        assert_eq!(others, [".hlock/locks/harness.pi.lock", ".hlock/locks/harness.codex.lock", ".hlock/team/harness.lock"]);
+        assert_eq!(choose_lock(&r("a/p//.hlock/locks/harness.pi.lock"), &files).unwrap(), (".hlock/locks/harness.pi.lock".into(), vec![]));
+        assert_eq!(choose_lock(&r("a/p//.hlock/team"), &files).unwrap().0, ".hlock/team/harness.lock");
+        let e = choose_lock(&r("a/p//.hlock/locks@1"), &files).unwrap_err().to_string();
+        assert!(e.contains("has 2 locks in .hlock/locks/") && e.contains("hlock pull a/p//.hlock/locks/harness.pi.lock@1"), "{e}");
+        assert!(choose_lock(&r("a/p//.hlock/vendor/x/harness.lock"), &files).unwrap_err().to_string().contains("has no lock"));
+        // without a root lock: the only one, else a choice
+        let one = vec![".hlock/locks/harness.pi.lock".to_string()];
+        assert_eq!(choose_lock(&r("a/p"), &one).unwrap().0, ".hlock/locks/harness.pi.lock");
+        let e = choose_lock(&r("a/p"), &files[2..4]).unwrap_err().to_string();
+        assert!(e.contains("2 locks and no harness.lock"), "{e}");
     }
 
     #[test]
@@ -926,6 +1340,51 @@ mod tests {
         assert_eq!(got.len(), 4);
         assert_eq!(std::fs::read_to_string(out.join(".hlock/vendor/pi/skills/x/SKILL.md")).unwrap(), "Run the tests.\n");
         assert!(!out.join("notes.txt").exists());
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn packing_takes_harness_files_under_dot_hlock() {
+        let d = tmp("nested");
+        std::fs::write(d.join("harness.toml"), "[project]\nname = \"x\"\n").unwrap();
+        std::fs::create_dir_all(d.join(".hlock/locks")).unwrap();
+        std::fs::write(d.join(".hlock/locks/harness.pi.lock"), LOCK).unwrap();
+        std::fs::write(d.join(".hlock/locks/harness.pi.lock.prev"), LOCK).unwrap();
+        std::fs::write(d.join(".hlock/locks/notes.txt"), "not pushed").unwrap();
+        std::fs::create_dir_all(d.join(".hlock/team")).unwrap();
+        std::fs::write(d.join(".hlock/team/harness.toml"), "[project]\nname = \"team\"\n").unwrap();
+        // a lock's vendored paths are relative to its own directory
+        std::fs::create_dir_all(d.join(".hlock/locks/.hlock/vendor/pi/skills/x")).unwrap();
+        std::fs::write(d.join(".hlock/locks/.hlock/vendor/pi/skills/x/SKILL.md"), "Run the tests.\n").unwrap();
+        std::fs::write(d.join(".hlock/locks/.hlock/vendor/harness.y.lock"), LOCK).unwrap();
+        // the root's vendor directory belongs to the root lock, which there isn't
+        std::fs::create_dir_all(d.join(".hlock/vendor/pi/skills/x")).unwrap();
+        std::fs::write(d.join(".hlock/vendor/pi/skills/x/SKILL.md"), "not pushed\n").unwrap();
+        std::fs::write(d.join(".hlock/vendor/harness.lock"), LOCK).unwrap();
+        // hlock's own state: an eval environment's candidate lock, a stored dependency tree
+        for state in [".hlock/env/eval/x", ".hlock/store/trees/abc", ".hlock/tune/1"] {
+            std::fs::create_dir_all(d.join(state)).unwrap();
+            std::fs::write(d.join(state).join("harness.lock"), LOCK).unwrap();
+        }
+        let a = pack(&d).unwrap();
+        let paths: Vec<&str> = a.files.iter().map(|f| f.path.as_str()).collect();
+        assert_eq!(paths, [".hlock/locks/.hlock/vendor/pi/skills/x/SKILL.md", ".hlock/locks/harness.pi.lock", ".hlock/team/harness.toml", "harness.toml"]);
+        assert!(a.warnings.is_empty(), "{:?}", a.warnings);
+        let out = d.join("out");
+        std::fs::create_dir_all(&out).unwrap();
+        assert_eq!(unpack(&a.bytes, &out).unwrap().len(), 4);
+        assert_eq!(std::fs::read_to_string(out.join(".hlock/locks/harness.pi.lock")).unwrap(), LOCK);
+        assert_eq!(std::fs::read_to_string(out.join(".hlock/locks/.hlock/vendor/pi/skills/x/SKILL.md")).unwrap(), "Run the tests.\n");
+        // nested harness files alone are a setup
+        std::fs::remove_file(d.join("harness.toml")).unwrap();
+        assert!(pack(&d).is_ok());
+        assert!(allowed_path(".hlock/locks/harness.pi.lock") && !allowed_path(".hlock/locks/notes.txt") && !allowed_path(".hlock/../harness.lock"));
+        assert!(allowed_path(".hlock/locks/.hlock/vendor/pi/x") && allowed_path(".hlock/vendor/pi/x"));
+        for bad in ["src/.hlock/vendor/x", ".hlock/locks/.hlock/vendor/", ".hlock/locks/.hlock/vendor/x/../../../../../x"] {
+            assert!(!allowed_path(bad), "{bad}");
+        }
+        assert!(!pull::is_hlock_setup_path(".hlock/locks/.hlock/vendor/harness.y.lock"));
+        assert!(!allowed_path(".hlock/env/eval/x/harness.lock") && allowed_path(".hlock/harness.x.lock"));
         let _ = std::fs::remove_dir_all(&d);
     }
 
@@ -979,6 +1438,12 @@ mod tests {
             assert!(e.contains(why), "{why}: {e}");
         }
         assert!(unpack(b"not a tarball", &d).is_err());
+        // a PAX size bigger than the header's, which the limit wouldn't count
+        let out = d.join("pax");
+        std::fs::create_dir_all(&out).unwrap();
+        let bytes = crate::evals_archive::pax_sized_tarball(&[("harness.lock", b"x")], "README.md", &vec![b'x'; 4096]);
+        let e = unpack(&bytes, &out).unwrap_err().to_string();
+        assert!(e.contains("differs from its header"), "{e}");
         let _ = std::fs::remove_dir_all(&d);
     }
 

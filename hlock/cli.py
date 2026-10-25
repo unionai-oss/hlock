@@ -1376,8 +1376,9 @@ def _print_pull(result: dict) -> None:
     if cmds:
         console.print(f"[warn]![/] starts MCP servers with: [cmd]{', '.join(cmds)}[/]  "
                       "[muted]· review before syncing into your own config[/]")
+    where = "package" if result.get("registry") else "repo"
     for other in result["others"]:
-        console.print(f"[muted]also in the repo:[/] {other['path']}  [muted]→[/] "
+        console.print(f"[muted]also in the {where}:[/] {other['path']}  [muted]→[/] "
                       f"[cmd]hlock pull {escape(other['source'])}[/]", soft_wrap=True)
 
 
@@ -1409,8 +1410,10 @@ def _lock_ref(arg: str, as_json: bool = False) -> tuple[str, str | None]:
 @click.option("-o", "--out", default=None, metavar="FILE",
               help="Write the lock into the project as FILE (e.g. harness.alice.lock) instead of the store.")
 @click.option("--into", "into", default=None, metavar="DIR",
-              help="Write the whole setup (harness.toml, harness.lock and what it vendors, apm.yml, "
-                   "apm.lock.yaml) into DIR. Refuses to overwrite files without --force.")
+              help="Write the whole setup (harness.toml, its locks and what they vendor, apm.yml, "
+                   "apm.lock.yaml, and a registry package's eval packs) into DIR. Refuses to overwrite files "
+                   "without --force.")
+@click.option("--no-evals", is_flag=True, help="With --into from a registry: leave out the package's eval packs.")
 @click.option("--force", is_flag=True, help="Replace an existing lock of that name that came from somewhere else "
                                             "(with --into: files that already exist).")
 @click.option("--allow-hidden", "allow_hidden", multiple=True, metavar="FILE",
@@ -1418,18 +1421,21 @@ def _lock_ref(arg: str, as_json: bool = False) -> tuple[str, str | None]:
 @click.option("--registry", default=None, metavar="URL",
               help="The registry a NAMESPACE/NAME source is in.  [dim]\\[default: $HLOCK_REGISTRY, else the one you logged in to][/]")
 @click.option("--json", "as_json", is_flag=True, help="Print the result as JSON.")
-def pull(sources: tuple[str, ...], name: str | None, out: str | None, into: str | None, force: bool,
+def pull(sources: tuple[str, ...], name: str | None, out: str | None, into: str | None, no_evals: bool, force: bool,
          allow_hidden: tuple[str, ...], registry: str | None, as_json: bool) -> None:
     """Pull someone else's [path]harness.lock[/] from a git repository or a registry.
 
     SOURCE is [cmd]github:OWNER/REPO\\[/PATH]\\[@REF][/], [cmd]gitlab:GROUP/REPO\\[//PATH]\\[@REF][/],
     [cmd]git:URL\\[//PATH]\\[@REF][/], a repository or file URL copied from the browser, or a registry
-    package, [cmd]NAMESPACE/NAME\\[@VERSION][/] (see [cmd]hlock login[/]). The lock and the files it
+    package, [cmd]NAMESPACE/NAME\\[//PATH]\\[@VERSION][/] (see [cmd]hlock login[/]), where PATH picks one
+    of the package's locks, such as [path].hlock/locks/harness.pi.lock[/]. The lock and the files it
     vendors are stored under [path]~/.hlock/pulls/NAME/[/], so you can use it from any project by
     name: [cmd]hlock launch --lock NAME[/], [cmd]hlock sync NAME[/]. Nothing from the lock runs until you do.
 
     With no SOURCE, refreshes every pulled lock; with NAMEs or LOCK files, refreshes those.
     """
+    if no_evals and not into:
+        _fail("--no-evals only applies with --into", "eval packs are written only by [cmd]hlock pull NAMESPACE/NAME --into DIR[/]")
     remote = [s for s in sources if is_pull_source(s) or is_registry_ref(s)]
     if remote and len(sources) > 1:
         _fail("pull one source at a time", "run [cmd]hlock pull[/] once per source")
@@ -1443,7 +1449,7 @@ def pull(sources: tuple[str, ...], name: str | None, out: str | None, into: str 
         with _working(f"Pulling {src}…"):
             if is_registry_ref(src):
                 result = json.loads(_registry_pull(src, registry=registry, out=out, name=name, into=into, force=force,
-                                                   allow_hidden=list(allow_hidden)))
+                                                   allow_hidden=list(allow_hidden), no_evals=no_evals))
             elif into:
                 result = json.loads(_pull_into(src, into, force=force, allow_hidden=list(allow_hidden)))
             else:
@@ -1545,14 +1551,25 @@ def _print_into(result: dict) -> None:
     files = result["files"]
     _ok(f"pulled {escape(result['source']['spec'])} [muted]@ {escape(rev or '')}[/] → [path]{_show(result['dir'])}[/]  "
         f"[muted]({len(files)} {'file' if len(files) == 1 else 'files'})[/]", soft_wrap=True)
-    vendored = [f for f in files if f.startswith(".hlock/vendor/")]
+    packs = result.get("eval_packs") or []
+
+    def is_vendored(f: str) -> bool:
+        return f.startswith(".hlock/vendor/") or "/.hlock/vendor/" in f
+
+    def in_pack(f: str) -> bool:
+        return any(f.startswith(f"{p}/") for p in packs)
+
+    vendored = [f for f in files if is_vendored(f)]
     for f in files:
-        if not f.startswith(".hlock/vendor/"):
+        if not is_vendored(f) and not in_pack(f):
             console.print(f"  [path]{escape(f)}[/]")
     if vendored:
         console.print(f"  [path].hlock/vendor/[/] [muted]{len(vendored)} vendored {'file' if len(vendored) == 1 else 'files'}[/]")
+    for p in packs:
+        n = sum(1 for f in files if f.startswith(f"{p}/"))
+        console.print(f"  [path]{escape(p)}/[/] [muted]eval pack, {n} {'file' if n == 1 else 'files'}[/]")
     for w in result["warnings"]:
-        console.print(f"[warn]![/] {w}")
+        console.print(f"[warn]![/] {w}", soft_wrap=True)
     if result.get("lock"):
         cmds = _mcp_commands(result["lock"])
         if cmds:
@@ -1677,44 +1694,66 @@ def whoami(registry: str | None, as_json: bool) -> None:
 @click.option("--version", "version", default=None, metavar="VERSION",
               help="The version to publish.  [dim]\\[default: apm.yml's version, else sha-<digest>][/]")
 @click.option("-C", "--dir", "directory", default=".", metavar="DIR", help="The project to push.  [dim]\\[default: .][/]")
+@click.option("--no-evals", is_flag=True, help="Publish without the eval packs harness.toml names.")
 @click.option("--dry-run", is_flag=True, help="Show what would be pushed, and push nothing.")
 @click.option("--registry", default=None, metavar="URL", help="The registry to push to.  [dim]\\[default: your default registry][/]")
 @click.option("--json", "as_json", is_flag=True, help="Print the result as JSON.")
-def push(name: str | None, version: str | None, directory: str, dry_run: bool, registry: str | None, as_json: bool) -> None:
+def push(name: str | None, version: str | None, directory: str, no_evals: bool, dry_run: bool, registry: str | None,
+         as_json: bool) -> None:
     """Publish this project's agent setup to a registry.
 
     Packs what exists of [path]harness.toml[/], [path]harness.lock[/] (with the files it vendors),
-    [path]apm.yml[/], [path]apm.lock.yaml[/] and [path]README.md[/] into one archive, checked first
-    for credentials and hidden characters. NAMESPACE/NAME defaults to your namespace and the
-    project's name. The same files always pack to the same digest, so pushing twice is safe.
+    [path]apm.yml[/], [path]apm.lock.yaml[/] and [path]README.md[/], plus the harness files under
+    [path].hlock/[/] (such as [path].hlock/locks/harness.pi.lock[/]), into one archive, checked first
+    for credentials and hidden characters. The eval packs [path]harness.toml[/]'s [key]\\[evals] packs[/]
+    names go in a second archive of the same version ([cmd]--no-evals[/] leaves them out).
+
+    NAMESPACE/NAME defaults to your namespace and the git remote's repository name (when the
+    project is the repository's root), else [key]\\[project] name[/]. The same files always pack to
+    the same digest, so pushing twice is safe.
     """
     url = _registry(registry)
     with _working(f"{'Packing' if dry_run else 'Pushing to ' + url}…"):
-        r = json.loads(_registry_push(url, directory, name=name, version=version, dry_run=dry_run))
+        r = json.loads(_registry_push(url, directory, name=name, version=version, dry_run=dry_run, no_evals=no_evals))
     if as_json:
         console.print_json(data=r)
         return
     for w in r.get("warnings", []):
-        console.print(f"[warn]![/] {w}")
+        console.print(f"[warn]![/] {w}", soft_wrap=True)
     ref = f"{r['package']}@{r['version']}"
-    summary = f"[muted]({len(r['files'])} files, {_size(r.get('size_bytes'))}, {r['digest'][:19]}…)[/]"
+    evals = r.get("evals")
+    n_files = len(r["files"]) + (len(evals["files"]) if evals else 0)
+    size = (r.get("size_bytes") or 0) + ((evals or {}).get("size_bytes") or 0)
+    summary = f"[muted]({n_files} files, {_size(size)}, {r['digest'][:19]}…)[/]"
+    origin = f"  [muted](name from {_NAME_FROM[r['name_from']]})[/]" if r.get("name_from") else ""
     if r.get("dry_run"):
-        console.print(f"would push [key]{escape(ref)}[/] to [path]{escape(url)}[/] {summary}", soft_wrap=True)
+        console.print(f"would push [key]{escape(ref)}[/] to [path]{escape(url)}[/] {summary}{origin}", soft_wrap=True)
         t = Table(box=None, header_style="bold", pad_edge=False)
         for col in ("file", "size", "digest"):
             t.add_column(col)
         for f in r["files"]:
             t.add_row(f"[path]{escape(f['path'])}[/]", _size(f["size"]), f"[muted]{f['digest'][:12]}[/]")
+        if evals:
+            for p in evals["packs"]:
+                files = [f for f in evals["files"] if f["path"].startswith(f"{p}/")]
+                t.add_row(f"[path]{escape(p)}/[/] [muted]eval pack, {len(files)} files[/]",
+                          _size(sum(f["size"] for f in files)), "")
         console.print(t)
         _next(f"hlock push{' ' + name if name else ''}")
         return
-    if r.get("already_published"):
+    if r.get("already_published") and (not evals or not evals.get("published")):
         _ok(f"[key]{escape(ref)}[/] is already published with these files {summary}", soft_wrap=True)
     else:
-        _ok(f"pushed [key]{escape(ref)}[/] {summary}", soft_wrap=True)
+        _ok(f"pushed [key]{escape(ref)}[/] {summary}{origin}", soft_wrap=True)
         if r.get("url"):
             console.print(f"  [path]{escape(r['url'])}[/]", soft_wrap=True)
+    if evals and (evals.get("published") or evals.get("already_published")):
+        console.print(f"  [muted]with eval packs:[/] {escape(', '.join(p + '/' for p in evals['packs']))}", soft_wrap=True)
     _next(f"hlock pull {r['package']}@{r['version']}")
+
+
+_NAME_FROM = {"git-remote": "the git remote", "project": "\\[project] name", "apm": "apm.yml's name",
+              "directory": "the directory's name"}
 
 
 @main.command()

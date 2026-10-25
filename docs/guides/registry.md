@@ -6,15 +6,22 @@ open protocol, the [hlock registry HTTP API](https://github.com/unionai-oss/hloc
 any server that implements it works, and hlock has no default registry. Pulling from a git
 repository ([`hlock pull github:…`](pull.md)) needs no registry at all.
 
-A published setup is whichever of these files your project has:
+A published package is a project: whichever of these files it has, versioned together.
 
 | File | |
 |---|---|
 | `harness.toml` | What the project declares |
 | `harness.lock`, and the files it vendors under `.hlock/vendor/` | The pinned setup |
+| `harness.toml`, `harness.lock` and `harness.NAME.lock` anywhere else under `.hlock/`, with the files each lock vendors (under its own directory's `.hlock/vendor/`) | More setups, such as the per-harness locks in `.hlock/locks/` |
 | `apm.yml` (or `apm.yaml`) | [APM](../getting-started/apm.md)'s manifest |
 | `apm.lock.yaml` | APM's lock |
 | `README.md` | Shown on the registry's page for it |
+| The [eval packs](eval-packs.md) `harness.toml`'s `[evals] packs` names | What the locks' evidence was measured on, so whoever pulls it can rerun it |
+
+The directories hlock keeps its own state in under `.hlock/` (`env/`, `store/`, `tune/`,
+`runs/`, `bak/` and the like) aren't searched. The eval packs travel in a second archive of
+the same version, so a registry or an hlock from before eval packs still takes and pulls the
+rest.
 
 A project that uses only APM can publish its `apm.yml` and `apm.lock.yaml` the same way. A
 reusable APM *package*, with an `.apm/` directory, is published with
@@ -55,25 +62,36 @@ Look at what would be published first:
 
 ```console
 $ hlock push --dry-run
-would push alice/review-bot@1.0.0 to https://registry.example.com (5 files, 404 B, sha256:24f99c95f3c0…)
-file                                              size   digest
-.hlock/vendor/claude-code/skills/review/SKILL.md  17 B   ec9934ffb1e9
-apm.lock.yaml                                     39 B   13fe02d9ad1f
-apm.yml                                           56 B   3dbfab129de8
-harness.lock                                      220 B  d880772b7e3c
-harness.toml                                      30 B   a49d0989b2a7
+would push alice/review-bot@1.0.0 to https://registry.example.com (11 files, 853 B, sha256:25c9c3830399…)  (name from the git remote)
+file                                                  size   digest
+.hlock/locks/.hlock/vendor/pi/skills/review/SKILL.md  17 B   ec9934ffb1e9
+.hlock/locks/harness.pi.lock                          169 B  7d7e6b1c9c1c
+.hlock/vendor/claude-code/skills/review/SKILL.md      17 B   ec9934ffb1e9
+apm.lock.yaml                                         39 B   13fe02d9ad1f
+apm.yml                                               56 B   3dbfab129de8
+harness.lock                                          207 B  2c5584e8a5cf
+harness.toml                                          53 B   9079dd5e1bed
+evals/ eval pack, 4 files                             290 B
 next → hlock push
 $ hlock push
-✓ pushed alice/review-bot@1.0.0 (5 files, 404 B, sha256:24f99c95f3c0…)
+✓ pushed alice/review-bot@1.0.0 (11 files, 853 B, sha256:25c9c3830399…)  (name from the git remote)
   https://registry.example.com/alice/review-bot
+  with eval packs: evals/
 next → hlock pull alice/review-bot@1.0.0
 ```
 
-- **The name** is `NAMESPACE/NAME`: by default your namespace (your handle) and the project's
-  name (`[project] name` in `harness.toml`, else `name` in `apm.yml`, else the directory's).
-  Pass another, such as an organization's, as an argument: `hlock push acme/review-bot`.
+- **The name** is `NAMESPACE/NAME`: by default your namespace (your handle) and the name of
+  the repository the project is in, from its git remote (`origin`, else the only one). That
+  holds when the project is the repository's root; a project in a subdirectory of a
+  repository, or one that isn't in one, is named by `[project] name` in `harness.toml`, else
+  `name` in `apm.yml`, else the directory's. `push` says where the name came from. Pass
+  another, such as an organization's, as an argument: `hlock push acme/review-bot`. When the
+  repository's name isn't published yet but one of the names `push` used to default to is
+  (`[project] name`, unless it's `hlock init`'s `demo`, `apm.yml`'s, the directory's),
+  `push` stops rather than start a second package, and asks you to pass the one you want.
 - **The version** is `--version`, else `apm.yml`'s `version`, else `sha-` and the first 12
-  hex digits of the archive's digest. A version can't change once it's published.
+  hex digits of a digest of everything pushed, eval packs included. A version can't change
+  once it's published, eval packs included.
 - **The archive** is a `tar.gz` with sorted entries and no timestamps or owners, so the same
   files always give the same digest. Pushing a version that's already published with the
   same files says so and succeeds; with other files, it fails and asks for a new version.
@@ -82,6 +100,32 @@ next → hlock pull alice/review-bot@1.0.0
   it), and [characters that hide text from a reviewer](audit.md#hidden-characters). Files a
   lock vendors from outside `.hlock/vendor/`, and symlinks, are left out with a warning.
 - An archive is at most 4 MiB and 500 files.
+
+### Eval packs
+
+The eval packs in `harness.toml`'s `[evals] packs` are pushed with the setup, so someone who
+pulls a resolved setup can check and rerun the evidence its lock records. A pack is pushed
+as exactly the files hlock digests it by, with their executable bits, so its digest after a
+pull matches the one in the lock's `[evidence]`. `push` warns when a lock's evidence was
+measured on other packs than the ones you're pushing.
+
+Because packs are written into the projects of people who pull them, `push` is strict about
+what's in them, and stops (listing every problem) rather than leave a file out:
+
+- a pack's path must be a plain relative directory in the project, like `evals` or
+  `evals/review`, reached through no symlink: no leading dots, `..`, or characters outside
+  letters, digits and `._-`. A remote pack (`github:…`) is left out with a note;
+- file names must be safe on every OS: letters, digits and `._+@=,-` only, no Windows device
+  names like `CON`, no two that differ only in case, and no `.hlock` directory;
+- no credentials: no file named like one (`.env`, `.netrc`, `.npmrc`, `credentials`,
+  `*.pem`, `*.key`, `*.p12`, `id_rsa`, …), no private key block, no credential-shaped value in
+  TOML, JSON or YAML, and in a text file no token with a known prefix (`sk-`, `ghp_`, `AKIA`,
+  `npm_`, …) and no `password = …`-style line with a literal value that isn't a
+  `${…}` placeholder;
+- no critical hidden characters, and no file over 20 MiB.
+
+`push --no-evals` publishes without them. The eval packs are at most 32 MiB and 5,000 files.
+A registry that doesn't take eval packs yet gets the rest, with a warning.
 
 ## Find a setup
 
@@ -121,46 +165,75 @@ $ hlock pull alice/review-bot
 │  lock-version 1 · manifest —    │
 │                                 │
 ╰─────────────────────────────────╯
+also in the package: .hlock/locks/harness.pi.lock  → hlock pull alice/review-bot//.hlock/locks/harness.pi.lock
 next → hlock launch --lock review-bot  ·  hlock sync review-bot --in-place --plan
 ```
 
 `@VERSION` pulls one version and stays there; without one, `hlock pull` (or
 `hlock pull review-bot`) later moves to the newest. The download is checked against the
 version's digest before anything is unpacked, and an archive with anything but the files
-listed above, a path outside it, or a link is refused. The lock records where it came from:
+listed above, a path outside it, or a link is refused.
+
+### One lock of a package
+
+A package's root `harness.lock` is the one `NAMESPACE/NAME` pulls. Name another by its path
+after `//`, the way a git source takes one, with the version last
+(`NAMESPACE/NAME//PATH@VERSION`):
+
+```console
+$ hlock pull alice/review-bot//.hlock/locks/harness.pi.lock
+✓ pulled alice/review-bot//.hlock/locks/harness.pi.lock @ 1.0.0 → review-bot-pi
+```
+
+A directory works too (`alice/review-bot//.hlock/locks` takes its `harness.lock`, else its
+only lock). A package with no root `harness.lock` gives its only lock, or lists them to pick
+from. The lock is stored as `NAME-X` for `harness.X.lock`, and records where it came from, so
+`hlock pull review-bot-pi` refreshes that same lock:
 
 ```toml
 [pulled]
-at = "2026-10-22T21:08:32Z"
-digest = "sha256:24f99c95f3c0…"
-from = "registry:https://registry.example.com/alice/review-bot"
-path = "harness.lock"
+at = "2026-10-25T03:47:36Z"
+digest = "sha256:25c9c383039976144ec111366e21310095b42e9e0413b9254d74f18c63913952"
+from = "registry:https://registry.example.com/alice/review-bot//.hlock/locks/harness.pi.lock"
+path = ".hlock/locks/harness.pi.lock"
 url = "https://registry.example.com/alice/review-bot"
 version = "1.0.0"
 ```
+
+A stored lock from another package, or another lock of the same package, isn't replaced
+without `--force`; `--as NAME` keeps both.
 
 A registry can also list setups that live in GitHub or GitLab repositories. Pulling one of
 those fetches it from its repository with git, at the commit the registry gives.
 
 ## Into a project
 
-`--into DIR` writes the whole setup into a directory, rather than the lock alone into the
-store: `harness.toml`, `harness.lock` and the files it vendors, `apm.yml` and
-`apm.lock.yaml`. It's how you start a project from someone's setup:
+`--into DIR` writes the whole package into a directory, rather than one lock into the store:
+`harness.toml`, `harness.lock` and the files it vendors, the harness files under `.hlock/`
+with the files they vendor, `apm.yml` and `apm.lock.yaml`, and the eval packs. It's how you
+start a project from someone's setup:
 
 ```console
 $ hlock pull alice/review-bot --into .
-✓ pulled alice/review-bot @ 1.0.0 → .  (5 files)
+✓ pulled alice/review-bot @ 1.0.0 → .  (11 files)
+  .hlock/locks/harness.pi.lock
   apm.lock.yaml
   apm.yml
   harness.lock
   harness.toml
-  .hlock/vendor/ 1 vendored file
+  .hlock/vendor/ 2 vendored files
+  evals/ eval pack, 4 files
+! eval packs run commands when graded, and their fixtures are the agent's workspace: read them before hlock tune
 next → hlock sync --plan  ·  apm install --frozen
 ```
 
-It refuses to replace a file that's already there unless you pass `--force`. `--into` works
-with git sources too (`hlock pull github:alice/agent-setup --into .`).
+It refuses to replace a file that's already there unless you pass `--force`. An eval pack
+directory that's already there counts too, and `--force` replaces it whole, so no task from
+another version is left in it. The eval packs are checked against their digest, and scanned
+like everything else; nothing in them runs
+until you evaluate with them. `--no-evals` leaves them out, and pulling a lock into the store
+never downloads them. `--into` works with git sources too
+(`hlock pull github:alice/agent-setup --into .`).
 
 ## APM packages
 
@@ -230,9 +303,9 @@ dependencies:
 hlock login [URL] [--token TOKEN | --no-browser]
 hlock logout [--registry URL]
 hlock whoami [--registry URL] [--json]
-hlock push [NAMESPACE/NAME] [--version V] [-C DIR] [--dry-run] [--registry URL] [--json]
+hlock push [NAMESPACE/NAME] [--version V] [-C DIR] [--no-evals] [--dry-run] [--registry URL] [--json]
 hlock search [QUERY...] [--type T] [--kind K] [--source S] [--limit N] [--registry URL] [--json]
-hlock pull NAMESPACE/NAME[@VERSION] [--as NAME | -o FILE | --into DIR] [--force] [--registry URL] [--json]
+hlock pull NAMESPACE/NAME[//PATH][@VERSION] [--as NAME | -o FILE | --into DIR [--no-evals]] [--force] [--registry URL] [--json]
 hlock apm push [NAMESPACE/NAME] [-C DIR] [--dry-run] [--registry URL] [--json]
 hlock apm pull NAMESPACE/NAME[@VERSION] [--into DIR] [--force] [--allow-hidden FILE] [--registry URL] [--json]
 ```

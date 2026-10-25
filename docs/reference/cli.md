@@ -576,18 +576,19 @@ any project by name. Nothing from the lock runs. With no source, refresh every p
 See [Pulling someone else's lock](../guides/pull.md).
 
 ```bash
-hlock pull SOURCE [--as NAME | -o FILE | --into DIR] [--force] [--allow-hidden FILE ...] [--registry URL] [--json]
+hlock pull SOURCE [--as NAME | -o FILE | --into DIR [--no-evals]] [--force] [--allow-hidden FILE ...] [--registry URL] [--json]
 hlock pull [NAME | LOCK ...] [--json]
 ```
 
 | Option | Default | Description |
 |---|---|---|
-| `SOURCE` | | `github:OWNER/REPO[/PATH][@REF]`, `gitlab:GROUP/REPO[//PATH][@REF]`, `git:URL[//PATH][@REF]`, a GitHub or GitLab URL, or a registry package `NAMESPACE/NAME[@VERSION]` (see [Sharing through a registry](../guides/registry.md)) |
+| `SOURCE` | | `github:OWNER/REPO[/PATH][@REF]`, `gitlab:GROUP/REPO[//PATH][@REF]`, `git:URL[//PATH][@REF]`, a GitHub or GitLab URL, or a registry package `NAMESPACE/NAME[//PATH][@VERSION]`, where `PATH` picks one of its locks (see [Sharing through a registry](../guides/registry.md#one-lock-of-a-package)) |
 | `NAME`, `LOCK` | every pulled lock | Pulled locks to refresh from their recorded source: names in the store, or lock files pulled with `-o` |
-| `--as NAME` | the repository owner (the package name, from a registry) | Store the lock as `NAME` |
+| `--as NAME` | the repository owner (the package name, from a registry; `NAME-X` for a `harness.X.lock`) | Store the lock as `NAME` |
 | `-o`, `--out FILE` | | Write the lock into the project as `FILE` (its vendored files go in `.hlock/vendor/<name>/`) instead of the store |
-| `--into DIR` | | Write the whole setup into `DIR`: `harness.toml`, `harness.lock` and the files it vendors, `apm.yml`, `apm.lock.yaml` |
-| `--force` | | Replace a lock of that name that wasn't pulled from the same repository (with `--into`, files that already exist) |
+| `--into DIR` | | Write the whole setup into `DIR`: `harness.toml`, its locks and the files they vendor, `apm.yml`, `apm.lock.yaml`, and a registry package's eval packs |
+| `--no-evals` | | With `--into` from a registry: leave out the package's eval packs |
+| `--force` | | Replace a lock of that name that wasn't pulled from the same repository, or was pulled from another lock in it (with `--into`, files that already exist) |
 | `--registry URL` | `HLOCK_REGISTRY`, else the one you logged in to | The registry a `NAMESPACE/NAME` source is in |
 | `--allow-hidden FILE` | | Let through [hidden characters](../guides/audit.md#hidden-characters) in FILE (a file or directory the lock vendors); the lock records the exception. Repeatable |
 | `--json` | | Print the lock, its path, the source, the commit, the diff from the lock it replaced, vendored files, other locks in the repository, and warnings as JSON |
@@ -615,22 +616,27 @@ hlock rm NAME...
 ## `push`
 
 Publish the project's setup to a registry: what exists of `harness.toml`, `harness.lock` (with
-the files it vendors), `apm.yml` (or `apm.yaml`), `apm.lock.yaml` and `README.md`, packed into
-a deterministic `tar.gz`. Refuses values that look like credentials and hidden characters.
+the files it vendors), `apm.yml` (or `apm.yaml`), `apm.lock.yaml` and `README.md`, plus every
+`harness.toml`, `harness.lock` and `harness.NAME.lock` under `.hlock/` (such as
+`.hlock/locks/harness.pi.lock`, with the files each vendors), packed into a deterministic
+`tar.gz`, and the [eval packs](../guides/registry.md#eval-packs) `harness.toml`'s
+`[evals] packs` names, in a second archive of the same version. Refuses values that look like
+credentials and hidden characters, and eval packs with unsafe paths or credential files.
 See [Sharing through a registry](../guides/registry.md#publish).
 
 ```bash
-hlock push [NAMESPACE/NAME] [--version V] [-C DIR] [--dry-run] [--registry URL] [--json]
+hlock push [NAMESPACE/NAME] [--version V] [-C DIR] [--no-evals] [--dry-run] [--registry URL] [--json]
 ```
 
 | Option | Default | Description |
 |---|---|---|
-| `NAMESPACE/NAME` | your handle / the project's name | The package to publish |
-| `--version V` | `apm.yml`'s `version`, else `sha-<digest>` | The version; a published version can't change |
+| `NAMESPACE/NAME` | your handle / the git remote's repository name (when the project is the repository's root), else `[project] name`, else `apm.yml`'s `name`, else the directory's | The package to publish |
+| `--version V` | `apm.yml`'s `version`, else `sha-<digest>` of everything pushed | The version; a published version can't change |
 | `-C`, `--dir DIR` | `.` | The project to push |
+| `--no-evals` | | Publish without the eval packs |
 | `--dry-run` | | List the files, size and digest; push nothing |
 | `--registry URL` | `HLOCK_REGISTRY`, else the one you logged in to | The registry to push to |
-| `--json` | | Print the package, version, digest, size, files and warnings as JSON |
+| `--json` | | Print the package, version, digest, size, files, where the name came from (`name_from`), the eval packs (`evals`) and warnings as JSON |
 
 ## `search`
 
