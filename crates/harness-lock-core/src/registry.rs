@@ -854,8 +854,9 @@ pub fn git_toplevel_checked(dir: &Path) -> std::result::Result<Option<PathBuf>, 
     }
     let stderr = String::from_utf8_lossy(&out.stderr);
     // "not a git repository (or any of the parent directories)", or "… (or any parent up to
-    // mount point …)"; "not a git repository: PATH" is a `.git` file pointing nowhere
-    if stderr.contains("not a git repository (or any") {
+    // mount point …)", worded so since git 1.7 (capitalized before 2.25); "not a git
+    // repository: PATH" is a `.git` file pointing nowhere
+    if stderr.to_ascii_lowercase().contains("not a git repository (or any") {
         return Ok(None);
     }
     Err(stderr.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or("git rev-parse failed").to_string())
@@ -1463,7 +1464,7 @@ mod tests {
         std::fs::write(broken.join(".git"), "gitdir: /nonexistent/hlock-test\n").unwrap();
         let (got, from, warning) = push_root(None, &broken);
         assert_eq!((got, from), (broken.clone(), RootFrom::CurrentDirectoryGitFailed));
-        assert!(warning.as_deref().is_some_and(|w| w.contains("couldn't find the git repository (fatal: not a git repository: /nonexistent")), "{warning:?}");
+        assert!(warning.as_deref().is_some_and(|w| w.contains("couldn't find the git repository (fatal: not a git repository")), "{warning:?}");
         std::fs::remove_dir_all(&broken).unwrap();
         // nothing at the root: the nearest directory up from the working directory that has a setup
         assert!(!has_setup(&d));
