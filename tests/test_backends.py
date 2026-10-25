@@ -244,7 +244,8 @@ def test_a_local_wheel_goes_into_the_image_for_its_platform(monkeypatch, tmp_pat
     wheel.write_bytes(b"another build")
     assert fb._task_version() != v1  # a new build registers new tasks
     monkeypatch.setenv("HLOCK_FLYTE_HLOCK", "hlock==0.5.0")
-    assert fb._task_version().startswith("0.5.0-")
+    # the version is this hlock's, whatever the image installs
+    assert fb._task_version().startswith(f"{hlock.__version__}-")
 
 
 def test_flyte_tasks_get_the_endpoint_but_the_key_only_as_a_secret(monkeypatch, tmp_path):
