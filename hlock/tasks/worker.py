@@ -84,7 +84,7 @@ def _complete(model: str, prompt: str, temperature: float = 0.2, max_tokens: int
         headers["Authorization"] = f"Bearer {key}"
     req = urllib.request.Request(base + "/chat/completions", data=body, headers=headers, method="POST")
     start = time.monotonic()
-    with urllib.request.urlopen(req, timeout=120) as resp:
+    with urllib.request.urlopen(req, timeout=float(os.environ.get("HL_LLM_TIMEOUT") or 120)) as resp:
         data = json.loads(resp.read().decode())
     content = data["choices"][0]["message"]["content"] or ""
     usage = data.get("usage") or {}
@@ -228,7 +228,9 @@ def llm_run_trial(req: dict) -> dict:
         + f"Reply with only the full contents of `{name}`, and nothing else."
     )
     try:
-        r = _complete(model, composed, temperature, max_tokens=4096, provider=provider, system=system)
+        # a reasoning model spends its thinking from this budget too
+        max_tokens = int(os.environ.get("HL_LLM_MAX_TOKENS") or 4096)
+        r = _complete(model, composed, temperature, max_tokens=max_tokens, provider=provider, system=system)
     except Exception as exc:  # noqa: BLE001 - the trial fails, and says why
         return {"error": f"the model endpoint failed for {model_spec}: {exc}"}
     out.parent.mkdir(parents=True, exist_ok=True)

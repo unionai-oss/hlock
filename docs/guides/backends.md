@@ -90,6 +90,7 @@ runs on this machine, in the interpreter named by `HL_PYTHON`.
     export HL_LLM_BASE_URL=http://localhost:8000/v1
     export HL_LLM_MODEL=qwen-32b     # what reference:… candidates ask for
     export HL_LLM_API_KEY=...        # if the endpoint needs one
+    export HL_LLM_MAX_TOKENS=16384   # a reasoning model thinks from this budget (default 4096)
     ```
 
     Each candidate asks the endpoint for its own model: `openai:gpt-5` requests

@@ -60,6 +60,8 @@ reference LLM, and fails any other candidate before it runs (see
 | `HL_LLM_BASE_URL` | unset | Base URL of an OpenAI-compatible API, e.g. `http://localhost:8000/v1` |
 | `HL_LLM_MODEL` | unset | Model name to request for `reference:…` candidates; other candidates request their own model |
 | `HL_LLM_API_KEY` | unset | API key, if the endpoint needs one |
+| `HL_LLM_MAX_TOKENS` | `4096` | Most tokens a trial's completion may use. A reasoning model's thinking counts too, so raise it for one that thinks at length |
+| `HL_LLM_TIMEOUT` | `120` | Seconds to wait for each completion |
 
 ## Fine-tuning
 

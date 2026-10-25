@@ -314,6 +314,17 @@ def test_a_real_model_needs_an_endpoint(tmp_path, monkeypatch):
     assert resp["ok"] is True and resp["result"]["simulated"] is True
 
 
+def test_the_completion_budget_can_be_raised(tmp_path, monkeypatch, endpoint):
+    e = endpoint(lambda prompt: "3")
+    assert trial("openai:gpt-5", tmp_path)["ok"] is True
+    assert e.requests[0]["max_tokens"] == 4096
+    # a reasoning model thinks from the same budget, so a long think can leave no answer
+    monkeypatch.setenv("HL_LLM_MAX_TOKENS", "16384")
+    monkeypatch.setenv("HL_LLM_TIMEOUT", "600")
+    assert trial("openai:gpt-5", tmp_path)["ok"] is True
+    assert e.requests[1]["max_tokens"] == 16384
+
+
 def test_the_reply_is_written_to_the_expected_artifact(tmp_path, monkeypatch, endpoint):
     (tmp_path / "words.txt").write_text("one two three\n")
     e = endpoint(lambda prompt: "```\n3\n```")
