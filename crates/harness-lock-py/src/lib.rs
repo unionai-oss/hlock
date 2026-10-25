@@ -1105,12 +1105,30 @@ fn registry_search(py: Python<'_>, url: String, query: String, r#type: Option<St
     })
 }
 
-/// `hlock push`: pack the setup in `dir`, and its eval packs unless `no_evals`, and publish
-/// it (or, with `dry_run`, say what would be published). Returns JSON.
+/// `hlock push`: pack the setup at `root` (by default the root of the git repository the
+/// working directory is in, else the working directory), and its eval packs unless
+/// `no_evals`, and publish it (or, with `dry_run`, say what would be published). Returns JSON.
+/// `dir` and `directory` are older names for `root`.
 #[pyfunction]
-#[pyo3(signature = (url, dir=".".to_string(), name=None, version=None, dry_run=false, no_evals=false))]
-fn registry_push(py: Python<'_>, url: String, dir: String, name: Option<String>, version: Option<String>, dry_run: bool, no_evals: bool) -> PyResult<String> {
-    interruptible(py, move || to_json(&core::registry::push(&url, Path::new(&dir), name.as_deref(), version.as_deref(), dry_run, no_evals).map_err(py_err)?))
+#[pyo3(signature = (url, root=None, name=None, version=None, dry_run=false, no_evals=false, *, dir=None, directory=None))]
+#[allow(clippy::too_many_arguments)]
+fn registry_push(py: Python<'_>, url: String, root: Option<String>, name: Option<String>, version: Option<String>, dry_run: bool, no_evals: bool, dir: Option<String>, directory: Option<String>) -> PyResult<String> {
+    let root = one_of("root", [("root", root), ("dir", dir), ("directory", directory)])?;
+    interruptible(py, move || to_json(&core::registry::push(&url, root.as_deref().map(Path::new), name.as_deref(), version.as_deref(), dry_run, no_evals).map_err(py_err)?))
+}
+
+/// The one value given under any of `names` (aliases of the parameter `what`): an error when
+/// two of them differ.
+fn one_of<const N: usize>(what: &str, names: [(&str, Option<String>); N]) -> PyResult<Option<String>> {
+    let given: Vec<(&str, String)> = names.into_iter().filter_map(|(n, v)| v.map(|v| (n, v))).collect();
+    match given.as_slice() {
+        [] => Ok(None),
+        [(_, v), rest @ ..] if rest.iter().all(|(_, w)| w == v) => Ok(Some(v.clone())),
+        _ => Err(pyo3::exceptions::PyTypeError::new_err(format!(
+            "{} are names for the same {what} argument; pass one of them",
+            given.iter().map(|(n, _)| format!("{n}=")).collect::<Vec<_>>().join(" and ")
+        ))),
+    }
 }
 
 /// `hlock apm push`: pack the APM package in `dir` (`apm.yml` and `.apm/`) and publish it
@@ -1134,11 +1152,13 @@ fn registry_apm_pull(py: Python<'_>, url: String, spec: String, into: Option<Str
 }
 
 /// `hlock pull NS/NAME[//PATH][@VERSION]` (or a `registry:` spec): into the store as `name`,
-/// into the project lock file `out`, or every file of the setup into the directory `into`
-/// (with its eval packs, unless `no_evals`).
+/// into the project lock file `out`, or every file of the setup with the directory `root` as
+/// its root (with its eval packs, unless `no_evals`). `into` is another name for `root`.
 #[pyfunction]
-#[pyo3(signature = (spec, registry=None, out=None, name=None, into=None, force=false, allow_hidden=None, no_evals=false))]
-fn registry_pull(py: Python<'_>, spec: String, registry: Option<String>, out: Option<String>, name: Option<String>, into: Option<String>, force: bool, allow_hidden: Option<Vec<String>>, no_evals: bool) -> PyResult<String> {
+#[pyo3(signature = (spec, registry=None, out=None, name=None, into=None, force=false, allow_hidden=None, no_evals=false, *, root=None))]
+#[allow(clippy::too_many_arguments)]
+fn registry_pull(py: Python<'_>, spec: String, registry: Option<String>, out: Option<String>, name: Option<String>, into: Option<String>, force: bool, allow_hidden: Option<Vec<String>>, no_evals: bool, root: Option<String>) -> PyResult<String> {
+    let into = one_of("root", [("root", root), ("into", into)])?;
     let cwd = std::env::current_dir().unwrap_or_default();
     interruptible(py, move || {
         let allow = allow_hidden.unwrap_or_default();
@@ -1160,10 +1180,12 @@ fn registry_pull(py: Python<'_>, spec: String, registry: Option<String>, out: Op
     })
 }
 
-/// Pull the setup at a git source and write its files into the directory `into`.
+/// Pull the setup at a git source and write its files with the directory `root` as their
+/// root. `into` is another name for `root`; one of them is required.
 #[pyfunction]
-#[pyo3(signature = (source, into, force=false, allow_hidden=None))]
-fn pull_into(py: Python<'_>, source: String, into: String, force: bool, allow_hidden: Option<Vec<String>>) -> PyResult<String> {
+#[pyo3(signature = (source, into=None, force=false, allow_hidden=None, *, root=None))]
+fn pull_into(py: Python<'_>, source: String, into: Option<String>, force: bool, allow_hidden: Option<Vec<String>>, root: Option<String>) -> PyResult<String> {
+    let into = one_of("root", [("root", root), ("into", into)])?.ok_or_else(|| pyo3::exceptions::PyTypeError::new_err("pull_into() needs root= (or into=): the directory to write the setup into"))?;
     let into = std::env::current_dir().unwrap_or_default().join(into);
     interruptible(py, move || {
         let o = core::pull::pull_into(&source, &into, force, &allow_hidden.unwrap_or_default()).map_err(py_err)?;

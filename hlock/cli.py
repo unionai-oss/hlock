@@ -254,6 +254,16 @@ def _fail(message: str, hint: str | None = None) -> None:
     sys.exit(1)
 
 
+def _one_option(*given: tuple[str, str | None]) -> str | None:
+    """The value of an option passed under any of its names (`--root`, `-C`, …); a usage error
+    when two of them differ."""
+    passed = [(flag, v) for flag, v in given if v is not None]
+    if len({v for _, v in passed}) > 1:
+        raise click.UsageError(f"{' and '.join(flag for flag, _ in passed)} are names for the same option; "
+                               f"pass one of them")
+    return passed[0][1] if passed else None
+
+
 def _hint_for(e: Exception) -> str | None:
     """A hint for a core error, by its type (see harness_lock.HarnessLockError) and what it names."""
     message = str(e)
@@ -1409,20 +1419,21 @@ def _lock_ref(arg: str, as_json: bool = False) -> tuple[str, str | None]:
               help="Name to store the lock under.  [dim]\\[default: the repo owner][/]")
 @click.option("-o", "--out", default=None, metavar="FILE",
               help="Write the lock into the project as FILE (e.g. harness.alice.lock) instead of the store.")
-@click.option("--into", "into", default=None, metavar="DIR",
+@click.option("--root", "into", default=None, metavar="DIR",
               help="Write the whole setup (harness.toml, its locks and what they vendor, apm.yml, "
-                   "apm.lock.yaml, and a registry package's eval packs) into DIR. Refuses to overwrite files "
-                   "without --force.")
-@click.option("--no-evals", is_flag=True, help="With --into from a registry: leave out the package's eval packs.")
+                   "apm.lock.yaml, and a registry package's eval packs) with DIR as its root. Refuses to "
+                   "overwrite files without --force. [cmd]--into[/] is another name for it.")
+@click.option("--into", "into_alias", default=None, metavar="DIR", hidden=True)
+@click.option("--no-evals", is_flag=True, help="With --root from a registry: leave out the package's eval packs.")
 @click.option("--force", is_flag=True, help="Replace an existing lock of that name that came from somewhere else "
-                                            "(with --into: files that already exist).")
+                                            "(with --root: files that already exist).")
 @click.option("--allow-hidden", "allow_hidden", multiple=True, metavar="FILE",
               help="Let through hidden characters in FILE (a file or directory the lock vendors). Repeatable.")
 @click.option("--registry", default=None, metavar="URL",
               help="The registry a NAMESPACE/NAME source is in.  [dim]\\[default: $HLOCK_REGISTRY, else the one you logged in to][/]")
 @click.option("--json", "as_json", is_flag=True, help="Print the result as JSON.")
-def pull(sources: tuple[str, ...], name: str | None, out: str | None, into: str | None, no_evals: bool, force: bool,
-         allow_hidden: tuple[str, ...], registry: str | None, as_json: bool) -> None:
+def pull(sources: tuple[str, ...], name: str | None, out: str | None, into: str | None, into_alias: str | None,
+         no_evals: bool, force: bool, allow_hidden: tuple[str, ...], registry: str | None, as_json: bool) -> None:
     """Pull someone else's [path]harness.lock[/] from a git repository or a registry.
 
     SOURCE is [cmd]github:OWNER/REPO\\[/PATH]\\[@REF][/], [cmd]gitlab:GROUP/REPO\\[//PATH]\\[@REF][/],
@@ -1431,19 +1442,21 @@ def pull(sources: tuple[str, ...], name: str | None, out: str | None, into: str 
     of the package's locks, such as [path].hlock/locks/harness.pi.lock[/]. The lock and the files it
     vendors are stored under [path]~/.hlock/pulls/NAME/[/], so you can use it from any project by
     name: [cmd]hlock launch --lock NAME[/], [cmd]hlock sync NAME[/]. Nothing from the lock runs until you do.
+    [cmd]--root DIR[/] writes the whole setup into a project instead, with DIR as its root.
 
     With no SOURCE, refreshes every pulled lock; with NAMEs or LOCK files, refreshes those.
     """
+    into = _one_option(("--root", into), ("--into", into_alias))
     if no_evals and not into:
-        _fail("--no-evals only applies with --into", "eval packs are written only by [cmd]hlock pull NAMESPACE/NAME --into DIR[/]")
+        _fail("--no-evals only applies with --root", "eval packs are written only by [cmd]hlock pull NAMESPACE/NAME --root DIR[/]")
     remote = [s for s in sources if is_pull_source(s) or is_registry_ref(s)]
     if remote and len(sources) > 1:
         _fail("pull one source at a time", "run [cmd]hlock pull[/] once per source")
     if name and out:
         _fail("--as and -o both name the lock", "use [cmd]--as NAME[/] for the store, or [cmd]-o FILE[/] for the project")
     if into and (name or out):
-        _fail("--into writes the whole setup into a directory; it doesn't take --as or -o",
-              "use one of [cmd]--into DIR[/], [cmd]--as NAME[/], [cmd]-o FILE[/]")
+        _fail("--root (or --into) writes the whole setup into a directory; it doesn't take --as or -o",
+              "use one of [cmd]--root DIR[/], [cmd]--as NAME[/], [cmd]-o FILE[/]")
     if remote:
         src = remote[0]
         with _working(f"Pulling {src}…"):
@@ -1451,7 +1464,7 @@ def pull(sources: tuple[str, ...], name: str | None, out: str | None, into: str 
                 result = json.loads(_registry_pull(src, registry=registry, out=out, name=name, into=into, force=force,
                                                    allow_hidden=list(allow_hidden), no_evals=no_evals))
             elif into:
-                result = json.loads(_pull_into(src, into, force=force, allow_hidden=list(allow_hidden)))
+                result = json.loads(_pull_into(src, root=into, force=force, allow_hidden=list(allow_hidden)))
             else:
                 result = json.loads(_pull(src, out=out, name=name, force=force, allow_hidden=list(allow_hidden)))
         if as_json:
@@ -1466,7 +1479,7 @@ def pull(sources: tuple[str, ...], name: str | None, out: str | None, into: str 
         return
 
     if name or out or into:
-        _fail("--as, -o and --into need a SOURCE", "e.g. [cmd]hlock pull github:alice/agent-setup --as alice[/]")
+        _fail("--as, -o and --root need a SOURCE", "e.g. [cmd]hlock pull github:alice/agent-setup --as alice[/]")
     # (lock path, store name or None for a project file)
     targets: list[tuple[str, str | None]] = []
     if sources:
@@ -1546,7 +1559,7 @@ def rm(names: tuple[str, ...]) -> None:
 
 
 def _print_into(result: dict) -> None:
-    """What [cmd]pull --into[/] wrote."""
+    """What [cmd]pull --root[/] wrote."""
     rev = result.get("version") or _short(result.get("commit"))
     files = result["files"]
     _ok(f"pulled {escape(result['source']['spec'])} [muted]@ {escape(rev or '')}[/] → [path]{_show(result['dir'])}[/]  "
@@ -1693,16 +1706,22 @@ def whoami(registry: str | None, as_json: bool) -> None:
 @click.argument("name", required=False, metavar="[NAMESPACE/NAME]")
 @click.option("--version", "version", default=None, metavar="VERSION",
               help="The version to publish.  [dim]\\[default: apm.yml's version, else sha-<digest>][/]")
-@click.option("-C", "--dir", "directory", default=".", metavar="DIR", help="The project to push.  [dim]\\[default: .][/]")
+@click.option("--root", "directory", default=None, metavar="DIR",
+              help="The project to push: its harness.toml, locks and the rest are read from DIR. [cmd]-C[/] and "
+                   "[cmd]--dir[/] are other names for it.  [dim]\\[default: the git repository's root, else .][/]")
+@click.option("-C", "c_alias", default=None, metavar="DIR", hidden=True)
+@click.option("--dir", "dir_alias", default=None, metavar="DIR", hidden=True)
 @click.option("--no-evals", is_flag=True, help="Publish without the eval packs harness.toml names.")
 @click.option("--dry-run", is_flag=True, help="Show what would be pushed, and push nothing.")
 @click.option("--registry", default=None, metavar="URL", help="The registry to push to.  [dim]\\[default: your default registry][/]")
 @click.option("--json", "as_json", is_flag=True, help="Print the result as JSON.")
-def push(name: str | None, version: str | None, directory: str, no_evals: bool, dry_run: bool, registry: str | None,
-         as_json: bool) -> None:
+def push(name: str | None, version: str | None, directory: str | None, c_alias: str | None, dir_alias: str | None,
+         no_evals: bool, dry_run: bool, registry: str | None, as_json: bool) -> None:
     """Publish this project's agent setup to a registry.
 
-    Packs what exists of [path]harness.toml[/], [path]harness.lock[/] (with the files it vendors),
+    The project is the git repository you're in, from its root, wherever in it you run this
+    (outside a repository, the current directory); [cmd]--root DIR[/] pushes DIR instead, such
+    as one project of a monorepo. Packs what exists of [path]harness.toml[/], [path]harness.lock[/] (with the files it vendors),
     [path]apm.yml[/], [path]apm.lock.yaml[/] and [path]README.md[/], plus the harness files under
     [path].hlock/[/] (such as [path].hlock/locks/harness.pi.lock[/]), into one archive, checked first
     for credentials and hidden characters. The eval packs [path]harness.toml[/]'s [key]\\[evals] packs[/]
@@ -1712,14 +1731,18 @@ def push(name: str | None, version: str | None, directory: str, no_evals: bool, 
     project is the repository's root), else [key]\\[project] name[/]. The same files always pack to
     the same digest, so pushing twice is safe.
     """
+    directory = _one_option(("--root", directory), ("-C", c_alias), ("--dir", dir_alias))
     url = _registry(registry)
     with _working(f"{'Packing' if dry_run else 'Pushing to ' + url}…"):
-        r = json.loads(_registry_push(url, directory, name=name, version=version, dry_run=dry_run, no_evals=no_evals))
+        r = json.loads(_registry_push(url, root=directory, name=name, version=version, dry_run=dry_run,
+                                      no_evals=no_evals))
     if as_json:
         console.print_json(data=r)
         return
     for w in r.get("warnings", []):
         console.print(f"[warn]![/] {w}", soft_wrap=True)
+    console.print(f"[muted]packing[/] [path]{escape(_tilde(_show(r['root'])))}[/]  "
+                  f"[muted]({_ROOT_FROM[r['root_from']]})[/]", soft_wrap=True)
     ref = f"{r['package']}@{r['version']}"
     evals = r.get("evals")
     n_files = len(r["files"]) + (len(evals["files"]) if evals else 0)
@@ -1754,6 +1777,9 @@ def push(name: str | None, version: str | None, directory: str, no_evals: bool, 
 
 _NAME_FROM = {"git-remote": "the git remote", "project": "\\[project] name", "apm": "apm.yml's name",
               "directory": "the directory's name"}
+_ROOT_FROM = {"flag": "--root", "repository": "the repository root",
+              "current-directory": "the current directory; not in a git repository",
+              "current-directory-git-failed": "the current directory; git couldn't find the repository"}
 
 
 @main.command()

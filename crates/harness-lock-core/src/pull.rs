@@ -743,7 +743,7 @@ pub(crate) fn place(f: Fetched<'_>, target: &Target, force: bool, allow_hidden: 
     if let Target::Store(Some(n)) = target {
         check_name(n)?;
     }
-    let remote_lock = remote_lock.ok_or_else(|| Error::Lockfile(format!("{} has no harness.lock; write its files into a project with --into DIR", src.spec)))?;
+    let remote_lock = remote_lock.ok_or_else(|| Error::Lockfile(format!("{} has no harness.lock; write its files into a project with --root DIR", src.spec)))?;
     // a lock that's a symlink (or under one) could point anywhere on this machine
     if !std::fs::symlink_metadata(&remote_lock).is_ok_and(|m| m.is_file()) || !crate::fsutil::within(root, &remote_lock) {
         return Err(Error::Pull(format!("{}'s lock is a symlink or outside the repository; refusing to pull it", src.spec)));

@@ -576,7 +576,7 @@ any project by name. Nothing from the lock runs. With no source, refresh every p
 See [Pulling someone else's lock](../guides/pull.md).
 
 ```bash
-hlock pull SOURCE [--as NAME | -o FILE | --into DIR [--no-evals]] [--force] [--allow-hidden FILE ...] [--registry URL] [--json]
+hlock pull SOURCE [--as NAME | -o FILE | --root DIR [--no-evals]] [--force] [--allow-hidden FILE ...] [--registry URL] [--json]
 hlock pull [NAME | LOCK ...] [--json]
 ```
 
@@ -586,9 +586,9 @@ hlock pull [NAME | LOCK ...] [--json]
 | `NAME`, `LOCK` | every pulled lock | Pulled locks to refresh from their recorded source: names in the store, or lock files pulled with `-o` |
 | `--as NAME` | the repository owner (the package name, from a registry; `NAME-X` for a `harness.X.lock`) | Store the lock as `NAME` |
 | `-o`, `--out FILE` | | Write the lock into the project as `FILE` (its vendored files go in `.hlock/vendor/<name>/`) instead of the store |
-| `--into DIR` | | Write the whole setup into `DIR`: `harness.toml`, its locks and the files they vendor, `apm.yml`, `apm.lock.yaml`, and a registry package's eval packs |
-| `--no-evals` | | With `--into` from a registry: leave out the package's eval packs |
-| `--force` | | Replace a lock of that name that wasn't pulled from the same repository, or was pulled from another lock in it (with `--into`, files that already exist) |
+| `--root DIR` | | Write the whole setup with `DIR` as its root: `harness.toml`, its locks and the files they vendor, `apm.yml`, `apm.lock.yaml`, and a registry package's eval packs. `--into DIR` is another name for it |
+| `--no-evals` | | With `--root` from a registry: leave out the package's eval packs |
+| `--force` | | Replace a lock of that name that wasn't pulled from the same repository, or was pulled from another lock in it (with `--root`, files that already exist) |
 | `--registry URL` | `HLOCK_REGISTRY`, else the one you logged in to | The registry a `NAMESPACE/NAME` source is in |
 | `--allow-hidden FILE` | | Let through [hidden characters](../guides/audit.md#hidden-characters) in FILE (a file or directory the lock vendors); the lock records the exception. Repeatable |
 | `--json` | | Print the lock, its path, the source, the commit, the diff from the lock it replaced, vendored files, other locks in the repository, and warnings as JSON |
@@ -615,7 +615,9 @@ hlock rm NAME...
 
 ## `push`
 
-Publish the project's setup to a registry: what exists of `harness.toml`, `harness.lock` (with
+Publish the project's setup to a registry. The project is the git repository you're in, from
+its root (outside a repository, the current directory), or `--root DIR`. Packs what exists of
+`harness.toml`, `harness.lock` (with
 the files it vendors), `apm.yml` (or `apm.yaml`), `apm.lock.yaml` and `README.md`, plus every
 `harness.toml`, `harness.lock` and `harness.NAME.lock` under `.hlock/` (such as
 `.hlock/locks/harness.pi.lock`, with the files each vendors), packed into a deterministic
@@ -625,18 +627,18 @@ credentials and hidden characters, and eval packs with unsafe paths or credentia
 See [Sharing through a registry](../guides/registry.md#publish).
 
 ```bash
-hlock push [NAMESPACE/NAME] [--version V] [-C DIR] [--no-evals] [--dry-run] [--registry URL] [--json]
+hlock push [NAMESPACE/NAME] [--version V] [--root DIR] [--no-evals] [--dry-run] [--registry URL] [--json]
 ```
 
 | Option | Default | Description |
 |---|---|---|
 | `NAMESPACE/NAME` | your handle / the git remote's repository name (when the project is the repository's root), else `[project] name`, else `apm.yml`'s `name`, else the directory's | The package to publish |
 | `--version V` | `apm.yml`'s `version`, else `sha-<digest>` of everything pushed | The version; a published version can't change |
-| `-C`, `--dir DIR` | `.` | The project to push |
+| `--root DIR` (`-C`, `--dir`) | the git repository's root, else `.` | The project to push. One in a subdirectory of a repository isn't named after the repository |
 | `--no-evals` | | Publish without the eval packs |
 | `--dry-run` | | List the files, size and digest; push nothing |
 | `--registry URL` | `HLOCK_REGISTRY`, else the one you logged in to | The registry to push to |
-| `--json` | | Print the package, version, digest, size, files, where the name came from (`name_from`), the eval packs (`evals`) and warnings as JSON |
+| `--json` | | Print the package, version, digest, size, files, where the name came from (`name_from`), the root it packed and why (`root`; `root_from`: `flag`, `repository`, `current-directory`, or `current-directory-git-failed` when git couldn't tell, with a warning saying why), the eval packs (`evals`) and warnings as JSON |
 
 ## `search`
 

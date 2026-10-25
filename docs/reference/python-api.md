@@ -332,6 +332,33 @@ Compare the pack's judge (or `model`) with `against`, like
 [`hlock evals calibrate`](cli.md#evals-calibrate). Returns JSON with `a`, `b`, `rows`
 (each with `task`, `run`, `grader`, `criterion`, `a`, `b`, and `agree`), and `agreement`.
 
+### Registry
+
+The functions behind [`hlock push` and `hlock pull NAMESPACE/NAME`](../guides/registry.md).
+They return JSON, as the commands' `--json` prints it.
+
+```python
+import json
+import hlock as hl
+
+# from anywhere in the repository: its root
+out = json.loads(hl.registry_push("https://registry.example.com", dry_run=True))
+print(out["package"], out["root_from"], [f["path"] for f in out["files"]])
+# <your-namespace>/review-bot repository ['harness.toml']
+
+# or one directory
+out = json.loads(hl.registry_push("https://registry.example.com", root="..", dry_run=True))
+print(out["package"], out["root_from"])   # <your-namespace>/review-bot flag
+```
+
+| Function | Does |
+|---|---|
+| `registry_push(url, root=None, name=None, version=None, dry_run=False, no_evals=False)` | `hlock push`: pack the project at `root`, by default the root of the git repository the working directory is in (else the working directory), and publish it. `dir=` and `directory=` are other names for `root` |
+| `registry_pull(spec, registry=None, out=None, name=None, into=None, force=False, allow_hidden=None, no_evals=False, *, root=None)` | `hlock pull NAMESPACE/NAME[//PATH][@VERSION]`: into the store as `name`, into the project lock file `out`, or the whole package with the directory `root` (or `into`) as its root |
+| `pull_into(source, into=None, force=False, allow_hidden=None, *, root=None)` | `hlock pull SOURCE --root DIR` for a git source; one of `root` and `into` is required |
+
+Passing two names for the same argument with different values raises `TypeError`.
+
 ### Dependencies
 
 The functions behind [`hlock add`, `remove`, `outdated` and `export`](../guides/dependencies.md).
