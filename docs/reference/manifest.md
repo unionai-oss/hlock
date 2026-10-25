@@ -430,7 +430,9 @@ dependencies as well ([APM packages](../guides/dependencies.md#a-project-that-al
 manifest hash. They're placeholders for the peripherals described in the
 [design spec](https://github.com/unionai-oss/hlock/blob/main/specs/v0.md). The resolver
 doesn't search over dependencies yet: `hlock resolve` treats `[skills]` and `[tools]` names
-as fixed parts of every stack.
+as fixed parts of every stack. It keeps the pins `hlock add` and `hlock sync` recorded for
+declared dependencies (commits, versions, digests, and the secrets their MCP servers use),
+so `hlock add` then `hlock resolve` leaves a lock that `hlock check` passes.
 
 ## The manifest hash
 
