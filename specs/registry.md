@@ -22,7 +22,9 @@ hlock apm pull alice/review-skills[@1.0.0]    # into ./review-skills/
 ```
 
 A **setup** is whichever of `harness.toml`, `harness.lock` (with the files it vendors under
-`.hlock/vendor/`), `apm.yml`, `apm.lock.yaml` and `README.md` a project has. A registry may
+`.hlock/vendor/`), the harness files elsewhere under `.hlock/` (such as
+`.hlock/locks/harness.pi.lock`, with the files each vendors), `apm.yml`, `apm.lock.yaml` and
+`README.md` a project has. A registry may
 also list APM packages (`type = "apm-package"`, published with `apm publish` over APM's own
 [Registry HTTP API](https://microsoft.github.io/apm/reference/registry-http-api/)), and
 setups that live in git repositories (`source = "github"` or `"gitlab"`), which hlock pulls
@@ -95,8 +97,11 @@ A gzip'd tar. A server must refuse (`422`), and the client refuses before writin
 - an entry that isn't a regular file or a directory (links, devices);
 - an absolute path, or one with a `..` segment;
 - a path other than `harness.toml`, `harness.lock`, `apm.yml`, `apm.yaml` (written as
-  `apm.yml`), `apm.lock.yaml`, `README.md`, or one under `.hlock/vendor/`;
-- an archive with none of `harness.toml`, `harness.lock`, `apm.yml`, `apm.lock.yaml`;
+  `apm.yml`), `apm.lock.yaml`, `README.md`, one under `.hlock/vendor/`, or a harness file
+  (`harness.toml`, `harness.lock`, `harness.NAME.lock`) elsewhere under `.hlock/`, such as
+  `.hlock/locks/harness.pi.lock`;
+- an archive with none of `harness.toml`, `harness.lock`, `apm.yml`, `apm.lock.yaml`, or a
+  harness file under `.hlock/`;
 - more than 500 entries, more than 4 MiB compressed, or more than 64 MiB unpacked.
 
 A server should also check that `harness.lock` and `harness.toml` parse as TOML and the APM

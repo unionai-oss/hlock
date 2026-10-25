@@ -7,7 +7,8 @@
 //! `HLOCK_REGISTRY_TOKEN`, else the OS keychain, else `~/.hlock/credentials.toml`.
 //!
 //! A setup travels as a deterministic `tar.gz`: `harness.toml`, `harness.lock` and the
-//! files it vendors, `apm.yml`, `apm.lock.yaml` and `README.md`, sorted, with zero times
+//! files it vendors, `apm.yml`, `apm.lock.yaml` and `README.md`, and the harness files under
+//! `.hlock/` (`.hlock/locks/harness.pi.lock`, say) with the files they vendor, sorted, with zero times
 //! and owners, so the same files always give the same digest.
 
 use std::io::{Read, Write};
@@ -485,7 +486,12 @@ pub struct Packed {
 
 /// Whether `path` may be in a setup archive.
 pub fn allowed_path(path: &str) -> bool {
-    SETUP_FILES.contains(&path) || path == "README.md" || (path.starts_with(".hlock/vendor/") && path.len() > ".hlock/vendor/".len())
+    SETUP_FILES.contains(&path) || path == "README.md" || pull::is_hlock_setup_path(path) || (path.starts_with(".hlock/vendor/") && path.len() > ".hlock/vendor/".len())
+}
+
+/// Whether `path` is one of a setup's own files (not README.md or a vendored file).
+fn setup_path(path: &str) -> bool {
+    SETUP_FILES.contains(&path) || pull::is_hlock_setup_path(path)
 }
 
 /// `s` as a package name: lowercase letters, digits and `-_.`.
@@ -546,25 +552,22 @@ pub fn pack(dir: &Path) -> Result<Packed> {
         (false, true) => add(&mut entries, "apm.yml", dir.join("apm.yaml"), &mut warnings),
         _ => {}
     }
+    // harness files under .hlock/ too, such as .hlock/locks/harness.pi.lock
+    let nested = pull::hlock_setup_files(dir);
+    for p in &nested {
+        add(&mut entries, p, dir.join(p), &mut warnings);
+    }
     if entries.is_empty() {
-        return Err(err(format!("{} has none of {}, apm.yaml; nothing to push", dir.display(), SETUP_FILES.join(", "))));
+        return Err(err(format!("{} has none of {}, apm.yaml, or harness files under .hlock/; nothing to push", dir.display(), SETUP_FILES.join(", "))));
     }
     add(&mut entries, "README.md", dir.join("README.md"), &mut warnings);
     let mut project = None;
-    if dir.join("harness.lock").is_file() {
-        let lock = Lockfile::load(&dir.join("harness.lock"))?;
-        let mut paths: Vec<String> = Vec::new();
-        paths.extend(lock.skill.iter().filter_map(|s| s.vendored.clone()));
-        paths.extend(lock.instructions.iter().filter_map(|i| i.vendored.clone()));
-        paths.extend(lock.config.iter().filter_map(|c| c.vendored.clone()));
-        for fc in lock.subagent.iter().chain(&lock.script).chain(&lock.middleware) {
-            paths.extend(fc.vendored.clone());
-        }
-        paths.sort();
-        paths.dedup();
-        for p in paths {
+    let locks = std::iter::once("harness.lock".to_string()).filter(|l| dir.join(l).is_file()).chain(nested.iter().filter(|p| p.ends_with(".lock")).cloned());
+    for l in locks {
+        let lock = Lockfile::load(&dir.join(&l))?;
+        for p in pull::vendored_paths(&lock) {
             if !safe_rel(&p) || !p.starts_with(".hlock/vendor/") {
-                warnings.push(format!("harness.lock vendors {p}, outside .hlock/vendor/; left out"));
+                warnings.push(format!("{l} vendors {p}, outside .hlock/vendor/; left out"));
                 continue;
             }
             let from = dir.join(&p);
@@ -578,7 +581,7 @@ pub fn pack(dir: &Path) -> Result<Packed> {
                     }
                 }
                 Ok(_) => entries.push((p, from)),
-                Err(_) => warnings.push(format!("{p} (vendored by harness.lock) is missing; left out")),
+                Err(_) => warnings.push(format!("{p} (vendored by {l}) is missing; left out")),
             }
         }
     }
@@ -692,8 +695,8 @@ pub fn unpack(bytes: &[u8], dest: &Path) -> Result<Vec<String>> {
         f.write_all(&buf).map_err(|e| crate::error::io_at(&to, e))?;
         out.push(path);
     }
-    if !out.iter().any(|p| SETUP_FILES.contains(&p.as_str())) {
-        return Err(bad(format!("it has none of {}", SETUP_FILES.join(", "))));
+    if !out.iter().any(|p| setup_path(p)) {
+        return Err(bad(format!("it has none of {}, or harness files under .hlock/", SETUP_FILES.join(", "))));
     }
     Ok(out)
 }
@@ -926,6 +929,33 @@ mod tests {
         assert_eq!(got.len(), 4);
         assert_eq!(std::fs::read_to_string(out.join(".hlock/vendor/pi/skills/x/SKILL.md")).unwrap(), "Run the tests.\n");
         assert!(!out.join("notes.txt").exists());
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn packing_takes_harness_files_under_dot_hlock() {
+        let d = tmp("nested");
+        std::fs::write(d.join("harness.toml"), "[project]\nname = \"x\"\n").unwrap();
+        std::fs::create_dir_all(d.join(".hlock/locks")).unwrap();
+        std::fs::write(d.join(".hlock/locks/harness.pi.lock"), LOCK).unwrap();
+        std::fs::write(d.join(".hlock/locks/harness.pi.lock.prev"), LOCK).unwrap();
+        std::fs::write(d.join(".hlock/locks/notes.txt"), "not pushed").unwrap();
+        std::fs::create_dir_all(d.join(".hlock/team")).unwrap();
+        std::fs::write(d.join(".hlock/team/harness.toml"), "[project]\nname = \"team\"\n").unwrap();
+        std::fs::create_dir_all(d.join(".hlock/vendor/pi/skills/x")).unwrap();
+        std::fs::write(d.join(".hlock/vendor/pi/skills/x/SKILL.md"), "Run the tests.\n").unwrap();
+        std::fs::write(d.join(".hlock/vendor/harness.lock"), LOCK).unwrap();
+        let a = pack(&d).unwrap();
+        let paths: Vec<&str> = a.files.iter().map(|f| f.path.as_str()).collect();
+        assert_eq!(paths, [".hlock/locks/harness.pi.lock", ".hlock/team/harness.toml", ".hlock/vendor/pi/skills/x/SKILL.md", "harness.toml"]);
+        let out = d.join("out");
+        std::fs::create_dir_all(&out).unwrap();
+        assert_eq!(unpack(&a.bytes, &out).unwrap().len(), 4);
+        assert_eq!(std::fs::read_to_string(out.join(".hlock/locks/harness.pi.lock")).unwrap(), LOCK);
+        // nested harness files alone are a setup
+        std::fs::remove_file(d.join("harness.toml")).unwrap();
+        assert!(pack(&d).is_ok());
+        assert!(allowed_path(".hlock/locks/harness.pi.lock") && !allowed_path(".hlock/locks/notes.txt") && !allowed_path(".hlock/../harness.lock"));
         let _ = std::fs::remove_dir_all(&d);
     }
 

@@ -386,6 +386,28 @@ def test_pull_into_writes_the_whole_setup(world):
     assert invoke("pull", "alice/my-setup", "--into", "new", "--force").exit_code == 0
 
 
+def test_harness_locks_under_dot_hlock_are_pushed_and_pulled_into_a_project(world):
+    author = world["author"]
+    (author / ".hlock/locks").mkdir(parents=True)
+    (author / ".hlock/vendor/claude-code/skills/review").mkdir(parents=True)
+    (author / ".hlock/vendor/claude-code/skills/review/SKILL.md").write_text("Review it.\n")
+    (author / ".hlock/locks/harness.claude-code.lock").write_text(
+        LOCK.replace('"pi"', '"claude-code"').replace("vendor/pi/", "vendor/claude-code/"))
+    (author / ".hlock/locks/harness.claude-code.lock.prev").write_text(LOCK)
+    login(world)
+    r = invoke("push", "-C", str(author), "--dry-run")
+    assert r.exit_code == 0, r.output
+    assert ".hlock/locks/harness.claude-code.lock" in r.output
+    assert ".hlock/vendor/claude-code/skills/review/SKILL.md" in r.output and ".prev" not in r.output
+    assert invoke("push", "-C", str(author)).exit_code == 0
+    r = invoke("pull", "alice/my-setup", "--into", "new")
+    assert r.exit_code == 0, r.output
+    new = world["me"] / "new"
+    assert (new / ".hlock/locks/harness.claude-code.lock").is_file()
+    assert (new / ".hlock/vendor/claude-code/skills/review/SKILL.md").read_text() == "Review it.\n"
+    assert (new / "harness.lock").is_file()
+
+
 def test_an_archive_that_does_not_match_its_digest_is_refused(world):
     published(world)
     world["reg"].tamper = True

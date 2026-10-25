@@ -1684,7 +1684,8 @@ def push(name: str | None, version: str | None, directory: str, dry_run: bool, r
     """Publish this project's agent setup to a registry.
 
     Packs what exists of [path]harness.toml[/], [path]harness.lock[/] (with the files it vendors),
-    [path]apm.yml[/], [path]apm.lock.yaml[/] and [path]README.md[/] into one archive, checked first
+    [path]apm.yml[/], [path]apm.lock.yaml[/] and [path]README.md[/], plus the harness files under
+    [path].hlock/[/] (such as [path].hlock/locks/harness.pi.lock[/]), into one archive, checked first
     for credentials and hidden characters. NAMESPACE/NAME defaults to your namespace and the
     project's name. The same files always pack to the same digest, so pushing twice is safe.
     """

@@ -615,8 +615,10 @@ hlock rm NAME...
 ## `push`
 
 Publish the project's setup to a registry: what exists of `harness.toml`, `harness.lock` (with
-the files it vendors), `apm.yml` (or `apm.yaml`), `apm.lock.yaml` and `README.md`, packed into
-a deterministic `tar.gz`. Refuses values that look like credentials and hidden characters.
+the files it vendors), `apm.yml` (or `apm.yaml`), `apm.lock.yaml` and `README.md`, plus every
+`harness.toml`, `harness.lock` and `harness.NAME.lock` under `.hlock/` (such as
+`.hlock/locks/harness.pi.lock`, with the files each vendors), packed into a deterministic
+`tar.gz`. Refuses values that look like credentials and hidden characters.
 See [Sharing through a registry](../guides/registry.md#publish).
 
 ```bash

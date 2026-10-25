@@ -12,6 +12,7 @@ A published setup is whichever of these files your project has:
 |---|---|
 | `harness.toml` | What the project declares |
 | `harness.lock`, and the files it vendors under `.hlock/vendor/` | The pinned setup |
+| `harness.toml`, `harness.lock` and `harness.NAME.lock` anywhere under `.hlock/` (outside `.hlock/vendor/`), with the files each lock vendors | More setups, such as the per-harness locks in `.hlock/locks/` |
 | `apm.yml` (or `apm.yaml`) | [APM](../getting-started/apm.md)'s manifest |
 | `apm.lock.yaml` | APM's lock |
 | `README.md` | Shown on the registry's page for it |
@@ -146,7 +147,7 @@ those fetches it from its repository with git, at the commit the registry gives.
 
 `--into DIR` writes the whole setup into a directory, rather than the lock alone into the
 store: `harness.toml`, `harness.lock` and the files it vendors, `apm.yml` and
-`apm.lock.yaml`. It's how you start a project from someone's setup:
+`apm.lock.yaml`, and the harness files under `.hlock/` with the files they vendor. It's how you start a project from someone's setup:
 
 ```console
 $ hlock pull alice/review-bot --into .
