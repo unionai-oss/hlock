@@ -729,6 +729,102 @@ def test_the_rename_guard_skips_hlock_inits_default_name(world):
     assert "alice/hlock" in world["reg"].packages
 
 
+def test_push_from_a_subdirectory_packs_the_repository_root(world, monkeypatch):
+    login(world)
+    author = world["author"]
+    git(author, "init", "-q")
+    git(author, "remote", "add", "origin", "https://github.com/cosmicbboy/hlock.git")
+    deep = author / "src/agents"
+    deep.mkdir(parents=True)
+    monkeypatch.chdir(deep)
+    r = invoke("push", "--dry-run", "--json")
+    assert r.exit_code == 0, r.output
+    out = json.loads(r.output)
+    assert Path(out["root"]) == author.resolve() and out["root_from"] == "repository"
+    assert out["package"] == "alice/hlock" and "harness.lock" in [f["path"] for f in out["files"]]
+    r = invoke("push", "--dry-run")
+    assert "(the repository root)" in r.output and "github.com" not in r.output
+
+
+def test_root_c_and_dir_name_the_same_option(world, monkeypatch):
+    login(world)
+    author = str(world["author"])
+    runs = [invoke("push", flag, author, "--dry-run", "--json") for flag in ("--root", "-C", "--dir")]
+    assert all(r.exit_code == 0 for r in runs), [r.output for r in runs]
+    outs = [json.loads(r.output) for r in runs]
+    assert {o["digest"] for o in outs} == {outs[0]["digest"]} and {o["root_from"] for o in outs} == {"flag"}
+    assert "(--root)" in invoke("push", "--root", author, "--dry-run").output
+    # outside any repository, no flag: the current directory
+    r = invoke("push", "--dry-run")
+    assert r.exit_code == 1 and "nothing to push" in r.output and "repository root" not in r.output
+    monkeypatch.chdir(author)
+    out = json.loads(invoke("push", "--dry-run", "--json").output)
+    assert out["root_from"] == "current-directory" and out["digest"] == outs[0]["digest"]
+
+
+def test_a_repository_root_with_nothing_to_push_points_at_the_project(world, monkeypatch):
+    login(world)
+    repo = world["tmp"] / "mono"
+    review = repo / "agents/review"
+    (review / "prompts").mkdir(parents=True)
+    git(repo, "init", "-q")
+    monkeypatch.chdir(review / "prompts")
+    r = invoke("push", "--dry-run")
+    assert r.exit_code == 1 and "pass --root DIR" in r.output, r.output
+    (review / "harness.toml").write_text('[project]\nname = "Review Bot"\n')
+    r = invoke("push", "--dry-run")
+    assert r.exit_code == 1 and "hlock push --root .." in r.output, r.output
+    monkeypatch.chdir(review)
+    r = invoke("push", "--dry-run")
+    assert r.exit_code == 1 and "hlock push --root ." in r.output, r.output
+    # and --root pushes it, named after [project] name (it isn't the repository's root)
+    out = json.loads(invoke("push", "--root", ".", "--dry-run", "--json").output)
+    assert out["package"] == "alice/review-bot" and out["root_from"] == "flag"
+
+
+def test_pull_root_and_into_name_the_same_option(world):
+    published(world)
+    a = invoke("pull", "alice/my-setup", "--root", "a")
+    b = invoke("pull", "alice/my-setup", "--into", "b")
+    assert a.exit_code == 0 and b.exit_code == 0, a.output + b.output
+    files = lambda d: sorted(str(p.relative_to(d)) for p in d.rglob("*") if p.is_file())
+    assert files(world["me"] / "a") == files(world["me"] / "b") and "harness.lock" in files(world["me"] / "a")
+    r = invoke("pull", "alice/my-setup", "--root", "c", "--as", "x")
+    assert r.exit_code == 1 and "--root (or --into) writes the whole setup" in r.output
+    r = invoke("pull", "alice/my-setup", "--no-evals")
+    assert r.exit_code == 1 and "--no-evals only applies with --root" in r.output
+    r = invoke("pull", "--root", "c")
+    assert r.exit_code == 1 and "--as, -o and --root need a SOURCE" in r.output
+
+
+def test_the_sdk_pushes_the_repository_root_and_takes_root_aliases(world, monkeypatch):
+    import hlock as hl
+
+    login(world)
+    author = world["author"]
+    git(author, "init", "-q")
+    (author / "sub").mkdir()
+    monkeypatch.chdir(author / "sub")
+    url = world["url"]
+    default = json.loads(hl.registry_push(url, dry_run=True))
+    assert Path(default["root"]) == author.resolve() and default["root_from"] == "repository"
+    for given in ({"root": str(author)}, {"dir": str(author)}, {"directory": str(author)}):
+        out = json.loads(hl.registry_push(url, dry_run=True, **given))
+        assert (out["digest"], out["root_from"]) == (default["digest"], "flag"), given
+    assert json.loads(hl.registry_push(url, str(author), dry_run=True))["digest"] == default["digest"]  # positional
+    with pytest.raises(TypeError, match="root= and dir="):
+        hl.registry_push(url, root=str(author), dir="elsewhere", dry_run=True)
+    assert invoke("push", "--root", str(author)).exit_code == 0
+    monkeypatch.chdir(world["me"])
+    hl.registry_pull("alice/my-setup", root="a")
+    hl.registry_pull("alice/my-setup", into="b")
+    assert (world["me"] / "a/harness.lock").is_file() and (world["me"] / "b/harness.lock").is_file()
+    with pytest.raises(TypeError, match="root= and into="):
+        hl.registry_pull("alice/my-setup", root="c", into="d")
+    with pytest.raises(TypeError, match="needs root="):
+        hl.pull_into("github:alice/setup")
+
+
 def with_evals(author: Path) -> Path:
     """An eval pack in the author's project, with an executable grader script."""
     pack = author / "evals"
@@ -785,7 +881,7 @@ def test_eval_packs_are_pushed_beside_the_setup_and_pulled_into_a_project(world)
     assert invoke("pull", package).exit_code == 0
     assert not (world["home"] / "pulls/my-setup/evals").exists()
     r = invoke("pull", package, "--no-evals")
-    assert r.exit_code == 1 and "only applies with --into" in r.output
+    assert r.exit_code == 1 and "only applies with --root" in r.output
 
 
 def test_a_version_is_fixed_once_published(world):
@@ -980,7 +1076,7 @@ def test_pulling_one_lock_of_a_package(world):
     r = invoke("pull", "alice/my-setup//.hlock/locks/harness.pi.lock", "--as", "my-setup")
     assert r.exit_code == 1 and "was pulled from harness.lock" in r.output and "--as NAME" in r.output, r.output
     r = invoke("pull", "alice/my-setup//.hlock/locks/harness.pi.lock", "--into", "x")
-    assert r.exit_code == 1 and "--into writes the whole package" in r.output
+    assert r.exit_code == 1 and "--root writes the whole package" in r.output
 
 
 def test_a_pinned_from_without_a_path_still_refreshes(world):

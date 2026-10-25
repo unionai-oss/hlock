@@ -13,11 +13,12 @@ Status: implemented (client) · Last updated: 2026-10-24 · Builds on [pull](pul
 
 ```bash
 hlock login https://registry.example.com      # device login (RFC 8628); token in the keychain
-hlock push                                    # → <handle>/<repo>@<version>, with its eval packs
+hlock push                                    # the repository you're in, from its root: → <handle>/<repo>@<version>
+hlock push --root agents/review               # one project of a monorepo
 hlock search "code review" --kind apm
 hlock pull alice/hlock[@1.0.0]                # its harness.lock, into ~/.hlock/pulls/hlock/
 hlock pull alice/hlock//.hlock/locks/harness.pi.lock   # another of its locks
-hlock pull alice/hlock --into .               # the whole package, eval packs too, into a project
+hlock pull alice/hlock --root .               # the whole package, eval packs too, rooted at . (--into is an alias)
 hlock apm push                                # an APM package (apm.yml + .apm/), as `apm publish` does
 hlock apm pull alice/review-skills[@1.0.0]    # into ./review-skills/
 ```
@@ -218,9 +219,15 @@ token = "…"
 created with mode `0600` before the token is written to it. `HLOCK_KEYCHAIN=0` skips the
 keychain.
 
-**Push.** Packs the setup archive (§5.1), refusing values that look like credentials (by key
-name, or by shape: `sk-…`, `ghp_…`, long mixed-case tokens) and critical hidden characters,
-and the evals archive (§5.2), before anything is sent.
+**Push.** The project pushed is the **root**: `--root DIR` (`-C` and `--dir` are aliases), else
+the root of the git work tree the working directory is in (`git rev-parse --show-toplevel`,
+without the caller's `GIT_DIR` or `GIT_WORK_TREE`), else the working directory. The result
+says which (`root`, and `root_from`: `flag`, `repository`, `current-directory`). When the
+root is a repository's and has no setup, push fails and names the `--root` of the nearest
+directory from the working directory up that has one. Push packs the setup archive (§5.1),
+refusing values that look like credentials (by key name, or by shape: `sk-…`, `ghp_…`, long
+mixed-case tokens) and critical hidden characters, and the evals archive (§5.2), before
+anything is sent.
 
 The name is `NAMESPACE/NAME`, else `whoami`'s `user.handle` and the first of:
 
@@ -303,7 +310,7 @@ pull` with no source) pulls the same lock, and fails if the package no longer ha
 from before paths misreads a `from` with `//PATH` (it takes part of the path for the package)
 and fails with a not-found error rather than refresh another lock.
 
-`--into DIR` writes every file of the setup archive into DIR, refusing to replace existing
+`--root DIR` (alias `--into DIR`) writes every file of the setup archive with DIR as its root, refusing to replace existing
 files without `--force`, and takes no PATH. When the version has an uploaded evals archive (and
 no `--no-evals`), it downloads it too (at most 32 MiB), checks it against `Version.evals.digest`
 and `X-Hlock-Digest`, unpacks it (§5.2, restoring `0755` explicitly), scans it for hidden
@@ -350,7 +357,7 @@ existing ones only with `--force`.
   their download, away from store pulls. The setup `PUT` commits to the evals archive's digest,
   so a version can't gain or change eval packs after anyone has pulled it.
 - **Why such strict pack paths?** The setup's own `harness.toml` names the packs, so a
-  publisher could otherwise make `pull --into` write `.claude/settings.json` hooks, CI workflows
+  publisher could otherwise make `pull --root` write `.claude/settings.json` hooks, CI workflows
   or editor config into someone's project. No leading dots in a pack path, ASCII-only
   components and no case collisions keep that out on every OS.
 - **Why `hlock apm push` as well as `push`?** A project's `apm.yml` + `apm.lock.yaml` isn't an

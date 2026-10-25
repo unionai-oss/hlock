@@ -58,27 +58,51 @@ alice (Alice) on https://registry.example.com
 
 ## Publish
 
-Look at what would be published first:
+`hlock push` publishes the git repository you're in, from its root, wherever in it you run
+it. Look at what would be published first:
 
 ```console
+$ cd ~/review-bot/src
 $ hlock push --dry-run
-would push alice/review-bot@1.0.0 to https://registry.example.com (11 files, 853 B, sha256:25c9c3830399…)  (name from the git remote)
+packing /home/alice/review-bot  (the repository root)
+would push alice/review-bot@1.0.0 to https://registry.example.com (11 files, 829 B, sha256:e9dc057a4558…)  (name from the git remote)
 file                                                  size   digest
 .hlock/locks/.hlock/vendor/pi/skills/review/SKILL.md  17 B   ec9934ffb1e9
-.hlock/locks/harness.pi.lock                          169 B  7d7e6b1c9c1c
+.hlock/locks/harness.pi.lock                          168 B  0fc1179f11ad
 .hlock/vendor/claude-code/skills/review/SKILL.md      17 B   ec9934ffb1e9
 apm.lock.yaml                                         39 B   13fe02d9ad1f
 apm.yml                                               56 B   3dbfab129de8
-harness.lock                                          207 B  2c5584e8a5cf
-harness.toml                                          53 B   9079dd5e1bed
-evals/ eval pack, 4 files                             290 B
+harness.lock                                          186 B  9bd683d5bff0
+harness.toml                                          57 B   d3c7f63eb366
+evals/ eval pack, 4 files                             251 B
 next → hlock push
 $ hlock push
-✓ pushed alice/review-bot@1.0.0 (11 files, 853 B, sha256:25c9c3830399…)  (name from the git remote)
+packing /home/alice/review-bot  (the repository root)
+✓ pushed alice/review-bot@1.0.0 (11 files, 829 B, sha256:e9dc057a4558…)  (name from the git remote)
   https://registry.example.com/alice/review-bot
   with eval packs: evals/
 next → hlock pull alice/review-bot@1.0.0
 ```
+
+- **The root** is the directory whose files are pushed: the root of the git repository
+  you're in, else (outside a repository) the current directory. `--root DIR` pushes DIR
+  instead, such as one project of a monorepo; `-C DIR` and `--dir DIR` are other names for
+  it. `push` says which root it packed and why. When the repository's root has nothing to
+  push, `push` says so, and names the `--root` of the nearest directory above you that has a
+  setup:
+
+  ```console
+  $ cd ~/mono/agents/review
+  $ hlock push --dry-run
+  ✗ error: the repository root /home/alice/mono has none of harness.toml, harness.lock, apm.yml, apm.lock.yaml, apm.yaml, or harness files under .hlock/; nothing to push; push the project here with `hlock push --root .`
+  $ hlock push --root . --dry-run
+  packing .  (--root)
+  would push alice/review-bot@sha-119f11cdb1cf to https://registry.example.com (2 files, 205 B, sha256:119f11cdb1cf…)  (name from [project] name)
+  file          size   digest
+  harness.lock  124 B  7c6b6b72da4c
+  harness.toml  30 B   a49d0989b2a7
+  next → hlock push
+  ```
 
 - **The name** is `NAMESPACE/NAME`: by default your namespace (your handle) and the name of
   the repository the project is in, from its git remote (`origin`, else the only one). That
@@ -208,13 +232,14 @@ those fetches it from its repository with git, at the commit the registry gives.
 
 ## Into a project
 
-`--into DIR` writes the whole package into a directory, rather than one lock into the store:
-`harness.toml`, `harness.lock` and the files it vendors, the harness files under `.hlock/`
-with the files they vendor, `apm.yml` and `apm.lock.yaml`, and the eval packs. It's how you
-start a project from someone's setup:
+`--root DIR` writes the whole package with DIR as its root, rather than one lock into the
+store: `harness.toml`, `harness.lock` and the files it vendors, the harness files under
+`.hlock/` with the files they vendor, `apm.yml` and `apm.lock.yaml`, and the eval packs, each
+at its path in the package. It's how you start a project from someone's setup, or add one
+to a directory of a monorepo (`--root agents/review`). `--into DIR` is another name for it:
 
 ```console
-$ hlock pull alice/review-bot --into .
+$ hlock pull alice/review-bot --root .
 ✓ pulled alice/review-bot @ 1.0.0 → .  (11 files)
   .hlock/locks/harness.pi.lock
   apm.lock.yaml
@@ -232,8 +257,8 @@ directory that's already there counts too, and `--force` replaces it whole, so n
 another version is left in it. The eval packs are checked against their digest, and scanned
 like everything else; nothing in them runs
 until you evaluate with them. `--no-evals` leaves them out, and pulling a lock into the store
-never downloads them. `--into` works with git sources too
-(`hlock pull github:alice/agent-setup --into .`).
+never downloads them. `--root` works with git sources too
+(`hlock pull github:alice/agent-setup --root .`).
 
 ## APM packages
 
@@ -303,9 +328,9 @@ dependencies:
 hlock login [URL] [--token TOKEN | --no-browser]
 hlock logout [--registry URL]
 hlock whoami [--registry URL] [--json]
-hlock push [NAMESPACE/NAME] [--version V] [-C DIR] [--no-evals] [--dry-run] [--registry URL] [--json]
+hlock push [NAMESPACE/NAME] [--version V] [--root DIR] [--no-evals] [--dry-run] [--registry URL] [--json]
 hlock search [QUERY...] [--type T] [--kind K] [--source S] [--limit N] [--registry URL] [--json]
-hlock pull NAMESPACE/NAME[//PATH][@VERSION] [--as NAME | -o FILE | --into DIR [--no-evals]] [--force] [--registry URL] [--json]
+hlock pull NAMESPACE/NAME[//PATH][@VERSION] [--as NAME | -o FILE | --root DIR [--no-evals]] [--force] [--registry URL] [--json]
 hlock apm push [NAMESPACE/NAME] [-C DIR] [--dry-run] [--registry URL] [--json]
 hlock apm pull NAMESPACE/NAME[@VERSION] [--into DIR] [--force] [--allow-hidden FILE] [--registry URL] [--json]
 ```

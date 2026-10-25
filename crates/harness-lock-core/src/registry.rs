@@ -801,18 +801,73 @@ impl NameFrom {
 /// root of a git work tree; `None` otherwise (a project in a subdirectory of a repository, no
 /// remote, no git).
 pub fn git_repo_name(dir: &Path) -> Option<String> {
-    let run = |args: &[&str]| -> Option<String> {
-        let out = std::process::Command::new("git").arg("-C").arg(dir).args(args).env("GIT_TERMINAL_PROMPT", "0").env_remove("GIT_DIR").env_remove("GIT_WORK_TREE").stdin(std::process::Stdio::null()).stderr(std::process::Stdio::null()).output().ok()?;
-        out.status.success().then(|| String::from_utf8_lossy(&out.stdout).trim().to_string())
-    };
-    let top = run(&["rev-parse", "--show-toplevel"])?;
-    if std::fs::canonicalize(&top).ok()? != std::fs::canonicalize(dir).ok()? {
+    let run = |args: &[&str]| git_in(dir, args);
+    let top = git_toplevel(dir)?;
+    if top != std::fs::canonicalize(dir).ok()? {
         return None;
     }
     let remotes = run(&["remote"])?;
     let remotes: Vec<&str> = remotes.lines().map(str::trim).filter(|r| !r.is_empty()).collect();
     let remote = if remotes.contains(&"origin") { "origin" } else if remotes.len() == 1 { remotes[0] } else { return None };
     repo_name_of(&run(&["remote", "get-url", remote])?)
+}
+
+/// `git -C dir ARGS`'s output, trimmed, when it succeeds; the caller's `GIT_DIR` and
+/// `GIT_WORK_TREE` don't leak in, and git never prompts.
+fn git_in(dir: &Path, args: &[&str]) -> Option<String> {
+    let out = std::process::Command::new("git").arg("-C").arg(dir).args(args).env("GIT_TERMINAL_PROMPT", "0").env_remove("GIT_DIR").env_remove("GIT_WORK_TREE").stdin(std::process::Stdio::null()).stderr(std::process::Stdio::null()).output().ok()?;
+    out.status.success().then(|| String::from_utf8_lossy(&out.stdout).trim().to_string())
+}
+
+/// The root of the git work tree `dir` is in, canonicalized; `None` outside one.
+pub fn git_toplevel(dir: &Path) -> Option<PathBuf> {
+    std::fs::canonicalize(git_in(dir, &["rev-parse", "--show-toplevel"])?).ok()
+}
+
+/// Where a push's root came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum RootFrom {
+    /// `--root DIR` (or `-C`, `--dir`).
+    Flag,
+    /// The root of the git work tree the working directory is in.
+    Repository,
+    /// The working directory, outside any git work tree.
+    CurrentDirectory,
+}
+
+/// The directory `hlock push` packs: `root` (relative to `cwd`), else the root of the git work
+/// tree `cwd` is in, else `cwd`.
+pub fn push_root(root: Option<&Path>, cwd: &Path) -> (PathBuf, RootFrom) {
+    match root {
+        Some(r) => (cwd.join(r), RootFrom::Flag),
+        None => match git_toplevel(cwd) {
+            Some(top) => (top, RootFrom::Repository),
+            None => (cwd.to_path_buf(), RootFrom::CurrentDirectory),
+        },
+    }
+}
+
+/// Whether `dir` has any file a setup archive is made of.
+pub fn has_setup(dir: &Path) -> bool {
+    SETUP_FILES.iter().chain(["apm.yaml"].iter()).any(|f| dir.join(f).is_file()) || !pull::hlock_setup_files(dir).is_empty()
+}
+
+/// For a repository root with nothing to push: the `--root` that would push the nearest
+/// directory with a setup, from `cwd` up to (not including) `top`, relative to `cwd`.
+fn nearer_root(cwd: &Path, top: &Path) -> Option<String> {
+    let cwd = std::fs::canonicalize(cwd).ok()?;
+    let mut up = 0;
+    for d in cwd.ancestors() {
+        if d == top || !d.starts_with(top) {
+            return None;
+        }
+        if has_setup(d) {
+            return Some(if up == 0 { ".".into() } else { vec![".."; up].join("/") });
+        }
+        up += 1;
+    }
+    None
 }
 
 /// The repository name in a git remote URL: its last path segment without `.git`
@@ -901,9 +956,24 @@ pub fn login_with_token(url: &str, token: &str) -> Result<Value> {
     Ok(json!({ "url": url, "whoami": who, "stored": stored }))
 }
 
-/// `hlock push`: pack `dir` (and its eval packs, unless `no_evals`), then publish it as
+/// `hlock push`: pack the project at `root` (see [`push_root`]: by default the git
+/// repository's root), and its eval packs unless `no_evals`, then publish it as
 /// `name@version`.
-pub fn push(url: &str, dir: &Path, name: Option<&str>, version: Option<&str>, dry_run: bool, no_evals: bool) -> Result<Value> {
+pub fn push(url: &str, root: Option<&Path>, name: Option<&str>, version: Option<&str>, dry_run: bool, no_evals: bool) -> Result<Value> {
+    let cwd = std::env::current_dir().map_err(|e| err(format!("can't read the working directory: {e}")))?;
+    let (dir, root_from) = push_root(root, &cwd);
+    let dir = dir.as_path();
+    if root_from == RootFrom::Repository && !has_setup(dir) {
+        let hint = match nearer_root(&cwd, dir) {
+            Some(r) => format!("; push the project here with `hlock push --root {r}`"),
+            None => "; pass --root DIR to push another directory".into(),
+        };
+        return Err(err(format!(
+            "the repository root {} has none of {}, apm.yaml, or harness files under .hlock/; nothing to push{hint}",
+            dir.display(),
+            SETUP_FILES.join(", ")
+        )));
+    }
     let client = Client::for_url(url);
     let packed = pack(dir)?;
     let namespace = match name {
@@ -949,6 +1019,8 @@ pub fn push(url: &str, dir: &Path, name: Option<&str>, version: Option<&str>, dr
         "warnings": warnings,
         "registry": url,
         "name_from": if name.is_some() { Value::Null } else { json!(packed.name_from) },
+        "root": dir.display().to_string(),
+        "root_from": root_from,
     });
     if let Some(e) = &evals {
         out["evals"] = json!({ "digest": e.digest, "size_bytes": e.size_bytes, "packs": e.packs, "files": e.files });
@@ -1110,7 +1182,7 @@ fn choose_lock(r: &Ref, files: &[String]) -> Result<(String, Vec<String>)> {
             }
             match locks.len() {
                 1 => Ok((locks[0].clone(), Vec::new())),
-                0 => Err(err(format!("{pkg} has no harness.lock; write its files into a project with --into DIR"))),
+                0 => Err(err(format!("{pkg} has no harness.lock; write its files into a project with --root DIR"))),
                 _ => Err(err(format!("{pkg} has {} locks and no harness.lock; pick one:\n{}", locks.len(), refs(&locks)))),
             }
         }
@@ -1127,7 +1199,7 @@ pub fn pull(url_flag: Option<&str>, spec: &str, dest: Dest<'_>, force: bool, all
         (resolve_url(url_flag)?, parse_ref_checked(spec)?)
     };
     if let (Dest::Into(_), Some(p)) = (&dest, &r.path) {
-        return Err(err(format!("--into writes the whole package; drop //{p}, or pull that lock into the store without --into")));
+        return Err(err(format!("--root writes the whole package; drop //{p}, or pull that lock into the store without --root")));
     }
     let client = Client::for_url(&url);
     let pkg = client.package(&r)?;
@@ -1291,6 +1363,33 @@ mod tests {
             assert_eq!(repo_name_of(url).as_deref(), Some(name), "{url}");
         }
         assert_eq!(repo_name_of(""), None);
+    }
+
+    #[test]
+    fn the_push_root_is_the_repository_root_by_default() {
+        let d = std::fs::canonicalize(tmp("root")).unwrap();
+        // outside any git work tree: the working directory
+        assert_eq!(push_root(None, &d), (d.clone(), RootFrom::CurrentDirectory));
+        let ok = std::process::Command::new("git").arg("-C").arg(&d).args(["init", "-q"]).env_remove("GIT_DIR").env_remove("GIT_WORK_TREE").status().is_ok_and(|s| s.success());
+        if !ok {
+            return; // no git here
+        }
+        let sub = d.join("agents/review");
+        std::fs::create_dir_all(&sub).unwrap();
+        assert_eq!(push_root(None, &d), (d.clone(), RootFrom::Repository));
+        assert_eq!(push_root(None, &sub), (d.clone(), RootFrom::Repository));
+        assert_eq!(push_root(Some(Path::new("agents/review")), &d), (sub.clone(), RootFrom::Flag));
+        assert_eq!(push_root(Some(Path::new(".")), &sub), (sub.join("."), RootFrom::Flag));
+        // nothing at the root: the nearest directory up from the working directory that has a setup
+        assert!(!has_setup(&d));
+        assert_eq!(nearer_root(&sub, &d), None);
+        std::fs::write(d.join("agents/harness.toml"), "[project]\nname = \"x\"\n").unwrap();
+        assert_eq!(nearer_root(&sub, &d).as_deref(), Some(".."));
+        std::fs::write(sub.join("harness.toml"), "[project]\nname = \"x\"\n").unwrap();
+        assert_eq!(nearer_root(&sub, &d).as_deref(), Some("."));
+        // a project in a subdirectory doesn't take the repository's name
+        assert_eq!(git_repo_name(&sub), None);
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     #[test]
