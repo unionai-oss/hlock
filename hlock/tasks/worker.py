@@ -185,6 +185,25 @@ def _artifact_path(ws: Path, expected: list) -> Path | None:
     return ws / p
 
 
+def _within(root: Path, p: Path) -> bool:
+    """Whether `p`, resolved through the symlinks in its path, stays at or under `root`.
+
+    The lexical checks in [`_artifact_path`] (no absolute path, no `..`) don't stop a
+    workspace that holds a symlinked subdirectory from redirecting a write outside it:
+    `ws/sub/link/out.txt` writes wherever `ws/sub/link` points. Resolve both sides (the
+    deepest existing ancestor through symlinks, like the Rust core's `fsutil::resolve`)
+    and compare, so the model's output can't land outside its own workspace.
+    """
+    try:
+        root_r = root.resolve(strict=False)
+        p_r = p.resolve(strict=False)
+    except OSError:
+        return False
+    p_r = str(p_r)
+    root_r = str(root_r)
+    return p_r == root_r or p_r.startswith(root_r + os.sep)
+
+
 def llm_run_trial(req: dict) -> dict:
     """Run one (stack, task, seed) trial.
 
@@ -220,6 +239,8 @@ def llm_run_trial(req: dict) -> dict:
     out = _artifact_path(ws, task.get("expected") or [])
     if out is None:
         return {"error": f"task {task.get('id')}: its expected artifact isn't a path inside the workspace"}
+    if not _within(ws, out):
+        return {"error": f"task {task.get('id')}: its expected artifact resolves outside the workspace; refusing to write it"}
     name = out.relative_to(ws).as_posix()
     files = _workspace_text(ws)
     composed = (

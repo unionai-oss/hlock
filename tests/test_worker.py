@@ -325,6 +325,36 @@ def test_the_completion_budget_can_be_raised(tmp_path, monkeypatch, endpoint):
     assert e.requests[1]["max_tokens"] == 16384
 
 
+def test_a_symlinked_parent_cant_redirect_the_reply_out_of_the_workspace(tmp_path, monkeypatch, endpoint):
+    """A workspace directory that is a symlink must not let the model's reply escape it
+    (a path traversal on write: `ws/sub/link/count.txt` writes where `link` points)."""
+    victim = tmp_path.parent / f"{tmp_path.name}-victim"
+    victim.mkdir()
+    (tmp_path / "sub").mkdir()
+    try:
+        (tmp_path / "sub" / "link").symlink_to(victim, target_is_directory=True)
+    except OSError:
+        pytest.skip("can't make a symlink here")
+    from hlock.tasks.worker import _artifact_path, _within
+
+    # the resolver itself flags the escape
+    out = _artifact_path(tmp_path, ["sub/link/count.txt"])
+    assert out is not None
+    assert _within(tmp_path, out) is False
+
+    # end to end: the trial refuses, and nothing is written outside
+    endpoint(lambda prompt: "3")
+    resp = trial("openai:gpt-5", tmp_path, expected=["sub/link/count.txt"])
+    assert resp["ok"] is False
+    assert "resolves outside the workspace" in resp["error"]
+    assert not (victim / "count.txt").exists()
+
+    # a normal nested artifact still writes where it should
+    resp = trial("openai:gpt-5", tmp_path, expected=["sub/count.txt"])
+    assert resp["ok"] is True
+    assert (tmp_path / "sub" / "count.txt").read_text() == "3"
+
+
 def test_the_reply_is_written_to_the_expected_artifact(tmp_path, monkeypatch, endpoint):
     (tmp_path / "words.txt").write_text("one two three\n")
     e = endpoint(lambda prompt: "```\n3\n```")
