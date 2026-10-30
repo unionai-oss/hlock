@@ -15,7 +15,7 @@ use serde_json::{json, Map, Value};
 use crate::capture::{drop_nulls, render_config, tree_digest, VendorFile, VENDOR_DIR};
 use crate::error::{Error, Result};
 use crate::launch::mcp_entry;
-use crate::lockfile::{ConfigFile, Evidence, Harness, Instructions, Lockfile, LLM};
+use crate::lockfile::{ConfigFile, Evidence, Harness, Instructions, Lockfile, LLM, Tool};
 use crate::localize::subst_value;
 use crate::profiles::{probe_harness, Ctx, HarnessProfile, Registry};
 use crate::sync::set_pointer;
@@ -26,6 +26,9 @@ pub struct MigrateOptions {
     pub to: String,
     /// `provider:model` for the default role.
     pub model: Option<String>,
+    /// Connector MCP servers (`connector:NAME`, e.g. from `hlock connectors`) to add to the
+    /// migrated lock, so the target re-authorizes them (OAuth grants are per-client).
+    pub connectors: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -388,6 +391,9 @@ pub(crate) fn mcp_settings(lock: &Lockfile, target: &HarnessProfile, per_file: &
         match crate::sync::transport_problem(t, target) {
             Some(why) => notes.push(format!("MCP server {}: {why}", t.name)),
             None => {
+                if t.auth.as_deref() == Some("oauth") {
+                    notes.push(format!("MCP server {} uses OAuth; authorize it in {} the first time it connects — OAuth grants are per-client and don't migrate", t.name, target.name));
+                }
                 servers.insert(t.name.clone(), mcp_entry(t, shape));
             }
         }
@@ -573,6 +579,24 @@ pub fn migrate(source: &Lockfile, source_path: &Path, reg: &Registry, ctx: &Ctx,
     }
     carry_over(&mut lock, source, src, target, ctx, &vroot, &mut c);
 
+    // connectors the user asked to carry: known OAuth servers to re-authorize in the target
+    if !opts.connectors.is_empty() {
+        let mut seen = std::collections::BTreeSet::new();
+        for raw in &opts.connectors {
+            let id = raw.trim();
+            let is_known = crate::connectors::known(id);
+            let first = seen.insert(id.to_string());
+            if !is_known || !first {
+                if !is_known {
+                    c.notes.push(format!("{id} isn't a known connector ({}); add it yourself by its MCP URL", crate::connectors::ids().join(", ")));
+                }
+                continue;
+            }
+            let url = crate::connectors::url(id).unwrap();
+            lock.tool.push(Tool { name: id.to_string(), kind: "mcp".into(), transport: Some("http".into()), url: Some(url.to_string()), auth: Some("oauth".into()), source: Some(format!("connector:{id}")), scope: Some("user".into()), enabled: Some(true), ..Default::default() });
+        }
+    }
+
     // ---- models ----
     let wanted = match &opts.model {
         Some(m) => {
@@ -753,15 +777,15 @@ mod tests {
         };
         let reg = Registry::builtin();
         source.save(&proj.join("harness.lock")).unwrap();
-        let o = migrate(&source, &proj.join("harness.lock"), &reg, &ctx, &MigrateOptions { to: "codex".into(), model: None }).unwrap();
+        let o = migrate(&source, &proj.join("harness.lock"), &reg, &ctx, &MigrateOptions { to: "codex".into(), model: None, ..Default::default()}).unwrap();
         let l = &o.lock;
         assert_eq!(l.harness.name, "codex");
         assert_eq!((l.llm[0].provider.as_str(), l.llm[0].model.as_str()), ("openai", "gpt-5.5"));
         assert_eq!(l.skill[0].path.as_deref(), Some(".agents/skills/review"));
         assert_eq!(l.skill[0].vendored.as_deref(), Some(".hlock/vendor/codex/migrate/skills/project/review"));
         // each output lock gets its own vendored files
-        let a = migrate_to(&proj.join("harness.lock"), &proj.join("a.lock"), &reg, &ctx, &MigrateOptions { to: "codex".into(), model: None }).unwrap();
-        let b = migrate_to(&proj.join("harness.lock"), &proj.join("b.lock"), &reg, &ctx, &MigrateOptions { to: "codex".into(), model: Some("openai:gpt-5.5-mini".into()) }).unwrap();
+        let a = migrate_to(&proj.join("harness.lock"), &proj.join("a.lock"), &reg, &ctx, &MigrateOptions { to: "codex".into(), model: None, ..Default::default()}).unwrap();
+        let b = migrate_to(&proj.join("harness.lock"), &proj.join("b.lock"), &reg, &ctx, &MigrateOptions { to: "codex".into(), model: Some("openai:gpt-5.5-mini".into()), ..Default::default()}).unwrap();
         let cfg = |l: &Lockfile| l.config.iter().find(|c| c.id == "config").and_then(|c| c.vendored.clone()).unwrap();
         assert_eq!(cfg(&a.lock), ".hlock/vendor/codex/migrate/a/config.pointers.json");
         assert_eq!(cfg(&b.lock), ".hlock/vendor/codex/migrate/b/config.pointers.json");
@@ -778,17 +802,17 @@ mod tests {
 
         // the project's own AGENTS.md is pinned instead of moving CLAUDE.md onto it
         std::fs::write(proj.join("AGENTS.md"), "shared\n").unwrap();
-        let o = migrate(&source, &proj.join("harness.lock"), &reg, &ctx, &MigrateOptions { to: "codex".into(), model: Some("openai:gpt-5.5-mini".into()) }).unwrap();
+        let o = migrate(&source, &proj.join("harness.lock"), &reg, &ctx, &MigrateOptions { to: "codex".into(), model: Some("openai:gpt-5.5-mini".into()), ..Default::default()}).unwrap();
         assert_eq!(o.lock.instructions[0].name, "AGENTS.md");
         assert_eq!(o.lock.instructions[0].vendored, None);
         assert_eq!(o.lock.instructions[0].digest.as_deref(), Some(crate::hash::sha256_bytes(b"shared\n").as_str()));
         assert_eq!(o.lock.llm[0].model, "gpt-5.5-mini");
 
-        let err = migrate(&source, &proj.join("harness.lock"), &reg, &ctx, &MigrateOptions { to: "codex".into(), model: Some("anthropic:opus".into()) }).unwrap_err();
+        let err = migrate(&source, &proj.join("harness.lock"), &reg, &ctx, &MigrateOptions { to: "codex".into(), model: Some("anthropic:opus".into()), ..Default::default()}).unwrap_err();
         assert!(err.to_string().contains("doesn't talk to"), "{err}");
-        let err = migrate(&source, &proj.join("harness.lock"), &reg, &ctx, &MigrateOptions { to: "claude".into(), model: None }).unwrap_err();
+        let err = migrate(&source, &proj.join("harness.lock"), &reg, &ctx, &MigrateOptions { to: "claude".into(), model: None, ..Default::default()}).unwrap_err();
         assert!(err.to_string().contains("already on"), "{err}");
-        let err = migrate(&source, &proj.join("harness.lock"), &reg, &ctx, &MigrateOptions { to: "pydantic-ai".into(), model: None }).unwrap_err();
+        let err = migrate(&source, &proj.join("harness.lock"), &reg, &ctx, &MigrateOptions { to: "pydantic-ai".into(), model: None, ..Default::default()}).unwrap_err();
         assert!(err.to_string().contains("between agent CLIs"), "{err}");
         let _ = std::fs::remove_dir_all(&d);
     }
@@ -818,7 +842,7 @@ mod tests {
         let notes = |o: &MigrateOutcome| o.report["notes"].as_array().unwrap().iter().map(|n| n.as_str().unwrap().to_string()).collect::<Vec<_>>();
 
         // VS Code: servers in its own shape, AGENTS.md, and a skill directory it reads
-        let o = migrate(&source, &proj.join("harness.lock"), &reg, &ctx, &MigrateOptions { to: "vscode".into(), model: None }).unwrap();
+        let o = migrate(&source, &proj.join("harness.lock"), &reg, &ctx, &MigrateOptions { to: "vscode".into(), model: None, ..Default::default()}).unwrap();
         let mcp = o.vendor.iter().find(|f| f.rel.contains("mcp")).unwrap();
         let servers: Value = serde_json::from_slice(&mcp.bytes).unwrap();
         let servers = servers.get("/servers").or_else(|| servers.get("servers")).unwrap_or(&servers);
@@ -831,7 +855,7 @@ mod tests {
         assert!(notes(&o).iter().any(|n| n.contains("VS Code sets its model in the app")), "{:?}", notes(&o));
 
         // Claude Desktop holds only stdio servers: the remote one stays in the lock, with a note
-        let o = migrate(&source, &proj.join("harness.lock"), &reg, &ctx, &MigrateOptions { to: "claude-desktop".into(), model: None }).unwrap();
+        let o = migrate(&source, &proj.join("harness.lock"), &reg, &ctx, &MigrateOptions { to: "claude-desktop".into(), model: None, ..Default::default()}).unwrap();
         let cfg = o.vendor.iter().find(|f| f.rel.contains("config")).unwrap();
         let text = String::from_utf8_lossy(&cfg.bytes);
         assert!(text.contains("gh") && !text.contains("x.dev"), "{text}");
@@ -841,6 +865,71 @@ mod tests {
         // a desktop app can't be localized: localize runs the harness on a local model
         let err = crate::localize::localize(&source, &proj.join("harness.lock"), &reg, &ctx, &crate::localize::LocalizeOptions { harness: Some("vscode".into()), ..Default::default() }).unwrap_err();
         assert!(err.to_string().contains("is a desktop app"), "{err}");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// An OAuth HTTP server (a Claude Code connector) migrates into a target that needs its
+    /// own authorization: the scheme is carried into the config (`auth: "oauth"`) and a note
+    /// says the user must authorize it in the target. OAuth grants are per-client.
+    #[test]
+    fn oauth_connectors_migrate_as_oauth() {
+        let d = std::env::temp_dir().join(format!("hlock-migrate-oauth-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        let proj = d.join("proj");
+        std::fs::create_dir_all(&proj).unwrap();
+        let ctx = Ctx { home: d.join("home"), cwd: proj.clone(), env: BTreeMap::new(), path: vec![] };
+        let source = Lockfile {
+            harness: Harness { name: "claude-code".into(), ..Default::default() },
+            llm: vec![LLM { role: "default".into(), provider: "anthropic".into(), model: "opus".into(), ..Default::default() }],
+            tool: vec![
+                Tool { name: "slack".into(), kind: "mcp".into(), transport: Some("http".into()), url: Some("https://mcp.slack.com/mcp".into()), auth: Some("oauth".into()), ..Default::default() },
+                Tool { name: "plain".into(), kind: "mcp".into(), transport: Some("http".into()), url: Some("https://x.dev/mcp".into()), headers: [("Authorization".into(), "Bearer abcdefghijklmnop".into())].into(), ..Default::default() },
+            ],
+            ..Default::default()
+        };
+        let reg = Registry::builtin();
+        source.save(&proj.join("harness.lock")).unwrap();
+        // the auth scheme survives a save/load round-trip in the lock
+        let reloaded = Lockfile::load(&proj.join("harness.lock")).unwrap();
+        assert_eq!(reloaded.tool.iter().find(|t| t.name == "slack").unwrap().auth.as_deref(), Some("oauth"));
+        let o = migrate(&source, &proj.join("harness.lock"), &reg, &ctx, &MigrateOptions { to: "pi".into(), model: None, ..Default::default()}).unwrap();
+        let notes = o.report["notes"].as_array().unwrap().iter().map(|n| n.as_str().unwrap().to_string()).collect::<Vec<_>>();
+        let cfg = o.vendor.iter().find(|f| f.rel.contains("mcp"))
+            .expect("the migrated lock should vendor an mcp config file");
+        let servers: Value = serde_json::from_slice(&cfg.bytes).unwrap();
+        let servers = servers.get("/mcpServers").or_else(|| servers.get("mcpServers")).unwrap_or(&servers);
+        // the OAuth server asks the target to run its own flow; the API-key one keeps no auth
+        assert_eq!(servers["slack"], json!({"type": "http", "url": "https://mcp.slack.com/mcp", "auth": "oauth"}), "{servers}");
+        assert_eq!(servers["plain"]["auth"], Value::Null, "{servers}");
+        assert!(o.lock.tool.iter().find(|t| t.name == "slack").unwrap().auth.as_deref() == Some("oauth"));
+        assert!(notes.iter().any(|n| n.contains("slack uses OAuth") && n.contains("authorize it in Pi")), "{notes:?}");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// OAuth connectors asked for with `--connectors` are added to the migrated lock and
+    /// written to the target's MCP config marked for re-authorization.
+    #[test]
+    fn migrate_connectors_adds_the_servers() {
+        let d = std::env::temp_dir().join(format!("hlock-migrate-conn-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        let proj = d.join("proj");
+        std::fs::create_dir_all(&proj).unwrap();
+        let ctx = Ctx { home: d.join("home"), cwd: proj.clone(), env: BTreeMap::new(), path: vec![] };
+        let source = Lockfile { harness: Harness { name: "claude-code".into(), ..Default::default() }, ..Default::default() };
+        let reg = Registry::builtin();
+        source.save(&proj.join("harness.lock")).unwrap();
+        let o = migrate(&source, &proj.join("harness.lock"), &reg, &ctx, &MigrateOptions { to: "pi".into(), model: None, connectors: vec!["slack".into(), "linear".into(), "bogus".into()], ..Default::default() }).unwrap();
+        let conn: Vec<&Tool> = o.lock.tool.iter().filter(|t| t.kind == "mcp").collect();
+        assert_eq!(conn.len(), 2, "only known connectors are added");
+        let slack = conn.iter().find(|t| t.name == "slack").unwrap();
+        assert_eq!((slack.transport.as_deref(), slack.url.as_deref(), slack.auth.as_deref(), slack.source.as_deref()),
+                   (Some("http"), Some("https://mcp.slack.com/mcp"), Some("oauth"), Some("connector:slack")));
+        let notes = o.report["notes"].as_array().unwrap().iter().map(|n| n.as_str().unwrap().to_string()).collect::<Vec<_>>();
+        assert!(notes.iter().any(|n| n.contains("bogus isn't a known connector")), "{notes:?}");
+        let cfg = o.vendor.iter().find(|f| f.rel.contains("mcp")).unwrap();
+        let servers: Value = serde_json::from_slice(&cfg.bytes).unwrap();
+        let servers = servers.get("/mcpServers").or_else(|| servers.get("mcpServers")).unwrap_or(&servers);
+        assert_eq!(servers["slack"], json!({"type": "http", "url": "https://mcp.slack.com/mcp", "auth": "oauth"}), "{servers}");
         let _ = std::fs::remove_dir_all(&d);
     }
 
@@ -897,7 +986,7 @@ mod tests {
             lock.save(&src_path).unwrap();
             for target in clis.iter().filter(|t| t.id != src.id) {
                 let pair = format!("{} → {}", src.id, target.id);
-                let o = match migrate(&lock, &src_path, &reg, &ctx, &MigrateOptions { to: target.id.clone(), model: None }) {
+                let o = match migrate(&lock, &src_path, &reg, &ctx, &MigrateOptions { to: target.id.clone(), model: None, ..Default::default()}) {
                     Ok(o) => o,
                     Err(e) => {
                         problems.push(format!("{pair}: {e}"));

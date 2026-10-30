@@ -1150,6 +1150,19 @@ fn normalize_mcp(name: &str, v: &Value, scope: &str, secrets: &mut Secrets) -> O
         (None, Some(d)) => Some(!d),
         _ => None,
     };
+    // an HTTP server that connects with OAuth (a Claude Code connector): carry the scheme
+    // so a target that supports it can ask for its own authorization. The account session
+    // itself is per-client and is never ported.
+    let auth = if transport == "http" {
+        let looks_oauth = obj.get("oauthAccount").is_some()
+            || obj.get("oauth").and_then(Value::as_object).is_some()
+            || matches!(obj.get("auth"), Some(Value::String(s)) if matches!(s.to_ascii_lowercase().as_str(), "oauth" | "oidc"))
+            || matches!(obj.get("auth"), Some(Value::Object(a)) if a.get("type").and_then(Value::as_str).is_some_and(|t| t.eq_ignore_ascii_case("oauth")))
+            || matches!(obj.get("authType").and_then(Value::as_str), Some(t) if t.eq_ignore_ascii_case("oauth"));
+        looks_oauth.then(|| "oauth".to_string())
+    } else {
+        None
+    };
     let source = command.as_deref().and_then(|c| launcher_source(c, &args)).or_else(|| url.as_ref().map(|_| "remote".to_string()));
     Some(Tool {
         name: name.to_string(),
@@ -1159,6 +1172,7 @@ fn normalize_mcp(name: &str, v: &Value, scope: &str, secrets: &mut Secrets) -> O
         command,
         args,
         url: url.map(|u| secrets.scrub(&ctx, "url", &u, false, &format!("mcp {name} url"))),
+        auth,
         env,
         headers,
         scope: Some(scope.into()),
@@ -2404,6 +2418,15 @@ mod tests {
         }
         let vscode = normalize_mcp("v", &json!({"type": "stdio", "command": "uvx", "args": ["x"]}), "user", &mut s).unwrap();
         assert_eq!((vscode.transport.as_deref(), vscode.command.as_deref()), (Some("stdio"), Some("uvx")));
+        // an OAuth HTTP server (a Claude Code connector) is marked so the target re-authorizes
+        let oauth = normalize_mcp("slack", &json!({"type": "http", "url": "https://mcp.slack.com/mcp", "oauthAccount": {"id": "u1", "email": "a@b.co"}}), "user", &mut s).unwrap();
+        assert_eq!((oauth.transport.as_deref(), oauth.auth.as_deref()), (Some("http"), Some("oauth")));
+        assert_eq!(normalize_mcp("oidc", &json!({"type": "http", "url": "https://x.dev/mcp", "auth": "oidc"}), "user", &mut s).unwrap().auth.as_deref(), Some("oauth"));
+        assert_eq!(normalize_mcp("authobj", &json!({"type": "http", "url": "https://x.dev/mcp", "auth": {"type": "oauth"}}), "user", &mut s).unwrap().auth.as_deref(), Some("oauth"));
+        // a plain HTTP server (API-key headers) and any stdio server carry no auth scheme
+        let plain = normalize_mcp("flyte2", &json!({"type": "http", "url": "https://x.dev/mcp", "headers": {"Authorization": "Bearer abcdefghijklmnop"}}), "user", &mut s).unwrap();
+        assert_eq!(plain.auth, None);
+        assert_eq!(normalize_mcp("std", &json!({"type": "stdio", "command": "x"}), "user", &mut s).unwrap().auth, None);
     }
 
     #[test]

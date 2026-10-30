@@ -2455,6 +2455,67 @@ def _names(o: str, e: dict) -> bool:
 _SEV_STYLE = {"critical": "fail", "error": "fail", "warning": "warn", "info": "muted"}
 
 
+@main.command("connectors")
+@click.option("--project", default=None, metavar="DIR",
+              help="Scan only sessions run in this project directory.")
+@click.option("--limit", default=5000, show_default=True, metavar="N", help="Max transcripts to scan.")
+@click.option("--json", "as_json", is_flag=True, help="Print the report as JSON.")
+@click.option("-v", "--verbose", is_flag=True, help="Also list unknown MCP servers the catalog can't name.")
+def connectors_cmd(project: str | None, limit: int, as_json: bool, verbose: bool) -> None:
+    """Infer the connector MCP servers you use, from your agent session transcripts.
+
+    A read-only dry run: it scans your local Claude Code / Pi / Codex session logs for
+    tool calls that belong to connector MCP servers (Slack, Linear, …) and lists the
+    connectors you demonstrably use. OAuth grants are per-client and don't port, so
+    nothing is written; this only shows what to re-link and authorize in a target harness
+    (Pi, OpenCode, …) after a migrate.
+    """
+    from hlock import connectors as cx
+
+    proj = Path(project).expanduser() if project else None
+    with _working("Scanning agent session transcripts…"):
+        result = cx.infer(project=proj, max_files=limit)
+    if as_json:
+        print(json.dumps({
+            "connectors": [{"id": c.id, "name": c.name, "uses": c.uses,
+                             "first_seen": c.first, "last_seen": c.last, "harnesses": c.harnesses}
+                            for c in result.connectors],
+            "unknown": [{"server": s, "uses": n} for s, n in result.unknown],
+            "transcripts": result.transcripts,
+            "tool_calls": result.uses_seen,
+        }, indent=2))
+        return
+    if not result.connectors and not result.unknown:
+        console.print(f"[muted]no connector tool calls in {result.transcripts} transcript"
+                      + ("s" if result.transcripts != 1 else "") + ".[/]")
+        return
+    if result.connectors:
+        t = Table(box=None, header_style="bold", pad_edge=False)
+        t.add_column("connector", style="bold")
+        t.add_column("uses", justify="right")
+        t.add_column("first seen")
+        t.add_column("last seen")
+        t.add_column("seen in")
+        for c in result.connectors:
+            t.add_row(c.name, str(c.uses), c.first[:10] or "", c.last[:10] or "", ", ".join(c.harnesses))
+        console.print("[key]connectors you use[/] (from session logs; authorize them again in the target harness")
+        console.print(t)
+    else:
+        console.print("[muted]no known connectors in your transcripts.[/]")
+    if verbose and result.unknown:
+        t = Table(box=None, header_style="bold", pad_edge=False)
+        t.add_column("mcp server / tool", style="bold")
+        t.add_column("uses", justify="right")
+        for server, n in result.unknown:
+            t.add_row(server, str(n))
+        console.print("[warn]![/] unknown MCP servers (re-link these by hand):")
+        console.print(t)
+    console.print(f"[muted]scanned {result.transcripts} transcripts; {result.uses_seen} tool calls.[/]")
+    if result.connectors:
+        console.print("[bold]next →[/] after [cmd]hlock migrate --to pi[/], connect each connector in Pi "
+                      "([muted]hlock can't port the OAuth grant; it runs its own flow[/])")
+
+
 @main.command("audit")
 @click.argument("lock", default=None, required=False)
 @click.option("--ci", is_flag=True, help="Fail on warnings about the lock's own content too.")
@@ -4254,9 +4315,11 @@ def _changes(rep: dict) -> None:
 @click.option("--model", default=None, help="provider:model for the default role. [dim]\\[default: kept when the harness supports its provider][/]")
 @click.option("--local", is_flag=True, help="Also move the models to a local runtime (what [cmd]hlock localize[/] does).")
 @click.option("--runtime", default=None, help="With --local: the inference runtime. [dim]\\[default: the best installed][/]")
+@click.option("--connectors", default=None, metavar="SLACK,LINEAR,…",
+              help="Comma-separated connector MCP servers (from [cmd]hlock connectors[/]) to carry into the new lock, marked for you to authorize in it.")
 @click.option("--json", "as_json", is_flag=True, help="Print the migrate report as JSON.")
 def migrate(lock: str | None, to: str | None, out: str | None, model: str | None, local: bool, runtime: str | None,
-            as_json: bool) -> None:
+            connectors: str | None, as_json: bool) -> None:
     """Write a copy of a lock moved onto another harness.
 
     Skills, MCP servers, instructions and decision models go where the new harness reads
@@ -4278,7 +4341,7 @@ def migrate(lock: str | None, to: str | None, out: str | None, model: str | None
     if runtime:
         _fail("--runtime needs --local")
     with _working("Migrating…"):
-        result = json.loads(_migrate(lock, to=to, out=out, model=model, manifest=_m()))
+        result = json.loads(_migrate(lock, to=to, out=out, model=model, connectors=connectors, manifest=_m()))
     rep, out = result["report"], result["path"]
     if as_json:
         console.print_json(data=rep)

@@ -16,6 +16,7 @@ pub mod apm_registry;
 pub mod audit;
 pub mod capture;
 pub mod components;
+pub mod connectors;
 pub mod contract;
 pub mod decide;
 pub mod deps;

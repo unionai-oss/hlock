@@ -206,6 +206,12 @@ pub struct Tool {
     pub args: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
+    /// The auth scheme an HTTP server needs to connect with (`oauth`, for a Claude Code
+    /// connector). OAuth authorizations are per-client and can't be ported, so the target
+    /// harness runs its own flow when it connects; hlock records the scheme so it can ask
+    /// for one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auth: Option<String>,
     /// Environment for the server; secret values are `${HLOCK_SECRET_…}` placeholders.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub env: BTreeMap<String, String>,

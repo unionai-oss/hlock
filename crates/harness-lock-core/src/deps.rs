@@ -351,6 +351,13 @@ fn parse_raw(spec: &str, kind: Kind) -> Result<Source> {
         let (marketplace, name) = rest.split_once('/').ok_or_else(|| err("expected plugin:MARKETPLACE/NAME"))?;
         return Ok(Source::Plugin { marketplace: marketplace.to_string(), name: name.to_string() });
     }
+    if spec.starts_with("connector:") {
+        if kind != Kind::Mcp {
+            return Err(err("connector: is an MCP server source"));
+        }
+        let id = crate::connectors::parse(spec)?;
+        return Ok(Source::Remote { url: crate::connectors::url(&id).unwrap().to_string() });
+    }
     if spec.starts_with("https://") || spec.starts_with("http://") {
         if kind == Kind::Mcp {
             return Ok(Source::Remote { url: spec.to_string() });
@@ -482,6 +489,15 @@ pub fn default_name(src: &Source) -> String {
         Source::Defined { name, .. } => name.rsplit('/').next().unwrap_or(name).to_string(),
     };
     crate::pull::sanitize(&raw)
+}
+
+/// What a dependency is named when `--as` and the source path both give nothing: the
+/// connector id for a `connector:` source, else [`default_name`].
+fn default_name_for(source_text: &str, source: &Source) -> String {
+    if let Some(id) = source_text.strip_prefix("connector:") {
+        return id.trim().to_string();
+    }
+    default_name(source)
 }
 
 // --------------------------------------------------------------------------- //
@@ -1364,7 +1380,12 @@ pub fn resolve_fresh(d: &Decl, env: &Env) -> Result<Resolved> {
         }
         (Source::Remote { url }, Kind::Mcp) => {
             let entry = json!({"type": "http", "url": url});
-            (Entry::Tool(server_tool(d, &entry, None, None, dep)?), None)
+            let mut t = server_tool(d, &entry, None, None, dep)?;
+            // a connector: known OAuth server; the target runs its own authorization
+            if d.spec.strip_prefix("connector:").is_some() {
+                t.auth = Some("oauth".into());
+            }
+            (Entry::Tool(t), None)
         }
         (Source::Defined { entry, .. }, Kind::Mcp) => {
             let t = match entry {
@@ -2072,7 +2093,7 @@ pub fn prepare(req: &AddRequest, manifest_path: &Path, lock_path: &Path, reg: &c
     let source = parse(source_text, kind)?;
     let name = match &req.name {
         Some(n) => n.clone(),
-        None => default_name(&source),
+        None => default_name_for(&source_text, &source),
     };
     if !crate::fsutil::plain_name(&name) || name.starts_with('-') {
         return Err(err(format!("{name:?} can't name a dependency: use letters, digits, '.', '_' and '-'")));
@@ -3236,6 +3257,10 @@ mod tests {
         assert_eq!(parse("npm:@modelcontextprotocol/server-github@^1", Kind::Mcp).unwrap(), Source::Npm { package: "@modelcontextprotocol/server-github".into(), constraint: Some("^1".into()) });
         assert_eq!(parse("pypi:mcp-server-fetch==2025.1.1", Kind::Mcp).unwrap(), Source::Pypi { package: "mcp-server-fetch".into(), constraint: Some("=2025.1.1".into()) });
         assert_eq!(parse("https://mcp.linear.app/mcp", Kind::Mcp).unwrap(), Source::Remote { url: "https://mcp.linear.app/mcp".into() });
+        // a known OAuth connector source maps to its MCP URL; unknown ids and other kinds are refused
+        assert_eq!(parse("connector:slack", Kind::Mcp).unwrap(), Source::Remote { url: "https://mcp.slack.com/mcp".into() });
+        assert!(parse("connector:nope", Kind::Mcp).is_err());
+        assert!(parse("connector:linear", Kind::Skill).is_err());
         assert_eq!(parse("plugin:acme-marketplace/acme-tools", Kind::Plugin).unwrap(), Source::Plugin { marketplace: "acme-marketplace".into(), name: "acme-tools".into() });
         assert_eq!(parse("./skills/sql", Kind::Skill).unwrap(), Source::Path { path: "./skills/sql".into(), editable: false });
         // a browser URL for a skill is a repository
@@ -3268,6 +3293,9 @@ mod tests {
         assert_eq!(n("pypi:mcp-server-fetch", Kind::Mcp), "fetch");
         assert_eq!(n("https://mcp.linear.app/mcp", Kind::Mcp), "linear");
         assert_eq!(n("apm:github/awesome-copilot/plugins/context-engineering", Kind::Package), "context-engineering");
+        // a connector: source is named by its id, not its URL host
+        assert_eq!(default_name_for("connector:google-docs", &parse("connector:google-docs", Kind::Mcp).unwrap()), "google-docs");
+        assert_eq!(default_name_for("https://mcp.linear.app/mcp", &parse("https://mcp.linear.app/mcp", Kind::Mcp).unwrap()), "linear");
     }
 
     #[test]

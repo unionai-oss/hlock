@@ -441,6 +441,26 @@ A program the stack doesn't need goes under `[environment] ignore`.
 one. `hlock pin` ends with a line naming the `high` programs `[environment]` neither
 declares nor ignores.
 
+## `connectors`
+
+Infer the connector MCP servers (Slack, Linear, …) a user actually uses, from their
+agent session transcripts. A read-only dry run: it scans local Claude Code / Pi / Codex
+session logs for tool calls namespaced by a connector's MCP server and lists what to
+re-link and authorize in a target harness. OAuth grants are per-client, so nothing is
+written and no session is ported — this only says *what you use*, to guide a
+[migrate](../guides/migrate.md).
+
+```bash
+hlock connectors [--project DIR] [--limit N] [--json] [-v]
+```
+
+| Option | Description |
+|---|---|
+| `--project` | Scan only sessions run in this project directory (default: all sessions on the machine) |
+| `--limit` | Max transcripts to scan (default `5000`) |
+| `--json` | Print the report as JSON |
+| `-v`, `--verbose` | Also list unknown MCP servers the catalog can't name |
+
 ## `audit`
 
 Check a lock: its vendored and fetched files match their digests, nothing it places hides
@@ -1027,6 +1047,7 @@ hlock migrate [LOCK] --to HARNESS [OPTIONS]
 | `--model` | kept when the harness supports its provider | `provider:model` for the default role |
 | `--local` | | Also move the models to a local runtime, as [`localize`](#localize) does |
 | `--runtime` | the best installed | With `--local`: the inference runtime |
+| `--connectors` | | Comma-separated connector MCP servers (`slack,linear,…`, from [`connectors`](#connectors)) to carry into the new lock, marked for you to authorize in it |
 | `--json` | | Print the migrate report as JSON |
 
 ## `localize`
