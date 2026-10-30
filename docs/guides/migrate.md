@@ -71,6 +71,20 @@ copy still matches the locked digest; if you've edited it since you pinned, it s
 hooks, themes), and skills that ship with it. `migrate` lists them. Files move as they are:
 `CLAUDE.md` becomes `AGENTS.md` byte for byte, `@imports` and all.
 
+**OAuth MCP servers (connectors).** An HTTP MCP server that connects with OAuth (a Claude Code
+connector) migrates as an OAuth server in the target's config — `auth: "oauth"` in the standard
+shape, which a harness like Pi uses to run its own flow on first connect. The authorization
+itself doesn't carry: OAuth grants are per-client, so you authorize the new harness (PKCE +
+browser consent) once. `migrate` notes each such server. A connector whose OAuth session lives
+in your Claude account (not in a local `mcpServers` entry) has no config hlock can read, so it
+isn't listed — connect it again in the new harness.
+
+To materialize a known connector, `hlock add mcp connector:NAME --scope user` resolves it to its
+MCP URL with `auth: "oauth"` (see [hlock connectors](../reference/cli.md#connectors) for the
+names, and `hlock migrate --connectors NAME,…` to carry them into a migrated lock and mark them
+for re-authorization). A connector's OAuth grant — and the session that holds it — can't be
+ported, by hand or otherwise; only the server definition (URL + `auth: oauth`) moves.
+
 **Evidence** is cleared, since it measured the old harness. The report keeps the source's
 numbers as a baseline; [`hlock resolve`](resolve.md) measures the new one.
 

@@ -209,6 +209,10 @@ pub fn mcp_entry(t: &Tool, shape: &str) -> Value {
         }
         (_, true) => {
             let mut e = json!({"type": t.transport, "url": t.url});
+            // an OAuth connector: ask the target to run its own authorization when it connects
+            if t.auth.as_deref() == Some("oauth") && t.transport.as_deref() == Some("http") {
+                e["auth"] = json!("oauth");
+            }
             if !t.headers.is_empty() {
                 e["headers"] = headers;
             }

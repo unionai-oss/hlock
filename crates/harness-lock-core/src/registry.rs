@@ -1464,7 +1464,11 @@ mod tests {
         std::fs::write(broken.join(".git"), "gitdir: /nonexistent/hlock-test\n").unwrap();
         let (got, from, warning) = push_root(None, &broken);
         assert_eq!((got, from), (broken.clone(), RootFrom::CurrentDirectoryGitFailed));
-        assert!(warning.as_deref().is_some_and(|w| w.contains("couldn't find the git repository (fatal: not a git repository")), "{warning:?}");
+        // git's message for an invalid `.git` differs by version (`not a git repository` on
+        // older git, `gitfile does not point to a valid repository` on git 2.56+); both mean
+        // it can't tell, so hlock falls back to the working directory
+        assert!(warning.as_deref().is_some_and(|w| w.contains("couldn't find the git repository")
+            && (w.contains("not a git repository") || w.contains("gitfile does not point to a valid repository"))), "{warning:?}");
         std::fs::remove_dir_all(&broken).unwrap();
         // nothing at the root: the nearest directory up from the working directory that has a setup
         assert!(!has_setup(&d));
