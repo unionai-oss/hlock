@@ -290,8 +290,9 @@ Choices the implementation made where this spec left room:
 - **`launch`** asks for approval on a terminal and fails without one unless `--trust`; it
   leaves out what isn't trusted or hides text, and says so, including when translating into
   another harness. A code harness (`launch` or `run`) needs everything trusted.
-- **Scanning** decodes what it can of a file that isn't valid UTF-8, skips only files named as
-  binary, treats a file over 20 MB as critical, and scans the parsed strings of JSON, TOML and
+- **Scanning** decodes what it can of a file that isn't valid UTF-8, skips files named as
+  binary and compiled executables (invalid UTF-8 with a NUL byte), treats a file over 20 MB
+  as critical, and scans the parsed strings of JSON, TOML and
   YAML files. `--strip` keeps zero-width non-joiners and bidi marks, and refuses when a vendored
   file doesn't match its digest.
 - **Policy subjects** are sources without their ref (`github:OWNER/REPO/PATH`, `npm:PKG`, …),

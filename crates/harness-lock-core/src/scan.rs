@@ -210,15 +210,21 @@ pub(crate) fn is_binary_name(file: &str) -> bool {
     file.rsplit('/').next().and_then(|f| f.rsplit_once('.')).is_some_and(|(_, e)| BINARY.contains(&e.to_ascii_lowercase().as_str()))
 }
 
-/// Hidden characters in a file's bytes. A file that isn't valid UTF-8 (or has a NUL byte)
-/// is scanned anyway, decoding what it can: one stray byte mustn't turn the scan off. Only
-/// files named as binary (`.png`, `.zip`, …) are skipped.
+/// Hidden characters in a file's bytes. A file named as binary (`.png`, `.zip`, …) or a
+/// file with a NUL byte that isn't valid UTF-8 (a compiled executable) isn't text: not
+/// scanned, verified by its digest instead. Other files are scanned anyway, decoding what
+/// they can: one stray byte mustn't turn the scan off.
 pub fn scan_bytes(bytes: &[u8], file: &str) -> Vec<Finding> {
     if is_binary_name(file) {
         return Vec::new();
     }
     match std::str::from_utf8(bytes) {
         Ok(t) if !t.contains('\0') => scan_text(t, file),
+        // valid UTF-8 with a NUL byte, or invalid UTF-8 without one: still text-ish
+        // enough to scan what it can
+        Ok(_) => scan_text(&String::from_utf8_lossy(bytes).replace('\0', ""), file),
+        // invalid UTF-8 with a NUL byte: machine code, not text
+        Err(_) if bytes.contains(&0) => Vec::new(),
         _ => {
             let mut out = scan_invalid(bytes, file);
             out.extend(scan_text(&String::from_utf8_lossy(bytes).replace('\0', ""), file));
@@ -450,6 +456,9 @@ mod tests {
         assert_eq!((f[0].codepoint.as_str(), f[0].severity, f[0].line), ("U+D800", Severity::Critical, 2));
         // one stray byte doesn't turn the scan off; a file named as binary isn't scanned
         assert_eq!(scan_bytes("x\u{202E}\0".as_bytes(), "a.md")[0].codepoint, "U+202E");
+        // machine code isn't text: a NUL byte plus invalid UTF-8 isn't scanned
+        assert!(scan_bytes(&[b"exec".as_slice(), &[0], &[0xCF, 0x80, 0xED, 0xA0, 0xFF]].concat(), "impeccable").is_empty());
+        // an invalid UTF-8 byte without a NUL byte is still scanned
         assert!(scan_bytes(&[b"x".as_slice(), "\u{202E}".as_bytes(), b"\xff"].concat(), "a.md").iter().any(|f| f.codepoint == "U+202E"));
         assert!(scan_bytes("\u{202E}".as_bytes(), "logo.png").is_empty());
         assert_eq!(scan_text("a\rb\u{202E}", "f")[0].line, 2, "a lone CR ends a line");

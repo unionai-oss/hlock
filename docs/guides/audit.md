@@ -28,7 +28,9 @@ file that passes one tool passes the other:
 | info | non-breaking and unusual spaces, a leading BOM, a zero-width joiner inside an emoji | `hlock audit -v` |
 
 A file isn't skipped because it has a stray NUL byte or isn't valid UTF-8: what decodes is
-scanned. Only files named as binary (`.png`, `.zip`, `.woff`, …) are left out, and a file over
+scanned. A compiled executable — invalid UTF-8 with a NUL byte — is left out: it isn't text,
+and its contents are verified by the digest instead. Other binary files are only skipped by
+extension (`.png`, `.zip`, `.woff`, …), and a file over
 20 MB counts as critical, since it can't be scanned. In JSON, TOML and YAML files the parsed
 strings are scanned too, so an escaped `"\u202e"` (plain ASCII in the file) is found as
 the character the harness reads.
