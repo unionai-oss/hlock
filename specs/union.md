@@ -12,7 +12,7 @@ Mirrors `unionai-oss/hlock-cloud`'s `web/lib/union.ts`
 ```bash
 hlock push union:acme/review-bot            # → artifact setup.acme.review-bot@sha-<digest>
 hlock pull union:acme/review-bot@1.2.0      # its setup, like a registry pull (VERSION required)
-hlock push union:acme/review-bot --flyte-config ./.flyte/config.yaml
+hlock push union:acme/review-bot --config ./.flyte/config.yaml
 ```
 
 ## 1. Why a union store
@@ -30,7 +30,7 @@ Like the `flyte` CLI, hlock reads where the tenant is from a `config.yaml`: `adm
 
 | Where hlock looks (in order) | |
 |---|---|
-| `--flyte-config PATH` | any path |
+| `--config PATH` (for `union:`) | any path — the flyte config.yaml |
 | `HLOCK_UNION_CONFIG` | a path in the environment |
 | `./.flyte/config.yaml` | the project's flyte config |
 | `~/.flyte/config.yaml` | the user's flyte config |

@@ -153,7 +153,7 @@ def test_union_source_is_recognized():
 def test_push_union_dry_run_needs_no_key_and_shows_the_store(world, monkeypatch):
     monkeypatch.delenv("FLYTE_API_KEY")
     monkeypatch.chdir(world["author"])
-    r = invoke("push", "union:alice/review", "--flyte-config", world["config"], "--dry-run", "--json")
+    r = invoke("push", "union:alice/review", "--config", world["config"], "--dry-run", "--json")
     assert r.exit_code == 0, r.output
     out = json.loads(r.output)
     assert out["provider"] == "union"
@@ -165,7 +165,7 @@ def test_push_union_dry_run_needs_no_key_and_shows_the_store(world, monkeypatch)
 def test_push_then_pull_union_round_trips(world, monkeypatch):
     author = world["author"]
     monkeypatch.chdir(author)
-    r = invoke("push", "union:alice/review", "--flyte-config", world["config"], "--json")
+    r = invoke("push", "union:alice/review", "--config", world["config"], "--json")
     assert r.exit_code == 0, r.output
     out = json.loads(r.output)
     assert out["published"] is True
@@ -175,7 +175,7 @@ def test_push_then_pull_union_round_trips(world, monkeypatch):
 
     # pull it back into the store, by name
     monkeypatch.chdir(world["me"])
-    p = invoke("pull", f"union:alice/review@{version}", "--flyte-config", world["config"], "--as", "review")
+    p = invoke("pull", f"union:alice/review@{version}", "--config", world["config"], "--as", "review")
     assert p.exit_code == 0, p.output
     pulled = world["tmp"] / "hlock-home" / "pulls" / "review"
     lock = (pulled / "harness.lock").read_text()
@@ -186,29 +186,29 @@ def test_push_then_pull_union_round_trips(world, monkeypatch):
 
 
 def test_pull_union_needs_a_version(world):
-    r = invoke("pull", "union:alice/review", "--flyte-config", world["config"])
+    r = invoke("pull", "union:alice/review", "--config", world["config"])
     assert r.exit_code != 0
     assert "needs an explicit @VERSION" in plain(r.output)
 
 
 def test_pull_union_requires_the_api_key(world, monkeypatch):
     monkeypatch.delenv("FLYTE_API_KEY")
-    r = invoke("pull", "union:alice/review@1", "--flyte-config", world["config"])
+    r = invoke("pull", "union:alice/review@1", "--config", world["config"])
     assert r.exit_code != 0
     assert "FLYTE_API_KEY" in plain(r.output)
 
 
 def test_no_flyte_config_is_a_clear_error(world):
-    r = invoke("push", "union:alice/review", "--flyte-config", "/nonexistent/config.yaml", "--dry-run")
+    r = invoke("push", "union:alice/review", "--config", "/nonexistent/config.yaml", "--dry-run")
     assert r.exit_code != 0
     assert "config" in plain(r.output).lower()
 
 
 def test_a_version_cannot_be_overwritten(world, monkeypatch):
     monkeypatch.chdir(world["author"])
-    r = invoke("push", "union:alice/review", "--version", "1.0.0", "--flyte-config", world["config"])
+    r = invoke("push", "union:alice/review", "--version", "1.0.0", "--config", world["config"])
     assert r.exit_code == 0, r.output
-    r2 = invoke("push", "union:alice/review", "--version", "1.0.0", "--flyte-config", world["config"], "--json")
+    r2 = invoke("push", "union:alice/review", "--version", "1.0.0", "--config", world["config"], "--json")
     assert r2.exit_code == 0, r2.output
     out = json.loads(r2.output)
     assert out["already_published"] is True
@@ -217,13 +217,13 @@ def test_a_version_cannot_be_overwritten(world, monkeypatch):
 def test_a_union_pull_can_be_refreshed(world, monkeypatch):
     # the lock's [pulled] from = "union:…@version"; a bare `hlock pull` refreshes it through union
     monkeypatch.chdir(world["author"])
-    r = invoke("push", "union:alice/review", "--version", "2.0.0", "--flyte-config", world["config"])
+    r = invoke("push", "union:alice/review", "--version", "2.0.0", "--config", world["config"])
     assert r.exit_code == 0, r.output
     monkeypatch.chdir(world["me"])
-    p = invoke("pull", "union:alice/review@2.0.0", "--flyte-config", world["config"], "--as", "refresher")
+    p = invoke("pull", "union:alice/review@2.0.0", "--config", world["config"], "--as", "refresher")
     assert p.exit_code == 0, p.output
     lock = world["tmp"] / "hlock-home" / "pulls" / "refresher" / "harness.lock"
     assert "union:alice/review@2.0.0" in lock.read_text()
     # refresh it (no source given → walks pulled locks and refetches via union)
-    m = invoke("pull", "--flyte-config", world["config"], "refresher")
+    m = invoke("pull", "--config", world["config"], "refresher")
     assert m.exit_code == 0, m.output

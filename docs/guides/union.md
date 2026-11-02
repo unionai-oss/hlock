@@ -16,7 +16,7 @@ next → hlock pull union:acme/review-bot@sha-0f3a9c11e2
 `union:` needs a flyte `config.yaml` to know where the store is — the same file
 [the `flyte` CLI](https://docs.union.ai) reads. hlock looks in order for:
 
-1. `--flyte-config PATH`
+1. `--config PATH`
 2. `HLOCK_UNION_CONFIG`
 3. `./.flyte/config.yaml`
 4. `~/.flyte/config.yaml`

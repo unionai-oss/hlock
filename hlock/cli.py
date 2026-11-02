@@ -1434,10 +1434,10 @@ def _lock_ref(arg: str, as_json: bool = False) -> tuple[str, str | None]:
               help="Let through hidden characters in FILE (a file or directory the lock vendors). Repeatable.")
 @click.option("--registry", default=None, metavar="URL",
               help="The registry a NAMESPACE/NAME source is in.  [dim]\\[default: $HLOCK_REGISTRY, else the one you logged in to][/]")
-@click.option("--flyte-config", default=None, metavar="PATH", help="The flyte config.yaml naming the Union artifact store.  [dim]\\[default: ./.flyte/config.yaml, then ~/.flyte/config.yaml][/]")
+@click.option("--config", default=None, metavar="PATH", help="A provider's config file: for a [cmd]union:[/] source, the flyte config.yaml naming the store.  [dim]\\[default: ./.flyte/config.yaml, then ~/.flyte/config.yaml][/]")
 @click.option("--json", "as_json", is_flag=True, help="Print the result as JSON.")
 def pull(sources: tuple[str, ...], name: str | None, out: str | None, into: str | None, into_alias: str | None,
-         no_evals: bool, force: bool, allow_hidden: tuple[str, ...], registry: str | None, flyte_config: str | None,
+         no_evals: bool, force: bool, allow_hidden: tuple[str, ...], registry: str | None, config: str | None,
          as_json: bool) -> None:
     """Pull someone else's [path]harness.lock[/] from a git repository or a registry.
 
@@ -1466,7 +1466,7 @@ def pull(sources: tuple[str, ...], name: str | None, out: str | None, into: str 
         src = remote[0]
         with _working(f"Pulling {src}…"):
             if is_union_source(src):
-                result = json.loads(_union_pull(src, config=flyte_config, out=out, name=name, into=into, force=force,
+                result = json.loads(_union_pull(src, config=config, out=out, name=name, into=into, force=force,
                                                 allow_hidden=list(allow_hidden), no_evals=no_evals))
             elif is_registry_ref(src):
                 result = json.loads(_registry_pull(src, registry=registry, out=out, name=name, into=into, force=force,
@@ -1521,7 +1521,7 @@ def pull(sources: tuple[str, ...], name: str | None, out: str | None, into: str 
     for path, stored, spec in jobs:
         with _working(f"Refreshing {stored or _show(path)} from {spec}…"):
             if spec.startswith("union:"):
-                fetch = lambda s, **kw: _union_pull(s, config=flyte_config, **kw)
+                fetch = lambda s, **kw: _union_pull(s, config=config, **kw)
             elif spec.startswith("registry:"):
                 fetch = lambda s, **kw: _registry_pull(s, registry=registry, **kw)
             else:
@@ -1727,10 +1727,10 @@ def whoami(registry: str | None, as_json: bool) -> None:
 @click.option("--no-evals", is_flag=True, help="Publish without the eval packs harness.toml names.")
 @click.option("--dry-run", is_flag=True, help="Show what would be pushed, and push nothing.")
 @click.option("--registry", default=None, metavar="URL", help="The registry to push to.  [dim]\\[default: your default registry][/]")
-@click.option("--flyte-config", default=None, metavar="PATH", help="The flyte config.yaml naming the Union artifact store.  [dim]\\[default: ./.flyte/config.yaml, then ~/.flyte/config.yaml][/]")
+@click.option("--config", default=None, metavar="PATH", help="A provider's config file: for [cmd]union:[/] push, the flyte config.yaml naming the store.  [dim]\\[default: ./.flyte/config.yaml, then ~/.flyte/config.yaml][/]")
 @click.option("--json", "as_json", is_flag=True, help="Print the result as JSON.")
 def push(name: str | None, version: str | None, directory: str | None, c_alias: str | None, dir_alias: str | None,
-         no_evals: bool, dry_run: bool, registry: str | None, flyte_config: str | None, as_json: bool) -> None:
+         no_evals: bool, dry_run: bool, registry: str | None, config: str | None, as_json: bool) -> None:
     """Publish this project's agent setup to a registry.
 
     The project is the git repository you're in, from its root, wherever in it you run this
@@ -1751,7 +1751,7 @@ def push(name: str | None, version: str | None, directory: str | None, c_alias: 
         # naming the store, FLYTE_API_KEY for the credential
         package = name[len("union:"):].strip()
         with _working(f"{'Packing' if dry_run else 'Pushing to the Union artifact store'}…"):
-            r = json.loads(_union_push(root=directory, config=flyte_config, name=package, version=version,
+            r = json.loads(_union_push(root=directory, config=config, name=package, version=version,
                                        dry_run=dry_run, no_evals=no_evals))
         url = r.get("url") or "the Union artifact store"
     else:

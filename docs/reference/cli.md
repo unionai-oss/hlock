@@ -610,7 +610,7 @@ hlock pull [NAME | LOCK ...] [--json]
 | `--no-evals` | | With `--root` from a registry: leave out the package's eval packs |
 | `--force` | | Replace a lock of that name that wasn't pulled from the same repository, or was pulled from another lock in it (with `--root`, files that already exist) |
 | `--registry URL` | `HLOCK_REGISTRY`, else the one you logged in to | The registry a `NAMESPACE/NAME` source is in |
-| `--flyte-config PATH` | `./.flyte/config.yaml`, then `~/.flyte/config.yaml` | The flyte `config.yaml` naming the Union Artifact store a `union:` source is in (or `HLOCK_UNION_CONFIG`) |
+| `--config PATH` | `./.flyte/config.yaml`, then `~/.flyte/config.yaml` | A provider's config file: for a `union:` source, the flyte `config.yaml` naming the Union Artifact store (or, for union, `HLOCK_UNION_CONFIG`) |
 | `--allow-hidden FILE` | | Let through [hidden characters](../guides/audit.md#hidden-characters) in FILE (a file or directory the lock vendors); the lock records the exception. Repeatable |
 | `--json` | | Print the lock, its path, the source, the commit, the diff from the lock it replaced, vendored files, other locks in the repository, and warnings as JSON |
 
@@ -659,7 +659,7 @@ hlock push [NAMESPACE/NAME] [--version V] [--root DIR] [--no-evals] [--dry-run] 
 | `--no-evals` | | Publish without the eval packs |
 | `--dry-run` | | List the files, size and digest; push nothing |
 | `--registry URL` | `HLOCK_REGISTRY`, else the one you logged in to | The registry to push to |
-| `--flyte-config PATH` | `./.flyte/config.yaml`, then `~/.flyte/config.yaml` | The flyte `config.yaml` naming the Union Artifact store a `union:` push sends to (or `HLOCK_UNION_CONFIG`); as with `pull`, the credential is `FLYTE_API_KEY` |
+| `--config PATH` | `./.flyte/config.yaml`, then `~/.flyte/config.yaml` | A provider's config file: for a `union:` push, the flyte `config.yaml` naming the Union Artifact store (or `HLOCK_UNION_CONFIG`); the credential is `FLYTE_API_KEY` |
 | `--json` | | Print the package, version, digest, size, files, where the name came from (`name_from`), the root it packed and why (`root`; `root_from`: `flag`, `repository`, `current-directory`, or `current-directory-git-failed` when git couldn't tell, with a warning saying why), the eval packs (`evals`) and warnings as JSON |
 
 ## `search`
