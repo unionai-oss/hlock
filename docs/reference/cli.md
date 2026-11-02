@@ -602,7 +602,7 @@ hlock pull [NAME | LOCK ...] [--json]
 
 | Option | Default | Description |
 |---|---|---|
-| `SOURCE` | | `github:OWNER/REPO[/PATH][@REF]`, `gitlab:GROUP/REPO[//PATH][@REF]`, `git:URL[//PATH][@REF]`, a GitHub or GitLab URL, or a registry package `NAMESPACE/NAME[//PATH][@VERSION]`, where `PATH` picks one of its locks (see [Sharing through a registry](../guides/registry.md#one-lock-of-a-package)) |
+| `SOURCE` | | `github:OWNER/REPO[/PATH][@REF]`, `gitlab:GROUP/REPO[//PATH][@REF]`, `git:URL[//PATH][@REF]`, a GitHub or GitLab URL, a registry package `NAMESPACE/NAME[//PATH][@VERSION]`, or a Union artifact `union:NAMESPACE/NAME@VERSION` (see [Publishing to a Union Artifact store](../guides/union.md)), where `PATH` picks one of its locks (see [Sharing through a registry](../guides/registry.md#one-lock-of-a-package)) |
 | `NAME`, `LOCK` | every pulled lock | Pulled locks to refresh from their recorded source: names in the store, or lock files pulled with `-o` |
 | `--as NAME` | the repository owner (the package name, from a registry; `NAME-X` for a `harness.X.lock`) | Store the lock as `NAME` |
 | `-o`, `--out FILE` | | Write the lock into the project as `FILE` (its vendored files go in `.hlock/vendor/<name>/`) instead of the store |
@@ -610,6 +610,7 @@ hlock pull [NAME | LOCK ...] [--json]
 | `--no-evals` | | With `--root` from a registry: leave out the package's eval packs |
 | `--force` | | Replace a lock of that name that wasn't pulled from the same repository, or was pulled from another lock in it (with `--root`, files that already exist) |
 | `--registry URL` | `HLOCK_REGISTRY`, else the one you logged in to | The registry a `NAMESPACE/NAME` source is in |
+| `--flyte-config PATH` | `./.flyte/config.yaml`, then `~/.flyte/config.yaml` | The flyte `config.yaml` naming the Union Artifact store a `union:` source is in (or `HLOCK_UNION_CONFIG`) |
 | `--allow-hidden FILE` | | Let through [hidden characters](../guides/audit.md#hidden-characters) in FILE (a file or directory the lock vendors); the lock records the exception. Repeatable |
 | `--json` | | Print the lock, its path, the source, the commit, the diff from the lock it replaced, vendored files, other locks in the repository, and warnings as JSON |
 
@@ -652,12 +653,13 @@ hlock push [NAMESPACE/NAME] [--version V] [--root DIR] [--no-evals] [--dry-run] 
 
 | Option | Default | Description |
 |---|---|---|
-| `NAMESPACE/NAME` | your handle / the git remote's repository name (when the project is the repository's root), else `[project] name`, else `apm.yml`'s `name`, else the directory's | The package to publish |
+| `NAMESPACE/NAME` | your handle / the git remote's repository name (when the project is the repository's root), else `[project] name`, else `apm.yml`'s `name`, else the directory's | The package to publish; `union:NAMESPACE/NAME` publishes to a Union Artifact store instead of a registry (see [Publishing to a Union Artifact store](../guides/union.md)) |
 | `--version V` | `apm.yml`'s `version`, else `sha-<digest>` of everything pushed | The version; a published version can't change |
 | `--root DIR` (`-C`, `--dir`) | the git repository's root, else `.` | The project to push. One in a subdirectory of a repository isn't named after the repository |
 | `--no-evals` | | Publish without the eval packs |
 | `--dry-run` | | List the files, size and digest; push nothing |
 | `--registry URL` | `HLOCK_REGISTRY`, else the one you logged in to | The registry to push to |
+| `--flyte-config PATH` | `./.flyte/config.yaml`, then `~/.flyte/config.yaml` | The flyte `config.yaml` naming the Union Artifact store a `union:` push sends to (or `HLOCK_UNION_CONFIG`); as with `pull`, the credential is `FLYTE_API_KEY` |
 | `--json` | | Print the package, version, digest, size, files, where the name came from (`name_from`), the root it packed and why (`root`; `root_from`: `flag`, `repository`, `current-directory`, or `current-directory-git-failed` when git couldn't tell, with a warning saying why), the eval packs (`evals`) and warnings as JSON |
 
 ## `search`

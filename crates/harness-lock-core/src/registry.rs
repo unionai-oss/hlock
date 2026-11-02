@@ -897,7 +897,7 @@ pub fn push_root(root: Option<&Path>, cwd: &Path) -> (PathBuf, RootFrom, Option<
 }
 
 /// `p` for display: without the `\\?\` prefix Windows' canonical paths have.
-fn shown_path(p: &Path) -> String {
+pub(crate) fn shown_path(p: &Path) -> String {
     let s = p.display().to_string();
     if let Some(rest) = s.strip_prefix(r"\\?\UNC\") {
         format!(r"\\{rest}")
