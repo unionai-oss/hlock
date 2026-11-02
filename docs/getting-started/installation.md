@@ -88,7 +88,7 @@ to follow releases instead (see [Declaring dependencies](../guides/dependencies.
 
 | Extra | Install | Adds |
 |---|---|---|
-| `flyte` | `pip install "hlock[flyte]"` | The Flyte SDK (and `flyteplugins-rs`), so the [`flyte` backend](../guides/backends.md#flyte) can run work as Flyte tasks |
+| `flyte` | `pip install "hlock[flyte]"` | The Flyte SDK (`flyte`) and `flyteplugins-rs` (for Rust-backed tasks), so the [`flyte` backend](../guides/backends.md#flyte) can run work as Flyte tasks. The open SDK reaches OSS Flyte and a hosted Union tenant alike; `flyteplugins-union` is not needed |
 
 The worker that runs heavy tuning stages (`local` and `flyte` backends) imports
 `pandas`/`polars`, `torch`/`peft`/`trl`, and `flyte` lazily, and only when a stage needs
