@@ -36,6 +36,14 @@ pub struct SyncOptions {
     pub docker: Option<PathBuf>,
     /// Let hlock run package managers (npm, brew, uv, pip, install scripts).
     pub install: bool,
+    /// Track whether an OS-mismatched install needs approval.
+    ///
+    /// When the lock recorded an install method native to another OS (e.g. Homebrew
+    /// on macOS for a lock made on a Mac), hlock falls back to the profile's installer
+    /// that works here, and marks the step so it needs this explicit approval: hlock
+    /// runs something other than what the lock recorded. `--install` is still required
+    /// (this is an install); this flag lets the cross-os step through.
+    pub install_cross_os: bool,
     /// Let hlock download model weights through installed runtimes.
     pub pull: bool,
     /// Also fetch models a provider lists but no locked role uses.
@@ -593,6 +601,18 @@ pub(crate) fn install_values_problem(package: Option<&str>, version: Option<&str
         .find_map(|(what, v)| v.filter(|v| !fsutil::plain_token(v)).map(|v| format!("refusing to install: the {what} {v:?} has characters that aren't allowed (letters, digits and ._:/@+- only, not starting with '-')")))
 }
 
+/// The OS an install method is native to, or `None` for methods that work anywhere
+/// (`npm`, `pip`, `uv-tool`, `script` and downloads). `brew`/`brew-cask` are macOS;
+/// `winget`, `scoop` and `choco` are Windows. A method recorded in a lock that isn't
+/// native to the machine hlock syncs on is handled through a native alternative instead.
+pub(crate) fn method_os(method: &str) -> Option<&'static str> {
+    match method {
+        "brew" | "brew-cask" => Some("macos"),
+        "winget" | "scoop" | "choco" => Some("windows"),
+        _ => None,
+    }
+}
+
 /// The command that installs a package by method, or `None` for app/manual installs
 /// (and for a package or version that isn't a plain token). A script's `{version}` is
 /// substituted shell-quoted.
@@ -634,25 +654,48 @@ fn install_step(id: String, kind: &str, what: &str, version: Option<&str>, sourc
     if let Some(why) = install_values_problem(package.as_deref(), version) {
         return Step { id, kind: kind.into(), title: format!("Install {what}{vtxt}"), status: "manual".into(), reason: why, verify, ..Default::default() };
     }
+    let os = ctx.os();
     let script = profile_install.iter().find(|m| m.method == "script").and_then(|m| m.command.clone());
-    let manual_hint = profile_install.iter().find(|m| m.method == method || m.method == "app" || m.method == "manual").and_then(|m| m.command.clone());
+    // An install method that belongs to another OS can't run here (Homebrew casks are
+    // macOS; winget/scoop/choco are Windows). When the lock recorded one of those, install
+    // through the profile's installer that's native to this machine instead, and flag the
+    // step so it needs an extra approval: hlock runs something other than what the lock
+    // recorded.
+    let cross_os = source.is_some() && method_os(&method).is_some_and(|m| m != os);
+    let (method, package) = if cross_os {
+        let native: Vec<&crate::profiles::InstallMethod> = profile_install.iter().filter(|m| method_os(&m.method).is_none_or(|mo| mo == os)).collect();
+        // prefer a native installer whose tool is already here, so hlock can auto-install it
+        native.iter().find_map(|m| install_command(&m.method, m.package.as_deref(), version, m.command.as_deref())
+            .filter(|a| ctx.which(&a[0]).is_some()).map(|_| (m.method.clone(), m.package.clone())))
+            .or_else(|| native.iter().find_map(|m| install_command(&m.method, m.package.as_deref(), version, m.command.as_deref()).map(|_| (m.method.clone(), m.package.clone()))))
+            .unwrap_or((method, package))
+    } else {
+        (method, package)
+    };
+    let manual_hint = profile_install.iter().find(|m| (m.method == method || m.method == "app" || m.method == "manual") && method_os(&m.method).is_none_or(|mo| mo == os)).and_then(|m| m.command.clone());
     let mut argv = install_command(&method, package.as_deref(), version, script.as_deref());
     if argv.is_none() {
-        // the recorded method can't be scripted here; fall back to the profile's first scriptable one
-        argv = profile_install.iter().find_map(|m| install_command(&m.method, m.package.as_deref(), version, m.command.as_deref()).filter(|a| ctx.which(&a[0]).is_some()));
+        // neither the recorded method nor the native one can be scripted on this OS; fall
+        // back to the profile's first scriptable method that's usable here and on PATH
+        argv = profile_install.iter().filter(|m| method_os(&m.method).is_none_or(|mo| mo == os)).find_map(|m| install_command(&m.method, m.package.as_deref(), version, m.command.as_deref()).filter(|a| ctx.which(&a[0]).is_some()));
     }
     let mut step = Step { id, kind: kind.into(), title: format!("Install {what}{vtxt}"), verify, ..Default::default() };
     match argv {
         Some(a) => {
             step.command = Some(if a[0] == "sh" && a.len() == 3 { a[2].clone() } else { shell_join(&a) });
             let tool_ok = ctx.which(&a[0]).is_some();
-            if opts.install && tool_ok {
+            // an installer that differs from what the lock recorded (cross-os) needs both
+            // --install and --install-cross-os; a plain package install needs only --install
+            let gated = if cross_os { !(opts.install && opts.install_cross_os) } else { !opts.install };
+            if tool_ok && !gated {
                 step.status = "auto".into();
                 step.action = Some(Action::Run { argv: a, env: BTreeMap::new() });
             } else {
                 step.status = "manual".into();
                 step.reason = if !tool_ok {
                     format!("needs `{}`, which isn't on PATH", a[0])
+                } else if cross_os {
+                    format!("the lock installed {} another way; here it's installed with `{}`. Cross-os installs run only with --install --install-cross-os", what, step.command.as_deref().unwrap_or(""))
                 } else {
                     "package installs run only with --install".into()
                 };
@@ -2253,6 +2296,12 @@ mod tests {
         );
         assert_eq!(install_command("script", None, Some("2.1"), Some("curl x | bash -s {version}")).unwrap()[2], "curl x | bash -s 2.1");
         assert!(install_command("app", None, None, None).is_none());
+        // install methods native to a specific OS
+        assert_eq!(method_os("brew"), Some("macos"));
+        assert_eq!(method_os("brew-cask"), Some("macos"));
+        assert_eq!(method_os("winget"), Some("windows"));
+        assert_eq!(method_os("npm"), None);
+        assert_eq!(method_os("script"), None);
     }
 
     #[test]
@@ -2575,6 +2624,46 @@ mod tests {
         let cask = Lockfile { harness: Harness { source: Some("brew-cask:claude@1.0.3".into()), ..lock.harness.clone() }, ..lock.clone() };
         let h = plan(&cask, &ctx.cwd.join("harness.lock"), &reg, &ctx, &SyncOptions::default()).unwrap().steps.into_iter().find(|s| s.id == "harness").unwrap();
         assert!(!h.command.as_deref().unwrap_or_default().contains("--cask"), "{h:?}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_macos_install_on_linux_falls_back_to_the_native_installer() {
+        let (dir, mut ctx) = sandbox("cross-os");
+        ctx.env.insert("HLOCK_OS".into(), "linux".into());
+        let bindir = dir.join("bin");
+        std::fs::create_dir_all(&bindir).unwrap();
+        for name in ["npm", "sh"] {
+            let p = bindir.join(name);
+            std::fs::write(&p, "#!/bin/sh\n").unwrap();
+            #[cfg(unix)]
+            { use std::os::unix::fs::PermissionsExt; std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap(); }
+        }
+        ctx.path = vec![bindir];
+        let reg = Registry::builtin();
+        let lock = Lockfile {
+            harness: Harness { name: "claude-code".into(), version: Some("2.1.0".into()), source: Some("brew-cask:claude-code@2.1.0".into()), ..Default::default() },
+            ..Default::default()
+        };
+        let path = ctx.cwd.join("harness.lock");
+        // default: gated as a cross-os manual step that uses the native installer
+        let p = plan(&lock, &path, &reg, &ctx, &SyncOptions::default()).unwrap();
+        let h = step(&p, "harness");
+        assert!(h.status == "manual" && h.reason.contains("Cross-os installs run only with --install --install-cross-os"), "{h:?}");
+        assert!(h.command.as_deref().is_some_and(|c| c.starts_with("npm install") && !c.contains("brew")), "{h:?}");
+        // --install alone isn't enough: it's still a cross-os deviation
+        let p = plan(&lock, &path, &reg, &ctx, &SyncOptions { install: true, ..Default::default() }).unwrap();
+        assert!(step(&p, "harness").status == "manual", "{:?}", step(&p, "harness"));
+        // --install --install-cross-os approves it: auto, via npm (the native, non-macOS path)
+        let p = plan(&lock, &path, &reg, &ctx, &SyncOptions { trust: true, install: true, install_cross_os: true, ..Default::default() }).unwrap();
+        let h = step(&p, "harness");
+        assert!(h.status == "auto", "{h:?}");
+        assert!(matches!(&h.action, Some(Action::Run { argv, .. }) if argv.first().map(String::as_str) == Some("npm")), "{h:?}");
+        // on macOS the recorded cask is native: not cross-os, brew is used
+        ctx.env.insert("HLOCK_OS".into(), "macos".into());
+        let p = plan(&lock, &path, &reg, &ctx, &SyncOptions::default()).unwrap();
+        let h = step(&p, "harness");
+        assert!(!h.reason.contains("Cross-os") && h.command.as_deref().is_some_and(|c| c.contains("--cask")), "{h:?}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
