@@ -96,7 +96,16 @@ steps need you to opt in:
 | `--in-place` | write into your own config root (`~/.claude`, …) instead of `.hlock/env/` | (no manual step: the setup goes into `.hlock/env/`) |
 | `--apps` | write a [desktop app's](#desktop-apps) own config (Claude Desktop, VS Code) | the step that writes it, with "hlock sync --apps writes it" |
 | `--install` | run package managers: `npm install -g`, `brew install`, `uv tool install`, install scripts | the exact command, e.g. `npm install -g @earendil-works/pi-coding-agent@1.0.0` |
+| `--install-cross-os` | install a cross-os step with this machine's native installer (needs `--install` too) | the native command, with "Cross-os installs run only with --install --install-cross-os" |
 | `--pull` | download model weights through an installed runtime (`ollama pull`, `lms get`, `hf download`) | the pull command and the download size |
+
+A lock records how a harness or runtime was installed (e.g. `brew-cask:claude-code` on
+macOS). When you sync on another OS and that recorded method can't run here (Homebrew casks
+are macOS; `winget`/`scoop`/`choco` are Windows), `sync` falls back to the [profile's](harness-profiles.md)
+installer that works on this machine — `npm`, `pip`, `uv tool` or an install script — and
+shows that command. Because it runs something other than what the lock recorded, it's gated
+behind an extra approval: it needs `--install --install-cross-os` (you could also edit the
+lock, or install it by hand). On the same OS as the lock, nothing changes.
 
 Some steps are always manual: apps without a CLI installer (the LM Studio app), self-hosted
 inference servers on another machine (`location = "network"` in the lock: hlock lists the
@@ -268,7 +277,7 @@ which OpenShell runs as). `--base IMAGE` builds on your own Debian-based image i
 ## Reference
 
 ```bash
-hlock sync [LOCK] [--plan | --json | --skill] [--yes] [--install] [--pull] [--all-models]
+hlock sync [LOCK] [--plan | --json | --skill] [--yes] [--install] [--install-cross-os] [--pull] [--all-models]
            [--prefix DIR | --in-place | --docker [--build] [--base IMAGE]] [--apps] [--exact] [--verbose]
 ```
 

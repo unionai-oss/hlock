@@ -208,7 +208,7 @@ harness expands references everywhere hlock writes secrets in that file. See
 | `version.args` | Arguments that print the version; the first dotted number is used |
 | `active-env` | Variables whose presence means hlock runs inside this harness |
 | `config-root` | `env`, `suffix`, `default` |
-| `install` | Install methods, most preferred first: `method`, `package`, `command`, `path-hints`. An `app` method is a download, with `command` as the hint |
+| `install` | Install methods, most preferred first: `method`, `package`, `command`, `path-hints`. An `app` method is a download, with `command` as the hint. `brew`/`brew-cask` are macOS and `winget`/`scoop`/`choco` are Windows; when a lock recorded one of those and hlock syncs on another OS, it falls back to this list's method that runs there (see [sync](sync.md)) |
 | `files.<id>` | `path`, `isolated`, `format`, `restore`, `pointers`, `env-ref` |
 | `model` | `default`, `small`, `provider`, `base-url` sources; `format`; `default-provider` |
 | `providers` | `source`, plus pointers into each provider for `base-url` and `models` |

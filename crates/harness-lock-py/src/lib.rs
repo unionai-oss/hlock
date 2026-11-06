@@ -1254,12 +1254,13 @@ fn is_pull_source(arg: &str) -> bool {
     core::pull::is_source(arg)
 }
 
-fn sync_options(prefix: Option<String>, in_place: bool, docker: Option<String>, install: bool, pull: bool, all_models: bool, exact: bool) -> core::sync::SyncOptions {
+fn sync_options(prefix: Option<String>, in_place: bool, docker: Option<String>, install: bool, install_cross_os: bool, pull: bool, all_models: bool, exact: bool) -> core::sync::SyncOptions {
     core::sync::SyncOptions {
         prefix: prefix.map(PathBuf::from),
         in_place,
         docker: docker.map(PathBuf::from),
         install,
+        install_cross_os,
         pull,
         all_models,
         exact,
@@ -1575,9 +1576,9 @@ fn export_apm_lock(py: Python<'_>, lock: String, out: Option<String>, force: boo
 /// Build the `hlock sync` plan for a lock as JSON. Nothing is changed. The plan writes
 /// into an isolated root (`prefix`, default `.hlock/env`) unless `in_place` or `docker`.
 #[pyfunction]
-#[pyo3(signature = (path="harness.lock".to_string(), prefix=None, in_place=false, docker=None, install=false, pull=false, all_models=false, exact=false, manifest=None, refresh=false, allow_hidden=None, trust=false, apps=false, default_prefix=None))]
+#[pyo3(signature = (path="harness.lock".to_string(), prefix=None, in_place=false, docker=None, install=false, install_cross_os=false, pull=false, all_models=false, exact=false, manifest=None, refresh=false, allow_hidden=None, trust=false, apps=false, default_prefix=None))]
 #[allow(clippy::too_many_arguments)]
-fn sync_plan(py: Python<'_>, path: String, prefix: Option<String>, in_place: bool, docker: Option<String>, install: bool, pull: bool, all_models: bool, exact: bool, manifest: Option<String>, refresh: bool, allow_hidden: Option<Vec<String>>, trust: bool, apps: bool, default_prefix: Option<String>) -> PyResult<String> {
+fn sync_plan(py: Python<'_>, path: String, prefix: Option<String>, in_place: bool, docker: Option<String>, install: bool, install_cross_os: bool, pull: bool, all_models: bool, exact: bool, manifest: Option<String>, refresh: bool, allow_hidden: Option<Vec<String>>, trust: bool, apps: bool, default_prefix: Option<String>) -> PyResult<String> {
     // no GIL while it waits on the network (deciders), so other Python threads keep running
     interruptible(py, move || {
         let (reg, ctx, _) = registry(manifest.as_deref(), Some(&lock_dir(&path)))?;
@@ -1589,7 +1590,7 @@ fn sync_plan(py: Python<'_>, path: String, prefix: Option<String>, in_place: boo
         }
         // a default prefix (a pulled lock's environment) is dropped for a desktop app
         let defaulted = prefix.is_none() && default_prefix.is_some();
-        let mut opts = sync_options(prefix.or(default_prefix), in_place, docker, install, pull, all_models, exact);
+        let mut opts = sync_options(prefix.or(default_prefix), in_place, docker, install, install_cross_os, pull, all_models, exact);
         opts.default_prefix = defaulted;
         opts.also = also_harnesses(manifest.as_deref(), &path);
         opts.allow_hidden = allow_hidden.unwrap_or_default();
