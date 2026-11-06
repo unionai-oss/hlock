@@ -4,7 +4,9 @@ A registry is a server that keeps published agent setups, so others can find one
 `hlock search` and pull it by name, without knowing which repository it's in. hlock speaks an
 open protocol, the [hlock registry HTTP API](https://github.com/unionai-oss/hlock/blob/main/specs/registry.md);
 any server that implements it works, and hlock has no default registry. Pulling from a git
-repository ([`hlock pull github:…`](pull.md)) needs no registry at all.
+repository ([`hlock pull github:…`](pull.md)) needs no registry at all,
+and [`hlock push/pull union:…`](union.md) publishes straight into a Union Artifact store
+instead.
 
 A published package is a project: whichever of these files it has, versioned together.
 

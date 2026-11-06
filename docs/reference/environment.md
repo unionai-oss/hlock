@@ -20,6 +20,8 @@
 | `HLOCK_GITHUB_URL` | `https://github.com` | Base URL `github:` and `apm:` sources fetch from (for GitHub Enterprise). See [Pulling someone else's lock](../guides/pull.md#sources). |
 | `HLOCK_REGISTRY` | the URL `hlock login` saved | The [registry](../guides/registry.md) `push`, `search`, `whoami` and `pull NAMESPACE/NAME` use |
 | `HLOCK_REGISTRY_TOKEN` | the keychain, else `~/.hlock/credentials.toml` | The registry token, for CI |
+| `HLOCK_UNION_CONFIG` | `./.flyte/config.yaml`, then `~/.flyte/config.yaml` | A path to the flyte `config.yaml` a [`union:` [push/pull](../guides/union.md) uses to find its store, before the `--config` flag |
+| `FLYTE_API_KEY` | — | The [Union API key](../guides/union.md#logging-in-the-union-api-key) (`base64` of `endpoint:client_id:client_secret:org`) a `union:` push/pull authenticates with |
 | `HLOCK_NPM_REGISTRY` | `https://registry.npmjs.org` | The npm registry `npm:` MCP servers resolve against |
 | `HLOCK_PYPI_URL` | `https://pypi.org` | The package index `pypi:` MCP servers resolve against |
 | `HLOCK_GITLAB_URL` | `https://gitlab.com` | Base URL `gitlab:` sources fetch from (for a self-hosted GitLab) |

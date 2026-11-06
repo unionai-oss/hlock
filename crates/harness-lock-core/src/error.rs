@@ -39,6 +39,10 @@ pub enum Error {
     /// reachable, or it refused the request.
     #[error("{0}")]
     Registry(String),
+    /// A Union artifact store (`hlock push/pull union:`): a missing flyte config, an
+    /// unset API key, or the store refused the request.
+    #[error("{0}")]
+    Union(String),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;

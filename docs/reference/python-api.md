@@ -354,6 +354,8 @@ print(out["package"], out["root_from"])   # <your-namespace>/review-bot flag
 | Function | Does |
 |---|---|
 | `registry_push(url, root=None, name=None, version=None, dry_run=False, no_evals=False)` | `hlock push`: pack the project at `root`, by default the root of the git repository the working directory is in (else the working directory), and publish it. `dir=` and `directory=` are other names for `root` |
+| `union_push(root=None, config=None, name=None, version=None, dry_run=False, no_evals=False)` | `hlock push union:NAMESPACE/NAME`: pack the project and store it as a Union Artifact. `config` is the flyte `config.yaml` naming the store |
+| `union_pull(spec, config=None, out=None, name=None, into=None, force=False, allow_hidden=None, no_evals=False, *, root=None)` | `hlock pull union:NAMESPACE/NAME@VERSION`: fetch the artifact and place it like [`registry_pull`](#registry) — into the store as `name`, into the project lock `out`, or with `root` as the directory |
 | `registry_pull(spec, registry=None, out=None, name=None, into=None, force=False, allow_hidden=None, no_evals=False, *, root=None)` | `hlock pull NAMESPACE/NAME[//PATH][@VERSION]`: into the store as `name`, into the project lock file `out`, or the whole package with the directory `root` (or `into`) as its root |
 | `pull_into(source, into=None, force=False, allow_hidden=None, *, root=None)` | `hlock pull SOURCE --root DIR` for a git source; one of `root` and `into` is required |
 
@@ -559,6 +561,8 @@ kind:
 | `WorkerError` | The Python worker failed |
 | `PullError` | A [`pull`](../guides/pull.md) source hlock can't read or won't fetch, or `git` failed |
 | `RegistryError` | A [registry](../guides/registry.md) isn't configured or reachable, or it refused the request |
+| `UnionError` | A [`union:` [store](../guides/union.md) isn't configured (a flyte config, `FLYTE_API_KEY`) or reachable, or it refused the request |
+| `is_union_source(arg)` | True if `arg` names a union source (`union:…`) rather than a git source or a lock path |
 | `DependencyError` | A [declared dependency](../guides/dependencies.md) hlock can't read, resolve, fetch or install |
 | `AuditError` | [Hidden characters](../guides/audit.md#hidden-characters), a [policy](../guides/audit.md#policy) violation, or a bad trust store stopped a step |
 

@@ -147,7 +147,16 @@ back, up to 8 MB each way, so hlock grades them here as on any other backend.
 
 Setup:
 
-1.  Install the Flyte extra: `pip install "hlock[flyte]"`
+1.  Install the Flyte extra: `pip install "hlock[flyte]"`. It installs the Flyte SDK
+    (`flyte`) — and `flyteplugins-rs`, which registers Rust-backed tasks with the backend —
+    so this backend can launch the work items as Flyte 2 tasks.
+
+    !!! note "`flyteplugins-union` isn't needed"
+        The open Flyte SDK connects to both OSS Flyte and a hosted Union tenant, so hlock's
+        `flyte` backend needs no extra when you point it at Union. `flyteplugins-union` is
+        Union's proprietary SDK, for Union-only features hlock doesn't use; don't install it
+        unless you're using those in your own tasks.
+
 2.  Configure access to your cluster in `~/.flyte/config.yaml`, for example with
     `flyte create config`, or name another config file in the options below.
 3.  Optionally, set the options:

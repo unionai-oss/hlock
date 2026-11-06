@@ -52,6 +52,7 @@ from ._hlock import (
     harnesses,
     is_pull_source,
     is_registry_ref,
+    is_union_source,
     launch_prepare,
     load,
     localize,
@@ -110,6 +111,8 @@ from ._hlock import (
     tune,
     tune_apply,
     tune_eval,
+    union_pull,
+    union_push,
     upgrade,
 )
 
@@ -162,6 +165,7 @@ __all__ = [
     "harnesses",
     "is_pull_source",
     "is_registry_ref",
+    "is_union_source",
     "launch_prepare",
     "load",
     "localize",
@@ -220,5 +224,7 @@ __all__ = [
     "tune",
     "tune_apply",
     "tune_eval",
+    "union_pull",
+    "union_push",
     "upgrade",
 ]

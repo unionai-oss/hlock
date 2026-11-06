@@ -32,6 +32,7 @@ create_exception!(hlock, PullError, HarnessLockError, "`hlock pull`: a source ca
 create_exception!(hlock, DependencyError, HarnessLockError, "A declared dependency can't be read, resolved, fetched or installed.");
 create_exception!(hlock, AuditError, HarnessLockError, "Hidden characters, an executable not yet trusted, or a policy violation stopped a step.");
 create_exception!(hlock, RegistryError, HarnessLockError, "A registry isn't configured or reachable, or it refused the request.");
+create_exception!(hlock, UnionError, HarnessLockError, "A Union artifact store isn't configured or reachable (a flyte config, a Union API key), or it refused the request.");
 
 fn py_err(e: core::Error) -> PyErr {
     use core::Error as E;
@@ -49,6 +50,7 @@ fn py_err(e: core::Error) -> PyErr {
         E::Dependency(_) => DependencyError::new_err(msg),
         E::Audit(_) => AuditError::new_err(msg),
         E::Registry(_) => RegistryError::new_err(msg),
+        E::Union(_) => UnionError::new_err(msg),
         E::Toml(_) | E::Json(_) => HarnessLockError::new_err(msg),
     }
 }
@@ -1195,6 +1197,49 @@ fn pull_into(py: Python<'_>, source: String, into: Option<String>, force: bool, 
         let o = core::pull::pull_into(&source, &into, force, &allow_hidden.unwrap_or_default()).map_err(py_err)?;
         Ok(json_str(serde_json::to_value(&o).map_err(|e| py_err(e.into()))?))
     })
+}
+
+/// `hlock push union:NS/NAME`: pack this project's setup and store it as a Union Artifact
+/// at `version` (Flyte config for the store, `FLYTE_API_KEY` for the credential).
+#[pyfunction]
+#[pyo3(signature = (root=None, config=None, name=None, version=None, dry_run=false, no_evals=false))]
+fn union_push(py: Python<'_>, root: Option<String>, config: Option<String>, name: Option<String>, version: Option<String>, dry_run: bool, no_evals: bool) -> PyResult<String> {
+    interruptible(py, move || to_json(&core::union::push(root.as_deref().map(Path::new), config.as_deref(), name.as_deref(), version.as_deref(), dry_run, no_evals).map_err(py_err)?))
+}
+
+/// `hlock pull union:NS/NAME[//PATH][@VERSION]`: fetch the version's setup artifact and
+/// place it like a registry pull (`[pulled] from = union:`). `out` is a project lock file,
+/// `name` a store name, `into`/`root` a directory to write the whole setup into.
+#[pyfunction]
+#[pyo3(signature = (spec, config=None, out=None, name=None, into=None, force=false, allow_hidden=None, no_evals=false, *, root=None))]
+#[allow(clippy::too_many_arguments)]
+fn union_pull(py: Python<'_>, spec: String, config: Option<String>, out: Option<String>, name: Option<String>, into: Option<String>, force: bool, allow_hidden: Option<Vec<String>>, no_evals: bool, root: Option<String>) -> PyResult<String> {
+    let into = one_of("root", [("root", root), ("into", into)])?;
+    let cwd = std::env::current_dir().unwrap_or_default();
+    interruptible(py, move || {
+        let allow = allow_hidden.unwrap_or_default();
+        let v = match into {
+            Some(d) => {
+                let d = cwd.join(d);
+                core::union::pull(&spec, config.as_deref(), core::registry::Dest::Into(&d), force, &allow, no_evals)
+            }
+            None => {
+                let target = match out {
+                    Some(o) => core::pull::Target::File(cwd.join(o)),
+                    None => core::pull::Target::Store(name),
+                };
+                core::union::pull(&spec, config.as_deref(), core::registry::Dest::Target(&target), force, &allow, no_evals)
+            }
+        }
+        .map_err(py_err)?;
+        to_json(&v)
+    })
+}
+
+/// True if `arg` names a Union source (`union:…`).
+#[pyfunction]
+fn is_union_source(arg: &str) -> bool {
+    core::union::is_source(arg)
 }
 
 /// True if `arg` is a registry reference (`NAMESPACE/NAME[@VERSION]`) and not a file.
@@ -2387,6 +2432,9 @@ fn _hlock(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(registry_pull, m)?)?;
     m.add_function(wrap_pyfunction!(registry_apm_push, m)?)?;
     m.add_function(wrap_pyfunction!(registry_apm_pull, m)?)?;
+    m.add_function(wrap_pyfunction!(union_push, m)?)?;
+    m.add_function(wrap_pyfunction!(union_pull, m)?)?;
+    m.add_function(wrap_pyfunction!(is_union_source, m)?)?;
     m.add_function(wrap_pyfunction!(check_pin, m)?)?;
     m.add_function(wrap_pyfunction!(deps_prepare, m)?)?;
     m.add_function(wrap_pyfunction!(deps_commit, m)?)?;

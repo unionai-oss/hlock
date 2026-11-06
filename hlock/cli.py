@@ -50,6 +50,7 @@ from hlock import (
     harnesses,
     is_pull_source,
     is_registry_ref,
+    is_union_source,
     launch_prepare,
     load,
     meta_check,
@@ -132,6 +133,8 @@ from hlock import trust_list as _trust_list
 from hlock import tune as al_tune
 from hlock import tune_apply as _tune_apply
 from hlock import tune_eval as _tune_eval
+from hlock import union_pull as _union_pull
+from hlock import union_push as _union_push
 from hlock import upgrade as al_upgrade
 
 MANIFEST = "harness.toml"
@@ -1431,9 +1434,11 @@ def _lock_ref(arg: str, as_json: bool = False) -> tuple[str, str | None]:
               help="Let through hidden characters in FILE (a file or directory the lock vendors). Repeatable.")
 @click.option("--registry", default=None, metavar="URL",
               help="The registry a NAMESPACE/NAME source is in.  [dim]\\[default: $HLOCK_REGISTRY, else the one you logged in to][/]")
+@click.option("--config", default=None, metavar="PATH", help="A provider's config file: for a [cmd]union:[/] source, the flyte config.yaml naming the store.  [dim]\\[default: ./.flyte/config.yaml, then ~/.flyte/config.yaml][/]")
 @click.option("--json", "as_json", is_flag=True, help="Print the result as JSON.")
 def pull(sources: tuple[str, ...], name: str | None, out: str | None, into: str | None, into_alias: str | None,
-         no_evals: bool, force: bool, allow_hidden: tuple[str, ...], registry: str | None, as_json: bool) -> None:
+         no_evals: bool, force: bool, allow_hidden: tuple[str, ...], registry: str | None, config: str | None,
+         as_json: bool) -> None:
     """Pull someone else's [path]harness.lock[/] from a git repository or a registry.
 
     SOURCE is [cmd]github:OWNER/REPO\\[/PATH]\\[@REF][/], [cmd]gitlab:GROUP/REPO\\[//PATH]\\[@REF][/],
@@ -1449,7 +1454,7 @@ def pull(sources: tuple[str, ...], name: str | None, out: str | None, into: str 
     into = _one_option(("--root", into), ("--into", into_alias))
     if no_evals and not into:
         _fail("--no-evals only applies with --root", "eval packs are written only by [cmd]hlock pull NAMESPACE/NAME --root DIR[/]")
-    remote = [s for s in sources if is_pull_source(s) or is_registry_ref(s)]
+    remote = [s for s in sources if is_pull_source(s) or is_registry_ref(s) or is_union_source(s)]
     if remote and len(sources) > 1:
         _fail("pull one source at a time", "run [cmd]hlock pull[/] once per source")
     if name and out:
@@ -1460,7 +1465,10 @@ def pull(sources: tuple[str, ...], name: str | None, out: str | None, into: str 
     if remote:
         src = remote[0]
         with _working(f"Pulling {src}…"):
-            if is_registry_ref(src):
+            if is_union_source(src):
+                result = json.loads(_union_pull(src, config=config, out=out, name=name, into=into, force=force,
+                                                allow_hidden=list(allow_hidden), no_evals=no_evals))
+            elif is_registry_ref(src):
                 result = json.loads(_registry_pull(src, registry=registry, out=out, name=name, into=into, force=force,
                                                    allow_hidden=list(allow_hidden), no_evals=no_evals))
             elif into:
@@ -1498,7 +1506,7 @@ def pull(sources: tuple[str, ...], name: str | None, out: str | None, into: str 
         if pulled.get("from"):
             # a lock's [pulled] source is checked like a typed one before anything is fetched
             try:
-                if not pulled["from"].startswith("registry:"):
+                if not (pulled["from"].startswith("registry:") or pulled["from"].startswith("union:")):
                     _pull_parse(pulled["from"])
             except PullError as e:
                 _fail(f"{_show(path)} has a [pulled] source hlock won't fetch: {escape(str(e))}",
@@ -1512,7 +1520,12 @@ def pull(sources: tuple[str, ...], name: str | None, out: str | None, into: str 
     results = []
     for path, stored, spec in jobs:
         with _working(f"Refreshing {stored or _show(path)} from {spec}…"):
-            fetch = _registry_pull if spec.startswith("registry:") else _pull
+            if spec.startswith("union:"):
+                fetch = lambda s, **kw: _union_pull(s, config=config, **kw)
+            elif spec.startswith("registry:"):
+                fetch = lambda s, **kw: _registry_pull(s, registry=registry, **kw)
+            else:
+                fetch = _pull
             results.append(json.loads(fetch(spec, out=None if stored else path, name=stored, force=force,
                                              allow_hidden=list(allow_hidden))))
     if as_json:
@@ -1714,9 +1727,10 @@ def whoami(registry: str | None, as_json: bool) -> None:
 @click.option("--no-evals", is_flag=True, help="Publish without the eval packs harness.toml names.")
 @click.option("--dry-run", is_flag=True, help="Show what would be pushed, and push nothing.")
 @click.option("--registry", default=None, metavar="URL", help="The registry to push to.  [dim]\\[default: your default registry][/]")
+@click.option("--config", default=None, metavar="PATH", help="A provider's config file: for [cmd]union:[/] push, the flyte config.yaml naming the store.  [dim]\\[default: ./.flyte/config.yaml, then ~/.flyte/config.yaml][/]")
 @click.option("--json", "as_json", is_flag=True, help="Print the result as JSON.")
 def push(name: str | None, version: str | None, directory: str | None, c_alias: str | None, dir_alias: str | None,
-         no_evals: bool, dry_run: bool, registry: str | None, as_json: bool) -> None:
+         no_evals: bool, dry_run: bool, registry: str | None, config: str | None, as_json: bool) -> None:
     """Publish this project's agent setup to a registry.
 
     The project is the git repository you're in, from its root, wherever in it you run this
@@ -1732,10 +1746,19 @@ def push(name: str | None, version: str | None, directory: str | None, c_alias: 
     the same digest, so pushing twice is safe.
     """
     directory = _one_option(("--root", directory), ("-C", c_alias), ("--dir", dir_alias))
-    url = _registry(registry)
-    with _working(f"{'Packing' if dry_run else 'Pushing to ' + url}…"):
-        r = json.loads(_registry_push(url, root=directory, name=name, version=version, dry_run=dry_run,
-                                      no_evals=no_evals))
+    if name and name.startswith("union:"):
+        # a Union artifact store instead of a registry: union:NS/NAME, the flyte config
+        # naming the store, FLYTE_API_KEY for the credential
+        package = name[len("union:"):].strip()
+        with _working(f"{'Packing' if dry_run else 'Pushing to the Union artifact store'}…"):
+            r = json.loads(_union_push(root=directory, config=config, name=package, version=version,
+                                       dry_run=dry_run, no_evals=no_evals))
+        url = r.get("url") or "the Union artifact store"
+    else:
+        url = _registry(registry)
+        with _working(f"{'Packing' if dry_run else 'Pushing to ' + url}…"):
+            r = json.loads(_registry_push(url, root=directory, name=name, version=version, dry_run=dry_run,
+                                          no_evals=no_evals))
     if as_json:
         console.print_json(data=r)
         return
@@ -1772,7 +1795,8 @@ def push(name: str | None, version: str | None, directory: str | None, c_alias: 
             console.print(f"  [path]{escape(r['url'])}[/]", soft_wrap=True)
     if evals and (evals.get("published") or evals.get("already_published")):
         console.print(f"  [muted]with eval packs:[/] {escape(', '.join(p + '/' for p in evals['packs']))}", soft_wrap=True)
-    _next(f"hlock pull {r['package']}@{r['version']}")
+    pre = "union:" if name and name.startswith("union:") else ""
+    _next(f"hlock pull {pre}{r['package']}@{r['version']}")
 
 
 _NAME_FROM = {"git-remote": "the git remote", "project": "\\[project] name", "apm": "apm.yml's name",

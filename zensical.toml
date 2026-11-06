@@ -36,6 +36,7 @@ nav = [
       "guides/launch.md",
       "guides/pull.md",
       "guides/registry.md",
+      "guides/union.md",
       "guides/teams.md",
       "guides/secrets.md",
       "guides/sandbox.md",
