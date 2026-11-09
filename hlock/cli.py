@@ -2720,6 +2720,8 @@ def _manual_steps(plan: dict) -> list[dict]:
 @click.option("--json", "as_json", is_flag=True, help="Print the plan as JSON and change nothing.")
 @click.option("-y", "--yes", is_flag=True, help="Don't ask before running automatic steps.")
 @click.option("--install", is_flag=True, help="Let hlock run package managers (npm, brew, uv, install scripts).")
+@click.option("--install-cross-os", is_flag=True,
+              help="Approve installing a cross-os step: the lock recorded an installer for another OS (e.g. a Homebrew cask, on macOS) and sync would use this machine's native alternative instead. Needs --install too.")
 @click.option("--pull", is_flag=True, help="Let hlock download model weights through installed runtimes.")
 @click.option("--all-models", is_flag=True, help="Include models a provider lists but no locked role uses.")
 @click.option("--prefix", default=None, help="Where isolated config roots live.  [dim]\\[default: .hlock/env][/]")
@@ -2739,7 +2741,7 @@ def _manual_steps(plan: dict) -> list[dict]:
 @click.option("--allow-hidden", "allow_hidden", multiple=True, metavar="FILE",
               help="Let through hidden characters in FILE. Repeatable.")
 @click.option("-v", "--verbose", is_flag=True, help="List every step, including optional ones.")
-def sync(lock: str, plan_only: bool, as_json: bool, yes: bool, install: bool, pull: bool, all_models: bool,
+def sync(lock: str, plan_only: bool, as_json: bool, yes: bool, install: bool, install_cross_os: bool, pull: bool, all_models: bool,
          prefix: str | None, in_place: bool, apps: bool, docker: bool, build: bool, base: str | None, skill: bool,
          skill_dir: str, exact: bool, frozen: bool, trust: bool, allow_hidden: tuple[str, ...], verbose: bool) -> None:
     """Rehydrate the setup in [path]harness.lock[/] on this machine.
@@ -2747,7 +2749,10 @@ def sync(lock: str, plan_only: bool, as_json: bool, yes: bool, install: bool, pu
     Builds a plan in which each step is [ok]✓ satisfied[/], [brand]● automatic[/] (hlock does it), or
     [warn]○ manual[/] (hlock prints what to run and why). Automatic steps restore config, skills
     and instruction files and install plugins through the harness's own CLI. Package
-    installs need [cmd]--install[/] and model downloads need [cmd]--pull[/]. Exits 3 while manual
+    installs need [cmd]--install[/] and model downloads need [cmd]--pull[/]. When a locked
+    install was recorded for another OS (e.g. a Homebrew cask) and hlock would use this
+    machine's native installer instead, that cross-os step needs [cmd]--install --install-cross-os[/].
+    Exits 3 while manual
     steps remain, so it's safe to re-run until it's clean.
 
     The setup goes into an isolated config root in [path].hlock/env/[/] (the one [cmd]hlock launch[/]
@@ -2778,7 +2783,8 @@ def sync(lock: str, plan_only: bool, as_json: bool, yes: bool, install: bool, pu
     def make_plan() -> dict:
         with _working("Planning…"):
             return json.loads(sync_plan(lock, prefix=prefix, in_place=in_place, docker=docker_dir, install=install,
-                                        pull=pull, all_models=all_models, exact=exact, manifest=_m(),
+                                        install_cross_os=install_cross_os, pull=pull, all_models=all_models,
+                                        exact=exact, manifest=_m(),
                                         refresh=own and (plan_only or as_json or skill) and not frozen,
                                         allow_hidden=list(allow_hidden),
                                         # a plan isn't a sync: --trust shows what it would do, recording nothing

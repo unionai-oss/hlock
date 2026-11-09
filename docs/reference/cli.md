@@ -519,6 +519,7 @@ hlock sync [LOCK] [OPTIONS]
 | `--json` | Print the plan as JSON and change nothing |
 | `-y`, `--yes` | Don't ask before running automatic steps (required when stdin isn't a terminal) |
 | `--install` | Let hlock run package managers and install scripts |
+| `--install-cross-os` | Approve a cross-os install: the lock recorded another OS's installer (e.g. a Homebrew cask) and `sync` would use this machine's native one instead. Needs `--install` too |
 | `--pull` | Let hlock download model weights through installed runtimes |
 | `--all-models` | Include models no locked role uses |
 | `--prefix DIR` | Where isolated config roots live (default `.hlock/env`) |

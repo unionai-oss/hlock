@@ -254,3 +254,54 @@ def test_a_new_machine_approves_executables_once(machines, tmp_path, monkeypatch
     assert r.exit_code == 0 and "denied" in r.output
     step = next(s for s in json.loads(invoke("sync", "--json").output)["steps"] if "denied" in s["reason"])
     assert step["status"] == "manual"
+
+
+def test_cross_os_lock_syncs_through_the_native_installer(tmp_path, monkeypatch):
+    """A lock recorded with Homebrew (macOS) on a Linux machine: sync falls back to the
+    profile's native installer (npm/curl for Claude), and gates it behind an explicit
+    `--install --install-cross-os` approval (specs §cross-os)."""
+    home = tmp_path / "home"
+    home.mkdir()
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    for name in ("npm", "sh"):
+        p = bindir / name
+        p.write_text("#!/bin/sh\n")
+        p.chmod(0o755)
+    # a macOS-made lock: Claude installed by Homebrew cask
+    lock = tmp_path / "harness.lock"
+    lock.write_text(
+        'lock-version = 1\ngenerated-by = "hlock"\ngenerated-at = ""\n'
+        '[stack]\nharness = "claude-code"\nname = "claude-code"\nselection = "pin"\n'
+        '[harness]\nname = "claude-code"\nsource = "brew-cask:claude-code@2.1.0"\n'
+    )
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("HLOCK_OS", "linux")
+    monkeypatch.setenv("PATH", f"{bindir}{os.pathsep}/usr/bin{os.pathsep}/bin")
+    monkeypatch.setenv("NO_COLOR", "1")
+    monkeypatch.chdir(tmp_path)
+    # the new machine approves what the lock runs, once
+    assert invoke("trust", "--yes").exit_code == 0
+
+    plan = json.loads(invoke("sync", "--json", str(lock)).output)
+    h = next(s for s in plan["steps"] if s["kind"] == "harness")
+    assert h["status"] == "manual", h
+    assert "Cross-os installs run only with --install --install-cross-os" in h["reason"], h
+    assert h["command"].startswith("npm install") and "--cask" not in h["command"], h
+
+    # --install alone still isn't the cross-os approval
+    plan = json.loads(invoke("sync", "--json", "--install", str(lock)).output)
+    h = next(s for s in plan["steps"] if s["kind"] == "harness")
+    assert h["status"] == "manual" and "Cross-os" in h["reason"], h
+
+    # --install --install-cross-os approves it: automatic, through npm
+    plan = json.loads(invoke("sync", "--json", "--install", "--install-cross-os", "--trust", str(lock)).output)
+    h = next(s for s in plan["steps"] if s["kind"] == "harness")
+    assert h["status"] == "auto" and h["action"]["type"] == "run", h
+    assert h["action"]["argv"][0] == "npm", h
+
+    # the same lock on macOS keeps Homebrew and isn't cross-os
+    monkeypatch.setenv("HLOCK_OS", "macos")
+    plan = json.loads(invoke("sync", "--json", str(lock)).output)
+    h = next(s for s in plan["steps"] if s["kind"] == "harness")
+    assert "Cross-os" not in h["reason"] and "--cask" in h["command"], h
