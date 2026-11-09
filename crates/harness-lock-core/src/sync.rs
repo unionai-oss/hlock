@@ -713,6 +713,98 @@ fn install_step(id: String, kind: &str, what: &str, version: Option<&str>, sourc
     step
 }
 
+/// The command that installs a declared `[environment]` package by installer method.
+/// `apt` needs root, so it's prefixed with `sudo` (hlock still won't run it itself).
+fn env_install_command(method: &str, package: &str) -> Option<Vec<String>> {
+    match method {
+        "apt" => Some(vec!["sudo".into(), "apt-get".into(), "install".into(), "-y".into(), package.into()]),
+        "brew" => Some(vec!["brew".into(), "install".into(), package.into()]),
+        "pip" => Some(vec!["python3".into(), "-m".into(), "pip".into(), "install".into(), package.into()]),
+        "npm" => Some(vec!["npm".into(), "install".into(), "-g".into(), package.into()]),
+        "cargo" => Some(vec!["cargo".into(), "install".into(), package.into()]),
+        "go" => Some(vec!["go".into(), "install".into(), format!("{package}@latest")]),
+        _ => None,
+    }
+}
+
+/// A declared `[environment]` as sync steps: the package lists installable through the
+/// harness-independent installers (`pip`, `npm`, `brew`, `cargo`, `go` — automatic under
+/// `--install`; `apt` system packages and the pinned `[[environment.binaries]]` downloads
+/// are verified but left for a human or the meta harness, so hlock never writes to an
+/// absolute system path itself). Anything it can't do deterministically is a manual step
+/// that points at `hlock meta run install`, the agentic fallback.
+fn env_steps(lock: &Lockfile, opts: &SyncOptions, ctx: &Ctx) -> Vec<Step> {
+    let mut steps = Vec::new();
+    let os = ctx.os();
+    for (installer, packages) in lock.environment.lists() {
+        for pkg in packages {
+            let id = format!("env:{installer}:{pkg}");
+            let title = format!("Install {pkg} via {installer}");
+            // `apt` is Linux and `brew` is macOS; the language installers (`pip`, `npm`,
+            // `cargo`, `go`) work on any OS, where they exist
+            let native = !((installer == "apt" && os != "linux") || (installer == "brew" && os != "macos"));
+            if !native {
+                steps.push(Step {
+                    id, kind: "package".into(), title, status: "manual".into(),
+                    reason: format!("declared for {installer}, which isn't on {os}; install it by hand, or let the meta harness: `hlock meta run install`"),
+                    ..Default::default()
+                });
+                continue;
+            }
+            let Some(argv) = env_install_command(installer, pkg) else {
+                steps.push(Step {
+                    id, kind: "package".into(), title, status: "manual".into(),
+                    reason: format!("no deterministic {installer} install for {pkg}; run it by hand, or let the meta harness: `hlock meta run install`"),
+                    ..Default::default()
+                });
+                continue;
+            };
+            let tool_ok = ctx.which(&argv[0]).is_some() || argv[0] == "sudo";
+            // `apt` needs root, so it's a guided manual step; the user-level installers run
+            // automatically once approved with --install
+            let apt = installer == "apt";
+            let run = !apt && tool_ok && opts.install;
+            let reason = if apt {
+                "installs system packages (needs root); run it, or let the meta harness: `hlock meta run install`".into()
+            } else if !tool_ok {
+                format!("needs `{}`, which isn't on PATH", argv[0])
+            } else {
+                "package installs run only with --install".into()
+            };
+            steps.push(Step {
+                id, kind: "package".into(), title,
+                status: if run { "auto" } else { "manual" }.into(),
+                reason,
+                action: run.then(|| Action::Run { argv: argv.clone(), env: BTreeMap::new() }),
+                command: Some(shell_join(&argv)),
+                verify: None,
+                ..Default::default()
+            });
+        }
+    }
+    // pinned binary downloads: verified against sha256, placed by a human (hlock won't
+    // write an unknown binary into an absolute path by itself)
+    for b in &lock.environment.binaries {
+        let id = format!("env:binary:{}", b.path);
+        let title = format!("Install binary {}", b.path);
+        let ok = std::fs::read(&b.path).map(|d| crate::hash::sha256_bytes(&d) == b.sha256).unwrap_or(false);
+        let cmd = format!("curl -fsSL {} -o {}.tmp && echo '{}  {}.tmp' | shasum -a 256 -c - && install {}.tmp {}", b.url, b.path, b.sha256, b.path, b.path, b.path);
+        steps.push(Step {
+            id, kind: "package".into(), title,
+            status: if ok { "satisfied" } else { "manual" }.into(),
+            reason: if ok {
+                "matches the lock".into()
+            } else {
+                format!("pinned by sha256 {}…; hlock won't download it to {}; install it by hand, or let the meta harness: `hlock meta run install`", &b.sha256[..12], b.path)
+            },
+            command: (!ok).then_some(cmd),
+            verify: Some(format!("echo '{}  {}' | shasum -a 256 -c -", b.sha256, b.path)),
+            ..Default::default()
+        });
+    }
+    steps
+}
+
 // --------------------------------------------------------------------------- //
 // Planning
 // --------------------------------------------------------------------------- //
@@ -1246,6 +1338,9 @@ pub fn plan(lock: &Lockfile, lock_path: &Path, reg: &Registry, ctx: &Ctx, opts: 
         st.action = None;
         st.reason = if denied { format!("you denied {} on this machine (hlock trust to change that)", what.join(", ")) } else { format!("⚑ runs {}, not yet trusted: approve with hlock trust, or sync --trust", what.join(", ")) };
     }
+
+    // ---- declared environment: the system and CLI tools the agent needs, installed for real ----
+    steps.extend(env_steps(lock, opts, ctx));
 
     // ---- desktop apps: their own config is written only with --apps, and not while they run ----
     let (apps, reload) = gate_apps(&mut steps, profile, mode == "home", reg, ctx, opts);
@@ -2628,7 +2723,7 @@ mod tests {
     }
 
     #[test]
-    fn a_macos_install_on_linux_falls_back_to_the_native_installer() {
+fn a_macos_install_on_linux_falls_back_to_the_native_installer() {
         let (dir, mut ctx) = sandbox("cross-os");
         ctx.env.insert("HLOCK_OS".into(), "linux".into());
         let bindir = dir.join("bin");
@@ -2646,24 +2741,66 @@ mod tests {
             ..Default::default()
         };
         let path = ctx.cwd.join("harness.lock");
-        // default: gated as a cross-os manual step that uses the native installer
         let p = plan(&lock, &path, &reg, &ctx, &SyncOptions::default()).unwrap();
         let h = step(&p, "harness");
         assert!(h.status == "manual" && h.reason.contains("Cross-os installs run only with --install --install-cross-os"), "{h:?}");
         assert!(h.command.as_deref().is_some_and(|c| c.starts_with("npm install") && !c.contains("brew")), "{h:?}");
-        // --install alone isn't enough: it's still a cross-os deviation
         let p = plan(&lock, &path, &reg, &ctx, &SyncOptions { install: true, ..Default::default() }).unwrap();
         assert!(step(&p, "harness").status == "manual", "{:?}", step(&p, "harness"));
-        // --install --install-cross-os approves it: auto, via npm (the native, non-macOS path)
         let p = plan(&lock, &path, &reg, &ctx, &SyncOptions { trust: true, install: true, install_cross_os: true, ..Default::default() }).unwrap();
         let h = step(&p, "harness");
         assert!(h.status == "auto", "{h:?}");
         assert!(matches!(&h.action, Some(Action::Run { argv, .. }) if argv.first().map(String::as_str) == Some("npm")), "{h:?}");
-        // on macOS the recorded cask is native: not cross-os, brew is used
         ctx.env.insert("HLOCK_OS".into(), "macos".into());
         let p = plan(&lock, &path, &reg, &ctx, &SyncOptions::default()).unwrap();
         let h = step(&p, "harness");
         assert!(!h.reason.contains("Cross-os") && h.command.as_deref().is_some_and(|c| c.contains("--cask")), "{h:?}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn declared_environment_installs_packages_and_verifies_binaries() {
+        let (dir, mut ctx) = sandbox("env");
+        ctx.env.insert("HLOCK_OS".into(), "linux".into());
+        let bindir = dir.join("bin");
+        std::fs::create_dir_all(&bindir).unwrap();
+        for name in ["npm", "python3"] {
+            let p = bindir.join(name);
+            std::fs::write(&p, "#!/bin/sh\n").unwrap();
+            #[cfg(unix)]
+            { use std::os::unix::fs::PermissionsExt; std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap(); }
+        }
+        ctx.path = vec![bindir];
+        let environment = crate::manifest::Environment {
+            apt: vec!["ffmpeg".into()],
+            pip: vec!["yt-dlp".into()],
+            npm: vec!["pi".into()],
+            brew: vec!["libation".into()],
+            binaries: vec![crate::manifest::Binary { url: "https://h.example/tool".into(), sha256: "0".repeat(64), path: "/usr/local/bin/tool".into() }],
+            ..Default::default()
+        };
+        let lock = Lockfile {
+            harness: Harness { name: "claude-code".into(), version: Some("2.1.0".into()), source: Some("npm:pi@2.1.0".into()), ..Default::default() },
+            environment,
+            ..Default::default()
+        };
+        let reg = Registry::builtin();
+        let path = ctx.cwd.join("harness.lock");
+        let p = plan(&lock, &path, &reg, &ctx, &SyncOptions::default()).unwrap();
+        assert!(step(&p, "env:pip:yt-dlp").status == "manual" && step(&p, "env:pip:yt-dlp").reason.contains("--install"), "{:?}", step(&p, "env:pip:yt-dlp"));
+        assert!(step(&p, "env:apt:ffmpeg").status == "manual" && step(&p, "env:apt:ffmpeg").reason.contains("root"), "{:?}", step(&p, "env:apt:ffmpeg"));
+        let bin = step(&p, "env:binary:/usr/local/bin/tool");
+        assert!(bin.status == "manual" && bin.verify.is_some() && bin.reason.contains("meta run install"), "{bin:?}");
+        let p = plan(&lock, &path, &reg, &ctx, &SyncOptions { trust: true, install: true, ..Default::default() }).unwrap();
+        assert!(step(&p, "env:pip:yt-dlp").status == "auto", "{:?}", step(&p, "env:pip:yt-dlp"));
+        assert!(step(&p, "env:npm:pi").status == "auto", "{:?}", step(&p, "env:npm:pi"));
+        assert!(step(&p, "env:apt:ffmpeg").status == "manual", "{:?}", step(&p, "env:apt:ffmpeg"));
+        let brew = step(&p, "env:brew:libation");
+        assert!(brew.status == "manual" && brew.reason.contains("isn't on linux") && brew.reason.contains("meta run install"), "{brew:?}");
+        ctx.env.insert("HLOCK_OS".into(), "macos".into());
+        let p = plan(&lock, &path, &reg, &ctx, &SyncOptions { trust: true, install: true, ..Default::default() }).unwrap();
+        let brew = step(&p, "env:brew:libation");
+        assert!(brew.status == "manual" && brew.reason.contains("isn't on PATH"), "{brew:?}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

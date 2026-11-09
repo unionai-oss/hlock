@@ -99,6 +99,33 @@ steps need you to opt in:
 | `--install-cross-os` | install a cross-os step with this machine's native installer (needs `--install` too) | the native command, with "Cross-os installs run only with --install --install-cross-os" |
 | `--pull` | download model weights through an installed runtime (`ollama pull`, `lms get`, `hf download`) | the pull command and the download size |
 
+### System and CLI tools: the declared `[environment]`
+
+[`harness.toml`'s `[environment]`](../reference/manifest.md#environment) declares the system packages and
+CLI tools the agent relies on — the local tools and their dependencies that are "a Dockerfile
+kind of thing". Unlike most of the manifest it isn't *found* by `pin`; you declare it and hlock
+installs it:
+
+```toml title="harness.toml"
+[environment]
+apt = ["ffmpeg"]                         # system packages (guided manual: needs root)
+pip = ["yt-dlp"]                       # user-level installers run automatically
+npm = ["@modelcontextprotocol/server-fetch"]
+[[environment.binaries]]                # a pinned binary: url + sha256 + path
+url = "https://github.com/…/tool"
+sha256 = "0123…"
+path = "/usr/local/bin/tool"
+```
+
+`hlock sync` turns each into an install step: `pip`, `npm`, `brew`, `cargo` and `go` packages
+install **automatically** once you pass `--install` (like any package manager step); `apt`
+packages (root) and pinned binary downloads — which hlock never writes to an absolute system
+path itself — are **verified** steps: a binary reports `satisfied` only when the file at
+`path` hashes to its pinned `sha256`, and the step gives you the exact `curl`+`install`
+command. Anything sync can't do deterministically (an installer that isn't available on this
+OS, a one-off installer script) stays manual and points at the agentic fallback:
+`hlock meta run install`.
+
 A lock records how a harness or runtime was installed (e.g. `brew-cask:claude-code` on
 macOS). When you sync on another OS and that recorded method can't run here (Homebrew casks
 are macOS; `winget`/`scoop`/`choco` are Windows), `sync` falls back to the [profile's](harness-profiles.md)

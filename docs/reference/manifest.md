@@ -269,10 +269,13 @@ a command runner with an `allowlist` entry in `network-args` (or `networks`)
 
 ## `[environment]`
 
-What the agent needs installed: packages for each installer, and binaries pinned by URL
-and SHA-256. The lock records it as declared, in its own
-[`[environment]`](lockfile.md#declared-environment-and-secrets); hlock doesn't install any
-of it yet.
+What the agent needs installed — the system and CLI tools it relies on, each with its own
+installer. The lock records it as declared, in its own
+[`[environment]`](lockfile.md#declared-environment-and-secrets), and
+[`hlock sync`](../guides/sync.md) installs it: `pip`, `npm`, `brew`, `cargo` and `go` packages run
+under `--install`, an `apt` package gives a guided manual step (it needs root), and a
+binary is reported satisfied only when the file at `path` hashes to its pinned `sha256`.
+What hlock can't install deterministically is left to the agentic fallback, [`hlock meta run install`](../guides/meta.md).
 
 ```toml title="harness.toml"
 [environment]
