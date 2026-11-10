@@ -305,3 +305,46 @@ def test_cross_os_lock_syncs_through_the_native_installer(tmp_path, monkeypatch)
     plan = json.loads(invoke("sync", "--json", str(lock)).output)
     h = next(s for s in plan["steps"] if s["kind"] == "harness")
     assert "Cross-os" not in h["reason"] and "--cask" in h["command"], h
+def test_declared_environment_becomes_install_and_verify_steps(tmp_path, monkeypatch):
+    """The declared [environment] is locked and sync turns it into real steps: user-level
+    packages install automatically under --install, apt/binary/off-OS go manual, and the
+    non-deterministic ones point at `hlock meta run install`."""
+    home = tmp_path / "home"
+    home.mkdir()
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    for name in ("npm", "python3"):
+        p = bindir / name
+        p.write_text("#!/bin/sh\n")
+        p.chmod(0o755)
+    lock = tmp_path / "harness.lock"
+    lock.write_text(
+        'lock-version = 1\ngenerated-by = "hlock"\ngenerated-at = ""\n'
+        '[stack]\nharness = "claude-code"\nname = "x"\nselection = "pin"\n'
+        '[harness]\nname = "claude-code"\nversion = "2.1.0"\nsource = "npm:pi@2.1.0"\n'
+        '[environment]\napt = ["ffmpeg"]\npip = ["yt-dlp"]\nnpm = ["pi"]\n'
+        '[[environment.binaries]]\nurl = "https://h.example/tool"\n'
+        'sha256 = "' + "0" * 64 + '"\npath = "/usr/local/bin/tool"\n'
+    )
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("HLOCK_OS", "linux")
+    monkeypatch.setenv("PATH", f"{bindir}{os.pathsep}/usr/bin{os.pathsep}/bin")
+    monkeypatch.setenv("NO_COLOR", "1")
+    monkeypatch.chdir(tmp_path)
+    assert invoke("trust", "--yes").exit_code == 0
+
+    # no --install: packages and binaries are collected as manual/verify steps, no work runs
+    plan = json.loads(invoke("sync", "--json", str(lock)).output)
+    env_steps = {s["id"]: s for s in plan["steps"] if s["id"].startswith("env:")}
+    assert env_steps["env:apt:ffmpeg"]["status"] == "manual" and "root" in env_steps["env:apt:ffmpeg"]["reason"]
+    assert env_steps["env:pip:yt-dlp"]["status"] == "manual"
+    assert env_steps["env:binary:/usr/local/bin/tool"]["status"] == "manual"
+    assert env_steps["env:binary:/usr/local/bin/tool"]["verify"]
+    assert "meta run install" in env_steps["env:binary:/usr/local/bin/tool"]["reason"]
+
+    # --install: the user-level package is automatic, apt (root) stays manual
+    plan = json.loads(invoke("sync", "--json", "--install", str(lock)).output)
+    env_steps = {s["id"]: s for s in plan["steps"] if s["id"].startswith("env:")}
+    assert env_steps["env:pip:yt-dlp"]["status"] == "auto"
+    assert env_steps["env:npm:pi"]["status"] == "auto"
+    assert env_steps["env:apt:ffmpeg"]["status"] == "manual"
