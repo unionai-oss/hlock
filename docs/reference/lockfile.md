@@ -285,7 +285,11 @@ declared = true
 ```
 
 `[environment]` has the manifest's keys: the package lists as declared, and each binary's
-`url`, `sha256` and `path`. Nothing installs them yet.
+`url`, `sha256` and `path`. [`hlock sync`](../guides/sync.md) installs the package lists
+through their installers (user-level ones automatically with `--install`; `apt` gives a
+guided manual step) and reports a binary as satisfied only when the file at `path` hashes to
+its pinned `sha256`. A step it can't do deterministically is manual and points at
+`hlock meta run install`, the agentic fallback.
 
 A declared secret's `[[secret]]` entry has these keys besides `name`, which is the
 `HLOCK_SECRET_…` variable that supplies it:
