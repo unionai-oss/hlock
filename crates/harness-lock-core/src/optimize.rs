@@ -662,7 +662,9 @@ pub fn evaluate(dir: &Path, candidate: &Path, split: &str, tasks: Option<&[Strin
 /// The stack a session's trials start from: the base lock's, as `tune` builds it.
 fn base_stack_for(session: &Session, base: Option<&Lockfile>) -> Result<crate::search::Stack> {
     let manifest = crate::manifest::Manifest::load(&session.manifest)?;
-    Ok(crate::ops::base_stack(base, &manifest, Some(&session.harness)))
+    let mut s = crate::ops::base_stack(base, &manifest, Some(&session.harness));
+    crate::ops::unset_rejected(&mut s, &crate::models::ModelTable::load(&crate::profiles::Ctx::from_process())?);
+    Ok(s)
 }
 
 // --------------------------------------------------------------------------- //

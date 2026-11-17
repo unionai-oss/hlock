@@ -967,7 +967,7 @@ pub struct Selection {
     pub reason: String,
 }
 
-fn toml_files(dir: &Path) -> Vec<PathBuf> {
+pub(crate) fn toml_files(dir: &Path) -> Vec<PathBuf> {
     let mut out: Vec<PathBuf> = std::fs::read_dir(dir)
         .map(|rd| {
             rd.flatten()

@@ -1,0 +1,11 @@
+# Anthropic models that reject request parameters hlock would otherwise send.
+#
+# Each [[model]] names model ids (`ids`) and the request parameters those models
+# reject (`rejects`). hlock leaves a rejected parameter out of the request, and
+# `hlock tune` doesn't sweep it. See docs/guides/harness-profiles.md#model-parameters.
+
+[[model]]
+ids = ["claude-fable-5-2", "claude-mythos-5-2"]
+rejects = ["temperature", "top_p", "top_k"]
+why = "the API returns a 400 when a request sets it"
+source = "https://platform.claude.com/docs/en/models/fable-5-2/migration-guide"

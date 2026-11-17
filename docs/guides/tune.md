@@ -57,10 +57,50 @@ them. A stage that didn't run isn't recorded in the tune lock.
 | `full` | Holdout re-validation and a tool-timeout sweep | `ft` grid × tool timeout `[30, 120]` s |
 | `auto` *(default)* | Currently the same as `hpo` | |
 
+A model that rejects `temperature` has no temperature axis; see
+[below](#models-that-reject-temperature).
+
 `ft` and `full` need the `local` or `flyte` [backend](backends.md) for real
 training, and a GPU for anything beyond a tiny model. On `offline`, tune says so before it
 runs, and runs only the grid. "models" is your lock's model, or the planner candidates
 when there are several.
+
+### Models that reject temperature
+
+Some models fail any request that sets `temperature`: Claude Fable 5.2 and Claude Mythos 5.2
+return a 400 (see Anthropic's [Fable 5.2 migration guide](https://platform.claude.com/docs/en/models/fable-5-2/migration-guide)).
+For such a model, tune doesn't sweep temperature: its configurations collapse to one per
+retry count, run with no temperature in the request, and the tune lock pins none. Tune says
+so:
+
+```console
+$ hlock tune --depth hpo
+! temperature not tuned: reference:claude-fable-5-2 rejects it (the API returns a 400 when a request sets it)
+✓ wrote harness.tune.lock
+╭─ ⚙ tune ─────────────────────────────────────────────────────────────────────────────────────────╮
+│                                                                                                  │
+│  depth    hpo                                                                                    │
+│  backend  offline                                                                                │
+│  data     user-traces                                                                            │
+│  grid     3 configurations                                                                       │
+│  stages   data ✗ not on offline: use local, flyte or another backend  ·  optimize ✗ not on       │
+│           offline: use local, flyte or another backend  ·  hpo ✓                                 │
+│                                                                                                  │
+│  Best configuration                                                                              │
+│  model                 reference:claude-fable-5-2                                                │
+│  retries               1                                                                         │
+│  temperature           unset                                                                     │
+│  tool timeout seconds  120                                                                       │
+│                                                                                                  │
+│  success rate  100%  →  100%   +0%   (baseline: the lock's own configuration, measured)          │
+│                                                                                                  │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+next → hlock tune apply
+```
+
+The tune lock records why under `[tune.hpo.skipped]`. With several planner candidates, only
+the ones that reject temperature lose the axis. Which models reject what is a
+[model table](harness-profiles.md#model-parameters) you can extend.
 
 ## Tune the harness text
 

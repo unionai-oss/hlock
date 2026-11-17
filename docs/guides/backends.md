@@ -126,6 +126,10 @@ task that needs tools, several files, or a running loop needs an agent. Run your
 [code harness](harnesses.md#your-own-agent-frameworks-and-custom-scripts), which runs
 for real in trials on every backend.
 
+The request sets `temperature` only when the configuration has one and the model accepts
+it: a model in a [model table](harness-profiles.md#model-parameters) that rejects it, such
+as Claude Fable 5.2, gets none.
+
 A trial's cost is what the endpoint reports (`usage.cost`, as OpenRouter's does). When it
 reports none, the cost is unknown: the trace records it as `null`, and it adds nothing to
 the totals.

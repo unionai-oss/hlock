@@ -86,7 +86,10 @@ as a Flyte task on a GPU node.
 | `optimize` | `harness.optimize` only: the bundle, the session, the splits, the budget (see [Write an optimizer](../guides/optimizers.md#write-an-optimizer)) |
 
 A trial's `stack` has `system_prompt` when tune runs it with a candidate's (or the lock's)
-instruction files: a single-completion trial sends it as the system message.
+instruction files: a single-completion trial sends it as the system message. Its
+`temperature` is `null` when the trial's model rejects one (see
+[model parameters](../guides/harness-profiles.md#model-parameters)) or none was set: the
+backend leaves it out of the request.
 
 The response is `{"version": 5, "ok": true, "result": {...}}`, or
 `{"version": 5, "ok": false, "error": "..."}` with a non-zero exit. A result has

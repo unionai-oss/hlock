@@ -249,3 +249,43 @@ fn a_rust_backend_runs_in_process() {
     assert_eq!(lock.evidence.success_rate.values().next(), Some(&1.0));
     let _ = fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn a_model_that_rejects_temperature_isnt_swept_and_pins_none() {
+    let dir = std::env::temp_dir().join(format!("hlock-ops-rejects-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).unwrap();
+    make_pack(&dir);
+    let mut m = make_manifest(&dir);
+    m.objective.constraints.clear();
+    // Claude Fable 5.2 rejects temperature (profiles/models/anthropic.toml); qwen doesn't
+    m.candidates.llm.get_mut("planner").unwrap().any_of = vec!["reference:claude-fable-5-2".into(), "reference:qwen-7b".into()];
+    let spec = TuneSpec { depth: "hpo".into(), out: dir.join("first.lock"), workdir: dir.join(".hlock"), lock: Some(dir.join("none.lock")), ..Default::default() };
+    let o = tune(m.clone(), &spec).unwrap();
+    // 3 retries x (fable without a temperature + qwen at 2 temperatures)
+    assert_eq!(o.report["grid"], 9, "{}", o.report);
+    let notes: Vec<&str> = o.report["notes"].as_array().unwrap().iter().filter_map(|n| n.as_str()).collect();
+    assert!(notes.iter().any(|n| n.starts_with("temperature not tuned: reference:claude-fable-5-2 rejects it")), "{notes:?}");
+    assert!(!notes.iter().any(|n| n.contains("qwen")), "{notes:?}");
+    let hpo = &o.lock.tune.as_ref().unwrap()["hpo"];
+    assert_eq!(hpo["skipped"]["temperature"], "reference:claude-fable-5-2 rejects it");
+    assert_eq!(hpo["axes"]["temperature"], serde_json::json!([0.2, 0.7]));
+
+    // a fable-only tune from a lock that pinned a temperature drops it
+    let mut base = o.lock.clone();
+    let planner = base.llm.iter_mut().find(|l| l.role == "planner").unwrap();
+    planner.provider = "reference".into();
+    planner.model = "claude-fable-5-2".into();
+    planner.params.insert("temperature".into(), serde_json::json!(0.7));
+    base.save(&dir.join("base.lock")).unwrap();
+    m.candidates.llm.get_mut("planner").unwrap().any_of = vec!["reference:claude-fable-5-2".into()];
+    let o = tune(m, &TuneSpec { out: dir.join("second.lock"), lock: Some(dir.join("base.lock")), ..spec }).unwrap();
+    assert_eq!(o.report["grid"], 3, "{}", o.report);
+    assert!(o.report["best"]["temperature"].is_null(), "{}", o.report);
+    assert_eq!(o.lock.tune.as_ref().unwrap()["hpo"]["axes"]["temperature"], serde_json::json!([]));
+    let planner = o.lock.llm.iter().find(|l| l.role == "planner").unwrap();
+    assert_eq!(planner.model, "claude-fable-5-2");
+    assert!(!planner.params.contains_key("temperature"), "{:?}", planner.params);
+    assert!(!Lockfile::load(&dir.join("second.lock")).unwrap().llm[0].params.contains_key("temperature"));
+    let _ = fs::remove_dir_all(&dir);
+}

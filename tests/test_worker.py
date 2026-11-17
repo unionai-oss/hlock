@@ -291,12 +291,12 @@ def endpoint(monkeypatch):
         e.close()
 
 
-def trial(planner: str, ws: Path, expected=None, prompt="Count the words in words.txt.") -> dict:
+def trial(planner: str, ws: Path, expected=None, prompt="Count the words in words.txt.", **stack) -> dict:
     return run_worker({
         "version": CONTRACT_VERSION,
         "kind": "llm.run_trial",
         "backend": "local",
-        "stack": {"llm": {"planner": planner}},
+        "stack": {"llm": {"planner": planner}, **stack},
         "task": {"id": "count_words", "prompt_text": prompt, "expected": expected or []},
         "seed": 0,
         "workdir": str(ws),
@@ -323,6 +323,28 @@ def test_the_completion_budget_can_be_raised(tmp_path, monkeypatch, endpoint):
     monkeypatch.setenv("HL_LLM_TIMEOUT", "600")
     assert trial("openai:gpt-5", tmp_path)["ok"] is True
     assert e.requests[1]["max_tokens"] == 16384
+
+
+def test_temperature_is_sent_only_when_set_and_the_model_accepts_it(tmp_path, endpoint):
+    e = endpoint(lambda prompt: "3")
+    trace = lambda r: r["result"]["trace"][0]["temperature"]
+    r = trial("openai:gpt-5", tmp_path, temperature=0.7)
+    assert e.requests[-1]["temperature"] == 0.7 and trace(r) == 0.7
+    r = trial("openai:gpt-5", tmp_path, temperature=0.0)  # zero is a temperature, not unset
+    assert e.requests[-1]["temperature"] == 0.0 and trace(r) == 0.0
+    r = trial("openai:gpt-5", tmp_path, temperature=None)
+    assert "temperature" not in e.requests[-1] and trace(r) is None
+    # Claude Fable 5.2 returns a 400 for a temperature, under any provider's spelling of its id
+    for planner in ("anthropic:claude-fable-5-2", "openrouter:anthropic/claude-fable-5.2", "anthropic:claude-mythos-5-2"):
+        r = trial(planner, tmp_path, temperature=0.7)
+        assert r["ok"] is True and "temperature" not in e.requests[-1] and trace(r) is None, planner
+
+
+def test_the_model_table_comes_from_the_core():
+    from hlock._hlock import model_rejects
+
+    assert model_rejects("anthropic:claude-fable-5-2") == ["temperature", "top_k", "top_p"]
+    assert model_rejects("openai:gpt-5") == []
 
 
 def test_a_symlinked_parent_cant_redirect_the_reply_out_of_the_workspace(tmp_path, monkeypatch, endpoint):
