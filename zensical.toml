@@ -41,6 +41,7 @@ nav = [
       "guides/secrets.md",
       "guides/sandbox.md",
       "guides/audit.md",
+      "guides/lint.md",
       "guides/diff.md",
     ] },
     { "Optimize your harness" = [

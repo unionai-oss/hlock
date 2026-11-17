@@ -1,0 +1,273 @@
+# The rules `hlock lint` checks instruction text against: lines written for an earlier
+# model that a newer one follows too literally. Each rule:
+#
+#   id, category        what it's named by (`hlock/lint/<id>`) and grouped under
+#   severity            `warning` (fails `hlock lint --ci`) or `info`
+#   models              the target models it applies to: `*` for every model, else model
+#                       ids or families matched against the target (`fable-5-2` matches
+#                       `claude-fable-5-2` and `claude-fable-5-2-20261001`)
+#   patterns            regular expressions (case-insensitive) over a block of text: a
+#                       paragraph or list item, its wrapped lines joined. A group named
+#                       `hit` marks the part to report; else the whole match
+#   unless              regular expressions over the sentence a match is in: any match
+#                       means the line has the scope or reason the rule asks for
+#   sentence            report the whole sentence, and only when it ends its block (a
+#                       sentence followed by more in the same item explains itself)
+#   fallback            checked only where no other rule matched
+#   message, fix        what's wrong and what to do instead
+#   source              where the advice comes from
+#   examples            text the rule must flag; `counterexamples`, text it mustn't
+#
+# Text in code fences, inline code and double quotes isn't checked: that's text the
+# instructions show, not text they give.
+
+[[rule]]
+id = "think-less"
+category = "effort"
+severity = "warning"
+models = ["fable-5-2", "mythos-5-2"]
+patterns = [
+  '\b(?:answer|respond|reply)\s+(?:directly|immediately|right away|quickly)\s+without\s+(?:any\s+)?(?:deliberat\w*|thinking|reasoning|overthinking)',
+  '\bwithout\s+(?:deliberating|overthinking)\b',
+  "\\b(?:don'?t|do not|never)\\s+(?:overthink|deliberate|think\\s+(?:too\\s+)?(?:long|hard|much))",
+  '\bthink\s+less\b',
+  '\b(?:skip|avoid|minimi[sz]e)\s+(?:your\s+|any\s+)?(?:extended\s+)?(?:thinking|deliberation)\b',
+  '\b(?:keep|limit)\s+(?:your\s+)?(?:thinking|deliberation)\s+(?:short|brief|minimal|to\s+a\s+minimum)',
+]
+message = "An instruction to think less doesn't stop the model thinking at medium effort and above."
+fix = "Remove the line and lower the effort level for these turns instead."
+source = "https://platform.claude.com/docs/en/build-with-claude/prompt-engineering/prompting-claude-fable-5-2#calibrate-effort"
+examples = [
+  "Answer directly without deliberating.",
+  "For simple questions, respond immediately without thinking.",
+  "Don't overthink easy requests.",
+  "Skip extended thinking on greetings.",
+]
+counterexamples = [
+  "Think carefully about edge cases.",
+  "Run the tests directly without a wrapper script.",
+]
+
+[[rule]]
+id = "visible-reasoning"
+category = "reasoning"
+severity = "warning"
+models = ["fable-5-2", "mythos-5-2"]
+patterns = [
+  '\b(?:show|write(?:\s+out)?|output|print|include|lay\s+out|walk\s+(?:me\s+)?through)\s+(?:all\s+(?:of\s+)?)?(?:your|its)\s+(?:(?:full|complete|internal|step[- ]by[- ]step)\s+reasoning|reasoning\s+process|thought\s+process|chain[- ]of[- ]thought|thinking)\b',
+  '\bthink\s+(?:it\s+through\s+)?step[- ]by[- ]step\b',
+  '\bthink\s+(?:out\s+loud|aloud)\b',
+  '<(?:thinking|scratchpad|reasoning)>',
+]
+message = "Asking for reasoning in the response can be declined as reasoning extraction (stop_reason \"refusal\"), and the model reasons in thinking blocks anyway."
+fix = "Remove the instruction; to see how the model reasoned, set thinking display to \"summarized\" and read the thinking blocks."
+source = "https://platform.claude.com/docs/en/build-with-claude/prompt-engineering/prompting-claude-fable-5-2#safeguard-refusals"
+examples = [
+  "Think step by step and show your reasoning.",
+  "Before answering, write out your full reasoning.",
+  "Put your analysis in <scratchpad> tags first.",
+]
+counterexamples = [
+  "Explain the change in the PR description.",
+  "Show the user the plan first.",
+  "Explain your reasoning: the reasoning field says why you chose the winner.",
+]
+
+[[rule]]
+id = "standing-delegation"
+category = "delegation"
+severity = "info"
+models = ["fable-5-2", "mythos-5-2"]
+patterns = [
+  '\balways\s+(?:delegate|use\s+(?:a\s+|the\s+)?sub-?agents?|spawn\s+(?:a\s+)?(?:sub-?)?agents?)',
+  '\b(?:use|spawn|launch|dispatch|start)\s+(?:a\s+|one\s+or\s+more\s+|parallel\s+|multiple\s+|many\s+)?sub-?agents?\s+(?:for|to|whenever|on)\b',
+  '\bdelegate\s+(?:everything|all\s+\w+|any\s+\w+|every\s+\w+|each\s+\w+|as\s+much\s+as)',
+  '\bprefer\s+(?:delegating|sub-?agents?|to\s+delegate)\b',
+]
+message = "A standing instruction to delegate makes the model start subagents the task may not need, and subagents can be a large part of a session's cost."
+fix = "Remove it if the model delegates more than your tasks need; say instead when a subagent is worth its cost."
+source = "https://platform.claude.com/docs/en/build-with-claude/prompt-engineering/prompting-claude-fable-5-2#set-expectations-for-subagents"
+examples = [
+  "Always delegate research to subagents.",
+  "Use subagents for any search across the codebase.",
+  "Prefer delegating to doing work yourself.",
+]
+counterexamples = [
+  "A subagent can review the diff if the change is large.",
+]
+
+[[rule]]
+id = "token-budget-in-prompt"
+category = "budget"
+severity = "warning"
+models = ["fable-5-2", "mythos-5-2"]
+patterns = [
+  '\bbudget\s+of\s+(?:about\s+|roughly\s+|up\s+to\s+)?[\d,.]+\s*[km]?\s*tokens\b',
+  '\b[\d,.]+\s*[km]?\s+tokens?\s+(?:budget|remaining|left)\b',
+  '\byou\s+have\s+(?:about\s+|roughly\s+|up\s+to\s+)?[\d,.]+\s*[km]?\s+tokens\b',
+]
+message = "A large token budget shown in the prompt changes how much the model spends; removing it lowered cost with equal performance."
+fix = "Remove the budget from the prompt text and test your tasks without it (the API's task budgets are a separate feature)."
+source = "https://platform.claude.com/docs/en/build-with-claude/prompt-engineering/prompting-claude-fable-5-2#review-instructions-written-for-earlier-models"
+examples = [
+  "You have a budget of 200k tokens for this task.",
+  "Context: 150,000 tokens remaining.",
+]
+counterexamples = [
+  "Keep replies short to save tokens.",
+]
+
+[[rule]]
+id = "treat-answer-as-done"
+category = "self-review"
+severity = "warning"
+models = ["fable-5-2", "mythos-5-2"]
+patterns = [
+  '\btreat\s+(?:that|the|your|each|an?|any)\s+(?:earlier\s+|previous\s+|prior\s+|last\s+)?(?:answer|response|reply)\s+as\s+(?:done|final|complete|settled|closed)',
+  "\\b(?:don'?t|do\\s+not|never)\\s+(?:revisit|reconsider|re-?examine|second-guess|go\\s+back\\s+(?:over|to))\\s+(?:your\\s+|any\\s+)?(?:earlier|previous|prior)\\s+(?:answers?|responses?|replies|turns?)",
+  '\bfocus\s+(?:your\s+)?thinking\s+(?:only\s+)?on\s+the\s+(?:new|latest|current|most\s+recent)\s+message',
+]
+message = "Lines that treat earlier answers as done make the model far less likely to point out its own mistakes."
+fix = "Remove them where you want the model to keep re-examining its earlier answers."
+source = "https://platform.claude.com/docs/en/build-with-claude/prompt-engineering/prompting-claude-fable-5-2#review-instructions-written-for-earlier-models"
+examples = [
+  "Treat that answer as done and focus your thinking on the new message.",
+  "Do not revisit your earlier answers.",
+]
+counterexamples = [
+  "Revisit the plan if the tests fail.",
+]
+
+[[rule]]
+id = "stale-caution"
+category = "caution"
+severity = "warning"
+models = ["fable-5-2", "mythos-5-2"]
+patterns = [
+  "\\b(?:never|don'?t|do\\s+not)\\s+(?:ever\\s+)?retry(?:\\s+(?:it|them|anything|on\\s+failure|(?:a\\s+|any\\s+)?failed\\s+\\w+))?\\s*(?:[.!;,)*]|$)",
+  '\bstop\s+(?:and\s+(?:review|ask|wait|report)\s+)?(?:at|on|after)\s+the\s+first\s+(?:error|failure|problem|warning)',
+]
+# a caution with its case named is scoped already
+unless = ['\b(?:if|when|whenever|unless|while|until|after|before|because|since)\b']
+message = "An old caution like this keeps being followed after its reason is gone, and can block autonomous work."
+fix = "Delete it if its reason no longer holds, or narrow it to the case it was written for."
+source = "https://platform.claude.com/docs/en/build-with-claude/prompt-engineering/prompting-claude-fable-5-2#keep-caution-from-piling-up"
+examples = [
+  "Never retry a failed command.",
+  "Stop and review at the first error.",
+  "- NEVER retry",
+]
+counterexamples = [
+  "Retry a flaky request once before reporting it.",
+  "Do not retry while the created app remains ambiguous.",
+  "Do not retry automatically.",
+  "Report it and never retry the delete.",
+  "If it prints refused lines, relay them as printed, never retry.",
+]
+
+[[rule]]
+id = "hard-style-limit"
+category = "style"
+severity = "info"
+models = ["fable-5-2", "mythos-5-2"]
+patterns = [
+  '\b(?:one|a\s+single)\s+(?:instruction|idea|point|thought|clause)\s+per\s+sentence\b',
+  '\bsentences?\s+(?:of|in|under|at\s+most|no\s+(?:longer|more)\s+than|shorter\s+than)\s+\d+\s+words\b',
+  '\b(?:each|every)\s+sentence\b[^.\n]*?\b\d+\s+words\b',
+  '\bin\s+\d+\s+words\s+or\s+(?:fewer|less)\b',
+]
+message = "The model follows hard style limits closely, and a sentence-length cap can make its prose choppy."
+fix = "Remove the limits you no longer need; describe the reader and the tone you want instead."
+source = "https://platform.claude.com/docs/en/build-with-claude/prompt-engineering/prompting-claude-fable-5-2#review-instructions-written-for-earlier-models"
+examples = [
+  "Write one instruction per sentence, in 20 words or fewer.",
+  "Keep every sentence under 15 words.",
+]
+counterexamples = [
+  "Keep the PR title under 70 characters.",
+  "Summarize the change in a sentence or two.",
+]
+
+[[rule]]
+id = "routine-approval"
+category = "approvals"
+severity = "info"
+models = ["fable-5-2", "mythos-5-2"]
+patterns = [
+  '\b(?:approval|confirmation|permission|confirm|approve)\b[^.\n]{0,60}?\b(?:before|for|to)\s+(?:sending|posting|messaging|contacting|replying|commenting|emailing|reading|searching|listing|opening|viewing|running\s+tests|any\s+(?:action|step|tool\s+call|message)|(?:every|each)\s+(?:action|step|tool\s+call|message))',
+  '\bmessages?\s+to\s+(?:people|anyone|someone|users?)\s+outside\b',
+]
+message = "Gating routine steps on approval makes the model hold back routine work: listing outside messages as needing approval held back about half of its routine requests."
+fix = "Name only the risky or irreversible actions that need approval, and list the routine steps it can take on its own."
+source = "https://platform.claude.com/docs/en/build-with-claude/prompt-engineering/prompting-claude-fable-5-2#approvals"
+examples = [
+  "Ask for approval before sending messages to people outside this conversation.",
+  "Get the user's confirmation before every tool call.",
+]
+counterexamples = [
+  "Ask for approval before deleting files.",
+  "Confirm before force-pushing to a shared branch.",
+  "Confirm with the user before running any `create` command.",
+  "Mark APPROVE OR REJECT for each normalization.",
+]
+
+[[rule]]
+id = "ownership-framing"
+category = "scope"
+severity = "info"
+models = ["fable-5-2", "mythos-5-2"]
+patterns = [
+  "\\byou\\s+(?:are|'re)\\s+the\\s+(?:owner|long-term\\s+maintainer|maintainer)\\s+(?:and\\s+(?:long-term\\s+)?maintainer\\s+)?of\\s+(?:this|the)\\s+(?:codebase|code\\s+base|repo|repository|project)",
+  '\b(?:its|the)\s+design\s+is\s+up\s+to\s+you\b',
+]
+message = "Telling the model the code is its own makes it restructure as it works: output tokens rose 70-80% and it made changes nobody asked for. A rule that limits scope doesn't cancel it."
+fix = "Keep it only where you want consolidation and related fixes; leave it out where the user owns the code and wants minimal changes."
+source = "https://platform.claude.com/docs/en/build-with-claude/prompt-engineering/prompting-claude-fable-5-2#say-who-owns-the-code"
+examples = [
+  "You are the owner and long-term maintainer of this codebase, and its design is up to you.",
+]
+counterexamples = [
+  "The user owns this repository; keep changes small.",
+]
+
+[[rule]]
+id = "unscoped-absolute"
+category = "absolute"
+severity = "info"
+models = ["*"]
+sentence = true
+fallback = true
+patterns = [
+  # at the start of a sentence, list item or heading, maybe in bold or italics
+  '(?:^|[.!?:]\s+)(?:(?:[-*+]|\d+[.)])\s+|>\s*|#+\s+)*(?:\*\*|__|\*|_)?(?P<hit>never|always)\b',
+  '\b(?:you|agents?|claude|the\s+(?:agent|model|assistant))\s+(?:must|should|shall)\s+(?P<hit>never|always)\b',
+  '(?:^|[.!?:]\s+)(?:(?:[-*+]|\d+[.)])\s+)?(?:\*\*|__)?(?P<hit>under\s+no\s+circumstances|do\s+not\s+ever)\b',
+]
+unless = [
+  "\\b(?:because|since|unless|except|when|whenever|where|wherever|before|after|if|until|while|otherwise|instead|only|without|due\\s+to|in\\s+order\\s+to|so\\s+that)\\b",
+  '\bso\s+(?:it|they|we|you|the|that|this)\b',
+  '\bto\s+(?:avoid|keep|prevent|protect|ensure|make\s+sure|stop)\b',
+  '\bas\s+(?:it|they|this|that|these|those)\b',
+  '\bfor\s+(?:security|safety|privacy|compliance|legal)\b',
+  ',\s+(?:these|this|that|it|they|which|even)\b',
+  '[(;:—–]|\s-\s|--',
+]
+message = "The model treats \"never\" and \"always\" as absolute; a rule without its scope or reason is followed even where it no longer applies."
+fix = "Say when it applies and why (\"ask for approval before deleting files\" rather than \"never delete files\"), or delete it if its reason is gone."
+source = "https://platform.claude.com/docs/en/build-with-claude/prompt-engineering/prompting-claude-fable-5-2#keep-caution-from-piling-up"
+examples = [
+  "Never delete files.",
+  "- **Always** run the full test suite.",
+  "Run the linter. Never push to main.",
+  "You must never edit the lockfile.",
+]
+counterexamples = [
+  "Never delete files without asking first.",
+  "Always run the tests before you push.",
+  "Never commit secrets: they end up in the history.",
+  "- **Never put secret values in files.** Locks hold placeholders.",
+  "The lock never holds a value.",
+  "hlock never starts an app.",
+  "Use `never` as the value.",
+  "Never rely on the title alone, these are the fields most likely to collide.",
+]
