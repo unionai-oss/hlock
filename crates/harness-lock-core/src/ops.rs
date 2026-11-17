@@ -328,6 +328,9 @@ pub struct TuneConfig {
     pub alpha: f64,
     /// How much more per task an accepted candidate may cost (0.25 = 25%).
     pub max_cost_increase: f64,
+    /// How the acceptance check judges the candidate ([`crate::optimize::ACCEPT_MODES`]):
+    /// `better` by default, `no-worse` by default for the `ablate` optimizer.
+    pub accept: String,
 }
 
 impl TuneConfig {
@@ -341,8 +344,17 @@ impl TuneConfig {
         }
         let budget = t.get("budget");
         let num = |k: &str| t.get(k).and_then(serde_json::Value::as_f64);
+        let optimizer = spec.optimizer.clone().or_else(|| t.get("optimizer").and_then(|v| v.as_str()).map(str::to_string)).unwrap_or_else(|| "hlock".into());
+        let accept = match t.get("accept") {
+            None => if optimizer == "ablate" { "no-worse" } else { "better" }.to_string(),
+            Some(v) => match v.as_str().filter(|a| crate::optimize::ACCEPT_MODES.contains(a)) {
+                Some(a) => a.to_string(),
+                None => return Err(Error::Tuning(format!("[tune] accept: {v} isn't a mode (use \"better\" or \"no-worse\")"))),
+            },
+        };
         Ok(TuneConfig {
-            optimizer: spec.optimizer.clone().or_else(|| t.get("optimizer").and_then(|v| v.as_str()).map(str::to_string)).unwrap_or_else(|| "hlock".into()),
+            optimizer,
+            accept,
             edit,
             proposer: t.get("proposer").and_then(|v| v.as_str()).map(str::to_string),
             budget: crate::optimize::Budget {
@@ -557,15 +569,10 @@ fn optimize_stage(
     let losses = test.iter().filter(|t| c[&t.id] < b[&t.id]).count();
     let p = opt::sign_test(wins, losses);
     let (bsr, csr) = (b.values().sum::<f64>() / b.len().max(1) as f64, c.values().sum::<f64>() / c.len().max(1) as f64);
-    let reason = if csr - bsr <= noise {
-        Some(format!("success {csr:.2} vs {bsr:.2} isn't above the noise band ({noise:.2})"))
-    } else if p > cfg.alpha {
-        Some(format!("the gain isn't significant: p = {p:.3} > {} ({wins} tasks better, {losses} worse)", cfg.alpha))
-    } else if b_cost > 0.0 && c_cost > b_cost * (1.0 + cfg.max_cost_increase) {
-        Some(format!("cost per trial rose from ${b_cost:.4} to ${c_cost:.4}, more than {:.0}%", cfg.max_cost_increase * 100.0))
-    } else {
-        None
-    };
+    let bytes = |m: fn(&opt::Change) -> &BTreeMap<String, Vec<u8>>| changes.iter().map(|ch| m(ch).values().map(Vec::len).sum::<usize>()).sum::<usize>();
+    let (b_bytes, c_bytes) = (bytes(|ch| &ch.before), bytes(|ch| &ch.after));
+    let measured = opt::Measured { base: bsr, candidate: csr, noise, wins, losses, base_cost: b_cost, candidate_cost: c_cost, base_bytes: b_bytes, candidate_bytes: c_bytes };
+    let reason = opt::judge(&cfg.accept, &measured, cfg.alpha, cfg.max_cost_increase);
     let mut acceptance = serde_json::json!({
         "accepted": reason.is_none(),
         "noise-band": round6(noise),
@@ -573,6 +580,12 @@ fn optimize_stage(
         "cost-usd-per-trial": {"base": round6(b_cost), "candidate": round6(c_cost)},
         "runs": n * 2,
     });
+    if cfg.accept != "better" {
+        // what a no-worse verdict rests on: the text it saves, and the chance it's worse
+        acceptance["mode"] = serde_json::json!(cfg.accept);
+        acceptance["size-bytes"] = serde_json::json!({"base": b_bytes, "candidate": c_bytes});
+        acceptance["test"]["p-worse"] = serde_json::json!(round6(opt::sign_test(losses, wins)));
+    }
     if let Some(why) = &reason {
         acceptance["reason"] = serde_json::json!(why);
         note(format!("hlock didn't accept the {} optimizer's edits: {why}", cfg.optimizer));

@@ -75,6 +75,7 @@ optimizer = "hlock"              # what searches: the built-in one, harness2, or
 proposer = "anthropic:opus"      # the model that drafts edits (optional for the built-in one)
 trials = 1                       # trials per task, in each evaluation
 alpha = 0.2                      # the significance level edits must reach
+accept = "better"                # or "no-worse": also take smaller text that isn't worse
 budget = { rollouts = 100 }      # the most trials the optimizer may run (default 100); usd too
 ```
 
@@ -122,6 +123,11 @@ How it works:
    on the test split, paired. It accepts the edits only when the candidate's success rate
    beats the lock's by more than the noise band, a sign test over the tasks gives p ≤ `alpha`
    (default 0.05), and cost per trial rose no more than `max-cost-increase` (default 25%).
+   With `accept = "no-worse"`, a candidate whose edited files are smaller than the lock's
+   passes when its success rate is no lower than the lock's minus the noise band, the sign
+   test the other way round (is it worse?) gives p > `alpha`, and cost per trial stays within
+   the same limit. A candidate that isn't smaller is still checked as above. See
+   [Delete first](#delete-first-ablate).
 6. **The result.** Accepted edits are written under `.hlock/tuned/<digest>/`, the tune lock's
    `[[instructions]]` and `[[skill]]` entries point at them, and the grid that follows runs
    with them. Rejected or not, `[tune.optimizer]` and `[tune.acceptance]` record what ran and
@@ -190,6 +196,110 @@ guidance from the failures and the graders' feedback. It reruns the same tasks, 
 edit when it does better there and no worse on dev. The lines it may add per step decay from
 3 to 1. Without a `proposer` (or without `HL_LLM_BASE_URL`), it tries a fixed list of general
 guidance instead. It's small on purpose: a better optimizer is [one of your own](optimizers.md#write-an-optimizer).
+
+### Delete first: ablate
+
+Anthropic's [Prompting Claude Fable 5.2](https://platform.claude.com/docs/en/build-with-claude/prompt-engineering/prompting-claude-fable-5-2)
+guide finds that the biggest wins in moving a harness to a newer model come from deleting
+text written for an earlier one: lines telling it to think less, requests for visible
+reasoning, token budgets, standing delegation, stale cautions. Guidance comes after that, one
+change at a time, each measured. `optimizer = "ablate"` does the deleting. It runs
+[`hlock lint`](lint.md) over the editable instruction files, skills and subagents for the
+target model, and tries deleting the lines of one finding at a time, warnings before info.
+It keeps a deletion when the candidate's success rate on train and on dev stays within the
+noise band of the lock's own text, then tries the next deletion on top of it. Each step is
+compared with the lock's text, not with the step before, so small dips can't add up. It
+stops when no findings are left or the budget runs out.
+
+Deleting text that doesn't help is the point, so ablate's result has to hold, not win. For
+this optimizer `accept` defaults to `"no-worse"` (see [the checks](#tune-the-harness-text)):
+on the held-out tasks the smaller text must not fall below the lock's success rate by more
+than the noise band, and must not lose significantly. The default gate for other optimizers
+is unchanged.
+
+```toml title="harness.toml"
+[tune]
+optimizer = "ablate"
+edit = ["instructions"]
+trials = 1
+
+[optimizers.ablate]
+options = { model = "claude-fable-5-2" }
+```
+
+Here the project's `AGENTS.md` has four lines, and its model passes the tasks only when told to
+"Check your result". Lint flags three of the lines for Fable 5.2: ablate deletes two of them
+and keeps the one the model needs.
+
+```console
+$ hlock tune --backend local --depth prompt --max-trials 2
+! eval pack ./evals has 1 problem(s); run `hlock evals check ./evals`
+! --data user found no traces, so there's no data to tune on
+! the pack holds out 3 tasks: a gain measured on fewer than 20 is unlikely to be real
+! --max-trials 2 cut the grid; configurations were measured round-robin
+✓ wrote harness.tune.lock
+╭─ ⚙ tune ─────────────────────────────────────────────────────────────────────────────────────────╮
+│                                                                                                  │
+│  depth      prompt                                                                               │
+│  backend    local                                                                                │
+│  data       user-traces                                                                          │
+│  grid       2 configurations                                                                     │
+│  stages     data ✗ 0 rows  ·  optimize ✓  ·  hpo ✓                                               │
+│  optimizer  ablate on local  1 edit accepted  holdout: 100% → 100% on 3 tasks, p(worse) = 1.0,   │
+│             text 121 → 38 bytes                                                                  │
+│                                                                                                  │
+│  Best configuration                                                                              │
+│  model                 reference:qwen-7b                                                         │
+│  retries               0                                                                         │
+│  temperature           0.2                                                                       │
+│  tool timeout seconds  120                                                                       │
+│                                                                                                  │
+│  success rate  100%  →  100%   +0%   (baseline: the lock's own configuration, measured)          │
+│                                                                                                  │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+next → hlock tune apply
+```
+
+```toml title="harness.tune.lock"
+[tune.acceptance]
+accepted = true
+mode = "no-worse"
+noise-band = 0.0
+runs = 6
+
+[tune.acceptance.size-bytes]
+base = 121
+candidate = 38
+
+[tune.acceptance.test]
+base = 1.0
+better = 0
+candidate = 1.0
+p = 1.0
+p-worse = 1.0
+split = "holdout"
+tasks = 3
+trials = 1
+worse = 0
+
+[[tune.edit]]
+component = "instructions/AGENTS.md"
+rationale = "deleted 2 lines hlock lint flagged for claude-fable-5-2 (visible-reasoning, standing-delegation); each held within the noise band on train and dev"
+```
+
+`size-bytes` is the edited files before and after, and `p-worse` the sign test for "the
+candidate is worse". A test like this one can't show much: with a handful of held-out tasks,
+a real loss can hide inside p > `alpha`. The noise band check is what catches a drop there,
+so run enough held-out tasks and `trials` for the band to mean something.
+
+| Option | Default | |
+|---|---|---|
+| `model` | the lock's task model | The model to lint for, as `hlock lint --model` takes it |
+| `severities` | `["warning", "info"]` | The finding severities to try, in this order |
+| `rules` | every rule for the model | Only these [rule ids](lint.md) |
+
+To add guidance after the deletions, apply the result (`hlock tune apply`) and tune again
+with `optimizer = "hlock"`. ablate doesn't chain into another optimizer in one run.
 
 ### Harness²
 

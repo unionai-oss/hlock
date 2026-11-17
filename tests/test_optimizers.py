@@ -109,7 +109,7 @@ def test_the_optimizer_commands(project, monkeypatch):  # noqa: F811
     flat = lambda r: " ".join(r.output.split())
     r = CliRunner().invoke(main, ["optimizer", "list"])
     assert r.exit_code == 0, r.output
-    assert "hlock built in" in flat(r) and "harness2 built in" in flat(r)
+    assert "hlock built in" in flat(r) and "harness2 built in" in flat(r) and "ablate built in" in flat(r)
     r = CliRunner().invoke(main, ["optimizer", "status"])
     assert r.exit_code == 0, r.output
     assert "optimizer hlock (from harness.toml)" in flat(r) and "about hlock's built-in reflective loop" in flat(r)

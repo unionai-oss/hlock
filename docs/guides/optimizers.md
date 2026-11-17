@@ -5,7 +5,7 @@
 | | Optimizer | [Backend](backends.md) |
 |---|---|---|
 | Decides | What searches for edits | Where the work runs |
-| Built in | `hlock` (default), `harness2` | `offline`, `local`, `flyte` |
+| Built in | `hlock` (default), `harness2`, `ablate` | `offline`, `local`, `flyte` |
 | Select with | `[tune] optimizer`, `--optimizer` | `[backend] target`, `--backend` |
 | Configure in | `[optimizers.<name>] options` | `[backends.<name>] options` |
 | Inspect with | `hlock optimizer list`, `hlock optimizer status` | `hlock backend list`, `hlock backend status` |
@@ -47,7 +47,7 @@ search ran, and `provenance` where the trials ran. `hlock tune` shows it as
 
 `hlock` looks a name up in this order:
 
-1. Built in: `hlock`, `harness2`. Their tables take only `options`.
+1. Built in: `hlock`, `harness2`, `ablate`. Their tables take only `options`.
 2. `[optimizers.<name>]` with `python = "module:attr"` or `command = [...]`.
 3. An `hlock-optimizer-<name>` executable on `PATH`.
 4. A Python package's `hlock.optimizers` entry point.
@@ -57,6 +57,7 @@ $ hlock optimizer list
 optimizer    found
 hlock        built in
 harness2     built in
+ablate       built in
 mine         harness.toml: Python object mine_opt:Mine
 ```
 
@@ -138,7 +139,9 @@ A package registers it instead under the `hlock.optimizers` entry point group. R
 `session.evaluate` raises `ValueError` for a candidate that changes what `bundle.json` doesn't
 allow, a task outside the split, or the test split, and `BudgetExhausted` once the budget is
 spent. Whatever the optimizer returns, hlock checks it again before accepting it (see
-[Tuning](tune.md#tune-the-harness-text)).
+[Tuning](tune.md#tune-the-harness-text)). An optimizer that shortens the text rather than
+improving it needs `[tune] accept = "no-worse"`, as [`ablate`](tune.md#delete-first-ablate)
+uses; under the default, a candidate must beat the lock.
 
 ### As a command
 

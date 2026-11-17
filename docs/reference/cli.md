@@ -970,7 +970,7 @@ hlock tune [--depth LEVEL] [--data SOURCE] [OPTIONS]
 | `--max-trials N` | | Cap the grid's trials in total, spread round-robin across the configurations |
 | `--backend` | manifest `[backend] target` | Where the work runs: `offline`, `local`, `flyte`, or a [custom backend](../guides/backends.md#write-your-own-backend) |
 | `--workdir DIR` | `.hlock` | Where trial artifacts go |
-| `--optimizer NAME` | `[tune] optimizer` | What searches for edits: `hlock`, `harness2`, or an [optimizer of your own](../guides/optimizers.md) |
+| `--optimizer NAME` | `[tune] optimizer` | What searches for edits: `hlock`, `harness2`, `ablate`, or an [optimizer of your own](../guides/optimizers.md) |
 | `--edit KINDS` | `[tune] edit` | What the optimizer may change: `instructions`, `skill`, comma-separated |
 | `--budget-rollouts N`, `--budget-usd X` | `[tune.budget]` | The optimizer's budget |
 | `-d`, `--detach` | | Run in the background as a tune job; can't be combined with `--apply` |

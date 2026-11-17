@@ -44,7 +44,8 @@ __all__ = ["BUILTIN", "GROUP", "Optimizer", "OptimizerError", "available", "load
 #: The entry point group Python optimizers register under.
 GROUP = "hlock.optimizers"
 #: The built-in optimizers.
-BUILTIN = {"hlock": "hlock.optimizers.hlock:HlockOptimizer", "harness2": "hlock.optimizers.harness2:Harness2Optimizer"}
+BUILTIN = {"hlock": "hlock.optimizers.hlock:HlockOptimizer", "harness2": "hlock.optimizers.harness2:Harness2Optimizer",
+           "ablate": "hlock.optimizers.ablate:AblateOptimizer"}
 
 
 class OptimizerError(BackendError):
