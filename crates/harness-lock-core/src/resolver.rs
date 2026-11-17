@@ -178,7 +178,7 @@ impl Resolver {
         let specs = self.manifest.deciders()?;
 
         let mut stacks = Vec::new();
-        for llm in &llm_combos {
+        for (llm, effort) in &llm_combos {
             for decision in &decisions {
                 for (harness, pattern) in &harnesses {
                   for deciders in self.decider_combos(&specs, harness) {
@@ -195,6 +195,7 @@ impl Resolver {
                         retries: policy_axis(&self.manifest.candidates.policy, "retries", 0),
                         temperature: policy_axis_float(&self.manifest.candidates.policy, "temperature"),
                         tool_timeout_seconds: None,
+                        effort: effort.clone(),
                         deciders,
                         overlay: None,
                     });
@@ -204,7 +205,7 @@ impl Resolver {
         }
         if stacks.len() > MAX_STACKS {
             return Err(Error::Manifest(format!(
-                "the candidates make {} stacks, more than the {MAX_STACKS} hlock searches; narrow [candidates] (fewer models, decisions, harnesses or deciders)",
+                "the candidates make {} stacks, more than the {MAX_STACKS} hlock searches; narrow [candidates] (fewer models, efforts, decisions, harnesses or deciders)",
                 stacks.len()
             )));
         }
@@ -738,6 +739,7 @@ impl Resolver {
                     model,
                     resolved_from: Some(spec.clone()),
                     params: BTreeMap::new(),
+                    effort: s.effort.get(role).cloned(),
                     fingerprint: Some(format!("sha256:{}", crate::hash::sha256_hex(spec.as_bytes()))),
                     ..Default::default()
                 }
@@ -971,14 +973,18 @@ fn roundf(v: f64) -> f64 {
     (v * 1e4).round() / 1e4
 }
 
-fn llm_combos(cands: &BTreeMap<String, crate::manifest::LLMCandidate>) -> Vec<BTreeMap<String, String>> {
+/// Every combination of the roles' candidate models, each at each of its `effort` levels:
+/// (role -> model, role -> effort).
+type LlmCombo = (BTreeMap<String, String>, BTreeMap<String, String>);
+
+fn llm_combos(cands: &BTreeMap<String, crate::manifest::LLMCandidate>) -> Vec<LlmCombo> {
     if cands.is_empty() {
         let mut m = BTreeMap::new();
         m.insert("planner".to_string(), "reference:qwen-7b".to_string());
-        return vec![m];
+        return vec![(m, BTreeMap::new())];
     }
     let roles: Vec<String> = cands.keys().cloned().collect();
-    let mut per_role: Vec<Vec<(String, String)>> = Vec::new();
+    let mut per_role: Vec<Vec<(String, String, Option<String>)>> = Vec::new();
     for role in &roles {
         let opts = cands.get(role).map(|c| c.any_of.clone()).unwrap_or_default();
         let opts = if opts.is_empty() {
@@ -986,16 +992,23 @@ fn llm_combos(cands: &BTreeMap<String, crate::manifest::LLMCandidate>) -> Vec<BT
         } else {
             opts
         };
-        per_role.push(opts.into_iter().map(|o| (role.clone(), o)).collect());
+        let efforts: Vec<Option<String>> = match cands.get(role).map(|c| c.effort.clone()).unwrap_or_default() {
+            e if e.is_empty() => vec![None],
+            e => e.into_iter().map(Some).collect(),
+        };
+        per_role.push(opts.into_iter().flat_map(|o| efforts.iter().map(move |e| (role.clone(), o.clone(), e.clone()))).collect());
     }
     // cartesian product
-    let mut combos: Vec<BTreeMap<String, String>> = vec![BTreeMap::new()];
+    let mut combos: Vec<LlmCombo> = vec![(BTreeMap::new(), BTreeMap::new())];
     for options in per_role {
         let mut next = Vec::new();
         for c in &combos {
-            for (role, model) in &options {
+            for (role, model, effort) in &options {
                 let mut cc = c.clone();
-                cc.insert(role.clone(), model.clone());
+                cc.0.insert(role.clone(), model.clone());
+                if let Some(e) = effort {
+                    cc.1.insert(role.clone(), e.clone());
+                }
                 next.push(cc);
             }
         }

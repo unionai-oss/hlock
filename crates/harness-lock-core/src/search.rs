@@ -27,6 +27,8 @@ pub struct Stack {
     pub temperature: Option<f64>,
     /// Per-step tool timeout in seconds (an HPO axis at deeper depths).
     pub tool_timeout_seconds: Option<u64>,
+    /// Reasoning effort, by role (`planner` → `high`); a role without one sends none.
+    pub effort: BTreeMap<String, String>,
     /// Decision models, by use (`approve` → `ollama:kev:4b`).
     pub deciders: BTreeMap<String, String>,
     /// Instruction files and skills a tune candidate puts in place of the lock's.
@@ -57,6 +59,7 @@ impl Default for Stack {
             retries: 0,
             temperature: None,
             tool_timeout_seconds: None,
+            effort: BTreeMap::new(),
             deciders: BTreeMap::new(),
             overlay: None,
         }
@@ -65,7 +68,10 @@ impl Default for Stack {
 
 impl Stack {
     pub fn label(&self) -> String {
-        let llm = self.llm.values().cloned().collect::<Vec<_>>().join("+");
+        let llm = self.llm.iter().map(|(role, m)| match self.effort.get(role) {
+            Some(e) => format!("{m}@{e}"),
+            None => m.clone(),
+        }).collect::<Vec<_>>().join("+");
         format!("{}/{}/d={}", self.harness, llm, self.decision)
     }
 
@@ -85,6 +91,9 @@ impl Stack {
         });
         if !self.deciders.is_empty() {
             v["deciders"] = json!(self.deciders); // only when set, so other stacks keep their hashes
+        }
+        if !self.effort.is_empty() {
+            v["effort"] = json!(self.effort); // likewise
         }
         if let Some(o) = &self.overlay {
             v["overlay"] = json!(o.digest);

@@ -351,10 +351,13 @@ def _lock_panel(lf, title: str | None = None) -> Panel:
     stack = _kv_table()
     version = f" [muted]{lf.harness_version}[/]" if lf.harness_version else ""
     stack.add_row("harness", f"[bold]{lf.harness}[/]{version}")
+    full = json.loads(lf.to_json())
+    efforts = {x["role"]: x.get("effort") for x in full.get("llm") or []}
     for role, spec in json.loads(lf.llm):
-        stack.add_row(f"llm · {role}", f"[bold]{spec}[/]")
+        effort = f"  [muted]effort {efforts[role]}[/]" if efforts.get(role) else ""
+        stack.add_row(f"llm · {role}", f"[bold]{spec}[/]{effort}")
     stack.add_row("decision", lf.decision)
-    for d in json.loads(lf.to_json()).get("decider") or []:
+    for d in full.get("decider") or []:
         stack.add_row(f"decider · {d['use']}", _decider_cell(d))
     stack.add_row("backend", lf.provenance)
 
@@ -425,6 +428,8 @@ def _pin_panel(lock: dict, title: str | None = None) -> Panel:
     for llm in lock.get("llm") or []:
         where = f"  [muted]via {llm['runtime']}[/]" if llm.get("runtime") else (
             f"  [muted]{llm['endpoint']}[/]" if llm.get("endpoint") else "")
+        if llm.get("effort"):
+            where += f"  [muted]effort {llm['effort']}[/]"
         t.add_row(f"llm · {llm['role']}", f"[bold]{llm['provider']}:{llm['model']}[/]{where}")
     for rt in lock.get("runtime") or []:
         models = rt.get("model") or []
@@ -3714,8 +3719,9 @@ def tune(ctx: click.Context, depth: str, data: str, harness: str | None, out: st
 
     Tune starts from [path]harness.lock[/]'s stack (its harness, models, skills and config)
     and varies retries, temperature and, with several [key]\\[candidates.llm.planner][/], the
-    model. It measures the lock's own configuration first, as the baseline. Adopt the
-    result with [cmd]hlock tune apply[/].
+    model, and with several of its [key]effort[/] levels, the reasoning effort. It measures
+    the lock's own configuration first, as the baseline. Adopt the result with
+    [cmd]hlock tune apply[/].
 
     With [cmd]--depth prompt[/] or [key]\\[tune] edit[/], an optimizer edits the lock's
     instruction files (and skills, with [cmd]--edit instructions,skill[/]), and hlock keeps the

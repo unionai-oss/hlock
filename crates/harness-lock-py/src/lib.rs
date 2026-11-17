@@ -311,7 +311,7 @@ fn to_core_manifest(name: &str, sp: &PySearchSpace) -> core::Manifest {
     candidates.llm = sp
         .llm
         .iter()
-        .map(|(k, v)| (k.clone(), core::manifest::LLMCandidate { any_of: v.clone() }))
+        .map(|(k, v)| (k.clone(), core::manifest::LLMCandidate { any_of: v.clone(), ..Default::default() }))
         .collect();
     candidates.decision = sp.decision.clone();
     candidates.harness = sp

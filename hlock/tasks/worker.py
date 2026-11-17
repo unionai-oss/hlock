@@ -84,12 +84,13 @@ def _out_of_tokens(got: dict) -> bool:
 
 
 def _complete(model: str, prompt: str, temperature: float = 0.2, max_tokens: int | None = None,
-              provider: str = "reference", system: str = "") -> dict:
+              provider: str = "reference", system: str = "", effort: str | None = None) -> dict:
     """One OpenAI-compatible chat completion against `HL_LLM_BASE_URL`, up to `max_tokens`
     (default `HL_LLM_MAX_TOKENS`). Raises on any failure. The cost is what the endpoint
     reports (`usage.cost`, as OpenRouter's does), else None: unknown, never a made-up 0.
     `finish_reason` is the endpoint's, and `usage.reasoning_tokens` the thinking it counted
-    (`completion_tokens_details.reasoning_tokens`), else None."""
+    (`completion_tokens_details.reasoning_tokens`), else None. `effort` (the stack's
+    reasoning effort) is sent as `reasoning_effort` only when set."""
     import urllib.request
 
     if max_tokens is None:
@@ -97,15 +98,16 @@ def _complete(model: str, prompt: str, temperature: float = 0.2, max_tokens: int
 
     base = os.environ.get("HL_LLM_BASE_URL", "").rstrip("/")
     key = os.environ.get("HL_LLM_API_KEY", "")
-    body = json.dumps(
-        {
-            "model": _served_model(model, provider),
-            "messages": ([{"role": "system", "content": system}] if system else [])
-            + [{"role": "user", "content": prompt}],
-            "max_tokens": max_tokens,
-            "temperature": temperature,
-        }
-    ).encode()
+    payload = {
+        "model": _served_model(model, provider),
+        "messages": ([{"role": "system", "content": system}] if system else [])
+        + [{"role": "user", "content": prompt}],
+        "max_tokens": max_tokens,
+        "temperature": temperature,
+    }
+    if effort:
+        payload["reasoning_effort"] = effort
+    body = json.dumps(payload).encode()
     headers = {"Content-Type": "application/json"}
     if key:
         headers["Authorization"] = f"Bearer {key}"
@@ -258,6 +260,8 @@ def llm_run_trial(req: dict) -> dict:
         provider, model = "reference", model_spec
     temperature = float(stack.get("temperature") or 0.2)
     tool_timeout = float(stack.get("tool_timeout_seconds") or 120.0)
+    # the planner's reasoning effort, when the stack sets one (never a default)
+    effort = (stack.get("effort") or {}).get("planner") or None
     seed = int(req.get("seed", 0))
     task = req.get("task") or {}
     prompt = task.get("prompt_text") or "solve the task"
@@ -284,7 +288,10 @@ def llm_run_trial(req: dict) -> dict:
         + f"Reply with only the full contents of `{name}`, and nothing else."
     )
     try:
-        r = _complete(model, composed, temperature, provider=provider, system=system)
+        # a reasoning model spends its thinking from this budget too
+        max_tokens = int(os.environ.get("HL_LLM_MAX_TOKENS") or 4096)
+        r = _complete(model, composed, temperature, max_tokens=max_tokens, provider=provider, system=system,
+                      effort=effort)
     except Exception as exc:  # noqa: BLE001 - the trial fails, and says why
         return {"error": f"the model endpoint failed for {model_spec}: {exc}"}
     out.parent.mkdir(parents=True, exist_ok=True)
@@ -303,6 +310,8 @@ def llm_run_trial(req: dict) -> dict:
         "finish_reason": r["finish_reason"],
         "wrote": name,
     }
+    if effort:
+        event["effort"] = effort
     return {
         "result": {
             "success": True,

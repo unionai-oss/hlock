@@ -2931,6 +2931,9 @@ pub(crate) fn lock_stack(lock: &Lockfile) -> crate::search::Stack {
     let mut s = crate::search::Stack::default();
     for l in &lock.llm {
         s.llm.insert(l.role.clone(), format!("{}:{}", l.provider, l.model));
+        if let Some(e) = &l.effort {
+            s.effort.insert(l.role.clone(), e.clone());
+        }
     }
     if s.llm.is_empty() {
         s.llm.insert("planner".into(), "reference:qwen-7b".into());

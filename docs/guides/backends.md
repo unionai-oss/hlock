@@ -97,7 +97,9 @@ runs on this machine, in the interpreter named by `HL_PYTHON`.
     `gpt-5`. `HL_LLM_MODEL` stands in only for `reference:…` candidates. Without
     `HL_LLM_BASE_URL`, `reference:…` candidates run on the deterministic offline
     reference, and any other candidate fails before it runs: "the local backend needs a
-    model endpoint for openai:gpt-5: set HL_LLM_BASE_URL (see Backends)".
+    model endpoint for openai:gpt-5: set HL_LLM_BASE_URL (see Backends)". A candidate
+    with a [reasoning effort](tune.md#reasoning-effort) sends it as `reasoning_effort`;
+    one without sends none, and the endpoint uses the model's default.
 
 3.  Install the libraries for the stages you'll use:
 
