@@ -921,7 +921,7 @@ hlock upgrade dep:NAME [--eval [-y]] [--apply]
 | `--all` | Consider every upgradeable component |
 | `--to TARGET` | Upgrade to a specific model/version |
 | `--apply` | Perform the upgrade. Without it, only print the plan. |
-| `--force` | Keep the upgrade even if the success rate drops |
+| `--force` | Keep the upgrade even if the success rate drops, or it costs more than `[gate]` allows |
 | `--rollback` | Restore `harness.lock` from `harness.lock.prev` |
 | `--workdir DIR` | Where trial artifacts go |
 | `--eval` | With `dep:NAME`, measure the new version on the eval pack first, then ask before applying (`-y` applies without asking) |

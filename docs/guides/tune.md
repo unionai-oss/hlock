@@ -29,6 +29,7 @@ $ hlock tune --depth hpo
 │  tool timeout seconds  120                                                                       │
 │                                                                                                  │
 │  success rate  100%  →  100%   +0%   (baseline: the lock's own configuration, measured)          │
+│  cost/task  $0.0001 → $0.0001 +0%   output tokens  62.5 → 62.5 +0%                               │
 │                                                                                                  │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
 next → hlock tune apply
@@ -40,9 +41,44 @@ harness. When configurations tie, tune keeps the one closest to your lock: the f
 retries, then your temperature, then your model. Here every configuration solved the demo
 tasks, so it kept the lock's own `retries = 1` and `temperature = 0.2`.
 
+Under the success rate is what the best configuration costs against the baseline: mean
+cost and output tokens per task, on the same trials. A gain that doubles the tokens shows
+here; [cost limits](#cost-limits) can rule it out. When the traces show more (tool calls,
+silent stretches, subagents, the last message), the panel lists that too, and the tune
+lock records it in `[evidence.behavior]` (see
+[How the agent worked](resolve.md#how-the-agent-worked)).
+
 `stages` lists what ran. On the `offline` backend only the HPO grid runs; the data, optimize
 and fine-tune stages need `local`, `flyte`, or another [backend](backends.md) that runs
 them. A stage that didn't run isn't recorded in the tune lock.
+
+## Cost limits
+
+By default tune picks the configuration with the best success rate, then the cheapest. Set
+a limit, and a configuration that costs more than it allows over the baseline isn't picked,
+whatever its success rate:
+
+```toml title="harness.toml"
+[gate]
+max-cost-increase = 0.2     # at most 20% more cost per task than the lock's configuration
+max-token-increase = 0.5    # at most 50% more output tokens per task (optional)
+```
+
+```console
+$ hlock tune
+! 6 of 12 configurations cost more than the cost limits allow over the baseline, so weren't picked
+✓ wrote harness.tune.lock
+```
+
+`max-cost-increase` compares mean cost per task, or output tokens per task when the cost
+isn't known; `max-token-increase` compares output tokens. `[gate]` is shared with
+[`hlock upgrade`](upgrade.md#cost-gate). `[tune]` takes the same two keys, which override
+`[gate]`'s for tune alone.
+
+The same limits hold the [optimizer's edits](#tune-the-harness-text): an edit is accepted
+only if the candidate's cost per trial rose no more than `max-cost-increase`. With neither
+`[tune]` nor `[gate]` setting it, that check uses 25% and compares only a known cost, as it
+always has; set it to also compare output tokens when the cost isn't known.
 
 ## Depth
 
@@ -121,7 +157,8 @@ How it works:
    strings graders check for, fixture file names), then runs the lock's text and the candidate
    on the test split, paired. It accepts the edits only when the candidate's success rate
    beats the lock's by more than the noise band, a sign test over the tasks gives p ≤ `alpha`
-   (default 0.05), and cost per trial rose no more than `max-cost-increase` (default 25%).
+   (default 0.05), and cost per trial rose no more than `max-cost-increase` (default 25%;
+   see [Cost limits](#cost-limits)).
 6. **The result.** Accepted edits are written under `.hlock/tuned/<digest>/`, the tune lock's
    `[[instructions]]` and `[[skill]]` entries point at them, and the grid that follows runs
    with them. Rejected or not, `[tune.optimizer]` and `[tune.acceptance]` record what ran and

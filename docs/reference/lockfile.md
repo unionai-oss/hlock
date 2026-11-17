@@ -161,6 +161,11 @@ mean = 0.0001
 p50 = 0.5565
 p95 = 0.655
 
+[evidence.behavior]
+trials = 2
+input-tokens-per-task = 200.0
+output-tokens-per-task = 50.0
+
 [provenance]
 backend = "local"
 
@@ -194,7 +199,7 @@ trials = 16
 | `[[subagent]]`, `[[script]]`, `[[middleware]]` | Subagent definitions, helper scripts, and middleware files (OpenCode plugin files, Codex's `.codex/hooks.json`): `name`, `path`, `digest`, `scope`, `vendored`, `format` (middleware), `source` (`tune` when an optimizer wrote it), and `scan`. See [Harness components](../guides/pin.md#harness-components) |
 | `[[decider]]` | One per [decision model](../guides/deciders.md) the stack uses (see below) |
 | `[evidence]` | `simulated = true` when an agent CLI's trials ran on the reference harness rather than the agent itself. The eval packs measured: their paths (`eval-pack`), `name@version` (`eval-pack-version`), and a digest of every file in them (`eval-pack-digest`), which `hlock check` compares with the packs on disk, warning when they've changed. Then the split measured (`holdout` when `resolve` checked the winner on it, with the search score kept as `success-rate.search`; `search` otherwise), the trial count, and success-rate, cost, and latency statistics. `[evidence.judge]` records the judge of [`judge` and `trace` graders](../guides/eval-packs.md#judges): its `model`, the model that `answered`, its `protocol`, a `fallback`, the share of `uncertain-grades`, and `cost-usd-per-task` when
-the provider publishes a price. `[evidence.sandbox]` records what trials and graders ran in: the `runner` and `network`, the kinds that ran sandboxed (`applies-to`), and a `note` (`agent-CLI trials are simulated`). A lock without it predates sandboxes. |
+the provider publishes a price. `[evidence.sandbox]` records what trials and graders ran in: the `runner` and `network`, the kinds that ran sandboxed (`applies-to`), and a `note` (`agent-CLI trials are simulated`). A lock without it predates sandboxes. `[evidence.behavior]` records how the agent worked, from the trials' traces: `input-tokens-per-task`, `output-tokens-per-task`, `tool-calls-per-task`, `longest-silent-stretch` (and `-max`), `subagents-per-task`, and two heuristics on the last message, `approval-request-rate` and `early-stop-rate`. A key is absent when no trace showed it; see [How the agent worked](../guides/resolve.md#how-the-agent-worked). |
 | `[verify]` | Runtime verification thresholds: `canary-tasks`, `min-success-rate`, `fingerprint-tolerance` |
 | `[provenance]` | The backend that produced the lock, the search settings (`candidates`, the number of stacks; `trials` and `holdout-trials` run; `cached`, those reused), for a pinned lock the `scopes` it captured and any `user-include` patterns, and `openapm` (`"0.1"`) when APM packages were resolved |
 | `[[package]]` | [APM packages](../guides/dependencies.md#apm-packages) declared dependencies resolved to (see below) |

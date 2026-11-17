@@ -129,3 +129,48 @@ def test_tune_apply_flag_keeps_prev_too(project):
     assert r.exit_code == 0, r.output
     assert flat("applied to harness.lock  (previous kept in harness.lock.prev)") in flat(r.output)
     assert Path("harness.lock.prev").is_file()
+
+
+def test_resolve_records_how_the_agent_worked(project):
+    r = invoke("resolve")
+    assert r.exit_code == 0, r.output
+    # the reference harness's trace has tokens, and nothing else: no made-up zeros
+    assert flat("tokens / task  200 in  ·  50 out") in flat(r.output)
+    assert "tool calls" not in r.output and "last message" not in r.output
+    lock = json.loads(invoke("show", "--json").output)
+    assert lock["evidence"]["behavior"] == {"trials": 2, "input-tokens-per-task": 200.0, "output-tokens-per-task": 50.0}
+
+
+def test_upgrade_prints_the_cost_and_the_gate_rolls_back_a_costlier_one(project):
+    assert invoke("resolve").exit_code == 0
+    before = (project / "harness.lock").read_text()
+    manifest = project / "harness.toml"
+    manifest.write_text(manifest.read_text() + "\n[gate]\nmax-cost-increase = 0.2\n")
+    r = invoke("upgrade", "--all", "--apply")
+    assert r.exit_code == 0, r.output
+    assert flat("upgrade held success-rate (1.00 -> 1.00) but cost per task rose from $0.0001 to $0.0004 (+300%), "
+                "more than the 20% max-cost-increase allows") in flat(r.output), r.output
+    assert flat("cost/task $0.0001 → $0.0004 +300% output tokens 50 → 50 +0%") in flat(r.output)
+    assert (project / "harness.lock").read_text() == before
+    # --force applies it anyway, saying what it costs
+    r = invoke("upgrade", "--all", "--apply", "--force")
+    assert r.exit_code == 0 and "✓ upgraded" in r.output, r.output
+    assert flat("cost/task $0.0001 → $0.0004 +300%") in flat(r.output)
+    # a mistyped key is reported, not ignored
+    manifest.write_text(manifest.read_text().replace("max-cost-increase", "max-cost-increse"))
+    assert "unknown key `max-cost-increse` in [gate] (did you mean `max-cost-increase`?)" in invoke("resolve").output
+
+
+def test_tune_shows_the_cost_next_to_the_gain_and_honors_the_gate(project):
+    assert invoke("resolve").exit_code == 0
+    r = invoke("tune", "--depth", "hpo")
+    assert r.exit_code == 0, r.output
+    assert flat("cost/task $0.0001 → $0.0001 +0% output tokens 62.5 → 62.5 +0%") in flat(r.output), r.output
+    assert "weren't picked" not in r.output
+    manifest = project / "harness.toml"
+    manifest.write_text(manifest.read_text() + "\n[gate]\nmax-cost-increase = 0.2\n")
+    r = invoke("tune", "--depth", "hpo")
+    assert r.exit_code == 0, r.output
+    assert flat("6 of 12 configurations cost more than the cost limits allow over the baseline, so weren't picked") in flat(r.output), r.output
+    tuned = json.loads(invoke("--lock", "harness.tune.lock", "show", "--json").output)
+    assert tuned["llm"][0]["model"] == "qwen-7b" and tuned["evidence"]["behavior"]["output-tokens-per-task"] > 0

@@ -93,9 +93,14 @@ Plan, apply, or roll back upgrades, like [`hlock upgrade`](cli.md#upgrade). Retu
   "applied": false, "rolled_back": false,
   "before": 1.0, "after": null,
   "message": "plan: 1 upgrade(s) available — rerun with --apply to perform.",
-  "lock_path": "/path/to/harness.lock"
+  "lock_path": "/path/to/harness.lock",
+  "delta": null
 }
 ```
+
+After an apply, `delta` holds `success-rate`, `cost-usd-per-task` and
+`output-tokens-per-task`, each `{"base", "candidate", "change"}`, with null where the
+evidence doesn't have the number.
 
 ### `backend_describe`
 
@@ -511,7 +516,7 @@ Budget(max_spend_usd=None, max_trials=None, strategy="grid", random_seed=0)
 | `.harness` | Locked harness name |
 | `.decision` | Locked decision model |
 | `.llm` | JSON list of `[role, "provider:model"]` pairs |
-| `.evidence` | JSON: `trials`, `success_rate`, `cost_usd_per_task`, `latency_s_per_task` |
+| `.evidence` | JSON: `trials`, `success_rate`, `cost_usd_per_task`, `latency_s_per_task`, `behavior` (`[evidence.behavior]`, or null) |
 | `.provenance` | The backend that produced the lock |
 | `.manifest_hash` | The manifest hash the lock was resolved from, or `None` |
 | `.to_json()` | The whole lockfile as JSON |

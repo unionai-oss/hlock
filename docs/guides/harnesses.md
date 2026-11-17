@@ -285,7 +285,10 @@ workspace:
 A `command` gets `{prompt}`, `{model}` and `{workspace}` substituted in its arguments; a
 relative executable path is relative to the project. The result is the JSON in
 `HLOCK_OUTPUT`, `{"success": true, "cost_usd": 0.01, "steps": 3, "trace": […]}`, or, without
-one, the exit code (`0` is success).
+one, the exit code (`0` is success). A `trace` hlock can read (Claude Code's stream-json
+events, Codex's `--json` events, chat messages) gives the lock's
+[`[evidence.behavior]`](resolve.md#how-the-agent-worked): tokens, tool calls, subagents, and
+how the last message ends.
 
 An `entrypoint` is called as `fn(prompt, ctx)`, and may be `async`:
 

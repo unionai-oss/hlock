@@ -123,6 +123,9 @@ pub struct TrialResult {
     /// Why it failed: the first failing grader and its detail, or the run's error.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub detail: Option<String>,
+    /// How the agent worked, from the trial's trace (unknown in trials cached before it).
+    #[serde(default, skip_serializing_if = "crate::behavior::TrialBehavior::is_unknown")]
+    pub behavior: crate::behavior::TrialBehavior,
 }
 
 /// The judging of one trial: for the lock's `evidence.judge`, from the winner's trials.
@@ -155,6 +158,16 @@ impl StackScore {
     pub fn mean_cost(&self) -> f64 {
         let s: f64 = self.trials.iter().map(|t| t.cost_usd).sum();
         s / self.trials.len().max(1) as f64
+    }
+
+    /// The trials' behavior, `None` when no trace showed any of it.
+    pub fn behavior(&self) -> Option<crate::behavior::EvidenceBehavior> {
+        crate::behavior::aggregate(self.trials.iter().map(|t| &t.behavior))
+    }
+
+    /// Mean cost and output tokens per task, for the cost gate.
+    pub fn spend(&self) -> crate::behavior::Spend {
+        crate::behavior::Spend::new(self.mean_cost(), self.behavior().and_then(|b| b.output_tokens_per_task))
     }
 
     pub fn mean_latency(&self) -> f64 {
