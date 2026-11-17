@@ -11,6 +11,11 @@ applies to, with a link to the advice behind it. The first set comes from Anthro
 [Prompting Claude Fable 5.2](https://platform.claude.com/docs/en/build-with-claude/prompt-engineering/prompting-claude-fable-5-2)
 guide, which lists the harness text to remove or rewrite when you migrate.
 
+Lint only reads. To try deleting what it flags, measured on your tasks, use the
+[`ablate`](tune.md#delete-first-ablate) optimizer, or
+[`hlock upgrade --to MODEL --retune`](upgrade.md#move-to-a-new-model), which lints, sweeps
+the effort, and runs ablate in one step.
+
 ## Run it
 
 ```console

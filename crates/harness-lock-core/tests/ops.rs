@@ -327,3 +327,76 @@ fn resolve_searches_effort_and_a_trial_gets_it() {
     assert_eq!(lock.llm[0].effort.as_deref(), Some("high"));
     let _ = fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn moving_to_a_new_model_lints_sweeps_effort_and_leaves_the_lock_alone() {
+    use harness_lock_core::ops::{supports_effort, TuneConfig};
+    let dir = std::env::temp_dir().join(format!("hlock-ops-migrate-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).unwrap();
+    make_pack(&dir);
+    fs::write(dir.join("AGENTS.md"), "Be careful.\nThink step by step and show your reasoning.\n").unwrap();
+    let mut m = make_manifest(&dir);
+    m.candidates.llm.get_mut("planner").unwrap().any_of = vec!["reference:qwen-7b".into()];
+    let lock = dir.join("harness.lock");
+    let base = TuneSpec { depth: "probe".into(), out: dir.join("base.tune.lock"), workdir: dir.join(".hlock"), lock: Some(lock.clone()), ..Default::default() };
+    let mut l = tune(m.clone(), &base).unwrap().lock;
+    l.kind = None;
+    l.save(&lock).unwrap();
+    let before = fs::read(&lock).unwrap();
+
+    // a bare model keeps the lock's provider; the effort is swept around high, on the new model
+    let spec = TuneSpec { to: Some("claude-fable-5-2".into()), out: dir.join("harness.tune.lock"), ..base.clone() };
+    assert_eq!(spec.resolved_depth(), "probe");
+    assert_eq!(TuneSpec { depth: "auto".into(), ..spec.clone() }.resolved_depth(), "prompt");
+    let o = tune(m.clone(), &spec).unwrap();
+    assert_eq!(fs::read(&lock).unwrap(), before, "harness.lock isn't touched");
+    let mg = &o.lock.tune.as_ref().unwrap()["migrate"];
+    assert_eq!((mg["from"].as_str(), mg["to"].as_str()), (Some("reference:qwen-7b"), Some("reference:claude-fable-5-2")));
+    assert_eq!((mg["efforts-from"].as_str(), mg["effort-set"].as_str()), (Some("default"), Some("high")));
+    let levels: Vec<&str> = mg["effort"].as_array().unwrap().iter().map(|e| e["level"].as_str().unwrap()).collect();
+    assert_eq!(levels, ["medium", "high", "xhigh"]);
+    assert_eq!(mg["before"]["model"], "reference:qwen-7b");
+    assert!(mg["before"].get("effort").is_none());
+    // the reference ignores effort, so every level ties and the one set explicitly wins
+    assert_eq!((mg["after"]["model"].as_str(), mg["after"]["effort"].as_str()), (Some("reference:claude-fable-5-2"), Some("high")));
+    assert_eq!((o.lock.llm[0].model.as_str(), o.lock.llm[0].effort.as_deref()), ("claude-fable-5-2", Some("high")));
+    // the harness's own instruction file is linted for the target, though the lock doesn't list it
+    assert_eq!(mg["lint"]["rules"]["visible-reasoning"], 1);
+    assert_eq!(o.report["migrate"]["lint"]["findings"][0]["file"], "AGENTS.md");
+    assert_eq!(mg["deleted"], serde_json::json!([]), "offline doesn't run ablate");
+
+    // the manifest's levels win over the default sweep
+    let mut mm = m.clone();
+    mm.candidates.llm.get_mut("planner").unwrap().effort = vec!["low".into(), "max".into()];
+    let o = tune(mm, &spec).unwrap();
+    let mg = &o.lock.tune.as_ref().unwrap()["migrate"];
+    assert_eq!((mg["efforts-from"].as_str(), mg["effort-set"].as_str(), mg["after"]["effort"].as_str()), (Some("manifest"), Some("low"), Some("low")));
+
+    // a migration deletes first: ablate over instructions and skills, judged no-worse
+    let cfg = TuneConfig::new(&m, &spec, "prompt").unwrap();
+    assert_eq!((cfg.optimizer.as_str(), cfg.edit.clone(), cfg.accept.as_str()), ("ablate", vec!["instructions".to_string(), "skill".to_string()], "no-worse"));
+    let cfg = TuneConfig::new(&m, &TuneSpec { optimizer: Some("hlock".into()), ..spec.clone() }, "prompt").unwrap();
+    assert_eq!((cfg.optimizer.as_str(), cfg.accept.as_str()), ("hlock", "better"));
+
+    // the same model, or no lock, is an error
+    let same = tune(m.clone(), &TuneSpec { to: Some("reference:qwen-7b".into()), ..spec.clone() }).err().unwrap().to_string();
+    assert!(same.contains("already runs reference:qwen-7b"), "{same}");
+    let none = tune(m, &TuneSpec { lock: Some(dir.join("missing.lock")), ..spec }).err().unwrap().to_string();
+    assert!(none.contains("starts from a lock"), "{none}");
+
+    for (spec, yes) in [
+        ("anthropic:claude-fable-5-2", true),
+        ("anthropic:claude-opus-4-1", true),
+        ("anthropic:claude-3-5-haiku", false),
+        ("openai:gpt-5.5", true),
+        ("openai:o3-mini", true),
+        ("openai:gpt-4o", false),
+        ("openrouter:anthropic/claude-sonnet-5-5", true),
+        ("ollama:gemma3:12b", false),
+        ("reference:qwen-32b", true),
+    ] {
+        assert_eq!(supports_effort(spec), yes, "{spec}");
+    }
+    let _ = fs::remove_dir_all(&dir);
+}

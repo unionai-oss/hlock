@@ -289,6 +289,10 @@ pub struct TuneSpec {
     pub edit: Option<Vec<String>>,
     pub budget_rollouts: Option<u64>,
     pub budget_usd: Option<f64>,
+    /// Move the tuned role to this model (`hlock upgrade --to M --retune`): lint the lock's
+    /// text for it, sweep its effort, run `ablate`, and compare with the lock as it is.
+    /// `provider:model`, or a bare model that keeps the lock's provider.
+    pub to: Option<String>,
 }
 
 impl Default for TuneSpec {
@@ -308,6 +312,7 @@ impl Default for TuneSpec {
             edit: None,
             budget_rollouts: None,
             budget_usd: None,
+            to: None,
         }
     }
 }
@@ -338,13 +343,20 @@ impl TuneConfig {
         let t = &manifest.tune;
         let str_list = |v: &serde_json::Value| -> Vec<String> { v.as_array().map(|a| a.iter().filter_map(|x| x.as_str().map(str::to_string)).collect()).unwrap_or_default() };
         let declared = t.get("edit").map(str_list);
-        let edit = spec.edit.clone().or(declared).unwrap_or_else(|| if prompt_depth(depth) { vec!["instructions".into()] } else { vec![] });
+        // a migration deletes stale text from the instructions and skills by default
+        let edit = spec.edit.clone().or(declared).unwrap_or_else(|| match () {
+            _ if spec.to.is_some() && prompt_depth(depth) => vec!["instructions".into(), "skill".into()],
+            _ if prompt_depth(depth) => vec!["instructions".into()],
+            _ => vec![],
+        });
         if let Some(k) = edit.iter().find(|k| !crate::optimize::KINDS.contains(&k.as_str())) {
             return Err(Error::Tuning(format!("[tune] edit: {k:?} can't be tuned yet (use {})", crate::optimize::KINDS.iter().map(|k| format!("{k:?}")).collect::<Vec<_>>().join(" or "))));
         }
         let budget = t.get("budget");
         let num = |k: &str| t.get(k).and_then(serde_json::Value::as_f64);
-        let optimizer = spec.optimizer.clone().or_else(|| t.get("optimizer").and_then(|v| v.as_str()).map(str::to_string)).unwrap_or_else(|| "hlock".into());
+        // a migration runs ablate unless --optimizer says otherwise: deletion first
+        let declared_opt = || if spec.to.is_some() { Some("ablate".to_string()) } else { t.get("optimizer").and_then(|v| v.as_str()).map(str::to_string) };
+        let optimizer = spec.optimizer.clone().or_else(declared_opt).unwrap_or_else(|| "hlock".into());
         let accept = match t.get("accept") {
             None => if optimizer == "ablate" { "no-worse" } else { "better" }.to_string(),
             Some(v) => match v.as_str().filter(|a| crate::optimize::ACCEPT_MODES.contains(a)) {
@@ -596,6 +608,8 @@ fn optimize_stage(
 impl TuneSpec {
     pub fn resolved_depth(&self) -> &str {
         match self.depth.as_str() {
+            // a model migration edits the text first (ablate), then sweeps effort
+            "auto" if self.to.is_some() => "prompt",
             "auto" => "hpo",
             other => other,
         }
@@ -706,6 +720,184 @@ fn tune_grid(base: &Stack, manifest: &Manifest, depth: &str) -> Vec<Stack> {
     out
 }
 
+// --------------------------------------------------------------------------- //
+// Moving to a new model (`hlock upgrade --to M --retune`)
+// --------------------------------------------------------------------------- //
+/// The effort levels a model migration measures when the manifest lists none: the level
+/// Anthropic's Fable 5.2 guide says to start from (`high`), and one on either side.
+pub const MIGRATE_EFFORTS: [&str; 3] = ["medium", "high", "xhigh"];
+
+/// Whether `spec` (`provider:model`) takes a reasoning effort, so a migration sweeps it
+/// without being told: Claude models after Claude 3, OpenAI's GPT-5 and o-series, and the
+/// offline reference (a stand-in that accepts every level and ignores it).
+pub fn supports_effort(spec: &str) -> bool {
+    let (provider, model) = spec.split_once(':').unwrap_or(("", spec));
+    if provider == "reference" {
+        return true;
+    }
+    let m = model.rsplit('/').next().unwrap_or(model).to_ascii_lowercase();
+    if let Some(rest) = m.strip_prefix("claude-") {
+        return !(rest.starts_with('2') || rest.starts_with('3') || rest.starts_with("instant"));
+    }
+    m.starts_with("gpt-5") || ["o1", "o3", "o4"].iter().any(|o| m == *o || m.starts_with(&format!("{o}-")))
+}
+
+/// A tune that moves the lock's tuned role to a new model ([`TuneSpec::to`]): the target,
+/// the effort levels it sweeps and the one it sets, and what `hlock lint` finds in the
+/// lock's text for the target.
+struct Migration {
+    role: String,
+    from: String,
+    to: String,
+    efforts: Vec<String>,
+    /// Where the levels came from: `manifest`, `default` ([`MIGRATE_EFFORTS`]), or `none`.
+    efforts_from: &'static str,
+    /// The level set explicitly, which ties go to: `high` when it's swept.
+    effort: Option<String>,
+    lint: serde_json::Value,
+}
+
+impl Migration {
+    fn new(manifest: &Manifest, lock: Option<&Lockfile>, lock_path: &std::path::Path, base: &Stack, to: &str) -> Result<Migration> {
+        if lock.is_none() {
+            return Err(Error::Tuning(format!("moving to a new model starts from a lock, and there's none at {}; resolve or pin one first", lock_path.display())));
+        }
+        let role = tuned_role(base);
+        let from = base.llm.get(&role).cloned().unwrap_or_default();
+        let to = if to.contains(':') { to.to_string() } else { format!("{}:{to}", from.split_once(':').map(|(p, _)| p).unwrap_or("reference")) };
+        if to == from {
+            return Err(Error::Tuning(format!("the lock's {role} already runs {to}; tune it with hlock tune")));
+        }
+        let declared = manifest.candidates.llm.get(&role).map(|c| c.effort.clone()).unwrap_or_default();
+        let (efforts, efforts_from) = if !declared.is_empty() {
+            (declared, "manifest")
+        } else if supports_effort(&to) {
+            (MIGRATE_EFFORTS.iter().map(|e| e.to_string()).collect(), "default")
+        } else {
+            (Vec::new(), "none")
+        };
+        let effort = if efforts.iter().any(|e| e == "high") { Some("high".to_string()) } else { efforts.first().cloned() };
+        let ctx = crate::profiles::Ctx::at(&manifest.root());
+        let reg = crate::profiles::Registry::load_for(&ctx, Some(manifest))?;
+        let mut r = crate::lint::run(Some(lock_path), &[], Some(&to), &reg, &ctx)?;
+        // the harness's own instruction file, which trials read (and ablate edits) even when
+        // the lock doesn't list it
+        let name = tuned_instructions_name(lock, manifest, &base.harness);
+        let lock_dir = lock_path.parent().filter(|d| !d.as_os_str().is_empty()).unwrap_or(std::path::Path::new("."));
+        if !lock.is_some_and(|l| l.instructions.iter().any(|i| i.name == name)) && lock_dir.join(&name).is_file() {
+            let (fs, n) = crate::lint::lint_path(&lock_dir.join(&name), &name, Some(&to));
+            r.files_scanned += n;
+            r.findings.extend(fs.into_iter().map(|mut f| {
+                f.kind = "instructions".into();
+                f.entry = name.clone();
+                f
+            }));
+        }
+        let warnings = r.findings.iter().filter(|f| f.severity == "warning").count();
+        let mut rules: BTreeMap<String, usize> = BTreeMap::new();
+        for f in &r.findings {
+            *rules.entry(f.rule.clone()).or_default() += 1;
+        }
+        let lint = serde_json::json!({
+            "model": to,
+            "files": r.files_scanned,
+            "warnings": warnings,
+            "info": r.findings.len() - warnings,
+            "rules": rules,
+            "findings": r.findings.iter().map(|f| serde_json::json!({"file": f.file, "line": f.line, "rule": f.rule, "severity": f.severity, "matched": f.matched})).collect::<Vec<_>>(),
+        });
+        Ok(Migration { role, from, to, efforts, efforts_from, effort, lint })
+    }
+
+    /// The lock's stack on the new model, at the level set explicitly.
+    fn stack(&self, base: &Stack) -> Stack {
+        let mut s = base.clone();
+        s.llm.insert(self.role.clone(), self.to.clone());
+        match &self.effort {
+            Some(e) => s.effort.insert(self.role.clone(), e.clone()),
+            None => s.effort.remove(&self.role),
+        };
+        s
+    }
+
+    /// The manifest tune's grid reads: the role's one model, the target, and its levels.
+    fn manifest(&self, manifest: &Manifest) -> Manifest {
+        let mut m = manifest.clone();
+        if self.role != "planner" {
+            if let Some(p) = m.candidates.llm.get_mut("planner") {
+                p.any_of.clear(); // the grid varies the planner's list as the tuned role's models
+            }
+        }
+        let c = m.candidates.llm.entry(self.role.clone()).or_default();
+        c.any_of = vec![self.to.clone()];
+        c.effort = self.efforts.clone();
+        m
+    }
+
+    /// `[tune.migrate]`: the lock as it was against the migrated stack, the best of each
+    /// effort level, and the lines `ablate` deleted.
+    fn evidence(&self, before: &StackScore, scored: &[StackScore], after: &StackScore, optimized: Option<&Optimized>) -> serde_json::Value {
+        let r4 = |v: f64| (v * 1e4).round() / 1e4;
+        let side = |s: &StackScore| {
+            let mut v = serde_json::json!({"model": s.stack.llm.get(&self.role), "success-rate": r4(s.success_rate()), "cost-usd-per-task": round6(s.mean_cost()), "trials": s.n});
+            if let Some(e) = s.stack.effort.get(&self.role) {
+                v["effort"] = serde_json::json!(e);
+            }
+            v
+        };
+        let mut by_level: Vec<serde_json::Value> = Vec::new();
+        for level in &self.efforts {
+            let best = scored
+                .iter()
+                .filter(|s| s.stack.effort.get(&self.role) == Some(level))
+                .min_by(|a, b| b.success_rate().total_cmp(&a.success_rate()).then(a.mean_cost().total_cmp(&b.mean_cost())));
+            if let Some(b) = best {
+                by_level.push(serde_json::json!({"level": level, "success-rate": r4(b.success_rate()), "cost-usd-per-task": round6(b.mean_cost()), "trials": b.n}));
+            }
+        }
+        // ablate numbers each line in the text it deleted it from; the evidence numbers it in
+        // the lock's text, as lint did
+        let line_in_seed = |seed: &std::path::Path, component: &str, text: &str| -> Option<usize> {
+            let at = seed.join(component);
+            let file = if at.is_dir() { at.join("SKILL.md") } else { at };
+            let body = std::fs::read_to_string(file).ok()?;
+            let pos = body.match_indices(text).map(|(i, _)| i).find(|&i| i == 0 || body.as_bytes()[i - 1] == b'\n')?;
+            Some(body[..pos].matches('\n').count() + 1)
+        };
+        let deleted: Vec<serde_json::Value> = optimized
+            .filter(|o| o.accepted)
+            .map(|o| {
+                o.ledger
+                    .iter()
+                    .flat_map(|l| l["native"]["deleted"].as_array().cloned().unwrap_or_default())
+                    .map(|d| {
+                        let (c, t) = (d["component"].as_str().unwrap_or_default(), d["text"].as_str().unwrap_or_default());
+                        let line = line_in_seed(&o.seed, c, t).map(serde_json::Value::from).unwrap_or_else(|| d["line"].clone());
+                        serde_json::json!({"component": c, "rule": d["rule"], "line": line, "text": t})
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        let mut v = serde_json::json!({
+            "role": self.role,
+            "from": self.from,
+            "to": self.to,
+            "efforts-from": self.efforts_from,
+            "lint": {"model": self.lint["model"], "files": self.lint["files"], "warnings": self.lint["warnings"], "info": self.lint["info"], "rules": self.lint["rules"]},
+            "before": side(before),
+            "after": side(after),
+            "deleted": deleted,
+        });
+        if !by_level.is_empty() {
+            v["effort"] = serde_json::json!(by_level);
+        }
+        if let Some(e) = &self.effort {
+            v["effort-set"] = serde_json::json!(e);
+        }
+        v
+    }
+}
+
 /// A stage of the tune pipeline, for the report: whether it ran, and why not.
 fn stage(name: &str, ran: bool, detail: impl Into<String>) -> serde_json::Value {
     serde_json::json!({"stage": name, "ran": ran, "detail": detail.into()})
@@ -729,6 +921,14 @@ pub fn tune(manifest: Manifest, spec: &TuneSpec) -> Result<TuneOutcome> {
     let lock_path = spec.lock.clone().unwrap_or_else(|| cwd.join(LOCKFILE_PATH));
     let base_lock = load_if_present(&lock_path)?;
     let base = base_stack(base_lock.as_ref(), &manifest, spec.harness.as_deref());
+    // moving to a new model: tune searches around the lock's stack on that model, and the
+    // lock as it is stays the baseline
+    let migration = match &spec.to {
+        Some(to) => Some(Migration::new(&manifest, base_lock.as_ref(), &lock_path, &base, to)?),
+        None => None,
+    };
+    let anchor = migration.as_ref().map(|mg| mg.stack(&base)).unwrap_or_else(|| base.clone());
+    let grid_manifest = migration.as_ref().map(|mg| mg.manifest(&manifest)).unwrap_or_else(|| manifest.clone());
 
     // trials run the base's harness: its code harness for real, else the reference adapter
     let mut m = manifest.clone();
@@ -767,7 +967,8 @@ pub fn tune(manifest: Manifest, spec: &TuneSpec) -> Result<TuneOutcome> {
     // a backend that can't describe itself, or can't run the base's trials, stops here
     if let Some(w) = &worker {
         if !resolver.adapter_for(&base).starts_with("code harness") {
-            w.preflight(std::slice::from_ref(&base))?;
+            let stacks = if migration.is_some() { vec![base.clone(), anchor.clone()] } else { vec![base.clone()] };
+            w.preflight(&stacks)?;
         }
     }
     // the backend that runs `kind`, else why the stage can't run
@@ -783,7 +984,7 @@ pub fn tune(manifest: Manifest, spec: &TuneSpec) -> Result<TuneOutcome> {
 
     let n_synthetic = parse_synthetic(&spec.data);
     let data_mode = if n_synthetic > 0 { "synthetic" } else { "user-traces" };
-    let grid = tune_grid(&base, &manifest, &depth);
+    let grid = tune_grid(&anchor, &grid_manifest, &depth);
     let mut plan_value = serde_json::json!({
         "depth": depth,
         "data": spec.data,
@@ -861,7 +1062,7 @@ pub fn tune(manifest: Manifest, spec: &TuneSpec) -> Result<TuneOutcome> {
             }
         };
         match found {
-            Ok(w) => match optimize_stage(w, &optimizer, &tcfg, &manifest, spec, &mut resolver, &base, base_lock.as_ref(), &lock_path, &search_tasks, &note) {
+            Ok(w) => match optimize_stage(w, &optimizer, &tcfg, &manifest, spec, &mut resolver, &anchor, base_lock.as_ref(), &lock_path, &search_tasks, &note) {
                 Ok(o) => {
                     let detail = if o.accepted { format!("{} edit{} accepted", o.changes.len(), if o.changes.len() == 1 { "" } else { "s" }) } else { "no edits accepted".to_string() };
                     stages.push(stage("optimize", true, detail));
@@ -955,9 +1156,10 @@ pub fn tune(manifest: Manifest, spec: &TuneSpec) -> Result<TuneOutcome> {
     let scored: Vec<StackScore> = configs.iter().cloned().zip(results).filter(|(_, t)| !t.is_empty()).map(|(stack, trials)| StackScore { stack, n: trials.len(), trials }).collect();
     stages.push(stage("hpo", true, format!("{} configs", scored.len())));
 
-    // the best: highest success, then lowest cost, then closest to the base
+    // the best: highest success, then lowest cost, then closest to the base (on a
+    // migration, the base on the new model at the level it sets)
     let distance = |s: &Stack| {
-        (s.retries.abs_diff(base.retries), s.temperature != base.temperature, effort_distance(s.effort.get(&role), base.effort.get(&role)), s.llm.get(&role) != base.llm.get(&role), s.tool_timeout_seconds != base.tool_timeout_seconds)
+        (s.retries.abs_diff(anchor.retries), s.temperature != anchor.temperature, effort_distance(s.effort.get(&role), anchor.effort.get(&role)), s.llm.get(&role) != anchor.llm.get(&role), s.tool_timeout_seconds != anchor.tool_timeout_seconds)
     };
     let winner = scored
         .iter()
@@ -1035,6 +1237,12 @@ pub fn tune(manifest: Manifest, spec: &TuneSpec) -> Result<TuneOutcome> {
     tune_lock.declare(&declared);
     resolver.approve_sandbox(&tune_lock)?;
     let mut optimize_report = serde_json::Value::Null;
+    let migrate = migration.as_ref().map(|mg| mg.evidence(&baseline, &scored, &winner, optimized.as_ref()));
+    if let Some(mv) = &migrate {
+        let mut t = tune_lock.tune.take().unwrap_or_else(|| serde_json::json!({}));
+        t["migrate"] = mv.clone();
+        tune_lock.tune = Some(t);
+    }
     if let Some(o) = &optimized {
         let mut t = tune_lock.tune.take().unwrap_or_else(|| serde_json::json!({}));
         t["optimizer"] = o.optimizer.clone();
@@ -1078,6 +1286,10 @@ pub fn tune(manifest: Manifest, spec: &TuneSpec) -> Result<TuneOutcome> {
     });
     if let Some(e) = best.effort.get(&role) {
         report["best"]["effort"] = serde_json::json!(e);
+    }
+    if let (Some(mv), Some(mg)) = (migrate, &migration) {
+        report["migrate"] = mv;
+        report["migrate"]["lint"]["findings"] = mg.lint["findings"].clone();
     }
     Ok(TuneOutcome { path: spec.out.clone(), lock: tune_lock, report })
 }

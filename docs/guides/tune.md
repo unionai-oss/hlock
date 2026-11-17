@@ -112,6 +112,10 @@ offline reference ignores effort, so every level ties here and the lock's `mediu
 A single level isn't searched: tune keeps the lock's level, or uses that one when the
 lock has none. With no `effort` anywhere, nothing is sent and the model uses its default.
 
+[`hlock upgrade --to MODEL --retune`](upgrade.md#move-to-a-new-model) does this for a model
+you're moving to: it sets `high`, and sweeps `medium`, `high` and `xhigh` unless the
+manifest lists levels.
+
 Trials on the `local` and `flyte` backends send the level to the model endpoint as
 `reasoning_effort`. A level the manifest doesn't know stops `resolve` and `tune` before
 any trial runs. `hlock sync` and `hlock launch` don't set the effort in the harness's own
@@ -355,6 +359,9 @@ so run enough held-out tasks and `trials` for the band to mean something.
 
 To add guidance after the deletions, apply the result (`hlock tune apply`) and tune again
 with `optimizer = "hlock"`. ablate doesn't chain into another optimizer in one run.
+
+When you're moving to a new model, [`hlock upgrade --to MODEL --retune`](upgrade.md#move-to-a-new-model)
+runs ablate on that model with an effort sweep, and compares the result with your lock.
 
 ### Harness²
 

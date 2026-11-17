@@ -3726,13 +3726,34 @@ def _print_prep(prep: dict) -> None:
 @click.option("--workdir", default=None, help="Where to put trial artifacts.")
 @click.option("--eval", "measure", is_flag=True, help="With dep:NAME: measure the new version on the eval pack first.")
 @click.option("-y", "--yes", is_flag=True, help="With dep:NAME --eval: apply without asking.")
+@click.option("--retune", is_flag=True,
+              help="Move to the new model by tuning: lint the lock's text for it, sweep its effort, delete "
+                   "stale lines (ablate), and write [path]harness.tune.lock[/]. harness.lock isn't touched.")
+@click.option("--backend", default=None, metavar="NAME",
+              help="With --retune: where the trials run (offline, local, flyte, …). Deleting lines needs local or flyte.")
+@click.option("--out", default="harness.tune.lock", show_default=True, help="With --retune: the tune lock to write.")
+@click.option("--max-trials", default=None, type=int, help="With --retune: cap the grid's trials, as tune does.")
 def upgrade(target: str | None, to: str | None, all_: bool, apply: bool, rollback: bool, force: bool,
-            workdir: str | None, measure: bool, yes: bool) -> None:
+            workdir: str | None, measure: bool, yes: bool, retune: bool, backend: str | None, out: str,
+            max_trials: int | None) -> None:
     """Plan, apply, or roll back upgrades to locked components.
 
     [cmd]hlock upgrade dep:NAME[/] moves a declared dependency to the newest commit, tag or
     version its declaration allows ([cmd]--eval[/] measures it first).
+
+    [cmd]hlock upgrade --to MODEL --retune[/] moves the lock to a new model the way
+    Anthropic's Fable 5.2 guide orders it: set the effort explicitly and measure the levels
+    either side, remove instruction text written for the old model, then measure. It writes
+    [path]harness.tune.lock[/] with the evidence; adopt it with [cmd]hlock tune apply[/].
     """
+    if retune:
+        if target is not None or apply or rollback or measure:
+            _fail("--retune doesn't go with dep:NAME, --apply, --rollback or --eval",
+                  "it writes a tune lock; adopt it with [cmd]hlock tune apply[/]")
+        _retune(to, all_, backend, out, max_trials, workdir)
+        return
+    if backend is not None or max_trials is not None or out != "harness.tune.lock":
+        _fail("--backend, --out and --max-trials go with --retune", "e.g. [cmd]hlock upgrade --to MODEL --retune --backend local[/]")
     if target is not None:
         if not target.startswith("dep:") or len(target) == 4:
             _fail(f"{target!r} isn't something to upgrade", "use [cmd]hlock upgrade dep:NAME[/] for a declared dependency")
@@ -3773,6 +3794,92 @@ def upgrade(target: str | None, to: str | None, all_: bool, apply: bool, rollbac
         console.print(f"[muted]{result.get('message', '')}[/]")
         if items and not apply:
             _next("hlock upgrade --all --apply")
+
+
+def _retune(to: str | None, all_: bool, backend: str | None, out: str, max_trials: int | None,
+            workdir: str | None) -> None:
+    """`hlock upgrade --retune`: tune the lock onto a new model, into a tune lock."""
+    if not Path(_l()).exists():
+        _fail(f"there's no {_ld()} to move to a new model", "resolve one with [cmd]hlock resolve[/], or pin one with [cmd]hlock pin[/]")
+    if to is None:
+        with _working("Planning upgrades…"):
+            plan = json.loads(al_upgrade(_m(), all=all_, lock=_l()))["plan"]
+        llm = [e for e in plan.get("upgradeable", []) if "decider" not in e]
+        if not llm:
+            _fail("there's no newer model to move to", "name one with [cmd]hlock upgrade --to MODEL --retune[/]")
+        to = llm[0]["to"]
+    with _working(f"Moving to {to}: lint, effort sweep, ablate…"):
+        result = json.loads(al_tune(_m(), depth="prompt", out=out, max_trials=max_trials, backend=backend,
+                                    workdir=workdir, lock=_l(), to=to))
+    report = result.get("report", {})
+    for line in report.get("notes") or []:
+        console.print(f"[warn]![/] {escape(line)}", soft_wrap=True)
+    mg = report.get("migrate") or {}
+    _print_migrate_lint(mg)
+    ran = any(st["stage"] == "optimize" and st["ran"] for st in report.get("stages") or [])
+    if not ran and (mg.get("lint") or {}).get("findings"):
+        console.print(f"[warn]![/] ablate didn't run on {report.get('backend')}, so no line was tried: deleting them "
+                      "needs [cmd]--backend local[/] or [cmd]flyte[/]", soft_wrap=True)
+    _ok(f"wrote [path]{_show(result.get('path'))}[/]  [muted]({_ld()} is unchanged)[/]")
+    console.print(_migrate_panel(report))
+    if report.get("simulated"):
+        console.print(f"[warn]![/] {report.get('harness')} itself didn't run these trials: they ran on hlock's "
+                      "offline reference harness, so the gains are a stand-in", soft_wrap=True)
+    tuned = out if out != "harness.tune.lock" else ""
+    _next(f"hlock diff {_ld()} {_show(result.get('path'))}", ("hlock tune apply " + tuned).strip())
+
+
+def _print_migrate_lint(mg: dict) -> None:
+    lint = mg.get("lint") or {}
+    found = lint.get("findings") or []
+    model = escape(str(lint.get("model")))
+    if not found:
+        console.print(f"[ok]✓[/] lint: nothing in the lock's text was flagged for {model}  "
+                      f"[muted]({lint.get('files', 0)} file{'' if lint.get('files') == 1 else 's'})[/]")
+        return
+    rules = ", ".join(f"{r} ×{n}" for r, n in (lint.get("rules") or {}).items())
+    console.print(f"[warn]![/] lint: {len(found)} line{'' if len(found) == 1 else 's'} in the lock's text to review for "
+                  f"{model}  [muted]({lint.get('warnings', 0)} warning, {lint.get('info', 0)} info: {escape(rules)})[/]",
+                  soft_wrap=True)
+    for f in found[:6]:
+        console.print(f"    [path]{escape(f['file'])}:{f['line']}[/]  {escape(f['matched'])}  [muted]{f['rule']}[/]",
+                      soft_wrap=True)
+    if len(found) > 6:
+        console.print(f"    [muted]… {len(found) - 6} more: [cmd]hlock lint --model {model}[/][/]")
+
+
+def _migrate_panel(r: dict) -> Panel:
+    """The tune panel for a model migration: the lock as it was against the migrated
+    stack at each effort level, and the lines ablate deleted."""
+    mg = r.get("migrate") or {}
+    run_info = _tune_run_info(r)
+    t = Table(box=None, header_style="bold", pad_edge=False, padding=(0, 2))
+    for col, kw in (("", {"style": "key"}), ("model", {}), ("effort", {}), ("success", {"justify": "right"}),
+                    ("cost/task", {"justify": "right"})):
+        t.add_column(col, **kw)
+    before, after = mg.get("before") or {}, mg.get("after") or {}
+    t.add_row("lock", escape(str(before.get("model"))), before.get("effort") or "—",
+              _pct(before.get("success-rate")), _usd(before.get("cost-usd-per-task")))
+    for e in mg.get("effort") or []:
+        mark = "  [muted](set)[/]" if e["level"] == mg.get("effort-set") else ""
+        t.add_row(f"effort {e['level']}", escape(str(mg.get("to"))), f"{e['level']}{mark}",
+                  _pct(e.get("success-rate")), _usd(e.get("cost-usd-per-task")))
+    t.add_row("[bold]chosen[/]", f"[bold]{escape(str(after.get('model')))}[/]", f"[bold]{after.get('effort') or '—'}[/]",
+              f"[bold]{_pct(after.get('success-rate'))}[/]", f"[bold]{_usd(after.get('cost-usd-per-task'))}[/]")
+    parts = [run_info, Text(""), t]
+    deleted = mg.get("deleted") or []
+    if deleted:
+        parts += [Text(""), Text(f"Deleted {len(deleted)} line{'' if len(deleted) == 1 else 's'}", style="bold")]
+        for d in deleted:
+            comp = str(d.get("component") or "").split("/", 1)[-1]
+            parts.append(Text.from_markup(f"[path]{escape(comp)}:{d.get('line')}[/]  {escape(str(d.get('text')))}  "
+                                          f"[muted]{d.get('rule')}[/]"))
+    gain = (after.get("success-rate") or 0.0) - (before.get("success-rate") or 0.0)
+    parts += [Text(""), Text.assemble(("success rate  ", "key"), _pct(before.get("success-rate")), "  →  ",
+                                      (_pct(after.get("success-rate")), "bold"), "   ", _signed_pct(gain),
+                                      ("   (lock on the old model → the migrated stack, same tasks)", "muted"))]
+    title = f"[brand]⚙ upgrade[/] · {escape(str(mg.get('role')))} {escape(str(mg.get('from')))} → {escape(str(mg.get('to')))}"
+    return Panel(Group(*parts), title=title, title_align="left", border_style="magenta", expand=False, padding=(1, 2))
 
 
 @main.group(invoke_without_command=True)
@@ -3853,6 +3960,28 @@ def tune(ctx: click.Context, depth: str, data: str, harness: str | None, out: st
 
 def _tune_panel(r: dict, title: str = "[brand]⚙ tune[/]") -> Panel:
     best = r.get("best") or {}
+    run_info = _tune_run_info(r)
+
+    chosen = _kv_table()
+    for k, v in best.items():
+        if k in ("success_rate", "cost_usd", "trials"):
+            continue
+        chosen.add_row(k.replace("_", " "), f"[bold]{v}[/]")
+
+    measured = (r.get("baseline") or {}).get("measured")
+    result_row = Text.assemble(
+        ("success rate  ", "key"), _pct(r.get("baseline_success_rate")), "  →  ",
+        (_pct(best.get("success_rate")), "bold"), "   ", _signed_pct(r.get("gain_success_rate")),
+        ("   (baseline: the lock's own configuration, measured)" if measured else "", "muted"),
+    )
+    return Panel(
+        Group(run_info, Text(""), Text("Best configuration", style="bold"), chosen, Text(""), result_row),
+        title=title, title_align="left", border_style="magenta", expand=False, padding=(1, 2),
+    )
+
+
+def _tune_run_info(r: dict) -> Table:
+    """A tune's depth, backend, data, grid, stages and optimizer, for its panel."""
     run_info = _kv_table()
     run_info.add_row("depth", str(r.get("depth")))
     run_info.add_row("backend", str(r.get("backend")))
@@ -3863,12 +3992,6 @@ def _tune_panel(r: dict, title: str = "[brand]⚙ tune[/]") -> Panel:
         cells = [f"{st['stage']} [ok]✓[/]" if st["ran"] else f"{st['stage']} [fail]✗[/] [muted]{escape(st['detail'])}[/]"
                  for st in stages]
         run_info.add_row("stages", "  ·  ".join(cells))
-
-    chosen = _kv_table()
-    for k, v in best.items():
-        if k in ("success_rate", "cost_usd", "trials"):
-            continue
-        chosen.add_row(k.replace("_", " "), f"[bold]{v}[/]")
 
     opt = r.get("optimize") or {}
     if opt:
@@ -3888,17 +4011,7 @@ def _tune_panel(r: dict, title: str = "[brand]⚙ tune[/]") -> Panel:
         o = opt.get("optimizer") or {}
         where = f" [muted]on {escape(str(o['backend']))}[/]" if o.get("backend") else ""
         run_info.add_row("optimizer", f"{escape(str(o.get('name')))}{where}  {line}")
-
-    measured = (r.get("baseline") or {}).get("measured")
-    result_row = Text.assemble(
-        ("success rate  ", "key"), _pct(r.get("baseline_success_rate")), "  →  ",
-        (_pct(best.get("success_rate")), "bold"), "   ", _signed_pct(r.get("gain_success_rate")),
-        ("   (baseline: the lock's own configuration, measured)" if measured else "", "muted"),
-    )
-    return Panel(
-        Group(run_info, Text(""), Text("Best configuration", style="bold"), chosen, Text(""), result_row),
-        title=title, title_align="left", border_style="magenta", expand=False, padding=(1, 2),
-    )
+    return run_info
 
 
 def _root() -> Path:

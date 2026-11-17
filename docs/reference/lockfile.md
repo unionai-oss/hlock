@@ -378,6 +378,13 @@ a `[[tune.edit]]` (`component`, `kind`, `op`, `before`, `after`, `path`, `ration
 the lock's `[[instructions]]` (with `source = "tune"`) or `[[skill]]` entry points at its
 file under `.hlock/tuned/`.
 
+A tune that [moved the lock to a new model](../guides/upgrade.md#move-to-a-new-model)
+(`hlock upgrade --to MODEL --retune`) adds `[tune.migrate]`: the `role`, `from` and `to`
+models, the `lint` summary for the new model, `before` (the lock as it was) and `after`
+(the chosen configuration) with their success rate and cost per task, each effort level
+tried (`[[tune.migrate.effort]]`), the level set explicitly (`effort-set`) and where the
+levels came from (`efforts-from`), and each line ablate deleted (`[[tune.migrate.deleted]]`).
+
 ## `harness.meta.lock`
 
 [`hlock meta pin`](../guides/meta.md) writes the meta harness's lock: a pinned lock
