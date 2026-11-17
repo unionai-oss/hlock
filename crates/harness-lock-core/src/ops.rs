@@ -203,7 +203,7 @@ pub fn upgrade(manifest: Manifest, spec: &UpgradeSpec) -> Result<UpgradeOutcome>
         cand.llm
             .entry(role.clone())
             .and_modify(|c| c.any_of = vec![spec_str.clone()])
-            .or_insert(crate::manifest::LLMCandidate { any_of: vec![spec_str] });
+            .or_insert(crate::manifest::LLMCandidate { any_of: vec![spec_str], ..Default::default() });
     }
     cand.decision = manifest.candidates.decision.clone();
     cand.harness = manifest.candidates.harness.clone();
@@ -610,6 +610,7 @@ pub(crate) fn base_stack(base: Option<&Lockfile>, manifest: &Manifest, harness: 
             skills: manifest.skills.keys().cloned().collect(),
             temperature: Some(0.2),
             tool_timeout_seconds: Some(120),
+            effort: manifest.candidates.llm.get("planner").and_then(|c| c.effort.first()).map(|e| BTreeMap::from([("planner".to_string(), e.clone())])).unwrap_or_default(),
             ..Default::default()
         },
     };
@@ -624,13 +625,41 @@ fn tuned_role(base: &Stack) -> String {
     if base.llm.contains_key("planner") || base.llm.is_empty() { "planner".into() } else { base.llm.keys().next().cloned().unwrap_or_default() }
 }
 
+/// The reasoning-effort levels `tune` tries for `role`: each of `[candidates.llm.<role>]
+/// effort` (else the planner's) when it lists more than one, at every depth; otherwise
+/// the base's level, else the one the manifest fixes, else none (nothing is sent).
+fn tune_efforts(base: &Stack, manifest: &Manifest, role: &str) -> Vec<Option<String>> {
+    let cands: Vec<String> = manifest.candidates.llm.get(role).filter(|c| !c.effort.is_empty()).or_else(|| manifest.candidates.llm.get("planner")).map(|c| c.effort.clone()).unwrap_or_default();
+    if cands.len() > 1 {
+        cands.into_iter().map(Some).collect()
+    } else {
+        vec![base.effort.get(role).cloned().or_else(|| cands.into_iter().next())]
+    }
+}
+
+/// How far apart two effort levels are, for tune's tie-break: 0 when equal, else their
+/// distance in [`crate::manifest::EFFORTS`] order (unset counts as farther than any level).
+fn effort_distance(a: Option<&String>, b: Option<&String>) -> usize {
+    let rank = |e: &String| crate::manifest::EFFORTS.iter().position(|x| x == e);
+    match (a, b) {
+        (a, b) if a == b => 0,
+        (Some(a), Some(b)) => match (rank(a), rank(b)) {
+            (Some(x), Some(y)) => x.abs_diff(y),
+            _ => crate::manifest::EFFORTS.len(),
+        },
+        _ => crate::manifest::EFFORTS.len() + 1,
+    }
+}
+
 /// The configurations `tune` tries: the base stack, varied over what tune tunes
-/// (retries, temperature, and at `full` the tool timeout), and over the planner model
-/// when `[candidates.llm.planner]` lists more than one. Deeper depths widen the grid.
+/// (retries, temperature, and at `full` the tool timeout), over the planner model
+/// when `[candidates.llm.planner]` lists more than one, and over its reasoning effort
+/// when its `effort` lists more than one level. Deeper depths widen the grid.
 fn tune_grid(base: &Stack, manifest: &Manifest, depth: &str) -> Vec<Stack> {
     let role = tuned_role(base);
     let cands: Vec<String> = manifest.candidates.llm.get("planner").map(|c| c.any_of.clone()).unwrap_or_default();
     let models: Vec<Option<String>> = if cands.len() > 1 { cands.into_iter().map(Some).collect() } else { vec![base.llm.get(&role).cloned()] };
+    let efforts = tune_efforts(base, manifest, &role);
     let retries: Vec<u32> = match depth {
         "probe" => vec![0],
         "prompt" => vec![0, 1],
@@ -640,17 +669,23 @@ fn tune_grid(base: &Stack, manifest: &Manifest, depth: &str) -> Vec<Stack> {
     let timeouts: Vec<u64> = if depth == "full" { vec![30, 120] } else { vec![120] };
     let mut out = Vec::new();
     for m in &models {
-        for &r in &retries {
-            for &t in &temps {
-                for &tt in &timeouts {
-                    let mut s = base.clone();
-                    if let Some(m) = m {
-                        s.llm.insert(role.clone(), m.clone());
+        for e in &efforts {
+            for &r in &retries {
+                for &t in &temps {
+                    for &tt in &timeouts {
+                        let mut s = base.clone();
+                        if let Some(m) = m {
+                            s.llm.insert(role.clone(), m.clone());
+                        }
+                        match e {
+                            Some(e) => s.effort.insert(role.clone(), e.clone()),
+                            None => s.effort.remove(&role),
+                        };
+                        s.retries = r;
+                        s.temperature = Some(t);
+                        s.tool_timeout_seconds = Some(tt);
+                        out.push(s);
                     }
-                    s.retries = r;
-                    s.temperature = Some(t);
-                    s.tool_timeout_seconds = Some(tt);
-                    out.push(s);
                 }
             }
         }
@@ -736,7 +771,7 @@ pub fn tune(manifest: Manifest, spec: &TuneSpec) -> Result<TuneOutcome> {
     let n_synthetic = parse_synthetic(&spec.data);
     let data_mode = if n_synthetic > 0 { "synthetic" } else { "user-traces" };
     let grid = tune_grid(&base, &manifest, &depth);
-    let plan_value = serde_json::json!({
+    let mut plan_value = serde_json::json!({
         "depth": depth,
         "data": spec.data,
         "data_mode": data_mode,
@@ -748,6 +783,14 @@ pub fn tune(manifest: Manifest, spec: &TuneSpec) -> Result<TuneOutcome> {
             "tool_timeout_seconds": grid.iter().filter_map(|s| s.tool_timeout_seconds).collect::<std::collections::BTreeSet<_>>(),
         },
     });
+    // the effort axis, only when the grid sets one (so a tune without it records what it did)
+    let role = tuned_role(&base);
+    let mut efforts: Vec<&String> = grid.iter().filter_map(|s| s.effort.get(&role)).collect();
+    efforts.sort_by_key(|e| crate::manifest::EFFORTS.iter().position(|x| x == e));
+    efforts.dedup();
+    if !efforts.is_empty() {
+        plan_value["axes"]["effort"] = serde_json::json!(efforts);
+    }
     let mut stages = Vec::new();
 
     // ---- stage 1: data (user traces or synthetic) ----
@@ -900,8 +943,9 @@ pub fn tune(manifest: Manifest, spec: &TuneSpec) -> Result<TuneOutcome> {
     stages.push(stage("hpo", true, format!("{} configs", scored.len())));
 
     // the best: highest success, then lowest cost, then closest to the base
-    let role = tuned_role(&base);
-    let distance = |s: &Stack| (s.retries.abs_diff(base.retries), s.temperature != base.temperature, s.llm.get(&role) != base.llm.get(&role), s.tool_timeout_seconds != base.tool_timeout_seconds);
+    let distance = |s: &Stack| {
+        (s.retries.abs_diff(base.retries), s.temperature != base.temperature, effort_distance(s.effort.get(&role), base.effort.get(&role)), s.llm.get(&role) != base.llm.get(&role), s.tool_timeout_seconds != base.tool_timeout_seconds)
+    };
     let winner = scored
         .iter()
         .min_by(|a, b| b.success_rate().total_cmp(&a.success_rate()).then(a.mean_cost().total_cmp(&b.mean_cost())).then(distance(&a.stack).cmp(&distance(&b.stack))))
@@ -998,7 +1042,7 @@ pub fn tune(manifest: Manifest, spec: &TuneSpec) -> Result<TuneOutcome> {
 
     let best = &winner.stack;
     let notes = notes.lock().map(|n| n.clone()).unwrap_or_default();
-    let report = serde_json::json!({
+    let mut report = serde_json::json!({
         "depth": depth,
         "data": spec.data,
         "data_mode": data_mode,
@@ -1019,6 +1063,9 @@ pub fn tune(manifest: Manifest, spec: &TuneSpec) -> Result<TuneOutcome> {
         "applied": spec.apply,
         "previous": previous.map(|p| p.to_string_lossy().into_owned()),
     });
+    if let Some(e) = best.effort.get(&role) {
+        report["best"]["effort"] = serde_json::json!(e);
+    }
     Ok(TuneOutcome { path: spec.out.clone(), lock: tune_lock, report })
 }
 
@@ -1105,6 +1152,7 @@ fn build_tuned_lock(
         ("temperature".to_string(), serde_json::json!(stack.temperature.unwrap_or(0.2))),
         ("tool_timeout_seconds".to_string(), serde_json::json!(stack.tool_timeout_seconds.unwrap_or(120))),
     ];
+    let effort = stack.effort.get(&role).cloned();
     match lf.llm.iter_mut().find(|l| l.role == role) {
         Some(l) => {
             if l.provider != provider || l.model != model {
@@ -1114,8 +1162,9 @@ fn build_tuned_lock(
             l.provider = provider;
             l.model = model;
             l.params.extend(params);
+            l.effort = effort.clone();
         }
-        None => lf.llm.push(crate::lockfile::LLM { role, provider, model, resolved_from: Some(spec.clone()), params: params.into_iter().collect(), ..Default::default() }),
+        None => lf.llm.push(crate::lockfile::LLM { role: role.clone(), provider, model, resolved_from: Some(spec.clone()), params: params.into_iter().collect(), effort: effort.clone(), ..Default::default() }),
     }
     lf.policy.retries = stack.retries;
     // the sandbox is harness.toml's, whatever the base lock had
@@ -1150,6 +1199,9 @@ fn build_tuned_lock(
             "best": {"model": spec, "retries": stack.retries, "temperature": stack.temperature, "tool_timeout_seconds": stack.tool_timeout_seconds},
         },
     });
+    if let Some(e) = &effort {
+        tune["hpo"]["best"]["effort"] = serde_json::json!(e);
+    }
     if let Some(gain) = prompt_gain {
         let mut applied = serde_json::json!({
             "component": "harness.system-prompt",
