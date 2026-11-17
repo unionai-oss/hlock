@@ -47,7 +47,7 @@ target = "local"
 ```
 
 `resolve` and `tune` refuse a manifest with a key they don't know in `[budget]`,
-`[objective]`, `[evals]`, `[evals.splits]`, `[candidates]`, `[backend]`, `[target]`,
+`[objective]`, `[evals]`, `[evals.splits]`, `[candidates]`, `[candidates.llm.<role>]`, `[backend]`, `[target]`,
 `[environment]`, `[[environment.binaries]]`, `[[secrets]]`, `[workspace]`,
 `[[workspace.repos]]`, `[[workspace.files]]`, or at the top level, and name the closest
 known key: a mistyped key is otherwise ignored.
@@ -86,6 +86,7 @@ The search space. The resolver tries every combination.
 | Key | Description |
 |---|---|
 | `llm.<role>.any_of` | Candidate models for a role, as `"provider:model"`. v0.1 tunes the `planner` role. |
+| `llm.<role>.effort` | [Reasoning effort](../guides/tune.md#reasoning-effort) for the role: one level (`"high"`) or a list to search (`["medium", "high", "xhigh"]`). Levels are `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`; any other is an error. Unset, none is sent. |
 | `decision` | Candidate decision models, e.g. `"none"`, `"rules:default"` |
 | `harness` | Candidate harnesses: a list of names, or tables with `name`, `pattern`, and `config` |
 | `policy.<key>` | Policy values, e.g. `retries = [1]`, `temperature = [0.2]`. `resolve` uses the first value. [`tune`](../guides/tune.md) searches retries and temperature itself. |

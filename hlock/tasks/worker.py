@@ -72,11 +72,12 @@ def _rejected_params(model: str) -> frozenset:
 
 
 def _complete(model: str, prompt: str, temperature: float | None = 0.2, max_tokens: int = 200,
-              provider: str = "reference", system: str = "") -> dict:
+              provider: str = "reference", system: str = "", effort: str | None = None) -> dict:
     """One OpenAI-compatible chat completion against `HL_LLM_BASE_URL`. Raises on any
     failure. The cost is what the endpoint reports (`usage.cost`, as OpenRouter's does),
-    else None: unknown, never a made-up 0. `temperature` is left out of the request when
-    it's None or the model rejects it; the result's `temperature` is what was sent."""
+    else None: unknown, never a made-up 0. `tempperature` is left out of the request when
+    it's None or the model rejects it; `effort` (the stack's reasoning effort) is sent as
+    `reasoning_effort` only when set."""
     import urllib.request
 
     base = os.environ.get("HL_LLM_BASE_URL", "").rstrip("/")
@@ -90,6 +91,8 @@ def _complete(model: str, prompt: str, temperature: float | None = 0.2, max_toke
     }
     if temperature is not None and "temperature" not in _rejected_params(served):
         request["temperature"] = temperature
+    if effort:
+        request["reasoning_effort"] = effort
     body = json.dumps(request).encode()
     headers = {"Content-Type": "application/json"}
     if key:
@@ -237,6 +240,8 @@ def llm_run_trial(req: dict) -> dict:
     # None (the stack's model rejects it, see `crates/harness-lock-core/src/models.rs`): not sent
     temperature = None if stack.get("temperature") is None else float(stack["temperature"])
     tool_timeout = float(stack.get("tool_timeout_seconds") or 120.0)
+    # the planner's reasoning effort, when the stack sets one (never a default)
+    effort = (stack.get("effort") or {}).get("planner") or None
     seed = int(req.get("seed", 0))
     task = req.get("task") or {}
     prompt = task.get("prompt_text") or "solve the task"
@@ -265,7 +270,8 @@ def llm_run_trial(req: dict) -> dict:
     try:
         # a reasoning model spends its thinking from this budget too
         max_tokens = int(os.environ.get("HL_LLM_MAX_TOKENS") or 4096)
-        r = _complete(model, composed, temperature, max_tokens=max_tokens, provider=provider, system=system)
+        r = _complete(model, composed, temperature, max_tokens=max_tokens, provider=provider, system=system,
+                      effort=effort)
     except Exception as exc:  # noqa: BLE001 - the trial fails, and says why
         return {"error": f"the model endpoint failed for {model_spec}: {exc}"}
     out.parent.mkdir(parents=True, exist_ok=True)
@@ -283,6 +289,8 @@ def llm_run_trial(req: dict) -> dict:
         "latency_ms": r["latency_ms"],
         "wrote": name,
     }
+    if effort:
+        event["effort"] = effort
     return {
         "result": {
             "success": True,

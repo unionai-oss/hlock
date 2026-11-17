@@ -291,12 +291,15 @@ def endpoint(monkeypatch):
         e.close()
 
 
-def trial(planner: str, ws: Path, expected=None, prompt="Count the words in words.txt.", **stack) -> dict:
+def trial(planner: str, ws: Path, expected=None, prompt="Count the words in words.txt.", effort=None, **stack) -> dict:
+    if effort:
+        stack["effort"] = {"planner": effort}
+    stack["llm"] = {"planner": planner}
     return run_worker({
         "version": CONTRACT_VERSION,
         "kind": "llm.run_trial",
         "backend": "local",
-        "stack": {"llm": {"planner": planner}, **stack},
+        "stack": stack,
         "task": {"id": "count_words", "prompt_text": prompt, "expected": expected or []},
         "seed": 0,
         "workdir": str(ws),
@@ -345,6 +348,18 @@ def test_the_model_table_comes_from_the_core():
 
     assert model_rejects("anthropic:claude-fable-5-2") == ["temperature", "top_k", "top_p"]
     assert model_rejects("openai:gpt-5") == []
+
+
+def test_reasoning_effort_is_sent_only_when_the_stack_sets_it(tmp_path, endpoint):
+    e = endpoint(lambda prompt: "3")
+    resp = trial("anthropic:claude-fable-5-2", tmp_path)
+    assert resp["ok"] is True
+    assert "reasoning_effort" not in e.requests[0]  # never a default
+    assert "effort" not in resp["result"]["trace"][0]
+    resp = trial("anthropic:claude-fable-5-2", tmp_path, effort="xhigh")
+    assert resp["ok"] is True
+    assert e.requests[1]["reasoning_effort"] == "xhigh"
+    assert resp["result"]["trace"][0]["effort"] == "xhigh"
 
 
 def test_a_symlinked_parent_cant_redirect_the_reply_out_of_the_workspace(tmp_path, monkeypatch, endpoint):

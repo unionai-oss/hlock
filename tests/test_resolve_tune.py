@@ -113,6 +113,29 @@ def test_tune_doesnt_sweep_a_temperature_the_model_rejects(project):
     assert tuned["tune"]["hpo"]["skipped"] == {"temperature": "reference:claude-fable-5-2 rejects it"}
 
 
+def test_effort_is_resolved_locked_and_tuned(project):
+    manifest = project / "harness.toml"
+    manifest.write_text(manifest.read_text().replace(
+        'any_of = ["reference:qwen-7b", "reference:qwen-32b"]',
+        'any_of = ["reference:qwen-7b"]\neffort = ["medium", "high", "xhigh"]'))
+    plan = json.loads(invoke("resolve", "--dry-run", "--json").output)
+    assert "reference/reference:qwen-7b@xhigh/d=none" in plan["stacks"] and len(plan["stacks"]) == 6
+    assert invoke("resolve").exit_code == 0
+    locked = json.loads(invoke("show", "--json").output)
+    assert locked["llm"][0]["effort"] in ("medium", "high", "xhigh")
+    r = invoke("tune", "--depth", "probe")
+    assert r.exit_code == 0, r.output
+    assert "3 configurations" in r.output and flat(f"effort {locked['llm'][0]['effort']}") in flat(r.output)
+    tuned = json.loads(invoke("--lock", "harness.tune.lock", "show", "--json").output)
+    # every level ties on the reference, so the lock's own effort stays
+    assert tuned["llm"][0]["effort"] == locked["llm"][0]["effort"]
+    assert tuned["tune"]["hpo"]["axes"]["effort"] == ["medium", "high", "xhigh"]
+    # a level that isn't one stops resolve and tune before any trial
+    manifest.write_text(manifest.read_text().replace('"xhigh"]', '"ultra"]'))
+    r = invoke("tune", "--depth", "probe")
+    assert r.exit_code == 1 and '[candidates.llm.planner] effort = "ultra" isn\'t supported' in flat(r.output), r.output
+
+
 def test_tune_max_trials_caps_the_whole_grid(project):
     assert invoke("resolve").exit_code == 0
     r = invoke("tune", "--depth", "hpo", "--max-trials", "5")
