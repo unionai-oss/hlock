@@ -56,6 +56,11 @@ const OBJECTIVE_KEYS: &[&str] = &["primary", "constraints", "select"];
 const EVALS_KEYS: &[&str] = &["packs", "seeds", "splits", "judge"];
 const SPLITS_KEYS: &[&str] = &["search"];
 const CANDIDATES_KEYS: &[&str] = &["llm", "decision", "harness", "policy"];
+const LLM_CANDIDATE_KEYS: &[&str] = &["any_of", "any-of", "effort"];
+/// The reasoning-effort levels `[candidates.llm.<role>] effort` takes, least to most:
+/// Anthropic's `low` to `max`, and OpenAI's `none` and `minimal`. A trial sends the level
+/// as `reasoning_effort`; tune breaks ties toward the level nearest the lock's.
+pub const EFFORTS: &[&str] = &["none", "minimal", "low", "medium", "high", "xhigh", "max"];
 const BACKEND_KEYS: &[&str] = &["target"];
 const TARGET_KEYS: &[&str] = &["harness", "also"];
 const TUNE_KEYS: &[&str] = &["optimizer", "edit", "proposer", "budget", "trials", "alpha", "max-cost-increase", "max-token-increase"];
@@ -389,6 +394,25 @@ pub struct LLMCandidate {
     /// Manifest candidates may spell this `any_of` (underscore) or `any-of`.
     #[serde(alias = "any-of")]
     pub any_of: Vec<String>,
+    /// Reasoning effort for this role: one level (`effort = "high"`) fixes it, a list
+    /// (`effort = ["medium", "high", "xhigh"]`) makes it a search axis. Empty: not sent.
+    #[serde(deserialize_with = "de_one_or_many", skip_serializing_if = "Vec::is_empty")]
+    pub effort: Vec<String>,
+}
+
+/// Accept both `effort = "high"` and `effort = ["medium", "high"]`.
+fn de_one_or_many<'de, D>(d: D) -> std::result::Result<Vec<String>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    use serde::de::Error as _;
+    let bad = |v: &serde_json::Value| D::Error::custom(format!("`effort` must be a level or a list of levels, not {v}"));
+    match serde_json::Value::deserialize(d)? {
+        serde_json::Value::String(s) => Ok(vec![s]),
+        serde_json::Value::Array(a) => a.iter().map(|v| v.as_str().map(str::to_string).ok_or_else(|| bad(v))).collect(),
+        serde_json::Value::Null => Ok(vec![]),
+        other => Err(bad(&other)),
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -579,6 +603,9 @@ impl Manifest {
             report(table(&["evals"]).or(table(&["tasks"])), EVALS_KEYS, "[evals]");
             report(table(&["evals", "splits"]), SPLITS_KEYS, "[evals.splits]");
             report(table(&["candidates"]), CANDIDATES_KEYS, "[candidates]");
+            for role in table(&["candidates", "llm"]).into_iter().flat_map(|t| t.keys()) {
+                report(table(&["candidates", "llm", role]), LLM_CANDIDATE_KEYS, &format!("[candidates.llm.{role}]"));
+            }
             report(table(&["backend"]), BACKEND_KEYS, "[backend]");
             for name in table(&["backends"]).into_iter().flat_map(|t| t.keys()) {
                 report(table(&["backends", name]), crate::worker::BACKEND_DEF_KEYS, &format!("[backends.{name}]"));
@@ -618,6 +645,11 @@ impl Manifest {
             }
         };
         supported("[budget] strategy", &self.budget.strategy, STRATEGIES);
+        for (role, c) in &self.candidates.llm {
+            for e in &c.effort {
+                supported(&format!("[candidates.llm.{role}] effort"), e, EFFORTS);
+            }
+        }
         supported("[objective] primary", &self.objective.primary, PRIMARIES);
         supported("[objective] select", &self.objective.select, SELECTS);
         out
@@ -932,6 +964,25 @@ mod tests {
         // a use with only any-of candidates falls back to [deciders.default]'s model
         let m = Manifest::from_str("[deciders.judge]\nany-of = [\"ollama:kev:4b\"]\n[deciders.default]\nmodel = \"typesafe:jev-1.13.0\"\n").unwrap();
         assert_eq!(m.default_judge_checked().unwrap().unwrap().model, "typesafe:jev-1.13.0");
+    }
+
+    #[test]
+    fn effort_is_one_level_or_a_list_and_bad_levels_are_problems() {
+        let m = Manifest::from_str("[candidates.llm.planner]\nany-of = [\"anthropic:claude-fable-5-2\"]\neffort = \"high\"\n").unwrap();
+        assert_eq!(m.candidates.llm["planner"].effort, ["high"]);
+        assert!(m.problems().is_empty(), "{:?}", m.problems());
+        let m = Manifest::from_str("[candidates.llm.planner]\neffort = [\"medium\", \"high\", \"xhigh\"]\n").unwrap();
+        assert_eq!(m.candidates.llm["planner"].effort, ["medium", "high", "xhigh"]);
+        // without it, nothing is set (and a role's table serializes as before)
+        let m = Manifest::from_str("[candidates.llm.planner]\nany_of = [\"reference:qwen-7b\"]\n").unwrap();
+        assert!(m.candidates.llm["planner"].effort.is_empty());
+        assert!(serde_json::to_value(&m.candidates.llm["planner"]).unwrap().get("effort").is_none());
+        // a level that isn't one, or a misspelled key, is a problem `resolve` and `tune` refuse
+        let m = Manifest::from_str("[candidates.llm.planner]\neffort = [\"high\", \"extreme\"]\n").unwrap();
+        assert!(m.check_search().unwrap_err().to_string().contains("[candidates.llm.planner] effort = \"extreme\" isn't supported"), "{:?}", m.problems());
+        let m = Manifest::from_str("[candidates.llm.planner]\nefort = \"high\"\n").unwrap();
+        assert_eq!(m.problems(), ["unknown key `efort` in [candidates.llm.planner] (did you mean `effort`?)"]);
+        assert!(Manifest::from_str("[candidates.llm.planner]\neffort = 3\n").is_err());
     }
 
     const DECLARED: &str = r#"

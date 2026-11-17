@@ -82,7 +82,9 @@ target = "local"              # (4)!
 ```
 
 1.  Each candidate runs every task this many times.
-2.  Candidate models for the `planner` role, written `provider:model`.
+2.  Candidate models for the `planner` role, written `provider:model`. Add
+    `effort = ["medium", "high"]` to try each at those
+    [reasoning effort](tune.md#reasoning-effort) levels too.
 3.  Among the stacks that meet the constraints, pick the cheapest one.
 4.  Where trials run. See [Backends](backends.md) for real LLMs and clusters.
 
@@ -101,6 +103,10 @@ search   greet_people, hello_file
 holdout  count_words
 next → hlock resolve
 ```
+
+With `effort` levels, each model is a stack per level, and the label carries the level
+(`reference/reference:qwen-7b@high/d=none`); the winner's level is pinned in its `[[llm]]`
+entry as `effort`.
 
 Then resolve. A progress bar shows each trial as it runs, and notes (a budget cut, a
 stack that got no trials) appear as they happen:

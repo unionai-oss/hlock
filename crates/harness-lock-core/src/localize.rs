@@ -375,7 +375,7 @@ pub fn localize(source: &Lockfile, source_path: &Path, reg: &Registry, ctx: &Ctx
         let mut man = m.clone();
         man.target.clear();
         let top: Vec<String> = ranked.iter().take(4).map(|c| format!("{}:{}", runtime.id, c.id)).collect();
-        man.candidates.llm = BTreeMap::from([("planner".to_string(), LLMCandidate { any_of: top })]);
+        man.candidates.llm = BTreeMap::from([("planner".to_string(), LLMCandidate { any_of: top, ..Default::default() })]);
         man.candidates.harness = vec![HarnessCandidate { name: target.id.clone(), ..Default::default() }];
         let mut resolver = crate::Resolver::new(man, &opts.workdir);
         let lock = resolver.resolve_lock()?;

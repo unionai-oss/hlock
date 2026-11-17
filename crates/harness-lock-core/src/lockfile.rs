@@ -30,6 +30,9 @@ pub struct LLM {
     pub resolved_from: Option<String>,
     #[serde(default)]
     pub params: BTreeMap<String, serde_json::Value>,
+    /// Reasoning effort the model runs at (`low` .. `max`), when the lock pins one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<String>,
     pub fingerprint: Option<String>,
     /// Base URL the harness sends this model's requests to (pinned locks).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -47,6 +50,7 @@ impl Default for LLM {
             model: String::new(),
             resolved_from: None,
             params: BTreeMap::new(),
+            effort: None,
             fingerprint: None,
             endpoint: None,
             runtime: None,
@@ -851,6 +855,9 @@ impl Lockfile {
             if let Some(rt) = &l.runtime {
                 token(&format!("[[llm]] {} runtime", l.role), rt)?;
             }
+            if let Some(e) = l.effort.as_deref().filter(|e| !crate::manifest::EFFORTS.contains(e)) {
+                return Err(Error::Lockfile(format!("[[llm]] {} effort {e:?} isn't one of {}", l.role, crate::manifest::EFFORTS.join(", "))));
+            }
         }
         for s in &self.secret {
             if crate::secrets::check_name(&s.name).is_err() {
@@ -1097,6 +1104,25 @@ mod tests {
         assert_eq!(back.stack["notes"], "line one\n# not a comment\nline three");
         let raw = format!("{HEADER}\n{HEAD}[stack]\nnotes = \"\"\"\na\n# b\nc\"\"\"\n");
         assert_eq!(Lockfile::from_str(&raw).unwrap().stack["notes"], "a\n# b\nc");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn an_llm_pins_its_effort_only_when_it_has_one() {
+        let mut l = Lockfile::default();
+        l.llm.push(LLM { role: "planner".into(), provider: "anthropic".into(), model: "claude-fable-5-2".into(), effort: Some("high".into()), ..Default::default() });
+        l.llm.push(LLM { role: "small".into(), provider: "anthropic".into(), model: "claude-haiku".into(), ..Default::default() });
+        let d = tmp("effort");
+        let p = d.join("harness.lock");
+        l.save(&p).unwrap();
+        let text = std::fs::read_to_string(&p).unwrap();
+        assert_eq!(text.matches("effort = \"high\"").count(), 1, "{text}");
+        assert!(!text.contains("effort = \"\""), "an unset effort isn't written");
+        let back = Lockfile::load(&p).unwrap();
+        assert_eq!((back.llm[0].effort.as_deref(), back.llm[1].effort.as_deref()), (Some("high"), None));
+        // a level that isn't one doesn't load
+        let raw = format!("{HEADER}\n{HEAD}[[llm]]\nrole = \"planner\"\nprovider = \"anthropic\"\nmodel = \"m\"\neffort = \"turbo\"\n");
+        assert!(Lockfile::from_str(&raw).unwrap_err().to_string().contains("[[llm]] planner effort \"turbo\""));
         let _ = std::fs::remove_dir_all(&d);
     }
 
