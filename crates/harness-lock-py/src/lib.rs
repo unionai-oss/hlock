@@ -444,6 +444,7 @@ impl PyLockfile {
         m.insert("eval_pack_digest".into(), serde_json::json!(self.inner.evidence.eval_pack_digest));
         m.insert("split".into(), serde_json::json!(self.inner.evidence.split));
         m.insert("simulated".into(), serde_json::json!(self.inner.evidence.simulated));
+        m.insert("out_of_tokens".into(), serde_json::json!(self.inner.evidence.out_of_tokens));
         m.insert(
             "success_rate".into(),
             serde_json::json!(self.inner.evidence.success_rate),

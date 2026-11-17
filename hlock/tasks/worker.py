@@ -61,12 +61,39 @@ def _served_model(model: str, provider: str = "reference") -> str:
     return model
 
 
-def _complete(model: str, prompt: str, temperature: float = 0.2, max_tokens: int = 200,
+def _max_tokens() -> int:
+    """`HL_LLM_MAX_TOKENS`: the most tokens a completion may use. A reasoning model spends
+    its thinking from this budget too, so it's a cap, not a spend: a model that answers in
+    a few tokens stops there."""
+    return int(os.environ.get("HL_LLM_MAX_TOKENS") or 4096)
+
+
+# fewer visible characters than this, at the token limit, is no answer at all
+NEAR_EMPTY = 16
+
+
+def _out_of_tokens(got: dict) -> bool:
+    """Whether a completion hit its token limit before it answered: it stopped at the
+    limit (`finish_reason` `length`) with next to no visible reply, or after spending most
+    of its output on reasoning. That's the budget's doing, not the model failing the task."""
+    if got.get("finish_reason") not in ("length", "max_tokens"):
+        return False
+    usage = got.get("usage") or {}
+    reasoning = usage.get("reasoning_tokens") or 0
+    return len(got.get("content", "").strip()) < NEAR_EMPTY or reasoning * 2 > (usage.get("output_tokens") or 0)
+
+
+def _complete(model: str, prompt: str, temperature: float = 0.2, max_tokens: int | None = None,
               provider: str = "reference", system: str = "") -> dict:
-    """One OpenAI-compatible chat completion against `HL_LLM_BASE_URL`. Raises on any
-    failure. The cost is what the endpoint reports (`usage.cost`, as OpenRouter's does),
-    else None: unknown, never a made-up 0."""
+    """One OpenAI-compatible chat completion against `HL_LLM_BASE_URL`, up to `max_tokens`
+    (default `HL_LLM_MAX_TOKENS`). Raises on any failure. The cost is what the endpoint
+    reports (`usage.cost`, as OpenRouter's does), else None: unknown, never a made-up 0.
+    `finish_reason` is the endpoint's, and `usage.reasoning_tokens` the thinking it counted
+    (`completion_tokens_details.reasoning_tokens`), else None."""
     import urllib.request
+
+    if max_tokens is None:
+        max_tokens = _max_tokens()
 
     base = os.environ.get("HL_LLM_BASE_URL", "").rstrip("/")
     key = os.environ.get("HL_LLM_API_KEY", "")
@@ -86,16 +113,20 @@ def _complete(model: str, prompt: str, temperature: float = 0.2, max_tokens: int
     start = time.monotonic()
     with urllib.request.urlopen(req, timeout=float(os.environ.get("HL_LLM_TIMEOUT") or 120)) as resp:
         data = json.loads(resp.read().decode())
-    content = data["choices"][0]["message"]["content"] or ""
+    choice = data["choices"][0]
+    content = choice["message"]["content"] or ""
     usage = data.get("usage") or {}
     cost = usage.get("cost")
+    reasoning = (usage.get("completion_tokens_details") or {}).get("reasoning_tokens")
     return {
         "content": content,
+        "finish_reason": choice.get("finish_reason"),
         "cost_usd": float(cost) if isinstance(cost, (int, float)) else None,
         "latency_ms": round((time.monotonic() - start) * 1000.0, 1),
         "usage": {
             "input_tokens": usage.get("prompt_tokens", 0),
             "output_tokens": usage.get("completion_tokens", 0),
+            "reasoning_tokens": reasoning if isinstance(reasoning, int) else None,
         },
     }
 
@@ -109,6 +140,10 @@ def _call_real_llm(model: str, prompt: str, temperature: float = 0.2) -> dict | 
         got = _complete(model, prompt, temperature)
     except Exception as exc:  # noqa: BLE001 - fall back on any transport failure
         sys.stderr.write(f"[worker] real LLM failed ({exc}); using reference fallback\n")
+        return None
+    if _out_of_tokens(got):
+        sys.stderr.write(f"[worker] {model} ran out of tokens before answering; raise HL_LLM_MAX_TOKENS. "
+                         "Using reference fallback\n")
         return None
     got["cost_usd"] = got["cost_usd"] or 0.0
     return got
@@ -249,9 +284,7 @@ def llm_run_trial(req: dict) -> dict:
         + f"Reply with only the full contents of `{name}`, and nothing else."
     )
     try:
-        # a reasoning model spends its thinking from this budget too
-        max_tokens = int(os.environ.get("HL_LLM_MAX_TOKENS") or 4096)
-        r = _complete(model, composed, temperature, max_tokens=max_tokens, provider=provider, system=system)
+        r = _complete(model, composed, temperature, provider=provider, system=system)
     except Exception as exc:  # noqa: BLE001 - the trial fails, and says why
         return {"error": f"the model endpoint failed for {model_spec}: {exc}"}
     out.parent.mkdir(parents=True, exist_ok=True)
@@ -267,11 +300,14 @@ def llm_run_trial(req: dict) -> dict:
         "usage": r["usage"],
         "cost_usd": r["cost_usd"],
         "latency_ms": r["latency_ms"],
+        "finish_reason": r["finish_reason"],
         "wrote": name,
     }
     return {
         "result": {
             "success": True,
+            # it ran out of tokens before it answered: the core says so when the trial fails
+            "out_of_tokens": _out_of_tokens(r),
             "score": 1.0,
             "cost_usd": r["cost_usd"],
             "gpu_h": 0.0,

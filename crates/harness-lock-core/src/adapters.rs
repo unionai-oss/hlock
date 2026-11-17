@@ -19,6 +19,9 @@ pub struct RunOutcome {
     pub steps: u64,
     /// Trace events (a serde array) for content-addressed storage.
     pub trace: serde_json::Value,
+    /// The model hit its token limit before it answered (a reasoning model's thinking
+    /// counts toward it): when the trial fails, that's the budget's doing.
+    pub out_of_tokens: bool,
 }
 
 /// A harness adapter runs one `(stack, task, seed)` and produces a `RunOutcome`.
@@ -126,6 +129,7 @@ impl HarnessAdapter for ReferenceAdapter {
             latency_s: (latency * 1e3).round() / 1e3,
             steps,
             trace: json!(events),
+            out_of_tokens: false,
         })
     }
 }

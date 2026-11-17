@@ -297,7 +297,7 @@ impl Resolver {
             Ok(o) => (o, None),
             Err(e) => {
                 self.note(format!("{} couldn't run task {} (seed {seed}): {e}", stack.label(), task.id));
-                let failed = crate::adapters::RunOutcome { success: false, cost_usd: 0.0, latency_s: 0.0, steps: 0, trace: json!([]) };
+                let failed = crate::adapters::RunOutcome { success: false, cost_usd: 0.0, latency_s: 0.0, steps: 0, trace: json!([]), out_of_tokens: false };
                 (failed, Some(e.to_string()))
             }
         };
@@ -321,7 +321,9 @@ impl Resolver {
             cost_usd: judged.iter().map(|g| g.cost_usd).sum::<Option<f64>>(),
         });
         let success = error.is_none() && outcome.success && grades.iter().all(|g| g.success);
-        let detail = error.clone().or_else(|| {
+        // a failure the token limit caused, not the model: said apart, and not on the model
+        let out_of_tokens = !success && error.is_none() && outcome.out_of_tokens;
+        let detail = error.clone().or_else(|| out_of_tokens.then(|| OUT_OF_TOKENS.to_string())).or_else(|| {
             grades.iter().find(|g| !g.success).map(|g| {
                 let why = g.detail.lines().rev().find(|l| !l.trim().is_empty()).unwrap_or("failed");
                 format!("{}: {why}", g.grader)
@@ -354,6 +356,14 @@ impl Resolver {
             error,
             judging,
             detail,
+            out_of_tokens,
+        }
+    }
+
+    /// The one warning for trials that ran out of tokens before answering, when any did.
+    pub fn note_out_of_tokens(&self, n: usize) {
+        if n > 0 {
+            self.note(out_of_tokens_note(n));
         }
     }
 
@@ -369,7 +379,7 @@ impl Resolver {
             }
         }
         let r = self.run_trial(stack, task, seed, ws_root);
-        if cacheable && r.error.is_none() {
+        if cacheable && r.error.is_none() && !r.out_of_tokens {
             let _ = std::fs::create_dir_all(cache_dir);
             let _ = crate::fsutil::write_atomic(&file, serde_json::to_string(&r).unwrap_or_default());
         }
@@ -604,6 +614,7 @@ impl Resolver {
         if let Some(why) = &cut {
             self.note(format!("{why} ran {n} of {total} trials, spread across the stacks"));
         }
+        let mut out_of_tokens: usize = results.iter().flatten().filter(|t| t.out_of_tokens).count();
 
         let mut scores: Vec<StackScore> = Vec::new();
         for (stack, trials) in stacks.iter().zip(results) {
@@ -650,6 +661,8 @@ impl Resolver {
                 holdout_trials.push(r);
             }
         }
+        out_of_tokens += holdout_trials.iter().filter(|t| t.out_of_tokens).count();
+        self.note_out_of_tokens(out_of_tokens);
         let holdout = (!holdout_trials.is_empty()).then(|| StackScore { stack: winner.stack.clone(), n: holdout_trials.len(), trials: holdout_trials });
         if holdout.is_none() {
             let why = if holdout_cut { "the budget left nothing for the holdout check" } else { "there are no holdout tasks; add tasks, or lower [evals.splits] search" };
@@ -671,11 +684,13 @@ impl Resolver {
                 "cost-usd-per-task": roundf(sc.mean_cost()),
                 "latency-s-p50": roundf(sc.mean_latency()),
                 "trials": sc.n,
+                "out-of-tokens": sc.out_of_tokens(),
                 "winner": sc.stack.hash() == winner.stack.hash(),
             })).collect::<Vec<_>>(),
             "winner": winner.stack.label(),
             "holdout": holdout.as_ref().map(|h| json!({"success-rate": roundf(h.success_rate()), "trials": h.n})),
             "trials": n + holdout.as_ref().map_or(0, |h| h.n),
+            "out-of-tokens": out_of_tokens,
             "cached": cached,
             "spend-usd": roundf(spend.spent),
             "report": report_path.to_string_lossy(),
@@ -782,6 +797,7 @@ impl Resolver {
                 success_rate,
                 cost_usd_per_task: cost,
                 latency_s_per_task: latency,
+                out_of_tokens: measured.out_of_tokens(),
                 judge: self.judge_model(measured),
                 // an agent CLI's trials ran on a stand-in, not the agent itself
                 simulated: self.profiles.get(&s.harness).is_some_and(|p| p.kind == "cli"),
@@ -940,6 +956,15 @@ pub fn apply_target(manifest: &mut Manifest, explicit: Option<&str>, registry: &
         }
     }
     Ok(Some(profile.id.clone()))
+}
+
+/// Why a trial failed when the model ran out of tokens before it answered.
+pub const OUT_OF_TOKENS: &str = "the model ran out of tokens before it answered (a reasoning model's thinking counts toward HL_LLM_MAX_TOKENS)";
+
+/// The warning for `n` trials that ran out of tokens before answering.
+pub fn out_of_tokens_note(n: usize) -> String {
+    let trials = if n == 1 { "trial" } else { "trials" };
+    format!("{n} {trials} ran out of tokens before answering; raise HL_LLM_MAX_TOKENS or lower effort")
 }
 
 fn roundf(v: f64) -> f64 {
