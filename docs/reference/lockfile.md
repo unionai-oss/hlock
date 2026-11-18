@@ -185,7 +185,7 @@ trials = 16
 | Section | Contents |
 |---|---|
 | `[stack]` | Stack name, and the `select` rule that chose it |
-| `[[llm]]` | One entry per role: `provider`, `model`, the candidate string it came from, a `fingerprint`, and `params` |
+| `[[llm]]` | One entry per role: `provider`, `model`, the candidate string it came from, a `fingerprint`, and `params`; and the [reasoning `effort`](../guides/tune.md#reasoning-effort) when the manifest declares one. A lock whose `effort` isn't one of the [manifest's levels](manifest.md#candidates) doesn't load. |
 | `[decision]` | Decision model `kind`, its `decisions`, and `thresholds` |
 | `[harness]` | Harness `name` and `pattern`. For a harness with a profile, also the installed `version`, its install `source` (e.g. `brew-cask:claude-code@2.1.285`), and the `adapter` that ran the trials. |
 | `[policy]` | `retries`, `max-steps`, `human-approval`, `risky-actions`, `tool-allowlist`, and `[policy.sandbox]`: the [sandbox](../guides/sandbox.md) the lock runs in (`runner`, `image`, `network`, with `hosts` for an allowlist, `secrets`, `applies-to`, `profile = { path, digest }`, `grader-image`), from `harness.toml`'s `[sandbox]`. Empty means none |
@@ -366,6 +366,8 @@ baseline. Its own `[evidence]` is empty until you resolve it.
 plus what tuning produced: the chosen hyperparameters, applied prompts, fine-tune
 adapters, the data split, and the budget, all content-addressed. Adopt it into
 `harness.lock` with `hlock tune apply`, which keeps the old lock in `harness.lock.prev`.
+`[tune.hpo]` records the grid's `axes` (with `effort` when it searched effort levels) and
+the `best` configuration.
 
 When the [optimize stage](../guides/tune.md#tune-the-harness-text) ran, `[tune.optimizer]`
 records the optimizer, the `backend` that hosted its search, what it could edit, its budget
@@ -375,6 +377,13 @@ and usage, and a digest of the splits;
 a `[[tune.edit]]` (`component`, `kind`, `op`, `before`, `after`, `path`, `rationale`), and
 the lock's `[[instructions]]` (with `source = "tune"`) or `[[skill]]` entry points at its
 file under `.hlock/tuned/`.
+
+A tune that [moved the lock to a new model](../guides/upgrade.md#move-to-a-new-model)
+(`hlock upgrade --to MODEL --retune`) adds `[tune.migrate]`: the `role`, `from` and `to`
+models, the `lint` summary for the new model, `before` (the lock as it was) and `after`
+(the chosen configuration) with their success rate and cost per task, each effort level
+tried (`[[tune.migrate.effort]]`), the level set explicitly (`effort-set`) and where the
+levels came from (`efforts-from`), and each line ablate deleted (`[[tune.migrate.deleted]]`).
 
 ## `harness.meta.lock`
 

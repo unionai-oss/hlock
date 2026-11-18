@@ -930,7 +930,8 @@ Find newer versions of locked components, re-measure the stack, and apply only o
 request. See [Upgrading components](../guides/upgrade.md).
 
 `upgrade` works on resolved locks. On a pinned lock it exits `1`: update your setup and
-re-pin with `hlock pin` instead. `hlock upgrade dep:NAME` works on any lock: it moves a
+re-pin with `hlock pin` instead. `--retune` works on any lock, as `hlock tune` does.
+`hlock upgrade dep:NAME` works on any lock: it moves a
 declared dependency to the newest commit, tag or version its declaration allows, keeping
 the previous lock as `harness.lock.prev` (see
 [Keep them current](../guides/dependencies.md#keep-them-current)).
@@ -938,12 +939,17 @@ the previous lock as `harness.lock.prev` (see
 ```bash
 hlock upgrade [--all | --to TARGET] [--apply] [--force] [--rollback] [--workdir DIR]
 hlock upgrade dep:NAME [--eval [-y]] [--apply]
+hlock upgrade [--to MODEL] --retune [--backend NAME] [--out FILE] [--max-trials N] [--workdir DIR]
 ```
 
 | Option | Description |
 |---|---|
 | `--all` | Consider every upgradeable component |
 | `--to TARGET` | Upgrade to a specific model/version |
+| `--retune` | [Move to the new model](../guides/upgrade.md#move-to-a-new-model) by tuning: lint the lock's text for it, sweep its effort, delete stale lines with `ablate`, and write `harness.tune.lock`. `harness.lock` isn't touched. |
+| `--backend NAME` | With `--retune`, where the trials run. Deleting lines needs `local` or `flyte`. |
+| `--out FILE` | With `--retune`, the tune lock to write (default `harness.tune.lock`) |
+| `--max-trials N` | With `--retune`, cap the grid's trials, as `tune --max-trials` does |
 | `--apply` | Perform the upgrade. Without it, only print the plan. |
 | `--force` | Keep the upgrade even if the success rate drops |
 | `--rollback` | Restore `harness.lock` from `harness.lock.prev` |

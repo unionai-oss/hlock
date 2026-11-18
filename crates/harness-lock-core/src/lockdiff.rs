@@ -330,7 +330,14 @@ pub struct DiffOptions {
 /// instruction file, skill and config file with the text diff of its content, and the
 /// change in evidence. `project` is where the dependency store is.
 pub fn diff(old: &Side, new: &Side, project: &Path, opts: &DiffOptions, ctx: &crate::profiles::Ctx) -> Value {
-    let summary = crate::capture::diff_locks(&old.lock, &new.lock);
+    let mut summary = crate::capture::diff_locks(&old.lock, &new.lock);
+    // a role's reasoning effort (pin's drift check leaves it out: a capture can't see it)
+    for n in &new.lock.llm {
+        let o = old.lock.llm.iter().find(|o| o.role == n.role).and_then(|o| o.effort.as_deref());
+        if o != n.effort.as_deref() {
+            summary.push(format!("~ effort {}: {} → {}", n.role, o.unwrap_or("unset"), n.effort.as_deref().unwrap_or("unset")));
+        }
+    }
     let mut components = Vec::new();
     let mut unresolved = 0;
     let mut push = |kind: &str, name: String, o: Option<Body>, n: Option<Body>, source: Option<&str>| {
@@ -486,6 +493,21 @@ mod tests {
         let hunks = f["hunks"].as_str().unwrap();
         assert!(hunks.contains("-Run tests.") && hunks.contains("+Run the tests first."), "{hunks}");
         assert_eq!(v["unresolved"], 0);
+    }
+
+    #[test]
+    fn a_changed_effort_is_a_summary_line() {
+        let d = tmp("effort");
+        let llm = |model: &str, effort: Option<&str>| crate::lockfile::LLM { role: "planner".into(), provider: "anthropic".into(), model: model.into(), effort: effort.map(str::to_string), ..Default::default() };
+        let (mut old, mut new) = (Lockfile::default(), Lockfile::default());
+        old.llm.push(llm("claude-opus-4-1", None));
+        new.llm.push(llm("claude-fable-5-2", Some("high")));
+        let (o, n) = (Side { lock: old, label: "a".into(), dir: d.clone(), git: None }, Side { lock: new.clone(), label: "b".into(), dir: d.clone(), git: None });
+        let v = diff(&o, &n, &d, &DiffOptions::default(), &ctx());
+        let lines: Vec<&str> = v["summary"].as_array().unwrap().iter().filter_map(|l| l.as_str()).collect();
+        assert!(lines.contains(&"~ effort planner: unset → high"), "{lines:?}");
+        let same = Side { lock: new, label: "c".into(), dir: d.clone(), git: None };
+        assert!(!diff(&n, &same, &d, &DiffOptions::default(), &ctx())["summary"].as_array().unwrap().iter().any(|l| l.as_str().unwrap_or("").contains("effort")));
     }
 
     #[test]

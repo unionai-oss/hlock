@@ -136,7 +136,7 @@ or an entry point).
 tune(
     manifest=None, depth="auto", data="user", harness=None, out=None,
     strict=False, apply=False, max_trials=None, backend=None, workdir=None, lock=None,
-    optimizer=None, edit=None, budget_rollouts=None, budget_usd=None,
+    optimizer=None, edit=None, budget_rollouts=None, budget_usd=None, to=None,
 ) -> str
 ```
 
@@ -149,6 +149,12 @@ Run tuning, like [`hlock tune`](cli.md#tune). Returns JSON with `path`
 `optimize` (when the optimize stage ran: `optimizer`, `acceptance`, the `edits` written, and
 how many components it `proposed` changing). `optimizer`, `edit` (a list of kinds),
 `budget_rollouts` and `budget_usd` override `[tune]`.
+
+`to` (`provider:model`, or a bare model that keeps the lock's provider) moves the lock to a
+new model, as [`hlock upgrade --to MODEL --retune`](../guides/upgrade.md#move-to-a-new-model)
+does: `depth="auto"` means `prompt`, the optimizer defaults to `ablate` over instructions
+and skills, and the report adds `migrate`, the tune lock's `[tune.migrate]` with the lint
+`findings` too.
 
 ### `tune_eval`
 

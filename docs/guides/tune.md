@@ -7,7 +7,8 @@ your base lock stays untouched until you adopt it.
 
 Tune starts from your `harness.lock`: its harness, models, skills, tools, instructions and
 config stay as they are. It varies only what it tunes: retries, temperature, at `full` the
-tool timeout, and the planner model when `[candidates.llm.planner]` lists more than one.
+tool timeout, the planner model when `[candidates.llm.planner]` lists more than one, and
+its [reasoning effort](#reasoning-effort) when its `effort` lists more than one level.
 With no lock, it starts from the manifest's first candidates.
 
 ```console
@@ -37,7 +38,7 @@ next → hlock tune apply
 The baseline is your lock's own configuration, run on the same tasks and seeds before the
 grid, not the number recorded in `harness.lock`, which may come from another split or
 harness. When configurations tie, tune keeps the one closest to your lock: the fewest
-retries, then your temperature, then your model. Here every configuration solved the demo
+retries, then your temperature, then the effort level nearest yours, then your model. Here every configuration solved the demo
 tasks, so it kept the lock's own `retries = 1` and `temperature = 0.2`.
 
 `stages` lists what ran. On the `offline` backend only the HPO grid runs; the data, optimize
@@ -60,7 +61,65 @@ them. A stage that didn't run isn't recorded in the tune lock.
 `ft` and `full` need the `local` or `flyte` [backend](backends.md) for real
 training, and a GPU for anything beyond a tiny model. On `offline`, tune says so before it
 runs, and runs only the grid. "models" is your lock's model, or the planner candidates
-when there are several.
+when there are several. When the planner's `effort` lists several levels, every depth
+multiplies its grid by them.
+
+## Reasoning effort
+
+Models that think before they answer take a reasoning effort: how much they think.
+Anthropic's [prompting guide for Claude Fable 5.2](https://platform.claude.com/docs/en/build-with-claude/prompt-engineering/prompting-claude-fable-5-2)
+makes it the first thing to set when you move to a new model: set it explicitly, then
+measure the levels on either side, since models default to different levels. List the
+levels to try for a role in its `[candidates.llm.<role>]` table:
+
+```toml title="harness.toml"
+[candidates.llm.planner]
+any_of = ["reference:qwen-7b"]
+effort = ["medium", "high", "xhigh"]   # or one level: effort = "high"
+```
+
+The levels are `low`, `medium`, `high`, `xhigh` and `max`, and OpenAI's `none` and
+`minimal`. `resolve` tries each model at each level, and `tune` adds them to its grid at
+every depth (the axis is opt-in, so its size is up to you):
+
+```console
+$ hlock tune --depth probe
+✓ wrote harness.tune.lock
+╭─ ⚙ tune ─────────────────────────────────────────────────────────────────────────────────╮
+│                                                                                          │
+│  depth    probe                                                                          │
+│  backend  offline                                                                        │
+│  data     user-traces                                                                    │
+│  grid     3 configurations                                                               │
+│  stages   data ✗ not on offline: use local, flyte or another backend  ·  hpo ✓           │
+│                                                                                          │
+│  Best configuration                                                                      │
+│  effort                medium                                                            │
+│  model                 reference:qwen-7b                                                 │
+│  retries               0                                                                 │
+│  temperature           0.2                                                               │
+│  tool timeout seconds  120                                                               │
+│                                                                                          │
+│  success rate  100%  →  100%   +0%   (baseline: the lock's own configuration, measured)  │
+│                                                                                          │
+╰──────────────────────────────────────────────────────────────────────────────────────────╯
+next → hlock tune apply
+```
+
+The winner's level goes into its `[[llm]]` entry as `effort = "medium"`, and the levels
+tried into `[tune.hpo.axes]`. On a tie, tune keeps the level nearest the lock's; the
+offline reference ignores effort, so every level ties here and the lock's `medium` stays.
+A single level isn't searched: tune keeps the lock's level, or uses that one when the
+lock has none. With no `effort` anywhere, nothing is sent and the model uses its default.
+
+[`hlock upgrade --to MODEL --retune`](upgrade.md#move-to-a-new-model) does this for a model
+you're moving to: it sets `high`, and sweeps `medium`, `high` and `xhigh` unless the
+manifest lists levels.
+
+Trials on the `local` and `flyte` backends send the level to the model endpoint as
+`reasoning_effort`. A level the manifest doesn't know stops `resolve` and `tune` before
+any trial runs. `hlock sync` and `hlock launch` don't set the effort in the harness's own
+config yet: the lock records it, and the harness runs at its configured effort.
 
 ## Tune the harness text
 
@@ -300,6 +359,9 @@ so run enough held-out tasks and `trials` for the band to mean something.
 
 To add guidance after the deletions, apply the result (`hlock tune apply`) and tune again
 with `optimizer = "hlock"`. ablate doesn't chain into another optimizer in one run.
+
+When you're moving to a new model, [`hlock upgrade --to MODEL --retune`](upgrade.md#move-to-a-new-model)
+runs ablate on that model with an effort sweep, and compares the result with your lock.
 
 ### Harness²
 

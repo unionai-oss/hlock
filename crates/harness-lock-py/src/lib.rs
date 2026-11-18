@@ -311,7 +311,7 @@ fn to_core_manifest(name: &str, sp: &PySearchSpace) -> core::Manifest {
     candidates.llm = sp
         .llm
         .iter()
-        .map(|(k, v)| (k.clone(), core::manifest::LLMCandidate { any_of: v.clone() }))
+        .map(|(k, v)| (k.clone(), core::manifest::LLMCandidate { any_of: v.clone(), ..Default::default() }))
         .collect();
     candidates.decision = sp.decision.clone();
     candidates.harness = sp
@@ -692,7 +692,7 @@ fn upgrade(
 }
 
 #[pyfunction]
-#[pyo3(signature = (manifest=None, depth="auto".to_string(), data="user".to_string(), harness=None, out=None, strict=false, apply=false, max_trials=None, backend=None, workdir=None, lock=None, optimizer=None, edit=None, budget_rollouts=None, budget_usd=None))]
+#[pyo3(signature = (manifest=None, depth="auto".to_string(), data="user".to_string(), harness=None, out=None, strict=false, apply=false, max_trials=None, backend=None, workdir=None, lock=None, optimizer=None, edit=None, budget_rollouts=None, budget_usd=None, to=None))]
 fn tune(
     py: Python<'_>,
     manifest: Option<PyObject>,
@@ -710,10 +710,12 @@ fn tune(
     edit: Option<Vec<String>>,
     budget_rollouts: Option<u64>,
     budget_usd: Option<f64>,
+    to: Option<String>,
 ) -> PyResult<String> {
     let m = resolve_manifest(py, manifest, backend.as_deref())?;
     let root = m.root();
     let spec = core::ops::TuneSpec {
+        to,
         optimizer,
         edit,
         budget_rollouts,
