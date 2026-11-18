@@ -132,6 +132,10 @@ pub struct TrialResult {
     /// Why it failed: the first failing grader and its detail, or the run's error.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub detail: Option<String>,
+    /// It failed because the model ran out of tokens before it answered, not on the
+    /// task: it counts as failed, and is counted apart.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub out_of_tokens: bool,
 }
 
 /// The judging of one trial: for the lock's `evidence.judge`, from the winner's trials.
@@ -159,6 +163,11 @@ impl StackScore {
     pub fn success_rate(&self) -> f64 {
         let ok = self.trials.iter().filter(|t| t.success).count();
         ok as f64 / self.trials.len().max(1) as f64
+    }
+
+    /// Trials that failed because the model ran out of tokens before it answered.
+    pub fn out_of_tokens(&self) -> usize {
+        self.trials.iter().filter(|t| t.out_of_tokens).count()
     }
 
     pub fn mean_cost(&self) -> f64 {

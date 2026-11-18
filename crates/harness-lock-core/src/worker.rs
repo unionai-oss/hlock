@@ -298,6 +298,10 @@ pub struct TaskResult {
     /// The offline reference ran it, not a model: a simulated success.
     #[serde(default)]
     pub simulated: bool,
+    /// The model hit its token limit before it answered (`finish_reason` `length` with
+    /// next to no reply, or after mostly thinking).
+    #[serde(default)]
+    pub out_of_tokens: bool,
     #[serde(default)]
     pub gpu_h: f64,
     #[serde(default)]
@@ -504,6 +508,7 @@ impl HarnessAdapter for WorkerAdapter {
             latency_s: r.latency_s,
             steps: r.steps,
             trace: r.trace,
+            out_of_tokens: r.out_of_tokens,
         })
     }
 }

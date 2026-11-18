@@ -245,7 +245,7 @@ class _Endpoint:
     """A local OpenAI-compatible endpoint that answers from the prompt, and records each
     request it gets."""
 
-    def __init__(self, answer, usage=None):
+    def __init__(self, answer, usage=None, finish_reason=None):
         import http.server
         import threading
 
@@ -256,7 +256,10 @@ class _Endpoint:
             def do_POST(self):
                 body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
                 outer.requests.append(body)
-                reply = {"choices": [{"message": {"content": answer(body["messages"][0]["content"])}}],
+                choice = {"message": {"content": answer(body["messages"][0]["content"])}}
+                if finish_reason:
+                    choice["finish_reason"] = finish_reason
+                reply = {"choices": [choice],
                          "usage": usage or {"prompt_tokens": 10, "completion_tokens": 5}}
                 data = json.dumps(reply).encode()
                 self.send_response(200)
@@ -280,8 +283,8 @@ class _Endpoint:
 def endpoint(monkeypatch):
     made = []
 
-    def make(answer, usage=None):
-        e = _Endpoint(answer, usage)
+    def make(answer, usage=None, finish_reason=None):
+        e = _Endpoint(answer, usage, finish_reason)
         made.append(e)
         monkeypatch.setenv("HL_LLM_BASE_URL", e.url)
         return e
@@ -454,3 +457,75 @@ def test_resolve_on_local_grades_what_the_model_wrote(tmp_path, monkeypatch, end
     lock = json.loads(CliRunner().invoke(main, ["show", "--json"]).output)
     assert lock["evidence"]["success-rate"]["mean"] == 1.0
     assert any("The quick brown fox" in p for p in seen)  # the fixtures reached the model
+
+
+def _thinking(reasoning: int, completion: int) -> dict:
+    """Usage as an endpoint reports a reasoning model's: its thinking within the output."""
+    return {"prompt_tokens": 10, "completion_tokens": completion,
+            "completion_tokens_details": {"reasoning_tokens": reasoning}}
+
+
+@pytest.mark.parametrize("answer,finish,usage,out", [
+    ("", "length", _thinking(4096, 4096), True),            # thought the whole budget away
+    ("", "length", None, True),                             # no reasoning count, nothing visible
+    ("The answer is probably th", "length", _thinking(4000, 4096), True),  # a few words after a long think
+    ("x" * 400, "length", _thinking(0, 4096), False),       # a long answer, cut off: no thinking to blame
+    ("3", "stop", _thinking(4000, 4001), False),            # thought at length, then answered
+    ("3", None, None, False),                               # an endpoint that says nothing
+])
+def test_a_trial_that_ran_out_of_tokens_before_answering_says_so(tmp_path, endpoint, answer, finish, usage, out):
+    endpoint(lambda prompt: answer, usage=usage, finish_reason=finish)
+    resp = trial("openai:gpt-5", tmp_path)
+    assert resp["ok"] is True, resp
+    r = resp["result"]
+    # the run completed; the core counts the failure apart when the graders fail it
+    assert r["success"] is True and r["out_of_tokens"] is out
+    event = r["trace"][0]
+    assert event["finish_reason"] == finish
+    assert event["usage"]["reasoning_tokens"] == (usage or {}).get("completion_tokens_details", {}).get("reasoning_tokens")
+
+
+def test_the_tune_stages_calls_use_the_trial_budget_and_fall_back_when_out_of_tokens(tmp_path, monkeypatch, endpoint):
+    """The internal calls (prompt search, synthetic data, the judge, the optimizer's
+    proposer) ask for short replies, but a reasoning model thinks first: they get the same
+    cap as trials, which a model that answers in a few tokens never reaches."""
+    from hlock.optimizers.hlock import _propose
+    from hlock.tasks.worker import _call_real_llm, _complete
+
+    e = endpoint(lambda prompt: "SUCCESS")
+    assert _call_real_llm("qwen-7b", "Reply SUCCESS or FAIL.")["content"] == "SUCCESS"
+    assert e.requests[-1]["max_tokens"] == 4096
+    monkeypatch.setenv("HL_LLM_MAX_TOKENS", "8192")
+    _complete("m", "p")
+    assert e.requests[-1]["max_tokens"] == 8192
+    assert _complete("m", "p", max_tokens=50) and e.requests[-1]["max_tokens"] == 50
+    assert _propose("Be brief.", [], 1, "openai:gpt-5", 0)[0] == "SUCCESS"
+    assert e.requests[-1]["max_tokens"] == 8192
+    # one that thought its budget away answered nothing: the stage falls back, and says why
+    endpoint(lambda prompt: "", usage=_thinking(8192, 8192), finish_reason="length")
+    assert _call_real_llm("qwen-7b", "Reply SUCCESS or FAIL.") is None
+    assert _propose("Be brief.", [], 1, "openai:gpt-5", 0) is None
+
+
+def test_resolve_counts_trials_that_ran_out_of_tokens_and_says_what_to_do(tmp_path, monkeypatch, endpoint):
+    from click.testing import CliRunner
+
+    from hlock.cli import main
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("HL_PYTHON", sys.executable)
+    endpoint(lambda prompt: "", usage=_thinking(4096, 4096), finish_reason="length")
+    assert CliRunner().invoke(main, ["evals", "init"]).exit_code == 0
+    (tmp_path / "harness.toml").write_text(
+        '[project]\nname = "local-oot"\n\n[evals]\npacks = ["./evals"]\nseeds = 1\n\n'
+        '[evals.splits]\nsearch = 1.0\n\n'
+        '[candidates.llm.planner]\nany_of = ["openai:gpt-5"]\n\n'
+        '[candidates]\ndecision = ["none"]\nharness = ["reference"]\n\n'
+        '[objective]\nprimary = "success-rate"\nselect = "min-cost"\n\n[backend]\ntarget = "local"\n')
+    r = CliRunner().invoke(main, ["resolve", "--json"])
+    assert r.exit_code == 0, r.output
+    out = json.loads(r.output)
+    n = out["report"]["out-of-tokens"]
+    assert n == out["report"]["trials"] and n > 0
+    assert out["lock"]["evidence"]["out-of-tokens"] == n
+    assert f"{n} trials ran out of tokens before answering; raise HL_LLM_MAX_TOKENS or lower effort" in out["notes"]
