@@ -132,6 +132,30 @@ A trial's cost is what the endpoint reports (`usage.cost`, as OpenRouter's does)
 reports none, the cost is unknown: the trace records it as `null`, and it adds nothing to
 the totals.
 
+#### Out of tokens
+
+A completion may use up to `HL_LLM_MAX_TOKENS` tokens (4096 by default), and a reasoning
+model's thinking counts toward them. A model that thinks at length can reach the limit
+before it writes its answer. The trace records each completion's `finish_reason`, and
+`usage.reasoning_tokens` when the endpoint reports them. A completion that stopped at the
+limit (`finish_reason` `length`) with almost no reply, or after spending most of its
+output on reasoning, ran out of tokens before answering.
+
+When such a trial fails its graders, the failure is the budget's, not the model's. It
+still counts as failed in the success rate, since a lock with that budget would fail the
+same way. Its detail says it ran out of tokens, it isn't cached, and it's counted apart:
+in the resolve report (`out-of-tokens`, in total and for each stack), in `tune`'s report
+(`out_of_tokens`), and in the lock's `[evidence] out-of-tokens` when the trials the
+evidence comes from ran out. `resolve` and `tune` then warn once:
+
+```console
+! 3 trials ran out of tokens before answering; raise HL_LLM_MAX_TOKENS or lower effort
+```
+
+The calls `tune`'s stages make (drafting a system prompt, synthesizing data, judging,
+the built-in optimizer's proposals) have the same cap. One that runs out falls back as
+when the endpoint fails.
+
 ## `flyte`
 
 The same work as `local`, but each work item runs as a [Flyte 2](https://flyte.org) task

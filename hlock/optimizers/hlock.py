@@ -32,7 +32,7 @@ def _component_file(bundle: Path, comp: dict) -> Path:
 def _propose(text: str, failures: list[dict], lines: int, proposer: str | None, step: int) -> tuple[str, str] | None:
     """Up to `lines` lines of guidance to add to `text`, and why: from the proposer model
     when one is configured, else the next of GUIDANCE that `text` doesn't have."""
-    from hlock.tasks.worker import _complete, _llm_configured, _unfence
+    from hlock.tasks.worker import _complete, _llm_configured, _out_of_tokens, _unfence
 
     why = "; ".join(sorted({f["feedback"] for f in failures})[:3]) or "no failures on the train split"
     if proposer and _llm_configured():
@@ -46,9 +46,12 @@ def _propose(text: str, failures: list[dict], lines: int, proposer: str | None, 
             "Don't mention specific tasks, file names or answers. Reply with only the lines to add."
         )
         try:
-            got = _complete(model, ask, 0.7, max_tokens=300, provider=provider)
+            got = _complete(model, ask, 0.7, provider=provider)
         except Exception as exc:  # noqa: BLE001 - the step proposes nothing, and the search goes on
             sys.stderr.write(f"[hlock optimizer] the proposer failed ({exc})\n")
+            return None
+        if _out_of_tokens(got):
+            sys.stderr.write(f"[hlock optimizer] {proposer} ran out of tokens before answering; raise HL_LLM_MAX_TOKENS\n")
             return None
         add = [ln.rstrip() for ln in _unfence(got["content"]).splitlines() if ln.strip()][:lines]
         return ("\n".join(add), f"proposed by {proposer} from: {why}") if add else None

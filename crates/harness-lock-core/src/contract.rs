@@ -366,7 +366,7 @@ impl HarnessAdapter for CommandAdapter {
             let tail: Vec<&str> = r.log.lines().rev().take(20).collect::<Vec<_>>().into_iter().rev().collect();
             a.push(json!({"type": "harness.exit", "harness": self.profile.id, "code": r.exit_code, "latency_s": r.latency_s, "log_tail": tail.join("\n")}));
         }
-        Ok(RunOutcome { success: r.success, cost_usd: r.cost_usd, latency_s: r.latency_s, steps: r.steps, trace })
+        Ok(RunOutcome { success: r.success, cost_usd: r.cost_usd, latency_s: r.latency_s, steps: r.steps, trace, out_of_tokens: false })
     }
 }
 

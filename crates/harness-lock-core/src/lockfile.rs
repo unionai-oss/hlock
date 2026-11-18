@@ -276,6 +276,10 @@ fn default_true() -> bool {
     true
 }
 
+fn is_zero(n: &usize) -> bool {
+    *n == 0
+}
+
 /// What a declared dependency (`hlock add`, a `harness.toml` or `apm.yml` entry) asked for
 /// and what it resolved to (`specs/dependencies.md` §5). Empty for what `pin` found on disk.
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
@@ -559,6 +563,11 @@ pub struct Evidence {
     pub success_rate: BTreeMap<String, f64>,
     pub cost_usd_per_task: BTreeMap<String, f64>,
     pub latency_s_per_task: BTreeMap<String, f64>,
+    /// Trials that failed because the model ran out of tokens before it answered (a
+    /// reasoning model's thinking counts toward `HL_LLM_MAX_TOKENS`). They count as failed
+    /// in `success-rate`.
+    #[serde(skip_serializing_if = "is_zero")]
+    pub out_of_tokens: usize,
     /// The judge that scored `judge` and `trace` graders, when the packs have any.
     pub judge: Option<EvidenceJudge>,
     /// True when the trials ran on a stand-in for the harness (an agent CLI measured on
@@ -1137,6 +1146,21 @@ mod tests {
         assert!(!back.stack.contains_key("gone") && back.pulled.is_none());
         assert_eq!(back.tune.unwrap(), serde_json::json!({"data_meta": {"split": [0.7]}, "kept": 1}));
         assert_eq!(std::fs::read_dir(&d).unwrap().count(), 1, "written by rename; no temp file left");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn evidence_records_trials_out_of_tokens_only_when_there_were_any() {
+        let mut l = Lockfile::default();
+        let d = tmp("oot");
+        let p = d.join("harness.lock");
+        l.save(&p).unwrap();
+        assert!(!std::fs::read_to_string(&p).unwrap().contains("out-of-tokens"));
+        l.evidence.out_of_tokens = 3;
+        l.save(&p).unwrap();
+        let text = std::fs::read_to_string(&p).unwrap();
+        assert!(text.contains("out-of-tokens = 3"), "{text}");
+        assert_eq!(Lockfile::load(&p).unwrap().evidence.out_of_tokens, 3);
         let _ = std::fs::remove_dir_all(&d);
     }
 

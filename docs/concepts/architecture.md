@@ -90,9 +90,9 @@ instruction files: a single-completion trial sends it as the system message.
 
 The response is `{"version": 5, "ok": true, "result": {...}}`, or
 `{"version": 5, "ok": false, "error": "..."}` with a non-zero exit. A result has
-`success`, `score`, `cost_usd` (`null` when unknown), `simulated`, `gpu_h`,
-`latency_s`, `steps`, `trace`, `artifact_digests`, and `model_digests` (stage metadata;
-a `run` key there is recorded as the run in the tune lock); `harness.optimize`'s also has
+`success`, `score`, `cost_usd` (`null` when unknown), `simulated`, `out_of_tokens` (the
+model hit its token limit before it answered), `gpu_h`, `latency_s`, `steps`, `trace`,
+`artifact_digests`, and `model_digests` (stage metadata; a `run` key there is recorded as the run in the tune lock); `harness.optimize`'s also has
 `candidate`, `ledger`, `optimizer` and `usage`. Every field is optional.
 
 `backend.describe` comes first, and its result says what the backend runs: `name`,
