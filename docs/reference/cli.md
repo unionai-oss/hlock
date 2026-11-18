@@ -482,6 +482,30 @@ hlock audit [LOCK] [--ci] [--format table|json|sarif] [-o FILE] [--strip] [-v]
 
 Exits `0` when it passes and `1` when it doesn't.
 
+## `lint`
+
+Find instruction text written for an earlier model in the skills, instruction files,
+subagents and slash commands a lock places, and in `--file` paths: lines telling the model
+to think less or to show its reasoning, a token budget in the prompt, standing orders to
+delegate, rules that say "never" without a reason. See [Lint instructions](../guides/lint.md).
+
+```bash
+hlock lint [LOCK] [--model MODEL] [--file PATH ...] [--ci] [--format table|json|sarif] [-o FILE] [--rules] [-v]
+```
+
+| Option | Description |
+|---|---|
+| `LOCK` | Lock to lint (default `harness.lock`; with only `--file`, none): a path, a pulled lock's name, or a source to pull first |
+| `--model` | The model to lint for (default: the lock's default model). `all` applies every rule |
+| `--file` | Also lint this file, or the Markdown under this directory. Repeatable |
+| `--ci` | Exit `1` when there are warnings |
+| `--format` | `table` (default), `json`, or `sarif` (SARIF 2.1.0) |
+| `-o`, `--out` | Write the JSON or SARIF report to FILE |
+| `--rules` | List the rules for the model and exit |
+| `-v`, `--verbose` | Also list info findings |
+
+Exits `0`, or with `--ci`, `1` when there are warnings.
+
 ## `trust`
 
 List what a lock would make this machine run (MCP servers, plugins, hooks and other settings

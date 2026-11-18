@@ -651,6 +651,7 @@ dependencies = [
  "flate2",
  "flyte",
  "libc",
+ "regex",
  "semver",
  "serde",
  "serde_json",

@@ -412,6 +412,31 @@ takes a `lock` path (default `harness.lock`) and returns JSON, except `trust_app
 | `policy_check(lock=…)` | The project policy's `enforcement`, `files` and `violations` for the lock |
 | `export_sbom(lock=…, format="cyclonedx")` | The lock as CycloneDX 1.6 or (`"spdx"`) SPDX 2.3 JSON |
 
+### Lint
+
+The functions behind [`hlock lint`](../guides/lint.md). Each returns JSON.
+
+| Function | Returns |
+|---|---|
+| `lint(lock=None, model=None, files=None, format="json")` | The report for what `lock` places and the `files` (paths): `lock`, `model` and `model_from` (`flag`, `lock` or `none`), the `rules` applied, `files_scanned`, `findings`, `warnings`, `infos`, and `passed` (no warnings). `format="sarif"` for SARIF 2.1.0 |
+| `lint_text(text, file="<text>", model=None)` | The findings in `text`, named `file` |
+| `lint_rules(model=None)` | Every rule, or those that apply to `model`: `id`, `category`, `severity`, `models`, `patterns`, `unless`, `sentence`, `fallback`, `message`, `fix`, `source` |
+
+Without `model`, `lint` uses the lock's default model; with no model at all, only the rules
+for every model (`models = ["*"]`) apply, and `model="all"` applies every rule. Each finding
+has `rule`, `category`, `severity` (`warning` or `info`), `file` (as the lock names it),
+`path` (the file read; empty from `lint_text`), `kind` and `entry` (the lock entry, or
+`file` for `files`), `line`, `column`, `end_line` and `end_column` (1-based; columns count
+characters, `end_column` is one past the match), `start` and `end` (byte offsets of the
+match, `matched`), `line_start` and `line_end` (byte offsets of the whole lines
+`line..=end_line`, with the last line's ending), `message`, `fix`, and `source`.
+
+```python
+text = Path("CLAUDE.md").read_text()
+for f in json.loads(hl.lint_text(text, "CLAUDE.md", "claude-fable-5-2")):
+    print(f["rule"], repr(text.encode()[f["line_start"]:f["line_end"]].decode()))
+```
+
 ### Decision models
 
 The functions behind [`hlock decide`](cli.md#decide). Each returns JSON, except

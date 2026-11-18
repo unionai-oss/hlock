@@ -667,6 +667,31 @@ fn tuned_role(base: &Stack) -> String {
     if base.llm.contains_key("planner") || base.llm.is_empty() { "planner".into() } else { base.llm.keys().next().cloned().unwrap_or_default() }
 }
 
+/// Unset what `s`'s tuned model rejects: a model that rejects `temperature` (Claude
+/// Fable 5.2) is run without one, so it has none to tune. The model's spec and why,
+/// when it did.
+pub(crate) fn unset_rejected(s: &mut Stack, models: &crate::models::ModelTable) -> Option<(String, String)> {
+    let spec = s.llm.get(&tuned_role(s))?.clone();
+    let rule = models.rejects(&spec, "temperature")?;
+    s.temperature = None;
+    Some((spec, rule.why.clone().unwrap_or_else(|| "the model doesn't accept it".into())))
+}
+
+/// The grid without what its models reject ([`unset_rejected`]): their configurations
+/// that differed only there collapse into one. Also the models that rejected it, and why.
+fn drop_rejected(grid: Vec<Stack>, models: &crate::models::ModelTable) -> (Vec<Stack>, BTreeMap<String, String>) {
+    let (mut seen, mut out, mut rejected) = (std::collections::HashSet::new(), Vec::new(), BTreeMap::new());
+    for mut s in grid {
+        if let Some((spec, why)) = unset_rejected(&mut s, models) {
+            rejected.insert(spec, why);
+        }
+        if seen.insert(s.hash()) {
+            out.push(s);
+        }
+    }
+    (out, rejected)
+}
+
 /// The reasoning-effort levels `tune` tries for `role`: each of `[candidates.llm.<role>]
 /// effort` (else the planner's) when it lists more than one, at every depth; otherwise
 /// the base's level, else the one the manifest fixes, else none (nothing is sent).
@@ -757,7 +782,9 @@ pub fn tune(manifest: Manifest, spec: &TuneSpec) -> Result<TuneOutcome> {
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let lock_path = spec.lock.clone().unwrap_or_else(|| cwd.join(LOCKFILE_PATH));
     let base_lock = load_if_present(&lock_path)?;
-    let base = base_stack(base_lock.as_ref(), &manifest, spec.harness.as_deref());
+    let models = crate::models::ModelTable::load(&crate::profiles::Ctx::from_process())?;
+    let mut base = base_stack(base_lock.as_ref(), &manifest, spec.harness.as_deref());
+    unset_rejected(&mut base, &models);
 
     // trials run the base's harness: its code harness for real, else the reference adapter
     let mut m = manifest.clone();
@@ -812,7 +839,10 @@ pub fn tune(manifest: Manifest, spec: &TuneSpec) -> Result<TuneOutcome> {
 
     let n_synthetic = parse_synthetic(&spec.data);
     let data_mode = if n_synthetic > 0 { "synthetic" } else { "user-traces" };
-    let grid = tune_grid(&base, &manifest, &depth);
+    let (grid, rejected) = drop_rejected(tune_grid(&base, &manifest, &depth), &models);
+    for (spec, why) in &rejected {
+        note(format!("temperature not tuned: {spec} rejects it ({why})"));
+    }
     let mut plan_value = serde_json::json!({
         "depth": depth,
         "data": spec.data,
@@ -832,6 +862,10 @@ pub fn tune(manifest: Manifest, spec: &TuneSpec) -> Result<TuneOutcome> {
     efforts.dedup();
     if !efforts.is_empty() {
         plan_value["axes"]["effort"] = serde_json::json!(efforts);
+    }
+    if !rejected.is_empty() {
+        let specs: Vec<&str> = rejected.keys().map(String::as_str).collect();
+        plan_value["skipped"] = serde_json::json!({"temperature": format!("{} rejects it", specs.join(", "))});
     }
     let mut stages = Vec::new();
 
@@ -1213,11 +1247,14 @@ fn build_tuned_lock(
         Some((p, m)) if !m.is_empty() => (p.to_string(), m.to_string()),
         _ => ("reference".to_string(), spec.clone()),
     };
-    let params = [
-        ("retries".to_string(), serde_json::json!(stack.retries)),
-        ("temperature".to_string(), serde_json::json!(stack.temperature.unwrap_or(0.2))),
-        ("tool_timeout_seconds".to_string(), serde_json::json!(stack.tool_timeout_seconds.unwrap_or(120))),
-    ];
+    let params: Vec<(String, serde_json::Value)> = [
+        Some(("retries".to_string(), serde_json::json!(stack.retries))),
+        stack.temperature.map(|t| ("temperature".to_string(), serde_json::json!(t))),
+        Some(("tool_timeout_seconds".to_string(), serde_json::json!(stack.tool_timeout_seconds.unwrap_or(120)))),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
     let effort = stack.effort.get(&role).cloned();
     match lf.llm.iter_mut().find(|l| l.role == role) {
         Some(l) => {
@@ -1227,6 +1264,9 @@ fn build_tuned_lock(
             }
             l.provider = provider;
             l.model = model;
+            if stack.temperature.is_none() {
+                l.params.remove("temperature");
+            }
             l.params.extend(params);
             l.effort = effort.clone();
         }
@@ -1267,6 +1307,9 @@ fn build_tuned_lock(
             "best": {"model": spec, "retries": stack.retries, "temperature": stack.temperature, "tool_timeout_seconds": stack.tool_timeout_seconds},
         },
     });
+    if let Some(skipped) = plan.get("skipped") {
+        tune["hpo"]["skipped"] = skipped.clone();
+    }
     if let Some(e) = &effort {
         tune["hpo"]["best"]["effort"] = serde_json::json!(e);
     }

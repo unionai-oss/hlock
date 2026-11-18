@@ -374,6 +374,10 @@ adapters, the data split, and the budget, all content-addressed. Adopt it into
 `[tune.hpo]` records the grid's `axes` (with `effort` when it searched effort levels) and
 the `best` configuration.
 
+`[tune.hpo]` records the grid's `axes`, its size, and the `best` configuration. When the
+tuned model rejects `temperature` (see [model parameters](../guides/harness-profiles.md#model-parameters)),
+`[tune.hpo.skipped]` says so, and the model's `params` have no `temperature`.
+
 When the [optimize stage](../guides/tune.md#tune-the-harness-text) ran, `[tune.optimizer]`
 records the optimizer, the `backend` that hosted its search, what it could edit, its budget
 and usage, and a digest of the splits;
