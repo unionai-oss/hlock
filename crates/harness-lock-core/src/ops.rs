@@ -1068,6 +1068,11 @@ pub fn tune(manifest: Manifest, spec: &TuneSpec) -> Result<TuneOutcome> {
         }
     }
 
+    // every trial tune ran, once each: the grid shares the baseline's
+    let out_of_tokens = baseline.out_of_tokens()
+        + scored.iter().filter(|s| s.stack.hash() != base_run.hash()).map(StackScore::out_of_tokens).sum::<usize>()
+        + if split == "holdout" { measured.out_of_tokens() } else { 0 };
+    resolver.note_out_of_tokens(out_of_tokens);
     let simulated = resolver.adapter_for(&winner.stack) == "reference" && base.harness != "reference";
     let out_dir = spec.out.parent().filter(|p| !p.as_os_str().is_empty()).map(PathBuf::from).unwrap_or_else(|| PathBuf::from("."));
     let tuned_file = match tuned_prompt.first() {
@@ -1108,6 +1113,7 @@ pub fn tune(manifest: Manifest, spec: &TuneSpec) -> Result<TuneOutcome> {
         "eval_split": split,
         "grid": scored.len(),
         "trials": n,
+        "out_of_tokens": out_of_tokens,
         "stages": stages,
         "optimize": optimize_report,
         "best": {"model": best.llm.get(&role), "retries": best.retries, "temperature": best.temperature, "tool_timeout_seconds": best.tool_timeout_seconds, "success_rate": measured.success_rate(), "cost_usd": measured.mean_cost(), "trials": measured.n},
@@ -1243,6 +1249,7 @@ fn build_tuned_lock(
         success_rate: success,
         cost_usd_per_task: BTreeMap::from([("mean".to_string(), round6(measured.mean_cost()))]),
         latency_s_per_task: BTreeMap::from([("p50".to_string(), r4(measured.mean_latency())), ("p95".to_string(), r4(measured.p95_latency()))]),
+        out_of_tokens: measured.out_of_tokens(),
         simulated,
         sandbox: evidence_sandbox,
         behavior: measured.behavior(),

@@ -310,6 +310,54 @@ fn tune_doesnt_pick_a_configuration_the_gate_rules_out() {
 }
 
 #[test]
+fn a_trial_out_of_tokens_is_counted_apart_and_not_cached() {
+    use harness_lock_core::worker::{Describe, Executor, TaskRequest, TaskResult};
+    // qwen-32b thinks its whole budget away and writes nothing; qwen-7b answers
+    struct Thinker;
+    impl Executor for Thinker {
+        fn describe(&self, _: &TaskRequest) -> harness_lock_core::Result<Describe> {
+            Ok(Describe::new("thinker", ["llm.run_trial"]))
+        }
+        fn call(&self, req: &TaskRequest) -> harness_lock_core::Result<TaskResult> {
+            let thinks = req.stack["llm"]["planner"].as_str().is_some_and(|m| m.ends_with("32b"));
+            if !thinks {
+                fs::write(Path::new(&req.workdir).join("summary.md"), "done")?;
+            }
+            Ok(TaskResult { success: true, out_of_tokens: thinks, cost_usd: Some(0.0), steps: 1, ..Default::default() })
+        }
+    }
+    let dir = std::env::temp_dir().join(format!("hlock-ops-out-of-tokens-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).unwrap();
+    // the pack apart from the workdir, so its digest (in the cache key) holds still
+    make_pack(&dir.join("pack"));
+    let resolve = || {
+        let mut r = Resolver::with_executor(make_manifest(&dir.join("pack")), dir.join(".hlock"), "thinker", Box::new(Thinker));
+        let notes = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let sink = notes.clone();
+        *r.on_event.lock().unwrap() = Some(Box::new(move |e: serde_json::Value| {
+            if e["kind"] == "note" {
+                sink.lock().unwrap().push(e["text"].as_str().unwrap_or_default().to_string());
+            }
+        }));
+        let lock = r.resolve_lock().unwrap();
+        let notes = notes.lock().unwrap().clone();
+        (lock, r.report.clone().unwrap(), notes)
+    };
+    let (lock, report, notes) = resolve();
+    assert_eq!(lock.llm[0].model, "qwen-7b");
+    // the winner never ran out, so its evidence says nothing about it
+    assert_eq!(lock.evidence.out_of_tokens, 0);
+    assert_eq!(report["out-of-tokens"], 2);
+    let big = report["stacks"].as_array().unwrap().iter().find(|s| s["label"].as_str().unwrap().contains("32b")).unwrap();
+    assert_eq!((big["out-of-tokens"].as_u64(), big["success-rate"].as_f64()), (Some(2), Some(0.0)));
+    assert!(notes.contains(&"2 trials ran out of tokens before answering; raise HL_LLM_MAX_TOKENS or lower effort".to_string()), "{notes:?}");
+    // the trials that ran out run again next time (a raised budget may answer); the rest are cached
+    let (_, report, _) = resolve();
+    assert_eq!((report["cached"].as_u64(), report["out-of-tokens"].as_u64()), (Some(2), Some(2)));
+}
+
+#[test]
 fn tune_sweeps_effort_when_the_manifest_lists_levels_and_keeps_the_locks_on_a_tie() {
     let dir = std::env::temp_dir().join(format!("hlock-ops-effort-{}", std::process::id()));
     let _ = fs::remove_dir_all(&dir);

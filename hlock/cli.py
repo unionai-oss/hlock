@@ -434,7 +434,9 @@ def _lock_panel(lf, title: str | None = None) -> Panel:
     trials = ev.get("trials")
     split = f"  [muted]({ev['split']})[/]" if ev.get("split") else ""
     few = f"  [warn]low sample (n={trials})[/]" if isinstance(trials, int) and 0 < trials < 10 else ""
-    evidence.add_row("trials", f"{trials if trials is not None else '—'}{split}{few}")
+    oot = ev.get("out_of_tokens")
+    oot = f"  [warn]{oot} out of tokens[/]" if oot else ""
+    evidence.add_row("trials", f"{trials if trials is not None else '—'}{split}{few}{oot}")
     if ev.get("eval_pack_version") or ev.get("eval_pack"):
         evidence.add_row("eval pack", escape(ev.get("eval_pack_version") or ev["eval_pack"]))
     judge = ev.get("judge")
