@@ -98,6 +98,21 @@ def test_tune_starts_from_the_lock_and_picks_the_simplest_of_equals(project):
     assert tuned["provenance"]["backend"] == "offline" and tuned["evidence"]["latency-s-per-task"]["p50"] > 0
 
 
+def test_tune_doesnt_sweep_a_temperature_the_model_rejects(project):
+    manifest = project / "harness.toml"
+    manifest.write_text(manifest.read_text().replace('any_of = ["reference:qwen-7b", "reference:qwen-32b"]',
+                                                     'any_of = ["reference:claude-fable-5-2"]'))
+    assert invoke("resolve").exit_code == 0
+    r = invoke("tune", "--depth", "hpo")
+    assert r.exit_code == 0, r.output
+    assert flat("! temperature not tuned: reference:claude-fable-5-2 rejects it (the API returns a 400 when a "
+                "request sets it)") in flat(r.output)
+    assert flat("grid 3 configurations") in flat(r.output) and flat("temperature unset") in flat(r.output)
+    tuned = json.loads(invoke("--lock", "harness.tune.lock", "show", "--json").output)
+    assert "temperature" not in tuned["llm"][0]["params"]
+    assert tuned["tune"]["hpo"]["skipped"] == {"temperature": "reference:claude-fable-5-2 rejects it"}
+
+
 def test_effort_is_resolved_locked_and_tuned(project):
     manifest = project / "harness.toml"
     manifest.write_text(manifest.read_text().replace(

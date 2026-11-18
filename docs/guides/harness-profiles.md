@@ -24,7 +24,8 @@ hlock then reads these directories, lowest precedence first:
 2. each directory in `HLOCK_PROFILE_PATH` (`:`-separated)
 3. `./.hlock/profiles/`
 
-Each directory holds `harnesses/*.toml` and `runtimes/*.toml`. A profile with the same `id`
+Each directory holds `harnesses/*.toml` and `runtimes/*.toml` (and
+[model tables](#model-parameters), `models/*.toml`). A profile with the same `id`
 as an earlier one replaces it, so you can override a built-in. `hlock harness show <name>`
 prints where the active profile came from.
 
@@ -259,6 +260,34 @@ tools = true                            # reliable tool calling
 roles = []                              # e.g. ["small", "decision"]; empty means any
                                         # "decider": a decision model, never picked as a chat model
 ```
+
+## Model parameters
+
+Some models reject request parameters hlock would otherwise send: Claude Fable 5.2 and
+Claude Mythos 5.2 return a 400 for a request that sets `temperature`, `top_p` or `top_k`
+(see Anthropic's [Fable 5.2 migration guide](https://platform.claude.com/docs/en/models/fable-5-2/migration-guide)).
+A model table lists them. The worker leaves a rejected parameter out of the request, and
+[`hlock tune`](tune.md#models-that-reject-temperature) doesn't sweep it.
+
+The built-in tables are in
+[`crates/harness-lock-core/profiles/models`](https://github.com/unionai-oss/hlock/tree/main/crates/harness-lock-core/profiles/models).
+Add your own as `models/*.toml` in a profile directory:
+
+```toml title="~/.config/hlock/profiles/models/acme.toml"
+[[model]]
+ids = ["acme-coder-2"]                  # matched in any spelling of the model's id
+rejects = ["temperature"]               # request parameters it rejects
+why = "the API returns a 400 when a request sets it"   # shown by `hlock tune`
+source = "https://example.com/acme-coder-2"            # optional: where it's documented
+```
+
+An id matches wherever it appears whole in the model's id, ignoring case and treating `.`
+as `-`: `claude-fable-5-2` matches `anthropic:claude-fable-5-2`,
+`openrouter:anthropic/claude-fable-5.2`, a dated `claude-fable-5-2-20261001` and a Bedrock
+`us.anthropic.claude-fable-5-2-v1:0`, but not `claude-fable-5-20`.
+
+A file replaces the table of the same name (`models/anthropic.toml` replaces the built-in
+Anthropic table), except in `./.hlock/profiles/`, which may only add tables.
 
 ## Project harnesses
 

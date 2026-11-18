@@ -1255,6 +1255,14 @@ fn is_pull_source(arg: &str) -> bool {
     core::pull::is_source(arg)
 }
 
+/// The request parameters `model` (an id or a `provider:model` spec) rejects, from the
+/// built-in model tables and those in the profile directories (`core::models`).
+#[pyfunction]
+fn model_rejects(model: &str) -> PyResult<Vec<String>> {
+    let t = core::models::ModelTable::load(&core::profiles::Ctx::from_process()).map_err(py_err)?;
+    Ok(t.rejected(model))
+}
+
 fn sync_options(prefix: Option<String>, in_place: bool, docker: Option<String>, install: bool, install_cross_os: bool, pull: bool, all_models: bool, exact: bool) -> core::sync::SyncOptions {
     core::sync::SyncOptions {
         prefix: prefix.map(PathBuf::from),
@@ -2420,6 +2428,7 @@ fn _hlock(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(pull_remove, m)?)?;
     m.add_function(wrap_pyfunction!(pull_env, m)?)?;
     m.add_function(wrap_pyfunction!(is_pull_source, m)?)?;
+    m.add_function(wrap_pyfunction!(model_rejects, m)?)?;
     m.add_function(wrap_pyfunction!(is_registry_ref, m)?)?;
     m.add_function(wrap_pyfunction!(pull_into, m)?)?;
     m.add_function(wrap_pyfunction!(registry_url, m)?)?;

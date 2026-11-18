@@ -61,6 +61,16 @@ def _served_model(model: str, provider: str = "reference") -> str:
     return model
 
 
+def _rejected_params(model: str) -> frozenset:
+    """The request parameters `model` rejects (Claude Fable 5.2 rejects `temperature`),
+    from the core's model tables; none when the core isn't importable."""
+    try:
+        from hlock._hlock import model_rejects
+    except ImportError:
+        return frozenset()
+    return frozenset(model_rejects(model))
+
+
 def _max_tokens() -> int:
     """`HL_LLM_MAX_TOKENS`: the most tokens a completion may use. A reasoning model spends
     its thinking from this budget too, so it's a cap, not a spend: a model that answers in
@@ -83,14 +93,15 @@ def _out_of_tokens(got: dict) -> bool:
     return len(got.get("content", "").strip()) < NEAR_EMPTY or reasoning * 2 > (usage.get("output_tokens") or 0)
 
 
-def _complete(model: str, prompt: str, temperature: float = 0.2, max_tokens: int | None = None,
+def _complete(model: str, prompt: str, temperature: float | None = 0.2, max_tokens: int | None = None,
               provider: str = "reference", system: str = "", effort: str | None = None) -> dict:
     """One OpenAI-compatible chat completion against `HL_LLM_BASE_URL`, up to `max_tokens`
     (default `HL_LLM_MAX_TOKENS`). Raises on any failure. The cost is what the endpoint
     reports (`usage.cost`, as OpenRouter's does), else None: unknown, never a made-up 0.
+    `temperature` is left out of the request when it's None or the model rejects it;
+    `effort` (the stack's reasoning effort) is sent as `reasoning_effort` only when set.
     `finish_reason` is the endpoint's, and `usage.reasoning_tokens` the thinking it counted
-    (`completion_tokens_details.reasoning_tokens`), else None. `effort` (the stack's
-    reasoning effort) is sent as `reasoning_effort` only when set."""
+    (`completion_tokens_details.reasoning_tokens`), else None."""
     import urllib.request
 
     if max_tokens is None:
@@ -98,16 +109,18 @@ def _complete(model: str, prompt: str, temperature: float = 0.2, max_tokens: int
 
     base = os.environ.get("HL_LLM_BASE_URL", "").rstrip("/")
     key = os.environ.get("HL_LLM_API_KEY", "")
-    payload = {
-        "model": _served_model(model, provider),
+    served = _served_model(model, provider)
+    request = {
+        "model": served,
         "messages": ([{"role": "system", "content": system}] if system else [])
         + [{"role": "user", "content": prompt}],
         "max_tokens": max_tokens,
-        "temperature": temperature,
     }
+    if temperature is not None and "temperature" not in _rejected_params(served):
+        request["temperature"] = temperature
     if effort:
-        payload["reasoning_effort"] = effort
-    body = json.dumps(payload).encode()
+        request["reasoning_effort"] = effort
+    body = json.dumps(request).encode()
     headers = {"Content-Type": "application/json"}
     if key:
         headers["Authorization"] = f"Bearer {key}"
@@ -122,6 +135,7 @@ def _complete(model: str, prompt: str, temperature: float = 0.2, max_tokens: int
     reasoning = (usage.get("completion_tokens_details") or {}).get("reasoning_tokens")
     return {
         "content": content,
+        "temperature": request.get("temperature"),
         "finish_reason": choice.get("finish_reason"),
         "cost_usd": float(cost) if isinstance(cost, (int, float)) else None,
         "latency_ms": round((time.monotonic() - start) * 1000.0, 1),
@@ -133,7 +147,7 @@ def _complete(model: str, prompt: str, temperature: float = 0.2, max_tokens: int
     }
 
 
-def _call_real_llm(model: str, prompt: str, temperature: float = 0.2) -> dict | None:
+def _call_real_llm(model: str, prompt: str, temperature: float | None = 0.2) -> dict | None:
     """Best-effort completion for the tune stages (prompt search, synthetic data, the
     judge); None on failure, and they fall back to the reference."""
     if not _llm_configured():
@@ -151,7 +165,7 @@ def _call_real_llm(model: str, prompt: str, temperature: float = 0.2) -> dict | 
     return got
 
 
-def _call_llm(model: str, prompt: str, seed: int, salt: int = 0, temperature: float = 0.2) -> dict:
+def _call_llm(model: str, prompt: str, seed: int, salt: int = 0, temperature: float | None = 0.2) -> dict:
     """Real served model when configured, else the deterministic reference."""
     if _llm_configured():
         got = _call_real_llm(model, prompt, temperature)
@@ -258,7 +272,8 @@ def llm_run_trial(req: dict) -> dict:
     provider, _, model = model_spec.partition(":")
     if not model:
         provider, model = "reference", model_spec
-    temperature = float(stack.get("temperature") or 0.2)
+    # None (the stack's model rejects it, see `crates/harness-lock-core/src/models.rs`): not sent
+    temperature = None if stack.get("temperature") is None else float(stack["temperature"])
     tool_timeout = float(stack.get("tool_timeout_seconds") or 120.0)
     # the planner's reasoning effort, when the stack sets one (never a default)
     effort = (stack.get("effort") or {}).get("planner") or None
@@ -303,7 +318,7 @@ def llm_run_trial(req: dict) -> dict:
         "type": "llm.call",
         "role": "planner",
         "model": _served_model(model, provider),
-        "temperature": temperature,
+        "temperature": r.get("temperature"),
         "usage": r["usage"],
         "cost_usd": r["cost_usd"],
         "latency_ms": r["latency_ms"],
@@ -330,7 +345,7 @@ def llm_run_trial(req: dict) -> dict:
     }
 
 
-def _reference_trial(stack: dict, provider: str, model: str, prompt: str, seed: int, temperature: float,
+def _reference_trial(stack: dict, provider: str, model: str, prompt: str, seed: int, temperature: float | None,
                      tool_timeout: float) -> dict:
     """The deterministic offline reference: succeeds as often as the model's simulated
     quality, honoring retries and max steps."""

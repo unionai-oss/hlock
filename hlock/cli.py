@@ -3781,7 +3781,8 @@ def _tune_panel(r: dict, title: str = "[brand]⚙ tune[/]") -> Panel:
     for k, v in best.items():
         if k in ("success_rate", "cost_usd", "trials"):
             continue
-        chosen.add_row(k.replace("_", " "), f"[bold]{v}[/]")
+        # None: the model rejects it, so it's left out of requests (`hlock tune` notes which)
+        chosen.add_row(k.replace("_", " "), f"[bold]{v}[/]" if v is not None else "[muted]unset[/]")
 
     opt = r.get("optimize") or {}
     if opt:

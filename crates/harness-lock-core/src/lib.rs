@@ -33,6 +33,7 @@ pub mod lockfile;
 pub mod manifest;
 pub mod meta;
 pub mod migrate;
+pub mod models;
 pub mod ops;
 pub mod openshell;
 pub mod optimize;
