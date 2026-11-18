@@ -14,6 +14,7 @@ pub mod agent;
 pub mod apm;
 pub mod apm_registry;
 pub mod audit;
+pub mod behavior;
 pub mod capture;
 pub mod components;
 pub mod connectors;

@@ -47,7 +47,7 @@ target = "local"
 ```
 
 `resolve` and `tune` refuse a manifest with a key they don't know in `[budget]`,
-`[objective]`, `[evals]`, `[evals.splits]`, `[candidates]`, `[candidates.llm.<role>]`, `[backend]`, `[target]`,
+`[objective]`, `[evals]`, `[evals.splits]`, `[candidates]`, `[candidates.llm.<role>]`, `[backend]`, `[target]`, `[gate]`,
 `[environment]`, `[[environment.binaries]]`, `[[secrets]]`, `[workspace]`,
 `[[workspace.repos]]`, `[[workspace.files]]`, or at the top level, and name the closest
 known key: a mistyped key is otherwise ignored.
@@ -230,9 +230,32 @@ budget = { rollouts = 100, usd = 20 }
 | `proposer` | | The model that drafts edits. The built-in optimizer tries fixed guidance without one |
 | `trials` | `2` | Trials per task in each evaluation and in the acceptance runs |
 | `alpha` | `0.05` | The sign test's significance level an accepted candidate must reach |
-| `max-cost-increase` | `0.25` | How much more per trial an accepted candidate may cost |
+| `max-cost-increase` | `0.25` for edits | How much more per trial an accepted candidate may cost. Set here or in [`[gate]`](#gate), it also rules out grid configurations, and compares output tokens when the cost isn't known. Overrides `[gate]` for tune |
+| `max-token-increase` | | How many more output tokens per trial an accepted candidate or a picked configuration may use. Overrides `[gate]` for tune |
 | `budget.rollouts` | `100` | The most trials the optimizer may run |
 | `budget.usd` | | The most it may spend on trials |
+
+## `[gate]`
+
+How much more a change may cost than the lock it replaces. [`hlock upgrade --apply`](../guides/upgrade.md#cost-gate)
+rolls back an upgrade over it, and [`hlock tune`](../guides/tune.md#cost-limits) doesn't
+pick a configuration or accept an edit over it, even when the success rate holds or rises.
+
+```toml title="harness.toml"
+[gate]
+max-cost-increase = 0.2
+max-token-increase = 0.5
+```
+
+| Key | Default | Description |
+|---|---|---|
+| `max-cost-increase` | none | The most the mean cost per task may rise, as a share (`0.2` is 20%). When either side's cost isn't known, it compares output tokens per task instead |
+| `max-token-increase` | none | The most the mean output tokens per task may rise, as a share |
+
+Each is a number at least 0. A limit that can't be checked, because the evidence on either
+side doesn't have the number, doesn't block the change, and `upgrade` and `tune` say it
+wasn't checked. Without `[gate]`, nothing is rejected for cost; the cost and token change
+is printed either way.
 
 ## `[sandbox]`
 

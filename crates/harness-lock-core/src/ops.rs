@@ -75,6 +75,9 @@ pub struct UpgradeOutcome {
     pub after: Option<f64>,
     pub lock_path: PathBuf,
     pub message: String,
+    /// What the applied upgrade changed: success rate, cost and output tokens per task,
+    /// each `{base, candidate, change}`; null when nothing was measured.
+    pub delta: serde_json::Value,
 }
 
 
@@ -138,6 +141,7 @@ pub fn upgrade(manifest: Manifest, spec: &UpgradeSpec) -> Result<UpgradeOutcome>
             after: None,
             lock_path: lock_path.clone(),
             message: String::new(),
+            delta: serde_json::Value::Null,
         };
         if prev_path.exists() {
             std::fs::copy(&prev_path, &lock_path)?;
@@ -161,6 +165,7 @@ pub fn upgrade(manifest: Manifest, spec: &UpgradeSpec) -> Result<UpgradeOutcome>
         after: None,
         lock_path: lock_path.clone(),
         message: String::new(),
+        delta: serde_json::Value::Null,
     };
 
     // ---- plan only (dry-run) ----
@@ -181,6 +186,7 @@ pub fn upgrade(manifest: Manifest, spec: &UpgradeSpec) -> Result<UpgradeOutcome>
         outcome.message = "nothing to apply (no upgradeable component).".into();
         return Ok(outcome);
     }
+    let gate = crate::behavior::Gate::from_manifest(&manifest)?;
 
     // ---- apply: derive a manifest targeting the upgraded models and deciders ----
     let (decider_ups, llm_ups): (Vec<&serde_json::Value>, Vec<&serde_json::Value>) = upgradeable.iter().partition(|e| e.get("decider").is_some());
@@ -226,28 +232,50 @@ pub fn upgrade(manifest: Manifest, spec: &UpgradeSpec) -> Result<UpgradeOutcome>
     let after = baseline_sr(&new_lock);
     outcome.after = Some(after);
     let before = outcome.before;
+    // the cost and tokens next to the success rate, so a costlier upgrade is visible
+    let (spend_before, spend_after) = (current_lock.as_ref().map(lock_spend).unwrap_or_default(), lock_spend(&new_lock));
+    let mut delta = crate::behavior::delta(spend_before, spend_after);
+    delta["success-rate"] = serde_json::json!({"base": before, "candidate": after, "change": before.map(|b| ((after - b) * 1e4).round() / 1e4)});
+    outcome.delta = delta;
+    let spend = crate::behavior::spend_line(spend_before, spend_after);
     let regressed = before.map(|b| after < b).unwrap_or(false);
-    if regressed && !spec.force {
-        // evidence gate: roll back automatically
+    // evidence gates: the success rate, then [gate]'s cost limits; either rolls back
+    let costly = if regressed { None } else { gate.check(spend_before, spend_after) };
+    if (regressed || costly.is_some()) && !spec.force {
         if prev_path.exists() {
             std::fs::copy(&prev_path, &lock_path)?;
         }
         outcome.applied = false;
-        outcome.message = format!(
-            "upgrade regressed success-rate ({:?} -> {:.2}) and was rolled back; use --force to apply anyway.",
-            before, after
-        );
+        outcome.message = match &costly {
+            None => format!("upgrade regressed success-rate ({:?} -> {:.2}; {spend}) and was rolled back; use --force to apply anyway.", before, after),
+            Some(why) => format!(
+                "upgrade held success-rate ({:.2} -> {:.2}) but {why} ([gate] in harness.toml), so it was rolled back; use --force to apply anyway.",
+                before.unwrap_or(0.0),
+                after
+            ),
+        };
         return Ok(outcome);
     }
     outcome.applied = true;
     let what: Vec<String> = targets.iter().map(|(role, t)| format!("{role} to {t}")).chain(decider_ups.iter().map(|e| format!("the {} decider to {}", e["decider"].as_str().unwrap_or("?"), e["to"].as_str().unwrap_or("?")))).collect();
     outcome.message = format!(
-        "upgraded {}: success-rate {:.2} -> {:.2}. previous lock kept at harness.lock.prev.",
+        "upgraded {}: success-rate {:.2} -> {:.2}; {spend}. previous lock kept at harness.lock.prev.",
         what.join(" and "),
         before.unwrap_or(0.0),
         after
     );
+    if let Some(n) = gate.unchecked(spend_before, spend_after) {
+        outcome.message.push_str(&format!(" {n}."));
+    }
     Ok(outcome)
+}
+
+/// A lock's evidence as the cost gate reads it: mean cost and output tokens per task.
+fn lock_spend(l: &Lockfile) -> crate::behavior::Spend {
+    crate::behavior::Spend::new(
+        l.evidence.cost_usd_per_task.get("mean").copied().unwrap_or(0.0),
+        l.evidence.behavior.as_ref().and_then(|b| b.output_tokens_per_task),
+    )
 }
 
 /// The lock at `path`, or `None` when there's no file there. A file that can't be read
@@ -328,6 +356,9 @@ pub struct TuneConfig {
     pub alpha: f64,
     /// How much more per task an accepted candidate may cost (0.25 = 25%).
     pub max_cost_increase: f64,
+    /// The cost limits set in `[tune]` or `[gate]`: they also hold the configurations
+    /// tune picks from, and check output tokens when the cost isn't known.
+    pub gate: crate::behavior::Gate,
 }
 
 impl TuneConfig {
@@ -341,6 +372,12 @@ impl TuneConfig {
         }
         let budget = t.get("budget");
         let num = |k: &str| t.get(k).and_then(serde_json::Value::as_f64);
+        let shared = crate::behavior::Gate::from_manifest(manifest)?;
+        let gate = crate::behavior::Gate {
+            max_cost_increase: num("max-cost-increase").or(shared.max_cost_increase),
+            max_token_increase: num("max-token-increase").or(shared.max_token_increase),
+            tokens_when_cost_unknown: true,
+        };
         Ok(TuneConfig {
             optimizer: spec.optimizer.clone().or_else(|| t.get("optimizer").and_then(|v| v.as_str()).map(str::to_string)).unwrap_or_else(|| "hlock".into()),
             edit,
@@ -351,7 +388,8 @@ impl TuneConfig {
             },
             trials: t.get("trials").and_then(serde_json::Value::as_u64).map(|n| n.clamp(1, 20) as u32).unwrap_or(2),
             alpha: num("alpha").unwrap_or(0.05),
-            max_cost_increase: num("max-cost-increase").unwrap_or(0.25),
+            max_cost_increase: gate.max_cost_increase.unwrap_or(0.25),
+            gate,
         })
     }
 }
@@ -371,10 +409,11 @@ struct Optimized {
     acceptance: serde_json::Value,
 }
 
-/// Per-task success over `trials` seeds, and mean cost per trial.
-fn per_task(dir: &std::path::Path, resolver: &Resolver, stack: &Stack, tasks: &[crate::tasks::Task], trials: u32) -> Result<(BTreeMap<String, f64>, f64, usize)> {
+/// Per-task success over `trials` seeds, and mean cost and output tokens per trial.
+fn per_task(dir: &std::path::Path, resolver: &Resolver, stack: &Stack, tasks: &[crate::tasks::Task], trials: u32) -> Result<(BTreeMap<String, f64>, crate::behavior::Spend, usize)> {
     let mut by = BTreeMap::new();
     let (mut cost, mut n) = (0.0, 0usize);
+    let mut behavior = Vec::new();
     for t in tasks {
         let mut ok = 0.0;
         for s in 0..trials {
@@ -382,10 +421,12 @@ fn per_task(dir: &std::path::Path, resolver: &Resolver, stack: &Stack, tasks: &[
             ok += if r.success { 1.0 } else { 0.0 };
             cost += r.cost_usd;
             n += 1;
+            behavior.push(r.behavior);
         }
         by.insert(t.id.clone(), ok / f64::from(trials));
     }
-    Ok((by, cost / n.max(1) as f64, n))
+    let tokens = crate::behavior::aggregate(&behavior).and_then(|b| b.output_tokens_per_task);
+    Ok((by, crate::behavior::Spend::new(cost / n.max(1) as f64, tokens), n))
 }
 
 /// The optimize stage (`specs/tune-optimizers.md` §3): write the bundle and the session,
@@ -551,8 +592,10 @@ fn optimize_stage(
     // ---- acceptance: the seed and the candidate, paired, on the test split ----
     let cand_stack = opt::overlay(base, &candidate);
     resolver.trial_locks.insert(cand_stack.hash(), opt::trial_lock(base_lock, &candidate, &bundle)?);
-    let (b, b_cost, n) = per_task(&dir, resolver, &seed_stack, &test, cfg.trials)?;
-    let (c, c_cost, _) = per_task(&dir, resolver, &cand_stack, &test, cfg.trials)?;
+    let (b, b_spend, n) = per_task(&dir, resolver, &seed_stack, &test, cfg.trials)?;
+    let (c, c_spend, _) = per_task(&dir, resolver, &cand_stack, &test, cfg.trials)?;
+    // [tune] max-cost-increase's implicit 25% checks a known cost only, as it always has
+    let gate = crate::behavior::Gate { max_cost_increase: Some(cfg.max_cost_increase), tokens_when_cost_unknown: cfg.gate.max_cost_increase.is_some(), ..cfg.gate.clone() };
     let wins = test.iter().filter(|t| c[&t.id] > b[&t.id]).count();
     let losses = test.iter().filter(|t| c[&t.id] < b[&t.id]).count();
     let p = opt::sign_test(wins, losses);
@@ -561,16 +604,15 @@ fn optimize_stage(
         Some(format!("success {csr:.2} vs {bsr:.2} isn't above the noise band ({noise:.2})"))
     } else if p > cfg.alpha {
         Some(format!("the gain isn't significant: p = {p:.3} > {} ({wins} tasks better, {losses} worse)", cfg.alpha))
-    } else if b_cost > 0.0 && c_cost > b_cost * (1.0 + cfg.max_cost_increase) {
-        Some(format!("cost per trial rose from ${b_cost:.4} to ${c_cost:.4}, more than {:.0}%", cfg.max_cost_increase * 100.0))
     } else {
-        None
+        gate.check(b_spend, c_spend)
     };
     let mut acceptance = serde_json::json!({
         "accepted": reason.is_none(),
         "noise-band": round6(noise),
         "test": {"split": test_split, "tasks": test.len(), "trials": cfg.trials, "base": round6(bsr), "candidate": round6(csr), "better": wins, "worse": losses, "p": round6(p)},
-        "cost-usd-per-trial": {"base": round6(b_cost), "candidate": round6(c_cost)},
+        "cost-usd-per-trial": {"base": round6(b_spend.cost_usd.unwrap_or(0.0)), "candidate": round6(c_spend.cost_usd.unwrap_or(0.0))},
+        "output-tokens-per-trial": {"base": b_spend.output_tokens, "candidate": c_spend.output_tokens},
         "runs": n * 2,
     });
     if let Some(why) = &reason {
@@ -977,13 +1019,28 @@ pub fn tune(manifest: Manifest, spec: &TuneSpec) -> Result<TuneOutcome> {
     stages.push(stage("hpo", true, format!("{} configs", scored.len())));
 
     // the best: highest success, then lowest cost, then closest to the base
+    let role = tuned_role(&base);
     let distance = |s: &Stack| {
         (s.retries.abs_diff(base.retries), s.temperature != base.temperature, effort_distance(s.effort.get(&role), base.effort.get(&role)), s.llm.get(&role) != base.llm.get(&role), s.tool_timeout_seconds != base.tool_timeout_seconds)
     };
+    // with cost limits set ([tune] or [gate]), a configuration that costs more than they
+    // allow over the baseline isn't picked, whatever its success rate
+    let base_spend = baseline.spend();
+    let over: Vec<usize> = if tcfg.gate.is_set() { (0..scored.len()).filter(|&i| tcfg.gate.check(base_spend, scored[i].spend()).is_some()).collect() } else { Vec::new() };
+    if !over.is_empty() {
+        note(format!("{} of {} configurations cost more than the cost limits allow over the baseline, so weren't picked", over.len(), scored.len()));
+    }
+    if let Some(n) = tcfg.gate.is_set().then(|| scored.iter().find_map(|s| tcfg.gate.unchecked(base_spend, s.spend()))).flatten() {
+        note(n);
+    }
     let winner = scored
         .iter()
+        .enumerate()
+        .filter(|(i, _)| !over.contains(i))
+        .map(|(_, s)| s)
         .min_by(|a, b| b.success_rate().total_cmp(&a.success_rate()).then(a.mean_cost().total_cmp(&b.mean_cost())).then(distance(&a.stack).cmp(&distance(&b.stack))))
         .cloned()
+        .or_else(|| (!over.is_empty()).then(|| baseline.clone()))
         .ok_or_else(|| Error::Tuning("tune produced no candidate".into()))?;
 
     if spec.strict && winner.success_rate() <= baseline.success_rate() {
@@ -1094,7 +1151,10 @@ pub fn tune(manifest: Manifest, spec: &TuneSpec) -> Result<TuneOutcome> {
         "stages": stages,
         "optimize": optimize_report,
         "best": {"model": best.llm.get(&role), "retries": best.retries, "temperature": best.temperature, "tool_timeout_seconds": best.tool_timeout_seconds, "success_rate": measured.success_rate(), "cost_usd": measured.mean_cost(), "trials": measured.n},
-        "baseline": {"success_rate": baseline.success_rate(), "trials": baseline.n, "measured": true},
+        "baseline": {"success_rate": baseline.success_rate(), "cost_usd": baseline.mean_cost(), "trials": baseline.n, "measured": true},
+        // the winner against the baseline on the same tasks: what it costs, next to the gain
+        "spend": crate::behavior::delta(base_spend, winner.spend()),
+        "behavior": {"baseline": baseline.behavior(), "best": measured.behavior()},
         "baseline_success_rate": baseline.success_rate(),
         "gain_success_rate": winner.success_rate() - baseline.success_rate(),
         "simulated": simulated,
@@ -1232,6 +1292,7 @@ fn build_tuned_lock(
         out_of_tokens: measured.out_of_tokens(),
         simulated,
         sandbox: evidence_sandbox,
+        behavior: measured.behavior(),
         ..Default::default()
     };
     lf.provenance.backend = backend.to_string();

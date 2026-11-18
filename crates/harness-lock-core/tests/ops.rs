@@ -251,6 +251,65 @@ fn a_rust_backend_runs_in_process() {
 }
 
 #[test]
+fn a_costlier_upgrade_is_rolled_back_by_the_gate() {
+    let dir = std::env::temp_dir().join(format!("hlock-ops-gate-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).unwrap();
+    make_pack(&dir);
+    let mut m = make_manifest(&dir);
+    m.candidates.llm.get_mut("planner").unwrap().any_of = vec!["reference:qwen-7b".into()];
+    let lock = dir.join("harness.lock");
+    let base = Resolver::new(m.clone(), dir.join(".hlock")).resolve_lock().unwrap();
+    // the reference harness's trace has each call's tokens
+    assert!(base.evidence.behavior.as_ref().unwrap().output_tokens_per_task.unwrap() > 0.0);
+    base.save(&lock).unwrap();
+    let up = UpgradeSpec { apply: true, workdir: dir.join(".hlock"), lock: Some(lock.clone()), ..Default::default() };
+
+    // qwen-32b holds the success rate, at about 4x the cost per call
+    m.gate.insert("max-cost-increase".into(), serde_json::json!(0.5));
+    let o = upgrade(m.clone(), &up).unwrap();
+    assert!(!o.applied, "{}", o.message);
+    assert!(o.message.contains("upgrade held success-rate") && o.message.contains("max-cost-increase allows") && o.message.contains("rolled back"), "{}", o.message);
+    assert_eq!(Lockfile::load(&lock).unwrap().llm[0].model, "qwen-7b");
+    assert!(o.delta["cost-usd-per-task"]["change"].as_f64().unwrap() > 0.5);
+
+    // --force takes it anyway; a looser gate lets it through, saying what it costs
+    assert!(upgrade(m.clone(), &UpgradeSpec { force: true, ..up.clone() }).unwrap().applied);
+    base.save(&lock).unwrap();
+    m.gate.insert("max-cost-increase".into(), serde_json::json!(10.0));
+    let o = upgrade(m.clone(), &up).unwrap();
+    assert!(o.applied && o.message.contains("cost/task $") && o.message.contains("output tokens/task"), "{}", o.message);
+    assert_eq!(Lockfile::load(&lock).unwrap().llm[0].model, "qwen-32b");
+
+    // a gate that doesn't parse stops the apply before anything runs
+    base.save(&lock).unwrap();
+    m.gate.insert("max-cost-increase".into(), serde_json::json!("lots"));
+    assert!(upgrade(m, &up).unwrap_err().to_string().contains("[gate] max-cost-increase"));
+    assert_eq!(Lockfile::load(&lock).unwrap().llm[0].model, "qwen-7b");
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn tune_doesnt_pick_a_configuration_the_gate_rules_out() {
+    let dir = std::env::temp_dir().join(format!("hlock-ops-tune-gate-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).unwrap();
+    make_pack(&dir);
+    let mut m = make_manifest(&dir);
+    m.gate.insert("max-cost-increase".into(), serde_json::json!(0.0));
+    let spec = TuneSpec { depth: "probe".into(), out: dir.join("harness.tune.lock"), workdir: dir.join(".hlock"), lock: Some(dir.join("harness.lock")), ..Default::default() };
+    let o = tune(m, &spec).unwrap();
+    // qwen-32b's configurations cost more than the base (qwen-7b)
+    let notes: Vec<&str> = o.report["notes"].as_array().unwrap().iter().filter_map(|n| n.as_str()).collect();
+    assert!(notes.iter().any(|n| n.contains("cost more than the cost limits allow")), "{notes:?}");
+    assert_eq!(o.report["best"]["model"], "reference:qwen-7b");
+    assert!(o.report["spend"]["cost-usd-per-task"]["change"].as_f64().unwrap() <= 0.0, "{}", o.report["spend"]);
+    assert!(o.report["behavior"]["best"]["output-tokens-per-task"].as_f64().is_some());
+    assert!(o.lock.evidence.behavior.is_some());
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn a_model_that_rejects_temperature_isnt_swept_and_pins_none() {
     let dir = std::env::temp_dir().join(format!("hlock-ops-rejects-{}", std::process::id()));
     let _ = fs::remove_dir_all(&dir);
@@ -379,6 +438,40 @@ fn tune_sweeps_effort_when_the_manifest_lists_levels_and_keeps_the_locks_on_a_ti
     let o = tune(m, &spec).unwrap();
     assert!(o.report["best"].get("effort").is_none() && o.lock.llm[0].effort.is_none());
     assert!(o.lock.tune.as_ref().unwrap()["hpo"]["axes"].get("effort").is_none());
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_trace_with_tool_calls_gives_the_locks_behavior() {
+    use harness_lock_core::worker::{Describe, Executor, TaskRequest, TaskResult};
+    struct Chatty;
+    impl Executor for Chatty {
+        fn describe(&self, _: &TaskRequest) -> harness_lock_core::Result<Describe> {
+            Ok(Describe::new("chatty", ["llm.run_trial"]))
+        }
+        fn call(&self, req: &TaskRequest) -> harness_lock_core::Result<TaskResult> {
+            fs::write(Path::new(&req.workdir).join("summary.md"), "done")?;
+            // Claude Code's stream-json: three tool calls in a row, a subagent, a last message offering more
+            let trace = serde_json::json!([
+                {"type": "assistant", "message": {"id": "a", "content": [{"type": "tool_use", "name": "Read"}, {"type": "tool_use", "name": "Task"}, {"type": "tool_use", "name": "Write"}], "usage": {"input_tokens": 100, "output_tokens": 40}}},
+                {"type": "assistant", "message": {"id": "b", "content": [{"type": "text", "text": "Wrote it. Would you like me to continue?"}], "usage": {"input_tokens": 120, "output_tokens": 10}}},
+            ]);
+            Ok(TaskResult { success: true, cost_usd: None, steps: 2, trace, ..Default::default() })
+        }
+    }
+    let dir = std::env::temp_dir().join(format!("hlock-ops-behavior-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).unwrap();
+    make_pack(&dir);
+    let lock = Resolver::with_executor(make_manifest(&dir), dir.join(".hlock"), "chatty", Box::new(Chatty)).resolve_lock().unwrap();
+    let b = lock.evidence.behavior.clone().unwrap();
+    assert_eq!((b.input_tokens_per_task, b.output_tokens_per_task, b.tool_calls_per_task), (Some(220.0), Some(50.0), Some(3.0)));
+    assert_eq!((b.longest_silent_stretch_max, b.subagents_per_task, b.approval_request_rate, b.early_stop_rate), (Some(3), Some(1.0), Some(0.0), Some(1.0)));
+    let path = dir.join("harness.lock");
+    lock.save(&path).unwrap();
+    let text = fs::read_to_string(&path).unwrap();
+    assert!(text.contains("[evidence.behavior]") && text.contains("early-stop-rate = 1.0"), "{text}");
+    assert_eq!(Lockfile::load(&path).unwrap().evidence.behavior, lock.evidence.behavior);
     let _ = fs::remove_dir_all(&dir);
 }
 

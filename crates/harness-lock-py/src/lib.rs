@@ -457,6 +457,7 @@ impl PyLockfile {
             "latency_s_per_task".into(),
             serde_json::json!(self.inner.evidence.latency_s_per_task),
         );
+        m.insert("behavior".into(), serde_json::json!(self.inner.evidence.behavior));
         serde_json::to_string(&serde_json::Value::Object(m)).unwrap_or_else(|_| "{}".into())
     }
 
@@ -687,6 +688,7 @@ fn upgrade(
             "after": o.after,
             "lock_path": o.lock_path.to_string_lossy(),
             "message": o.message,
+            "delta": o.delta,
         })
         .to_string())
     })

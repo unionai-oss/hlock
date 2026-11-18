@@ -577,6 +577,10 @@ pub struct Evidence {
     /// What trials and grading ran under. Absent in locks measured before sandboxes.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sandbox: Option<EvidenceSandbox>,
+    /// How the agent worked in the measured trials (tokens, tool calls, …), from their
+    /// traces. Absent when no trace showed any of it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub behavior: Option<crate::behavior::EvidenceBehavior>,
 }
 
 /// The sandbox a resolve or tune measured under: the runner and network, and the kinds

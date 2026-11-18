@@ -332,12 +332,13 @@ impl Resolver {
         }).or_else(|| (!success).then(|| "the harness reported a failure".to_string()));
         let score = if error.is_some() { 0.0 } else { grades.iter().map(|g| g.score).sum::<f64>() / grades.len().max(1) as f64 };
 
+        let behavior = crate::behavior::from_trace(&outcome.trace);
         // persist the trace to the store (content-addressed)
         let mut trace = json!({
             "trial": {"stack": hash, "task": task.id, "seed": seed},
             "events": outcome.trace,
             "result": {"artifacts": task.expected_artifacts()},
-            "metrics": {"steps": outcome.steps, "cost_usd": outcome.cost_usd, "latency_s": outcome.latency_s},
+            "metrics": {"steps": outcome.steps, "cost_usd": outcome.cost_usd, "latency_s": outcome.latency_s, "behavior": behavior},
             "grades": grades,
         });
         if let Some(e) = &error {
@@ -357,6 +358,7 @@ impl Resolver {
             error,
             judging,
             detail,
+            behavior,
             out_of_tokens,
         }
     }
@@ -804,6 +806,7 @@ impl Resolver {
                 // an agent CLI's trials ran on a stand-in, not the agent itself
                 simulated: self.profiles.get(&s.harness).is_some_and(|p| p.kind == "cli"),
                 sandbox: Some(self.evidence_sandbox(&s.harness)),
+                behavior: measured.behavior(),
             },
             verify: Verify::default(),
             provenance: Provenance {

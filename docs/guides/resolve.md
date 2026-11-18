@@ -122,24 +122,25 @@ reference/reference:qwen-7b/d=rules:default         100%    $0.0001  0.59s      
 reference/reference:qwen-32b/d=none                 100%    $0.0004  0.45s       4
 reference/reference:qwen-32b/d=rules:default        100%    $0.0004  0.45s       4
 holdout  reference/reference:qwen-7b/d=none  100% on 2 trials it wasn't picked on
-╭─ 🔒 harness.lock ──────────────────────────────╮
-│                                                │
-│  Stack                                         │
-│  harness        reference                      │
-│  llm · planner  reference:qwen-7b              │
-│  decision       none                           │
-│  backend        local                          │
-│                                                │
-│  Evidence                                      │
-│  success rate  100%                            │
-│  cost / task   $0.0001                         │
-│  latency       p50 0.56s  ·  p95 0.66s         │
-│  trials        2  (holdout)  low sample (n=2)  │
-│  eval pack     hlock-demo/evals@0.1.0          │
-│                                                │
-│  lock-version 1 · manifest 9864f18edb96        │
-│                                                │
-╰────────────────────────────────────────────────╯
+╭─ 🔒 harness.lock ───────────────────────────────╮
+│                                                 │
+│  Stack                                          │
+│  harness        reference                       │
+│  llm · planner  reference:qwen-7b               │
+│  decision       none                            │
+│  backend        offline                         │
+│                                                 │
+│  Evidence                                       │
+│  success rate   100%                            │
+│  cost / task    $0.0001                         │
+│  latency        p50 0.56s  ·  p95 0.66s         │
+│  tokens / task  200 in  ·  50 out               │
+│  trials         2  (holdout)  low sample (n=2)  │
+│  eval pack      hlock-demo/evals@0.1.0          │
+│                                                 │
+│  lock-version 1 · manifest fd6e42d1b192         │
+│                                                 │
+╰─────────────────────────────────────────────────╯
 report: .hlock/report.md
 next → hlock check  ·  hlock run "<prompt>"
 ```
@@ -155,6 +156,13 @@ search score is luck; the holdout score isn't. The search score is kept too, as
 `success-rate.search`. With no holdout tasks, the evidence is the search score and
 `resolve` says it's in-sample. Fewer than 10 trials is marked `low sample`: a demo pack
 of three tasks says little.
+
+The evidence also records how the agent worked, as far as the trials' traces show it
+(`[evidence.behavior]`): tokens per task, and with a harness whose trace has its messages
+(Claude Code's stream-json, Codex's `--json`, chat messages), tool calls, the longest run
+of tool calls with no text for the user, subagent launches, and how often the last message
+asks for approval or stops short. The reference harness's trace has only tokens, so that's
+all the panel shows here. See [How the agent worked](#how-the-agent-worked).
 
 `hlock resolve --json` prints the lock and every stack's scores, and
 `.hlock/report.md` keeps the table.
@@ -224,6 +232,57 @@ can't run them. See [Harnesses](harnesses.md#resolve-for-a-target).
     `simulated = true` in its evidence, and `resolve`, `show` and `check` say the evidence
     is a stand-in. To see the real agent on your tasks, use
     [`hlock evals run`](eval-packs.md#try-tasks-on-your-agent).
+
+## How the agent worked
+
+Two stacks can solve the same tasks very differently: one in a few calls, another with
+twice the tokens, long runs of tool calls the user never hears about, or a last message that
+stops to ask "Would you like me to continue?". When you move to a new model, these are
+what change first. hlock reads them from each trial's trace and records the averages in
+`[evidence.behavior]`:
+
+```toml title="harness.lock"
+[evidence.behavior]
+trials = 2
+input-tokens-per-task = 200.0
+output-tokens-per-task = 50.0
+```
+
+| Key | What it counts |
+|---|---|
+| `trials` | Trials whose trace showed any of the keys below |
+| `input-tokens-per-task`, `output-tokens-per-task` | Tokens per trial; input includes cached tokens |
+| `tool-calls-per-task` | Tool calls per trial |
+| `longest-silent-stretch` | The mean, over trials, of the most tool calls in a row with no text for the user between them |
+| `longest-silent-stretch-max` | The longest silent stretch in any trial |
+| `subagents-per-task` | Subagent launches per trial (Claude Code's `Task` or `Agent` tool calls, or `subagent` events) |
+| `approval-request-rate` | **Heuristic.** The share of trials whose last message asks for approval ("Should I proceed?", "Please confirm") |
+| `early-stop-rate` | **Heuristic.** The share of trials whose last message offers to go on or lists work left ("Would you like me to continue?", "Let me know if you want me to", "Remaining work") |
+
+A key is there only when the traces show it. Nothing is counted as 0 because it's
+missing: the reference harness's trace has each call's tokens but no tool calls or
+messages, so a lock it measured has only the token keys. The last two keys match phrases
+in the last message, so they can miss a request worded another way, or catch one that
+isn't. Treat a change in them as a reason to read the traces.
+
+What a trace shows depends on the harness:
+
+| Trace | Tokens | Tool calls, silent stretches | Subagents | Last message |
+|---|---|---|---|---|
+| hlock's `llm.call` events (the reference harness, the `local` worker) | ✓ | | | |
+| Claude Code's stream-json or session events (`assistant`, `result`) | ✓ | ✓ | ✓ | ✓ |
+| Codex's `exec --json` events (`item.completed`, `turn.completed`) | ✓ | ✓ | | ✓ |
+| Chat messages (`{"role": "assistant", "content": …, "tool_calls": […]}`) | ✓ | ✓ | | ✓ |
+
+A [code harness](harnesses.md#your-own-agent-frameworks-and-custom-scripts) can return any
+of these as its result's `trace`, or plain events: `{"type": "text", "text": …}`,
+`{"type": "tool.call", "name": …}` and `{"type": "subagent"}`. A subagent's own messages
+(`isSidechain`, or a `parent_tool_use_id`) don't count toward the main thread's tool calls
+or text.
+
+`tune` and `upgrade` print the cost and output-token change next to the success-rate
+change, and [`[gate]`](../reference/manifest.md#gate) can reject a change that holds
+success but costs too much more. See [Upgrading components](upgrade.md#cost-gate).
 
 ## Next
 

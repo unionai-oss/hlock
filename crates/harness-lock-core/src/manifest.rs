@@ -50,7 +50,7 @@ pub const SELECTS: &[&str] = &["min-cost", "max-quality"];
 /// The keys of the manifest's fixed-shape tables; anything else is reported by
 /// [`Manifest::problems`]. Tables holding names (`[skills]`, `[harnesses]`, …) aren't
 /// checked, and neither are the reserved `[context]` and `[enforce]`.
-const TOP_KEYS: &[&str] = &["project", "evals", "tasks", "candidates", "tools", "skills", "instructions", "mcp", "plugins", "packages", "context", "objective", "budget", "enforce", "backend", "backends", "optimizers", "target", "harnesses", "deciders", "tune", "sandbox", "environment", "secrets", "workspace", "commands"];
+const TOP_KEYS: &[&str] = &["project", "evals", "tasks", "candidates", "tools", "skills", "instructions", "mcp", "plugins", "packages", "context", "objective", "budget", "enforce", "backend", "backends", "optimizers", "target", "harnesses", "deciders", "tune", "gate", "sandbox", "environment", "secrets", "workspace", "commands"];
 const BUDGET_KEYS: &[&str] = &["max-spend-usd", "max-trials", "strategy", "random-seed", "max_spend_usd", "max_trials", "random_seed"];
 const OBJECTIVE_KEYS: &[&str] = &["primary", "constraints", "select"];
 const EVALS_KEYS: &[&str] = &["packs", "seeds", "splits", "judge"];
@@ -63,7 +63,7 @@ const LLM_CANDIDATE_KEYS: &[&str] = &["any_of", "any-of", "effort"];
 pub const EFFORTS: &[&str] = &["none", "minimal", "low", "medium", "high", "xhigh", "max"];
 const BACKEND_KEYS: &[&str] = &["target"];
 const TARGET_KEYS: &[&str] = &["harness", "also"];
-const TUNE_KEYS: &[&str] = &["optimizer", "edit", "proposer", "budget", "trials", "alpha", "max-cost-increase"];
+const TUNE_KEYS: &[&str] = &["optimizer", "edit", "proposer", "budget", "trials", "alpha", "max-cost-increase", "max-token-increase"];
 const TUNE_BUDGET_KEYS: &[&str] = &["rollouts", "usd"];
 const ENVIRONMENT_KEYS: &[&str] = &["apt", "brew", "pip", "npm", "cargo", "go", "binaries", "ignore"];
 const BINARY_KEYS: &[&str] = &["url", "sha256", "path"];
@@ -514,6 +514,10 @@ pub struct Manifest {
     /// How `tune` edits the harness (`[tune]`): the optimizer, what it may edit, its budget.
     #[serde(default)]
     pub tune: BTreeMap<String, serde_json::Value>,
+    /// How much more a change `upgrade` or `tune` makes may cost (`[gate]`): see
+    /// [`crate::behavior::Gate`].
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub gate: BTreeMap<String, serde_json::Value>,
     /// The sandbox the lock runs in (`[sandbox]`), and project-defined runners.
     #[serde(default)]
     pub sandbox: BTreeMap<String, serde_json::Value>,
@@ -612,6 +616,7 @@ impl Manifest {
             report(table(&["target"]), TARGET_KEYS, "[target]");
             report(table(&["tune"]), TUNE_KEYS, "[tune]");
             report(table(&["tune", "budget"]), TUNE_BUDGET_KEYS, "[tune.budget]");
+            report(table(&["gate"]), crate::behavior::GATE_KEYS, "[gate]");
             report(table(&["environment"]), ENVIRONMENT_KEYS, "[environment]");
             let items = |path: &[&str], last: &str| -> Vec<&toml::Table> {
                 let arr = match path {

@@ -340,6 +340,68 @@ def _signed_pct(v) -> Text:
     return Text(f"{v:+.0%}", style=style)
 
 
+def _count(v) -> str:
+    """A token or call count: `1,234`, `12.5k`, `3.5`."""
+    if v is None:
+        return "—"
+    v = float(v)
+    if v >= 10_000:
+        return f"{v / 1000:.1f}k"
+    return f"{v:,.0f}" if v >= 100 or v == int(v) else f"{v:.1f}"
+
+
+def _spend_change(change) -> Text:
+    """A cost or token change, worse when it rises."""
+    if change is None:
+        return Text("")
+    v = float(change)
+    return Text(f"{v:+.0%}", style="warn" if v > 0.005 else ("ok" if v < -0.005 else "muted"))
+
+
+def _spend_text(spend: dict | None) -> Text | None:
+    """`cost/task $0.0040 → $0.0072 +80%   output tokens 1,200 → 2,160 +80%`: what a
+    change costs, from a `{cost-usd-per-task, output-tokens-per-task}` delta; None when
+    neither is known."""
+    parts = []
+    for key, label, fmt in (("cost-usd-per-task", "cost/task", _usd), ("output-tokens-per-task", "output tokens", _count)):
+        d = (spend or {}).get(key) or {}
+        if d.get("base") is None and d.get("candidate") is None:
+            continue
+        if parts:
+            parts.append("   ")
+        parts += [(f"{label}  ", "key"), f"{fmt(d.get('base'))} → ", (fmt(d.get("candidate")), "bold")]
+        if d.get("change") is not None:
+            parts += [" ", _spend_change(d["change"])]
+    return Text.assemble(*parts) if parts else None
+
+
+def _behavior_rows(b: dict | None) -> list[tuple[str, str]]:
+    """The lock panel's rows for `[evidence.behavior]`: only what the traces showed."""
+    if not b:
+        return []
+    rows = []
+    tin, tout = b.get("input-tokens-per-task"), b.get("output-tokens-per-task")
+    if tin is not None or tout is not None:
+        rows.append(("tokens / task", f"{_count(tin)} in  ·  {_count(tout)} out"))
+    work = []
+    if b.get("tool-calls-per-task") is not None:
+        work.append(f"{_count(b['tool-calls-per-task'])} tool calls")
+    if b.get("longest-silent-stretch-max") is not None:
+        work.append(f"longest silent stretch {b['longest-silent-stretch-max']}")
+    if b.get("subagents-per-task") is not None:
+        work.append(f"{_count(b['subagents-per-task'])} subagents")
+    if work:
+        rows.append(("per task", "  ·  ".join(work)))
+    last = []
+    if b.get("approval-request-rate") is not None:
+        last.append(f"asks approval {_pct(b['approval-request-rate'])}")
+    if b.get("early-stop-rate") is not None:
+        last.append(f"stops early {_pct(b['early-stop-rate'])}")
+    if last:
+        rows.append(("last message", "  ·  ".join(last) + "  [muted](heuristic)[/]"))
+    return rows
+
+
 def _kv_table() -> Table:
     t = Table.grid(padding=(0, 2))
     t.add_column(style="key", no_wrap=True)
@@ -369,6 +431,8 @@ def _lock_panel(lf, title: str | None = None) -> Panel:
     evidence.add_row("cost / task", _usd((ev.get("cost_usd_per_task") or {}).get("mean")))
     lat = ev.get("latency_s_per_task") or {}
     evidence.add_row("latency", f"p50 {_secs(lat.get('p50'))}  ·  p95 {_secs(lat.get('p95'))}")
+    for key, value in _behavior_rows(ev.get("behavior")):
+        evidence.add_row(key, value)
     trials = ev.get("trials")
     split = f"  [muted]({ev['split']})[/]" if ev.get("split") else ""
     few = f"  [warn]low sample (n={trials})[/]" if isinstance(trials, int) and 0 < trials < 10 else ""
@@ -3771,8 +3835,17 @@ def upgrade(target: str | None, to: str | None, all_: bool, apply: bool, rollbac
             f"upgraded  [muted]success rate[/] {_pct(result.get('before'))} → "
             f"[bold]{_pct(result.get('after'))}[/]  [muted](previous lock kept at {_ld()}.prev)[/]"
         )
+        spend = _spend_text(result.get("delta"))
+        if spend is not None:
+            console.print(Text.assemble("  ", spend))
+        msg = result.get("message", "")
+        if "wasn't checked" in msg and "[gate]" in msg:
+            console.print(f"[warn]![/] {escape(msg[msg.index('[gate]'):])}", soft_wrap=True)
     else:
-        console.print(f"[muted]{result.get('message', '')}[/]")
+        console.print(f"[muted]{escape(result.get('message', ''))}[/]", soft_wrap=True)
+        spend = _spend_text(result.get("delta"))
+        if spend is not None:
+            console.print(Text.assemble("  ", spend))
         if items and not apply:
             _next("hlock upgrade --all --apply")
 
@@ -3887,6 +3960,17 @@ def _tune_panel(r: dict, title: str = "[brand]⚙ tune[/]") -> Panel:
         o = opt.get("optimizer") or {}
         where = f" [muted]on {escape(str(o['backend']))}[/]" if o.get("backend") else ""
         run_info.add_row("optimizer", f"{escape(str(o.get('name')))}{where}  {line}")
+        # the edits' cost next to their gain, as the acceptance test measured it
+        spend = {}
+        for src, dst in (("cost-usd-per-trial", "cost-usd-per-task"), ("output-tokens-per-trial", "output-tokens-per-task")):
+            d = dict(acc.get(src) or {})
+            if not d.get("base") and not d.get("candidate"):
+                continue  # a cost of 0 is one no trial reported
+            if d.get("base") and d.get("candidate") is not None:
+                d["change"] = d["candidate"] / d["base"] - 1
+            spend[dst] = d
+        if (text := _spend_text(spend)) is not None:
+            run_info.add_row("", text)
 
     measured = (r.get("baseline") or {}).get("measured")
     result_row = Text.assemble(
@@ -3894,8 +3978,20 @@ def _tune_panel(r: dict, title: str = "[brand]⚙ tune[/]") -> Panel:
         (_pct(best.get("success_rate")), "bold"), "   ", _signed_pct(r.get("gain_success_rate")),
         ("   (baseline: the lock's own configuration, measured)" if measured else "", "muted"),
     )
+    rows = [result_row]
+    # what the gain costs, next to it
+    spend = _spend_text(r.get("spend"))
+    if spend is not None:
+        rows.append(spend)
+    # how the best worked, past the tokens the row above has
+    behavior = [row for row in _behavior_rows((r.get("behavior") or {}).get("best")) if row[0] != "tokens / task"]
+    if behavior:
+        b = _kv_table()
+        for key, value in behavior:
+            b.add_row(key, value)
+        rows.append(b)
     return Panel(
-        Group(run_info, Text(""), Text("Best configuration", style="bold"), chosen, Text(""), result_row),
+        Group(run_info, Text(""), Text("Best configuration", style="bold"), chosen, Text(""), *rows),
         title=title, title_align="left", border_style="magenta", expand=False, padding=(1, 2),
     )
 
