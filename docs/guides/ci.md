@@ -77,6 +77,15 @@ A CI runner has approved no executables, so `audit` lists them without failing. 
 syncs the lock passes `hlock sync --trust`, a statement that the lock was reviewed on the PR
 that changed it.
 
+## Lint the instructions
+
+`hlock lint --ci` fails on [instruction text written for an earlier model](lint.md) in what
+the lock places, for the lock's model or the one you name:
+
+```yaml
+      - run: uvx hlock lint --ci --model claude-fable-5-2 --file AGENTS.md
+```
+
 ## GitHub Actions
 
 ```yaml title=".github/workflows/agent-lock.yml"

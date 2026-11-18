@@ -76,6 +76,7 @@ hlock run "summarize README.md"  # or run one prompt through it (claude -p, code
 hlock pull github:alice/agents  # get someone else's pinned setup; then hlock launch --lock alice
 hlock add skill github:anthropics/skills/skills/pdf   # declare a dependency, pin it, install it
 hlock audit                     # integrity, hidden characters, what it runs, policy, secrets
+hlock lint --model claude-fable-5-2   # instructions written for an earlier model
 ```
 
 Plain `hlock pin` records only the project's own skills, MCP servers and config, so your

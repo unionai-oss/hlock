@@ -1497,6 +1497,41 @@ fn audit(py: Python<'_>, lock: String, ci: bool, strip: bool, verbose: bool, for
     })
 }
 
+/// `hlock lint`: instruction text written for an earlier model (`lint_rules.toml`), in what
+/// `lock` places and in `files`, for `model` (else the lock's default model), as JSON: a
+/// report whose `findings` carry exact byte spans (`start`/`end`, and `line_start`/`line_end`
+/// for the whole lines). `format="sarif"` for SARIF 2.1.0.
+#[pyfunction]
+#[pyo3(signature = (lock=None, model=None, files=None, format="json".to_string(), manifest=None))]
+fn lint(py: Python<'_>, lock: Option<String>, model: Option<String>, files: Option<Vec<String>>, format: String, manifest: Option<String>) -> PyResult<String> {
+    interruptible(py, move || {
+        let dir = lock.as_deref().map(lock_dir);
+        let (reg, ctx, _) = registry(manifest.as_deref(), dir.as_deref())?;
+        let files: Vec<PathBuf> = files.unwrap_or_default().into_iter().map(PathBuf::from).collect();
+        let r = core::lint::run(lock.as_deref().map(Path::new), &files, model.as_deref(), &reg, &ctx).map_err(py_err)?;
+        if format == "sarif" {
+            return Ok(json_str(core::lint::sarif(&r)));
+        }
+        to_json(&r)
+    })
+}
+
+/// The `hlock lint` findings in `text`, named `file`, for `model`, as a JSON list (the
+/// findings of [`lint`], with an empty `path`): for checking text before it's written.
+#[pyfunction]
+#[pyo3(signature = (text, file="<text>".to_string(), model=None))]
+fn lint_text(text: String, file: String, model: Option<String>) -> PyResult<String> {
+    to_json(&core::lint::lint_text(&text, &file, model.as_deref()))
+}
+
+/// The `hlock lint` rules, as a JSON list: every rule, or with `model`, those that apply to it.
+#[pyfunction]
+#[pyo3(signature = (model=None))]
+fn lint_rules(model: Option<String>) -> PyResult<String> {
+    let rules: Vec<_> = core::lint::rules().into_iter().filter(|r| model.is_none() || core::lint::applies(r, model.as_deref())).collect();
+    to_json(&rules)
+}
+
 /// The hidden-Unicode findings in what a lock places (critical and warning), and whether
 /// each entry's critical findings were allowed, as JSON.
 #[pyfunction]
@@ -2460,6 +2495,9 @@ fn _hlock(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(trust_list, m)?)?;
     m.add_function(wrap_pyfunction!(trust_approve, m)?)?;
     m.add_function(wrap_pyfunction!(audit, m)?)?;
+    m.add_function(wrap_pyfunction!(lint, m)?)?;
+    m.add_function(wrap_pyfunction!(lint_text, m)?)?;
+    m.add_function(wrap_pyfunction!(lint_rules, m)?)?;
     m.add_function(wrap_pyfunction!(scan_lock, m)?)?;
     m.add_function(wrap_pyfunction!(policy_check, m)?)?;
     m.add_function(wrap_pyfunction!(export_sbom, m)?)?;

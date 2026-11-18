@@ -298,6 +298,9 @@ $ hlock audit --strip --ci
 scanning, with APM's rule ids for hidden characters (`apm/hidden-unicode/<category>`) so the
 two tools' alerts line up. See [Using hlock in CI](ci.md#audit-the-lock).
 
+`hlock audit` checks what a lock places for what hides text. For text that's in plain
+sight but was written for an earlier model, see [`hlock lint`](lint.md).
+
 ## SBOM
 
 `hlock export --format cyclonedx` writes a CycloneDX 1.6 SBOM of the lock, and

@@ -95,6 +95,8 @@ from hlock import export_apm_lock as _export_apm_lock
 from hlock import export_sbom as _export_sbom
 from hlock import grade_eval_task as _grade_eval_task
 from hlock import jobs as _jobs
+from hlock import lint as _lint
+from hlock import lint_rules as _lint_rules
 from hlock import localize as _localize
 from hlock import lock_diff as _lock_diff
 from hlock import migrate as _migrate
@@ -229,7 +231,7 @@ click.rich_click.COMMAND_GROUPS = {
     "hlock": [
         {"name": "Lock", "commands": ["pin", "check"]},
         {"name": "Dependencies", "commands": ["add", "remove", "outdated", "export", "env"]},
-        {"name": "Audit", "commands": ["audit", "trust"]},
+        {"name": "Audit", "commands": ["audit", "lint", "trust"]},
         {"name": "Rehydrate & run", "commands": ["sync", "launch", "run"]},
         {"name": "Optimize", "commands": ["evals", "init", "resolve", "tune", "upgrade", "decide"]},
         {"name": "Switch", "commands": ["migrate", "localize"]},
@@ -2627,6 +2629,93 @@ def audit_cmd(lock: str | None, ci: bool, fmt: str, out: str | None, strip: bool
         err_console.print("  [muted]hint:[/] what isn't vendored comes from its source: fix it there and re-pin "
                           "([cmd]hlock add[/] or [cmd]hlock pin[/]), or let it through with [cmd]--allow-hidden FILE[/]")
     sys.exit(1)
+
+
+@main.command("lint")
+@click.argument("lock", default=None, required=False)
+@click.option("--model", default=None, metavar="MODEL",
+              help="The model to lint for (default: the lock's). [cmd]all[/] applies every rule.")
+@click.option("--file", "files", multiple=True, metavar="PATH",
+              help="Also lint this file, or the Markdown under this directory (repeatable).")
+@click.option("--ci", is_flag=True, help="Exit 1 if there are warnings.")
+@click.option("--format", "fmt", type=click.Choice(["table", "json", "sarif"]), default="table", show_default=True,
+              help="How to print the report.")
+@click.option("-o", "--out", default=None, metavar="FILE", help="Write the JSON or SARIF report to FILE.")
+@click.option("--rules", "list_rules", is_flag=True, help="List the rules for the model and exit.")
+@click.option("-v", "--verbose", is_flag=True, help="Also list info findings (absolute rules without a reason, …).")
+def lint_cmd(lock: str | None, model: str | None, files: tuple[str, ...], ci: bool, fmt: str, out: str | None,
+             list_rules: bool, verbose: bool) -> None:
+    """Find instruction text written for an earlier model.
+
+    Checks the skills, instruction files, subagents and slash commands a lock places (and
+    any [cmd]--file[/]) for lines a newer model follows too literally: telling it to think
+    less or to show its reasoning, a token budget in the prompt, standing orders to
+    delegate, rules that say [cmd]never[/] without a reason. Each rule names the models it
+    applies to; the target is the lock's model unless [cmd]--model[/] says otherwise.
+    Exits 1 on warnings with [cmd]--ci[/].
+    """
+    if list_rules:
+        _print_lint_rules(model, fmt)
+        return
+    if lock:
+        lock, _ = _lock_ref(lock, fmt != "table")
+    elif Path(_l()).is_file() or not files:
+        lock = _l()
+    with _working("Linting…"):
+        report = json.loads(_lint(lock=lock, model=model, files=list(files), format="json", manifest=_m()))
+        sarif = _lint(lock=lock, model=model, files=list(files), format="sarif", manifest=_m()) if fmt == "sarif" else None
+    if fmt != "table":
+        text = sarif if fmt == "sarif" else json.dumps(report, indent=2)
+        if out:
+            Path(out).write_text(text + "\n")
+            err_console.print(f"[ok]✓[/] wrote [path]{out}[/]")
+        else:
+            sys.stdout.write(text + "\n")
+        sys.exit(1 if ci and not report["passed"] else 0)
+    name = escape(report["model"] or "")
+    target = {"flag": name, "lock": f"{name} [muted](the lock's model)[/]",
+              "none": "[muted]no model: only the rules for every model[/]"}[report["model_from"]]
+    console.print(f"[bold]Linting for[/] {target}  [muted]{len(report['rules'])} rule{'s' if len(report['rules']) != 1 else ''}, "
+                  f"{report['files_scanned']} file{'s' if report['files_scanned'] != 1 else ''}[/]")
+    shown = [f for f in report["findings"] if verbose or f["severity"] == "warning"]
+    by_file: dict[str, list[dict]] = {}
+    for f in shown:
+        by_file.setdefault(f["file"], []).append(f)
+    width = max((len(f["rule"]) for f in shown), default=0)
+    for file, found in by_file.items():
+        console.print(f"[path]{escape(file)}[/]")
+        for f in found:
+            console.print(f"  {f['line']:>4}:{f['column']:<3} [{_SEV_STYLE[f['severity']]}]{f['severity']:<7}[/] "
+                          f"[key]{f['rule']:<{width}}[/]  {escape(f['matched'])}", soft_wrap=True)
+    fired = {f["rule"]: f for f in shown}
+    if fired:
+        console.print()
+    for rule, f in fired.items():
+        console.print(f"[key]{rule}[/]: {escape(f['message'])}", soft_wrap=True)
+        console.print(f"  [muted]→[/] {escape(f['fix'])}  [muted]{f['source']}[/]", soft_wrap=True)
+    w, i = report["warnings"], report["infos"]
+    counts = f"{w} warning{'s' if w != 1 else ''}, {i} info" + ("" if verbose or not i else "  [muted](-v lists them)[/]")
+    if report["passed"]:
+        _ok(f"no warnings  [muted]({counts})[/]" if i else "nothing stale for this model")
+        return
+    err_console.print(f"[warn]![/] {counts}")
+    sys.exit(1 if ci else 0)
+
+
+def _print_lint_rules(model: str | None, fmt: str) -> None:
+    """`hlock lint --rules`: the rules for a model (every rule without one)."""
+    rules = json.loads(_lint_rules(model=model))
+    if fmt != "table":
+        sys.stdout.write(json.dumps(rules, indent=2) + "\n")
+        return
+    t = Table(box=None, header_style="bold", pad_edge=False)
+    t.add_column("rule", style="key", no_wrap=True)
+    t.add_column("severity", no_wrap=True)
+    t.add_column("models", style="muted")
+    t.add_column("what it finds", overflow="fold")
+    for r in rules:
+        t.add_row(r["id"], f"[{_SEV_STYLE[r['severity']]}]{r['severity']}[/]", ", ".join(r["models"]), escape(r["message"]))
+    console.print(t)
 
 
 def _vendored(file: str) -> bool:
