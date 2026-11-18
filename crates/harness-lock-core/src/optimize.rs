@@ -45,8 +45,8 @@ pub fn file_dest(profile: Option<&crate::profiles::HarnessProfile>, kind: &str, 
         _ => None,
     }
 }
-/// The built-in optimizers. Both run in hlock's Python worker.
-pub const BUILTIN_OPTIMIZERS: &[&str] = &["hlock", "harness2"];
+/// The built-in optimizers. All run in hlock's Python worker.
+pub const BUILTIN_OPTIMIZERS: &[&str] = &["hlock", "harness2", "ablate"];
 
 /// How an optimizer runs, in whichever process hosts the search.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -687,6 +687,62 @@ pub fn sign_test(wins: usize, losses: usize) -> f64 {
     p / 2f64.powi(n as i32)
 }
 
+/// How tune's acceptance check judges a candidate (`[tune] accept`): `better` must beat the
+/// lock; `no-worse` also takes a candidate whose text is smaller than the lock's and that
+/// isn't measurably worse.
+pub const ACCEPT_MODES: &[&str] = &["better", "no-worse"];
+
+/// What the acceptance check measured: the lock's text (`base`) and the candidate, paired on
+/// the test split.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Measured {
+    /// Mean success rates.
+    pub base: f64,
+    pub candidate: f64,
+    /// The seed's spread on dev.
+    pub noise: f64,
+    /// Tasks the candidate did better and worse on.
+    pub wins: usize,
+    pub losses: usize,
+    /// Mean cost per trial.
+    pub base_cost: f64,
+    pub candidate_cost: f64,
+    /// Bytes of the changed components, before and after.
+    pub base_bytes: usize,
+    pub candidate_bytes: usize,
+}
+
+/// Why `m` isn't accepted under `mode` at `alpha`, or `None` when it is. `better`: success
+/// above the lock's by more than the noise band, a sign test with p <= `alpha`, and cost per
+/// trial up by no more than `max_cost_increase`. Under `no-worse`, a candidate that doesn't
+/// shrink the text is judged as `better`; a smaller one needs success no lower than the
+/// lock's minus the noise band, no significant loss (the sign test the other way round must
+/// give p > `alpha`), and the same cost limit.
+pub fn judge(mode: &str, m: &Measured, alpha: f64, max_cost_increase: f64) -> Option<String> {
+    let cost = || {
+        (m.base_cost > 0.0 && m.candidate_cost > m.base_cost * (1.0 + max_cost_increase))
+            .then(|| format!("cost per trial rose from ${:.4} to ${:.4}, more than {:.0}%", m.base_cost, m.candidate_cost, max_cost_increase * 100.0))
+    };
+    if mode == "no-worse" && m.candidate_bytes < m.base_bytes {
+        let p_worse = sign_test(m.losses, m.wins);
+        return if m.candidate < m.base - m.noise {
+            Some(format!("success {:.2} vs {:.2} fell below the noise band ({:.2})", m.candidate, m.base, m.noise))
+        } else if m.losses > 0 && p_worse <= alpha {
+            Some(format!("the candidate is worse: p = {p_worse:.3} <= {alpha} ({} tasks better, {} worse)", m.wins, m.losses))
+        } else {
+            cost()
+        };
+    }
+    let p = sign_test(m.wins, m.losses);
+    if m.candidate - m.base <= m.noise {
+        Some(format!("success {:.2} vs {:.2} isn't above the noise band ({:.2})", m.candidate, m.base, m.noise))
+    } else if p > alpha {
+        Some(format!("the gain isn't significant: p = {p:.3} > {alpha} ({} tasks better, {} worse)", m.wins, m.losses))
+    } else {
+        cost()
+    }
+}
+
 /// Text from the eval pack that an edit mustn't copy: task ids, the literal strings graders
 /// check for, and fixture file names. Short strings are left out: they'd match ordinary words.
 pub fn pack_literals(tasks: &[crate::tasks::Task]) -> BTreeSet<String> {
@@ -988,6 +1044,31 @@ mod tests {
         assert!((sign_test(0, 0) - 1.0).abs() < 1e-12);
         assert!((sign_test(1, 1) - 0.75).abs() < 1e-12);
         assert!(sign_test(9, 1) < 0.05 && sign_test(2, 0) > 0.05);
+    }
+
+    #[test]
+    fn no_worse_takes_smaller_text_that_holds_and_better_still_needs_a_gain() {
+        let tie = Measured { base: 1.0, candidate: 1.0, base_bytes: 100, candidate_bytes: 60, ..Default::default() };
+        // the default gate refuses a tie, however much smaller
+        assert!(judge("better", &tie, 0.05, 0.25).unwrap().contains("isn't above the noise band"));
+        assert_eq!(judge("no-worse", &tie, 0.05, 0.25), None);
+        // within the noise band holds; below it doesn't
+        let dip = Measured { candidate: 0.9, noise: 0.15, losses: 1, ..tie };
+        assert_eq!(judge("no-worse", &dip, 0.05, 0.25), None);
+        let drop = Measured { candidate: 0.8, noise: 0.1, ..tie };
+        assert!(judge("no-worse", &drop, 0.05, 0.25).unwrap().contains("fell below the noise band"));
+        // a significant loss is refused even inside a wide noise band
+        let lost = Measured { candidate: 0.5, noise: 0.5, losses: 6, ..tie };
+        assert!(judge("no-worse", &lost, 0.05, 0.25).unwrap().contains("the candidate is worse"));
+        // so is a cost rise past the limit
+        let dear = Measured { base_cost: 0.01, candidate_cost: 0.02, ..tie };
+        assert!(judge("no-worse", &dear, 0.05, 0.25).unwrap().contains("cost per trial rose"));
+        // text that didn't shrink is judged as under `better`
+        let added = Measured { candidate_bytes: 140, ..tie };
+        assert!(judge("no-worse", &added, 0.05, 0.25).unwrap().contains("isn't above the noise band"));
+        let gain = Measured { base: 0.0, candidate: 1.0, wins: 9, candidate_bytes: 140, ..tie };
+        assert_eq!(judge("no-worse", &gain, 0.05, 0.25), None);
+        assert_eq!(judge("better", &gain, 0.05, 0.25), None);
     }
 
     #[test]

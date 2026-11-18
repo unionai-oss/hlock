@@ -3784,7 +3784,7 @@ def upgrade(target: str | None, to: str | None, all_: bool, apply: bool, rollbac
               help="Where the work runs. Overrides \\[backend] target: offline, local, flyte, or a custom backend.")
 @click.option("--workdir", default=None, help="Where to put trial artifacts.")
 @click.option("--optimizer", default=None, metavar="NAME",
-              help="What searches for edits. Overrides \\[tune] optimizer: hlock, harness2, or a custom optimizer.")
+              help="What searches for edits. Overrides \\[tune] optimizer: hlock, harness2, ablate, or a custom optimizer.")
 @click.option("--edit", "edit", default=None, metavar="KINDS",
               help="Override \\[tune] edit: what the optimizer may change (instructions,skill).")
 @click.option("--budget-rollouts", default=None, type=int, help="Override \\[tune.budget] rollouts.")
@@ -3872,9 +3872,13 @@ def _tune_panel(r: dict, title: str = "[brand]⚙ tune[/]") -> Panel:
             line = f"[ok]{len(opt.get('edits') or [])} edit{'' if len(opt.get('edits') or []) == 1 else 's'} accepted[/]"
         else:
             line = f"[warn]no edits accepted[/] [muted]{escape(acc.get('reason') or '')}[/]"
+        size = acc.get("size-bytes") or {}
+        smaller = acc.get("mode") == "no-worse" and (size.get("candidate") or 0) < (size.get("base") or 0)
         if test:
             line += (f"  [muted]{test.get('split')}: {_pct(test.get('base'))} → {_pct(test.get('candidate'))} on "
-                     f"{test.get('tasks')} tasks, p = {test.get('p')}[/]")
+                     f"{test.get('tasks')} tasks, "
+                     + (f"p(worse) = {test.get('p-worse')}, text {size['base']} → {size['candidate']} bytes[/]" if smaller
+                        else f"p = {test.get('p')}[/]"))
         o = opt.get("optimizer") or {}
         where = f" [muted]on {escape(str(o['backend']))}[/]" if o.get("backend") else ""
         run_info.add_row("optimizer", f"{escape(str(o.get('name')))}{where}  {line}")
